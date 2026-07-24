@@ -41,7 +41,7 @@ import (
 	_ "github.com/choria-io/fisk-ai/internal/llm/anthropic"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	// Link the file memory backend in so it registers itself; memory.New resolves
-	// the configured backend from the registry, and this is the sole backend today.
+	// the configured backend from the registry, and this is the default backend.
 	_ "github.com/choria-io/fisk-ai/internal/memory/file"
 	// Link the jetstream memory backend in so it registers itself; it binds a
 	// pre-existing NATS KV bucket over the shared connection.

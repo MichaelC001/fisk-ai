@@ -20,7 +20,7 @@
       "properties": {
         "message": {
           "type": "object",
-          "description": "A free-standing interactive user turn (a chat follow-up), stored verbatim as the provider represents it (anthropic MessageParam). Opaque here so provider block shapes are preserved without this schema constraining them."
+          "description": "A free-standing interactive user turn (a chat follow-up), stored in the provider-neutral message shape (llm.Message). Opaque here so provider block shapes are preserved without this schema constraining them."
         }
       }
     }

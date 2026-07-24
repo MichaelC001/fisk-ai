@@ -214,11 +214,17 @@ func (s *Store) doctorDBChecks(ctx context.Context, add func(string, bool, bool,
 		add("WAL journal mode", mode == "wal", false, "journal_mode="+mode)
 	}
 
+	// Write permission bounds indexing, not retrieval: the agent and the search
+	// commands open the index read-only, so a read-only file serves them fine and
+	// only the writer commands are blocked. The detail says which, so an operator
+	// running a deliberately read-only deployment can tell an expected state from a
+	// broken one rather than reading the mark as a defect.
 	if fi, err := os.Stat(s.dbPath); err != nil {
-		add("Index writable", false, true, err.Error())
+		add("Index writable", false, false, err.Error())
+	} else if writable := fi.Mode().Perm()&0o200 != 0; writable {
+		add("Index writable", true, false, fi.Mode().Perm().String())
 	} else {
-		writable := fi.Mode().Perm()&0o200 != 0
-		add("Index writable", writable, false, fi.Mode().Perm().String())
+		add("Index writable", false, false, fmt.Sprintf("%s; searches still work, but knowledge index, watch, rm and reset need write access", fi.Mode().Perm()))
 	}
 }
 

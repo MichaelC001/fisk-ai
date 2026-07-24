@@ -248,7 +248,7 @@ func confirmModeSummary(mode ConfirmMode) string {
 // title, the space-separated command path (e.g. "stream rm" rather than the
 // underscore tool name). Annotations are advisory hints for clients, not a control
 // channel, so approval (ai:confirm) is deliberately not expressed here; see
-// BuildServer. The behavioral hints (ReadOnlyHint, DestructiveHint) are left unset:
+// BuildServer. The behavioral hints (the ReadOnlyHint, DestructiveHint) are left unset:
 // fisk-ai has no standard tag describing a command's effect, so asserting one would
 // be a guess, and leaving them unset carries the spec's conservative default.
 func toolAnnotations(t *fisk.FiskCommandTool) *mcp.ToolAnnotations {
