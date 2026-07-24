@@ -85,6 +85,10 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("closing session journal: %v", w.Err)
 	case agent.WarnTraceWrite:
 		return fmt.Sprintf("trace write failed, trace will be incomplete: %v", w.Err)
+	case agent.WarnPromptDenied:
+		return fmt.Sprintf("your prompt was rejected by a policy hook: %s; enter a different prompt, or Ctrl-D to end", w.Name)
+	case agent.WarnSessionEndHook:
+		return fmt.Sprintf("the SessionEnd hook failed: %v; the run's outcome is unaffected", w.Err)
 	default:
 		return ""
 	}

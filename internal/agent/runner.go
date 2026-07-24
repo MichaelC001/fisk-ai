@@ -5,6 +5,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -58,6 +59,10 @@ type runner struct {
 	// events receives the run's narration, tool traces and warnings so the caller
 	// owns all wording and rendering.
 	events Events
+
+	// hooks are the caller's optional callbacks invoked at fixed points in the loop. A
+	// nil field does not fire. They run on this single run goroutine, in loop order.
+	hooks Hooks
 
 	// prompter puts the run's interactive decisions (confirm-gate approval and the
 	// human-in-the-loop questions) to the operator. It is used only from this single
@@ -169,6 +174,15 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	// extends the iteration cap by a fresh turn's worth, so one long turn does not
 	// starve the next. The single terminal record below is written once, at true end.
 	for r.nextPrompt != nil && ctx.Err() == nil && continuable(reason) {
+		// TurnEnd fires at each interactive continuation boundary, before the next prompt
+		// is gathered, reporting why the just-ended turn stopped. It is an observation
+		// point with no power to continue; a returned error aborts the run.
+		terr := r.hooks.fireTurnEnd(ctx, TurnEndInfo{Reason: reason, Iteration: int(r.iter)})
+		if terr != nil {
+			reason, err = runstate.ReasonError, fmt.Errorf("TurnEnd hook: %w", terr)
+			break
+		}
+
 		switch reason {
 		case runstate.ReasonMaxIterations:
 			r.events.Warn(Warning{Kind: WarnMaxIterInteractive, Count: int(r.cfg.LLM.Budget.MaxIterations)})
@@ -197,6 +211,28 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 				reason, err = runstate.ReasonCompleted, nil
 			}
 			break
+		}
+
+		// Follow-up UserPromptSubmit: a real prompt is entering the conversation (possibly
+		// against a context this same submission clears). It fires before the reset/rotation
+		// and before the prompt is appended or journaled, so a Deny reopens the input
+		// without clearing the context, rotating a session, or journaling a rejected turn. A
+		// bare reset carries no prompt (empty Text), so nothing submits. To reject a prompt
+		// the hook sets Deny; a returned error instead ends the whole session.
+		if cont.Text != "" {
+			dec, herr := r.hooks.fireUserPromptSubmit(ctx, UserPromptSubmitInfo{Text: cont.Text, Initial: false})
+			if herr != nil {
+				reason, err = runstate.ReasonError, fmt.Errorf("UserPromptSubmit hook: %w", herr)
+				break
+			}
+			if dec.Deny {
+				// A denied follow-up does not end the session: surface the reason and reopen
+				// the input. Drop the stale reason so the max-iteration or turn-error warning
+				// above does not re-fire at the next boundary.
+				r.events.Warn(Warning{Kind: WarnPromptDenied, Name: dec.DenyReason})
+				reason = runstate.ReasonCompleted
+				continue
+			}
 		}
 
 		if cont.Reset {
@@ -398,6 +434,20 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			r.events.LLMRequest(util.LLMRequestSummary(r.messages))
 		}
 
+		// PreModelCall observes the request about to be sent. It carries counts, not the
+		// live conversation, so a hook cannot alter what is sent; a returned error aborts
+		// the run before the call is made or counted. It sits above the provider, so it
+		// fires for an injected provider too, unlike an llm.Middleware.
+		preErr := r.hooks.firePreModelCall(ctx, PreModelCallInfo{
+			Iteration:    int(i),
+			Model:        req.Model,
+			MessageCount: len(r.messages),
+			ToolCount:    len(r.toolDefs),
+		})
+		if preErr != nil {
+			return runstate.ReasonError, fmt.Errorf("PreModelCall hook: %w", preErr)
+		}
+
 		resp, err := r.provider.Call(util.WithTraceIteration(ctx, int(i)), req)
 		if err != nil {
 			return runstate.ReasonError, fmt.Errorf("llm call: %w", err)
@@ -436,6 +486,27 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			toolUses = append(toolUses, *block.ToolUse)
 		}
 
+		// The turn is terminal when the model neither asked to run a tool nor paused a
+		// long-running turn it intends to continue. A reply truncated at the output cap is
+		// not terminal (it is an incomplete answer, handled as an error just below); the
+		// StopMaxTokens guard is a no-op for every path past the truncation branch, where
+		// the reason can no longer be StopMaxTokens, so it only makes Terminal correct for
+		// the truncated reply PostModelCall observes.
+		terminal := len(toolUses) == 0 &&
+			resp.StopReason != llm.StopPauseTurn &&
+			resp.StopReason != llm.StopMaxTokens
+
+		// PostModelCall observes every reply, including one truncated at the output cap,
+		// before the truncation branch decides the run's fate. The hook is handed a deep
+		// copy of the reply and its own tool_use blocks, so a mutating hook cannot corrupt
+		// the live conversation, which references resp.Content. A returned error aborts the
+		// run (in a chat, the turn), but the assistant turn is already journaled above, so
+		// the abort is not durable across resume: to reliably block a tool, use PreToolUse.
+		postErr := r.hooks.firePostModelCall(ctx, int(i), *resp, terminal)
+		if postErr != nil {
+			return runstate.ReasonError, fmt.Errorf("PostModelCall hook: %w", postErr)
+		}
+
 		// A turn truncated at the output token cap may carry a partial tool_use whose
 		// input is incomplete, so it must never be executed. Treat it as the run's end
 		// with a clear cause rather than running malformed input or silently completing;
@@ -444,10 +515,6 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			r.events.Message(*resp, true)
 			return runstate.ReasonError, fmt.Errorf("model reply truncated at the output token limit; the answer is incomplete")
 		}
-
-		// The turn is terminal when the model neither asked to run a tool nor
-		// paused a long-running turn it intends to continue.
-		terminal := len(toolUses) == 0 && resp.StopReason != llm.StopPauseTurn
 
 		// Text on a terminal turn is the answer; text on an intermediate turn is
 		// narration. The caller decides where each goes.
@@ -474,7 +541,10 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		if len(toolUses) > 0 {
 			results := make([]llm.ContentBlock, 0, len(toolUses))
 			for _, use := range toolUses {
-				result, remote := r.executeTool(ctx, use)
+				result, remote, herr := r.executeTool(ctx, use)
+				if herr != nil {
+					return runstate.ReasonError, herr
+				}
 				err = r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
 					ToolUseID: use.ID,
 					Result:    result,
@@ -513,7 +583,10 @@ func (r *runner) completePending(ctx context.Context) error {
 			continue
 		}
 
-		result, remote := r.executeTool(ctx, *block.ToolUse)
+		result, remote, herr := r.executeTool(ctx, *block.ToolUse)
+		if herr != nil {
+			return herr
+		}
 		err := r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
 			ToolUseID: id,
 			Result:    result,
@@ -534,70 +607,197 @@ func (r *runner) completePending(ctx context.Context) error {
 // unified registry, then runs it through the uniform Tool contract: kind-specific
 // policy (argument validation, confirmation) is consulted through narrow capability
 // interfaces, and the kind-specific call trace is built by a type switch, so a tool
-// of any kind executes the same way. The second return reports whether the call was
-// dispatched to a remote agent, for the journal and stats.
-func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.ToolResultBlock, bool) {
-	r.stats.ToolCalls++
-
+// of any kind executes the same way. Around that pipeline it fires the PreToolUse and
+// PostToolUse hooks, which may deny the call, rewrite the tool and its arguments, or
+// replace the output. The second return reports whether the call was dispatched to a
+// remote agent, for the journal and stats; the third is non-nil only when a hook aborted
+// the run, which the caller surfaces on the ReasonError path.
+func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.ToolResultBlock, bool, error) {
 	tool, ok := r.tools[use.Name]
 	if !ok {
+		// An unknown tool never resolves to a kind or a PreToolUse snapshot, so it is
+		// counted under KindUnknown and answered with an error result before any hook,
+		// exactly as before.
+		r.stats.ToolCalls++
 		r.stats.CountToolKind(toolkit.KindUnknown)
 		r.events.Warn(Warning{Kind: WarnUnknownTool, Name: use.Name})
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("unknown tool %q", use.Name), IsError: true}, false
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("unknown tool %q", use.Name), IsError: true}, false, nil
 	}
 
-	// The tool describes its own call once, up front. Its Kind partitions the by-kind
-	// tool accounting across every exit path below, including the rejections that
-	// return before the tool runs, so the buckets sum to tool_calls on a fresh run;
-	// the rest of the CallInfo drives the call trace on the path that does run the
-	// tool. Describe must not run the tool or mutate state, so calling it before the
-	// argument and confirm gates is safe.
-	info := describeCall(tool, use.Input)
-	r.stats.CountToolKind(info.Kind)
+	// The tool describes its own call and evaluates its confirm gate up front, before any
+	// hook or mutation, so PreToolUse observes the call the model actually asked for and a
+	// later rewrite can be gated on the union with this original gate. Describe must not
+	// run the tool or mutate state, so calling it here is safe.
+	origInfo := describeCall(tool, use.Input)
+	origGated := confirmGated(tool, r.confirmTags)
 
-	// fisk does not enforce a command's required flags or arguments: a missing one
-	// is silently dropped or skipped, so the command runs incomplete and fails only
-	// on its own non-zero exit. When the model omits a required parameter, reject the
-	// call before it runs and return the missing parameters so the model can correct
-	// and retry. Only the tool kinds that can check (local command tools) implement
-	// ArgumentValidator. This runs before the confirm gate so the operator is never
-	// asked to approve a structurally invalid call, and nothing executed, so it is
-	// reported as a warning rather than a call-and-result pair whose command line
-	// would be shown missing the very parameter that was absent.
-	if v, ok := tool.(toolkit.ArgumentValidator); ok {
-		if missing := v.MissingRequired(use.Input); len(missing) > 0 {
-			r.events.Warn(Warning{Kind: WarnMissingRequired, Name: use.Name, Params: missing})
-			return llm.ToolResultBlock{ToolUseID: use.ID, Content: v.MissingRequiredMessage(missing), IsError: true}, false
+	// PreToolUse sees a copy of the model's raw arguments so a hook cannot mutate the
+	// run's own buffer through the snapshot. A returned error aborts the run.
+	pre, err := r.hooks.firePreToolUse(ctx, PreToolUseInfo{
+		ToolName:     use.Name,
+		ToolUseID:    use.ID,
+		Input:        bytes.Clone(use.Input),
+		Kind:         origInfo.Kind,
+		ConfirmGated: origGated,
+	})
+	if err != nil {
+		return llm.ToolResultBlock{}, false, fmt.Errorf("PreToolUse hook: %w", err)
+	}
+
+	// A policy deny returns an error result the model can adapt to (unlike the
+	// authoritative confirm-gate denial), answering use.ID so the batch stays well-formed
+	// and a resume is consistent. It is still exactly one tool call, counted under the
+	// original tool's kind since nothing ran and no rewrite was resolved. A rewrite is
+	// ignored when Deny.
+	if pre.Deny {
+		r.stats.ToolCalls++
+		r.stats.CountToolKind(origInfo.Kind)
+		reason := pre.DenyReason
+		if reason == "" {
+			reason = "the tool call was denied by a policy hook"
+		}
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: reason, IsError: true}, false, nil
+	}
+
+	// Resolve the effective tool and arguments once, applying any rewrite; the hook does
+	// not re-fire on the rewritten call. A rewrite to an unregistered tool or to invalid
+	// JSON aborts the run rather than dispatching a malformed call. RewriteTool may target
+	// any registered tool, including one the model was never shown.
+	effTool := tool
+	effName := use.Name
+	effInput := use.Input
+	if pre.RewriteTool != "" {
+		rt, ok := r.tools[pre.RewriteTool]
+		if !ok {
+			return llm.ToolResultBlock{}, false, fmt.Errorf("PreToolUse hook redirected tool %q to unregistered tool %q", use.Name, pre.RewriteTool)
+		}
+		effTool = rt
+		effName = pre.RewriteTool
+	}
+	if pre.RewriteInput != nil {
+		if !json.Valid(pre.RewriteInput) {
+			return llm.ToolResultBlock{}, false, fmt.Errorf("PreToolUse hook rewrote %q arguments to invalid JSON", effName)
+		}
+		effInput = bytes.Clone(pre.RewriteInput)
+	}
+	effUse := llm.ToolUseBlock{ID: use.ID, Name: effName, Input: effInput}
+
+	// The effective call describes itself again only when a rewrite changed the tool or
+	// its arguments; otherwise the original describe still holds.
+	effInfo := origInfo
+	if pre.RewriteTool != "" || pre.RewriteInput != nil {
+		effInfo = describeCall(effTool, effInput)
+	}
+
+	// Count once, now that the effective tool is resolved, so a rewritten call is
+	// accounted under the tool that actually runs and the by-kind buckets still partition
+	// tool_calls. RemoteToolCalls is incremented only on an actual remote dispatch below.
+	r.stats.ToolCalls++
+	r.stats.CountToolKind(effInfo.Kind)
+
+	// fisk does not enforce a command's required flags or arguments: a missing one is
+	// silently dropped, so the command runs incomplete and fails only on its own non-zero
+	// exit. When the model omits a required parameter, reject the call before it runs and
+	// return the missing parameters so the model can correct and retry. Only the tool
+	// kinds that can check (local command tools) implement ArgumentValidator. This runs on
+	// the effective call and before the confirm gate so the operator is never asked to
+	// approve a structurally invalid call, and nothing executed, so it is reported as a
+	// warning rather than a call-and-result pair.
+	if v, ok := effTool.(toolkit.ArgumentValidator); ok {
+		missing := v.MissingRequired(effInput)
+		if len(missing) > 0 {
+			r.events.Warn(Warning{Kind: WarnMissingRequired, Name: effName, Params: missing})
+			return llm.ToolResultBlock{ToolUseID: use.ID, Content: v.MissingRequiredMessage(missing), IsError: true}, false, nil
 		}
 	}
 
-	// A confirm-tagged tool must be approved by the operator before it runs. Only
-	// local command tools are Confirmable; a remote tool carries no local tags (its
-	// serving agent declines confirmation-gated tools at its own end) and a built-in
-	// has no command to gate. The gate is shown the full, faithful command line
-	// (TraceLine) so the operator approves exactly what will run; a denial returns an
-	// authoritative result to the model and the command is not run, so it emits no
-	// trace or result. The line is sanitized because its argument values come from
-	// the model and must not be able to rewrite or spoof the operator's terminal.
-	if c, ok := tool.(toolkit.Confirmable); ok && c.NeedsConfirm(r.confirmTags) {
-		allowed, reason := r.gate.Approve(ctx, tool.Name(), c.Command(), c.TraceLine(use.Input), c.ConfirmTrigger(r.confirmTags))
+	// A confirm-tagged tool must be approved by the operator before it runs, gated on the
+	// union of the original and effective tool: the call is confirmed if either is gated,
+	// so a hook cannot strip a gate by redirecting a gated call to an ungated tool. The
+	// operator is shown the effective command, which is what actually runs; a denial
+	// returns an authoritative result to the model and the command is not run, so it emits
+	// no trace or result.
+	effGated := confirmGated(effTool, r.confirmTags)
+	if origGated || effGated {
+		allowed, reason := r.approveEffective(ctx, tool, effTool, effName, effInput, effInfo)
 		if !allowed {
-			return util.ConfirmDeniedResult(use.ID, reason), false
+			return util.ConfirmDeniedResult(use.ID, reason), false, nil
 		}
 	}
 
-	// The call trace shape and the execution dependencies are kind-specific; the
-	// result trace and the ExecuteUse call are uniform. A call line is emitted for
-	// every tool that runs, including an approved confirm-gated one whose approval
-	// modal has since closed, so its result always has a visible command above it.
-	deps, remote := r.traceCall(use, info)
+	// The call trace shape and the execution dependencies are kind-specific; the result
+	// trace and the ExecuteUse call are uniform. A call line is emitted for every tool
+	// that runs, so its result always has a visible command above it.
+	deps, remote := r.traceCall(effUse, effInfo)
 	if remote {
 		r.stats.RemoteToolCalls++
 	}
 
-	result := tool.ExecuteUse(ctx, use, deps)
-	r.events.ToolResult(toolResultTrace(info.Present, info.Kind, result))
-	return result, remote
+	result := effTool.ExecuteUse(ctx, effUse, deps)
+
+	// PostToolUse observes the result before it is traced and journaled and may replace
+	// what the model sees. Info.Output is the tool's own output; a Replace substitutes
+	// Result.Output/IsError, keeping use.ID so the result still answers the call. A
+	// returned error aborts the run.
+	post, err := r.hooks.firePostToolUse(ctx, PostToolUseInfo{
+		ToolName:  effName,
+		ToolUseID: use.ID,
+		Input:     bytes.Clone(effInput),
+		Kind:      effInfo.Kind,
+		Output:    result.Content,
+		IsError:   result.IsError,
+	})
+	if err != nil {
+		return llm.ToolResultBlock{}, false, fmt.Errorf("PostToolUse hook: %w", err)
+	}
+	if post.Replace {
+		result = llm.ToolResultBlock{ToolUseID: use.ID, Content: post.Output, IsError: post.IsError}
+	}
+
+	r.events.ToolResult(toolResultTrace(effInfo.Present, effInfo.Kind, result))
+	return result, remote, nil
+}
+
+// confirmGated reports whether a tool is confirm-gated for the run's tags: it opts into
+// confirmation through toolkit.Confirmable and its tags trigger the gate. Only local
+// command tools are Confirmable; every other kind yields false.
+func confirmGated(tool toolkit.Tool, tags []string) bool {
+	c, ok := tool.(toolkit.Confirmable)
+	return ok && c.NeedsConfirm(tags)
+}
+
+// approveEffective drives the confirm gate for a call on the union of its original and
+// effective tool. It presents the effective command, which is what actually runs,
+// preferring the effective tool's own Confirmable rendering; when the effective tool is
+// not Confirmable (a rewrite to a built-in or remote tool) it falls back to the effective
+// tool's describe line and the original tool's gating tag, so an original gate is enforced
+// rather than silently dropped. The line is sanitized upstream because its argument values
+// come from the model and must not be able to spoof the operator's terminal.
+func (r *runner) approveEffective(ctx context.Context, orig, eff toolkit.Tool, effName string, effInput json.RawMessage, effInfo toolkit.CallInfo) (bool, string) {
+	commandPath := effName
+	display := effInfo.Display
+	var tag string
+
+	if c, ok := eff.(toolkit.Confirmable); ok {
+		commandPath = c.Command()
+		display = c.TraceLine(effInput)
+		tag = c.ConfirmTrigger(r.confirmTags)
+	}
+
+	// The gate is owed to the original tool when the effective tool supplies no trigger
+	// (not Confirmable, or Confirmable but its own tags do not gate): name the original's
+	// trigger so the operator sees why approval is asked.
+	if tag == "" {
+		if c, ok := orig.(toolkit.Confirmable); ok {
+			tag = c.ConfirmTrigger(r.confirmTags)
+		}
+	}
+
+	if display == "" {
+		display = effName
+	}
+
+	return r.gate.Approve(ctx, effName, commandPath, display, tag)
 }
 
 // describeCall asks a tool to describe one call, from the CallInfo the runner uses

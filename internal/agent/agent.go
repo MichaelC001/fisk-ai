@@ -283,6 +283,14 @@ type Options struct {
 	// Name, Definition, or Describe panics crashes the run as a *PanicError; the harness
 	// does not sandbox it.
 	CustomTools []toolkit.Tool
+
+	// Hooks are optional Go callbacks the run invokes at fixed points in its loop, the
+	// single place to observe a run, deny or adjust individual tool calls, and stop a run
+	// from your own code. A nil field does not fire. They are trusted in-process code with
+	// the agent's own privileges, like CustomTools: there is no sandbox, and a panic in a
+	// hook aborts the run as a *PanicError (SessionEnd apart, which fires once the
+	// outcome is decided). See the Hooks type for the full contract.
+	Hooks Hooks
 }
 
 // Continuation is the operator's decision at an interactive turn boundary. Continue
@@ -382,23 +390,51 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// records an outcome), delivers the stack to the Events sink for local rendering
 	// (never onto the returned error, which may cross to a remote peer and leaks absolute
 	// paths and frame arguments), and leaves res.Reason unset because a crash is not an
-	// outcome. It catches only this goroutine; the agent package spawns none today, but a
+	// outcome. Being the one point every exit passes through, crash included, it is also
+	// where the SessionEnd hook fires, exactly once.
+	// It catches only this goroutine; the agent package spawns none today, but a
 	// future goroutine would escape it, and it cannot catch a fatal runtime error
 	// (concurrent map write), OOM, or runtime.Goexit, so it is not a substitute for the
 	// per-run isolation the rest of this work provides.
 	defer func() {
 		p := recover()
-		if p == nil {
-			return
+		crashed := p != nil
+
+		// The stack is captured first, while the panicking frames are still on this
+		// goroutine, since the SessionEnd hook below runs caller code (which may itself
+		// panic) before the stack reaches the events sink.
+		var stack []byte
+		if crashed {
+			stack = debug.Stack()
+
+			// The normal path records the session the run ended on after the runner
+			// returns; a crash skipped that, so report it here instead.
+			if activeRunner != nil {
+				res.SessionID = activeRunner.sessionID
+				if res.Stats != nil {
+					res.Stats.Session = activeRunner.sessionID
+				}
+			}
 		}
 
-		stack := debug.Stack()
+		// SessionEnd fires from here and nowhere else, so it fires exactly once for
+		// every run that reached the runner, whatever ended it: completed, budget,
+		// suspended, error, or this crash. A setup failure before the runner exists
+		// never started a session, so it does not fire for one. It reads opts.Hooks
+		// rather than the runner's copy because the runner may be nil here. On a crash
+		// Err is still nil, the PanicError being set below, so a hook keys off Crashed.
+		if activeRunner != nil && res.Stats != nil {
+			opts.Hooks.fireSessionEnd(ctx, events, SessionEndInfo{
+				SessionID: res.SessionID,
+				Reason:    res.Reason,
+				Crashed:   crashed,
+				Err:       err,
+				Stats:     *res.Stats,
+			})
+		}
 
-		if activeRunner != nil {
-			res.SessionID = activeRunner.sessionID
-			if res.Stats != nil {
-				res.Stats.Session = activeRunner.sessionID
-			}
+		if !crashed {
+			return
 		}
 
 		// Panicked renders caller-supplied code during unwind; a panic in it must not
@@ -864,6 +900,61 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		newSession            func(prompt string) (runstate.Journal, string, error)
 	)
 
+	// Resolve the session id up front, before any session is created or opened, so
+	// SessionStart can carry it and an aborting hook leaves no orphan session. A resume
+	// reuses the id it was asked to continue; a fresh checkpointed run takes its configured
+	// name or a fresh id (generated once here, then reused when the session is created); a
+	// non-checkpointed run has none.
+	switch {
+	case opts.Checkpoint.ResumeID != "":
+		sessionID = opts.Checkpoint.ResumeID
+	case opts.Checkpoint.Enabled:
+		sessionID = opts.Checkpoint.Name
+		if sessionID == "" {
+			sessionID = a2a.NewID()
+		}
+	}
+
+	// SessionStart fires once as the run begins, on a fresh run and a resume alike (Resumed
+	// distinguishes them), before any session is created or opened and before the first
+	// model call, so an aborting hook leaves nothing behind. ToolNames lists every tool the
+	// model can address, including those deferred behind tool search.
+	toolNames := make([]string, 0, len(taken))
+	for name := range taken {
+		toolNames = append(toolNames, name)
+	}
+	slices.Sort(toolNames)
+
+	err = opts.Hooks.fireSessionStart(ctx, SessionStartInfo{
+		SessionID:   sessionID,
+		Resumed:     opts.Checkpoint.ResumeID != "",
+		Interactive: interactive,
+		Model:       cfg.LLM.Model,
+		ToolNames:   toolNames,
+	})
+	if err != nil {
+		return res, fmt.Errorf("SessionStart hook: %w", err)
+	}
+
+	// The initial prompt enters the conversation now, on a fresh run only (a resume
+	// reconstructs its history and does not re-fire the hook), ordered after SessionStart.
+	// A Deny stops the run before any session is created or any model call is made; it is
+	// surfaced as an error so the caller exits with the reason. To reject the prompt the
+	// hook sets Deny; a returned error instead aborts the run.
+	if opts.Checkpoint.ResumeID == "" {
+		dec, uerr := opts.Hooks.fireUserPromptSubmit(ctx, UserPromptSubmitInfo{
+			Text:    strings.Join(prompt, " "),
+			Initial: true,
+		})
+		if uerr != nil {
+			return res, fmt.Errorf("UserPromptSubmit hook: %w", uerr)
+		}
+		if dec.Deny {
+			res.Reason = runstate.ReasonError
+			return res, fmt.Errorf("the initial prompt was rejected by a policy hook: %s", dec.DenyReason)
+		}
+	}
+
 	if checkpointing {
 		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolDefs)
 		if err != nil {
@@ -888,8 +979,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 
 		if opts.Checkpoint.ResumeID != "" {
-			sessionID = opts.Checkpoint.ResumeID
-
 			rs, err := store.Load(sessionID)
 			if err != nil {
 				return res, err
@@ -972,11 +1061,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 			events.ResumeTranscript(rs, byName)
 		} else {
-			sessionID = opts.Checkpoint.Name
-			if sessionID == "" {
-				sessionID = a2a.NewID()
-			}
-
 			meta := runstate.MetaRecord{
 				Version:     runstate.Version,
 				RunID:       sessionID,
@@ -1077,6 +1161,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		promptCache:     cfg.PromptCacheEnabled(),
 		interactive:     interactive,
 		events:          events,
+		hooks:           opts.Hooks,
 		prompter:        prompter,
 		toolWorkDir:     opts.ToolWorkDir,
 		messages:        messages,

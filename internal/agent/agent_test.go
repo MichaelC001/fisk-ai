@@ -103,6 +103,57 @@ func (s stubInvoker) InvokeTool(context.Context, string, string, json.RawMessage
 	return s.reply, nil
 }
 
+// recordingTool is a controllable in-process tool for the hook tests: it records the
+// arguments it was executed with (so a test can prove which tool ran after a rewrite and
+// with what input) and returns a canned result. It implements only toolkit.Tool, so it is
+// not Confirmable and describes to toolkit.KindUnknown, which is all the hook tests need.
+type recordingTool struct {
+	name      string
+	output    string
+	isError   bool
+	ranInputs []string
+}
+
+func (t *recordingTool) Name() string                { return t.name }
+func (t *recordingTool) Description() string         { return t.name }
+func (t *recordingTool) InputSchema() map[string]any { return map[string]any{"type": "object"} }
+func (t *recordingTool) Definition(bool) llm.ToolDef { return llm.ToolDef{Name: t.name} }
+
+func (t *recordingTool) ExecuteUse(_ context.Context, use llm.ToolUseBlock, _ toolkit.ExecDeps) llm.ToolResultBlock {
+	t.ranInputs = append(t.ranInputs, string(use.Input))
+	return llm.ToolResultBlock{ToolUseID: use.ID, Content: t.output, IsError: t.isError}
+}
+
+// findToolResult returns the tool_result block answering id in a reconstructed
+// conversation, or nil when none does.
+func findToolResult(msgs []llm.Message, id string) *llm.ToolResultBlock {
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			if b.ToolResult != nil && b.ToolResult.ToolUseID == id {
+				return b.ToolResult
+			}
+		}
+	}
+	return nil
+}
+
+// userTexts collects the text of every user-role message in a reconstructed
+// conversation, so a test can assert which prompts were (and were not) journaled.
+func userTexts(msgs []llm.Message) []string {
+	var out []string
+	for _, m := range msgs {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Text != nil {
+				out = append(out, b.Text.Text)
+			}
+		}
+	}
+	return out
+}
+
 func mustMessage(j string) *anthropic.Message {
 	GinkgoHelper()
 	var m anthropic.Message
@@ -255,7 +306,8 @@ var _ = Describe("runner", func() {
 				tools:  map[string]toolkit.Tool{},
 			}
 
-			block, remote := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nope"})
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nope"})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(remote).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeTrue())
@@ -286,7 +338,8 @@ var _ = Describe("runner", func() {
 				tools:  map[string]toolkit.Tool{"do": tool},
 			}
 
-			block, remote := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"level":"info"}`)})
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"level":"info"}`)})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(remote).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeTrue())
@@ -309,7 +362,8 @@ var _ = Describe("runner", func() {
 			tool := &fisk2.FiskCommandTool{Path: []string{"do"}, AppPath: app, Model: &fisk.CmdModel{}}
 			r := &runner{stats: &util.RunStats{}, events: ev, tools: map[string]toolkit.Tool{"do": tool}}
 
-			block, remote := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(remote).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
@@ -329,7 +383,8 @@ var _ = Describe("runner", func() {
 
 			r := &runner{stats: &util.RunStats{}, events: ev, tools: map[string]toolkit.Tool{"nats_info": rt}}
 
-			block, remote := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(remote).To(BeTrue())
 			Expect(r.stats.RemoteToolCalls).To(Equal(int64(1)))
 			Expect(block.ToolUseID).To(Equal("t1"))
@@ -360,12 +415,693 @@ var _ = Describe("runner", func() {
 			// there is no one to approve, so the gate denies. The gated tool is never run:
 			// no call or result line is emitted, and the denial is an authoritative
 			// non-error result to the model.
-			block, remote := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(remote).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
 			Expect(ev.calls).To(BeEmpty())
 			Expect(ev.results).To(BeEmpty())
+		})
+	})
+
+	Describe("tool hooks (PreToolUse/PostToolUse)", func() {
+		It("denies a tool call: answers the exact id with an error result, does not run it, and journals it", func() {
+			store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			id := ksuid.New().String()
+
+			cfg := &config.Config{}
+			cfg.LLM.Model = "test-model"
+			cfg.LLM.Budget.CallTimeoutParsed = time.Second
+
+			toolMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"danger","input":{}}],"usage":{"input_tokens":10,"output_tokens":5}}`
+			finalMsg := `{"id":"m2","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":2}}`
+
+			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
+			Expect(err).NotTo(HaveOccurred())
+
+			tool := &recordingTool{name: "danger", output: "should never run"}
+			var calls int
+			r := &runner{
+				cfg: cfg, stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				journal:  j,
+				seq:      1,
+				tools:    map[string]toolkit.Tool{"danger": tool},
+				hooks: Hooks{
+					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+						Expect(in.ToolName).To(Equal("danger"))
+						Expect(in.ToolUseID).To(Equal("toolu_1"))
+						return PreToolUseResult{Deny: true, DenyReason: "blocked by policy"}, nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					calls++
+					if calls == 1 {
+						return mustResponse(toolMsg), nil
+					}
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.run(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonCompleted))
+			Expect(j.Close()).To(Succeed())
+
+			// The denied call never ran, yet it is still one counted tool call.
+			Expect(tool.ranInputs).To(BeEmpty())
+			Expect(r.stats.ToolCalls).To(Equal(int64(1)))
+
+			// The deny is journaled as an error result answering the exact id, so the
+			// batch stays well-formed and a resume is consistent.
+			rs, err := store.Load(id)
+			Expect(err).NotTo(HaveOccurred())
+			tr := findToolResult(rs.Messages, "toolu_1")
+			Expect(tr).NotTo(BeNil())
+			Expect(tr.IsError).To(BeTrue())
+			Expect(tr.Content).To(Equal("blocked by policy"))
+		})
+
+		It("rewrites a call: runs the effective tool with the new arguments, traces it, counts it once", func() {
+			orig := &recordingTool{name: "orig", output: "orig-out"}
+			safe := &recordingTool{name: "safe", output: "safe-out"}
+			ev := &captureEvents{}
+			r := &runner{
+				stats: &util.RunStats{}, events: ev,
+				tools: map[string]toolkit.Tool{"orig": orig, "safe": safe},
+				hooks: Hooks{
+					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+						Expect(in.ToolName).To(Equal("orig"))
+						return PreToolUseResult{RewriteTool: "safe", RewriteInput: json.RawMessage(`{"sandbox":true}`)}, nil
+					},
+				},
+			}
+
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "orig", Input: json.RawMessage(`{"x":1}`)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(remote).To(BeFalse())
+			Expect(block.ToolUseID).To(Equal("t1"))
+			Expect(block.Content).To(Equal("safe-out"))
+
+			// The effective tool ran with the rewritten arguments; the original never ran.
+			Expect(safe.ranInputs).To(ConsistOf(`{"sandbox":true}`))
+			Expect(orig.ranInputs).To(BeEmpty())
+
+			// Counted exactly once, and the rewrite flowed through the trace under the
+			// effective tool's name.
+			Expect(r.stats.ToolCalls).To(Equal(int64(1)))
+			Expect(ev.calls).To(HaveLen(1))
+			Expect(ev.calls[0].Name).To(Equal("safe"))
+			Expect(ev.results).To(HaveLen(1))
+		})
+
+		It("gates a rewrite on the union: a redirect from a gated tool to an ungated one is still gated", func() {
+			orig := &fisk2.FiskCommandTool{
+				Path:    []string{"stream", "rm"},
+				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
+				Model:   &fisk.CmdModel{Tags: []string{"ai:confirm"}},
+			}
+			safe := &recordingTool{name: "safe", output: "safe-out"}
+			ev := &captureEvents{}
+			r := &runner{
+				stats: &util.RunStats{}, events: ev,
+				tools: map[string]toolkit.Tool{"stream_rm": orig, "safe": safe},
+				gate:  util.NewConfirmGate(toolkit.DefaultDenyPrompter()),
+				hooks: Hooks{
+					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+						// The original tool is confirm-gated, which the hook observes.
+						Expect(in.ConfirmGated).To(BeTrue())
+						return PreToolUseResult{RewriteTool: "safe"}, nil
+					},
+				},
+			}
+
+			// With no operator reachable the union gate denies, and the ungated effective
+			// tool never runs: a hook cannot strip a gate by redirecting.
+			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(remote).To(BeFalse())
+			Expect(block.ToolUseID).To(Equal("t1"))
+			Expect(block.IsError).To(BeFalse()) // an authoritative confirm denial, not an error
+			Expect(safe.ranInputs).To(BeEmpty())
+			Expect(ev.calls).To(BeEmpty())
+			Expect(ev.results).To(BeEmpty())
+		})
+
+		It("replaces the output the model sees when PostToolUse asks to", func() {
+			tool := &recordingTool{name: "leaky", output: "BEGIN PRIVATE KEY abc END PRIVATE KEY"}
+			ev := &captureEvents{}
+			r := &runner{
+				stats: &util.RunStats{}, events: ev,
+				tools: map[string]toolkit.Tool{"leaky": tool},
+				hooks: Hooks{
+					PostToolUse: func(_ context.Context, in PostToolUseInfo) (PostToolUseResult, error) {
+						Expect(in.Output).To(ContainSubstring("PRIVATE KEY"))
+						return PostToolUseResult{Replace: true, Output: "[redacted]"}, nil
+					},
+				},
+			}
+
+			block, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "leaky", Input: json.RawMessage(`{}`)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(block.ToolUseID).To(Equal("t1"))
+			Expect(block.Content).To(Equal("[redacted]"))
+
+			// The replacement is applied before the result trace, so a renderer never sees
+			// the secret either.
+			Expect(ev.results).To(HaveLen(1))
+			Expect(ev.results[0].Output).To(Equal("[redacted]"))
+		})
+
+		It("isolates the run from a hook that mutates the Info snapshot", func() {
+			tool := &recordingTool{name: "do", output: "ok"}
+			r := &runner{
+				stats: &util.RunStats{}, events: &captureEvents{},
+				tools: map[string]toolkit.Tool{"do": tool},
+				hooks: Hooks{
+					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+						// Scribbling over the snapshot's buffer must not reach the tool.
+						for i := range in.Input {
+							in.Input[i] = 'x'
+						}
+						return PreToolUseResult{}, nil
+					},
+				},
+			}
+
+			block, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"a":1}`)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(block.IsError).To(BeFalse())
+			Expect(tool.ranInputs).To(ConsistOf(`{"a":1}`))
+		})
+
+		It("aborts the run when a tool hook returns an error", func() {
+			tool := &recordingTool{name: "do", output: "ok"}
+			r := &runner{
+				stats: &util.RunStats{}, events: &captureEvents{},
+				tools: map[string]toolkit.Tool{"do": tool},
+				hooks: Hooks{
+					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
+						return PreToolUseResult{}, errors.New("boom")
+					},
+				},
+			}
+
+			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("PreToolUse hook"))
+			Expect(tool.ranInputs).To(BeEmpty())
+		})
+
+		It("aborts when a rewrite targets an unregistered tool", func() {
+			tool := &recordingTool{name: "do", output: "ok"}
+			r := &runner{
+				stats: &util.RunStats{}, events: &captureEvents{},
+				tools: map[string]toolkit.Tool{"do": tool},
+				hooks: Hooks{
+					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
+						return PreToolUseResult{RewriteTool: "ghost"}, nil
+					},
+				},
+			}
+
+			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unregistered"))
+			Expect(tool.ranInputs).To(BeEmpty())
+		})
+
+		It("aborts when a rewrite produces invalid JSON arguments", func() {
+			tool := &recordingTool{name: "do", output: "ok"}
+			r := &runner{
+				stats: &util.RunStats{}, events: &captureEvents{},
+				tools: map[string]toolkit.Tool{"do": tool},
+				hooks: Hooks{
+					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
+						return PreToolUseResult{RewriteInput: json.RawMessage(`{not json`)}, nil
+					},
+				},
+			}
+
+			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid JSON"))
+			Expect(tool.ranInputs).To(BeEmpty())
+		})
+
+		It("re-fires the tool hooks only for the unanswered tools of a restored batch", func() {
+			store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			runID := ksuid.New().String()
+
+			// A partial batch: two calls to "echo", only the first answered before the crash.
+			assistant := llm.Message{
+				Role: llm.RoleAssistant,
+				Content: []llm.ContentBlock{
+					{ToolUse: &llm.ToolUseBlock{ID: "toolu_a", Name: "echo", Input: json.RawMessage(`{"n":1}`)}},
+					{ToolUse: &llm.ToolUseBlock{ID: "toolu_b", Name: "echo", Input: json.RawMessage(`{"n":2}`)}},
+				},
+			}
+
+			j, err := store.Create(runID, runstate.MetaRecord{Version: runstate.Version, RunID: runID, Prompt: "go"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Iteration: 0, Message: assistant}})).To(Succeed())
+			Expect(j.Append(3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "toolu_a", Result: llm.ToolResultBlock{ToolUseID: "toolu_a", Content: "already done"}}})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			rs, err := store.Load(runID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Pending).NotTo(BeNil())
+
+			resumeJ, err := store.Open(runID)
+			Expect(err).NotTo(HaveOccurred())
+
+			tool := &recordingTool{name: "echo", output: "ran"}
+			var preIDs, postIDs []string
+			r := &runner{
+				stats:    &util.RunStats{},
+				events:   nopEvents{},
+				tools:    map[string]toolkit.Tool{"echo": tool},
+				messages: rs.Messages,
+				journal:  resumeJ,
+				seq:      resumeJ.LastSeq(),
+				pending:  rs.Pending,
+				hooks: Hooks{
+					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+						preIDs = append(preIDs, in.ToolUseID)
+						return PreToolUseResult{}, nil
+					},
+					PostToolUse: func(_ context.Context, in PostToolUseInfo) (PostToolUseResult, error) {
+						postIDs = append(postIDs, in.ToolUseID)
+						return PostToolUseResult{}, nil
+					},
+				},
+			}
+
+			Expect(r.completePending(context.Background())).To(Succeed())
+			Expect(resumeJ.Close()).To(Succeed())
+
+			// The hooks re-fire only for the unanswered tool; the answered one reuses its
+			// journaled result and neither re-runs nor re-fires.
+			Expect(preIDs).To(ConsistOf("toolu_b"))
+			Expect(postIDs).To(ConsistOf("toolu_b"))
+			Expect(tool.ranInputs).To(ConsistOf(`{"n":2}`))
+		})
+	})
+
+	Describe("model-call hooks (PreModelCall/PostModelCall)", func() {
+		newCfg := func() *config.Config {
+			cfg := &config.Config{}
+			cfg.LLM.Model = "test-model"
+			cfg.LLM.Budget.CallTimeoutParsed = time.Second
+			return cfg
+		}
+
+		finalMsg := `{"id":"m2","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":2}}`
+
+		It("fires PreModelCall before the call with counts and PostModelCall after with Terminal set on a final reply", func() {
+			var pre []PreModelCallInfo
+			var post []PostModelCallInfo
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				toolDefs: []llm.ToolDef{{Name: "a"}, {Name: "b"}},
+				hooks: Hooks{
+					PreModelCall: func(_ context.Context, in PreModelCallInfo) error {
+						pre = append(pre, in)
+						return nil
+					},
+					PostModelCall: func(_ context.Context, in PostModelCallInfo) error {
+						post = append(post, in)
+						return nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.loop(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonCompleted))
+
+			Expect(pre).To(HaveLen(1))
+			Expect(pre[0].Iteration).To(Equal(0))
+			Expect(pre[0].Model).To(Equal("test-model"))
+			Expect(pre[0].MessageCount).To(Equal(1)) // just the seed user prompt
+			Expect(pre[0].ToolCount).To(Equal(2))
+
+			Expect(post).To(HaveLen(1))
+			Expect(post[0].Iteration).To(Equal(0))
+			Expect(post[0].Terminal).To(BeTrue())
+			Expect(post[0].ToolCalls).To(BeEmpty())
+		})
+
+		It("fires the model-call hooks once per iteration across a tool turn then a final turn", func() {
+			toolMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"echo","input":{"n":1}}],"usage":{"input_tokens":10,"output_tokens":5}}`
+
+			var pre []PreModelCallInfo
+			var post []PostModelCallInfo
+			var calls int
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				tools:    map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}},
+				hooks: Hooks{
+					PreModelCall: func(_ context.Context, in PreModelCallInfo) error {
+						pre = append(pre, in)
+						return nil
+					},
+					PostModelCall: func(_ context.Context, in PostModelCallInfo) error {
+						post = append(post, in)
+						return nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					calls++
+					if calls == 1 {
+						return mustResponse(toolMsg), nil
+					}
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.loop(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonCompleted))
+
+			Expect(pre).To(HaveLen(2))
+			Expect(pre[0].MessageCount).To(Equal(1)) // seed prompt only
+			Expect(pre[1].MessageCount).To(Equal(3)) // + assistant tool turn + tool result
+
+			Expect(post).To(HaveLen(2))
+			Expect(post[0].Terminal).To(BeFalse())
+			Expect(post[0].ToolCalls).To(HaveLen(1))
+			Expect(post[0].ToolCalls[0].Name).To(Equal("echo"))
+			Expect(post[1].Terminal).To(BeTrue())
+			Expect(post[1].ToolCalls).To(BeEmpty())
+		})
+
+		It("fires PostModelCall for a reply truncated at the output cap, with Terminal false", func() {
+			truncMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"max_tokens","content":[{"type":"text","text":"partial"}],"usage":{"input_tokens":10,"output_tokens":5}}`
+
+			var post []PostModelCallInfo
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				hooks: Hooks{
+					PostModelCall: func(_ context.Context, in PostModelCallInfo) error {
+						post = append(post, in)
+						return nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					return mustResponse(truncMsg), nil
+				}),
+			}
+
+			reason, err := r.loop(context.Background())
+			Expect(err).To(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonError))
+
+			// The hook still observed the reply, before the truncation branch ended the run.
+			Expect(post).To(HaveLen(1))
+			Expect(post[0].Terminal).To(BeFalse())
+		})
+
+		It("isolates the live conversation from a hook that mutates the reply copy", func() {
+			toolMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"toolu_1","name":"echo","input":{"n":1}}],"usage":{"input_tokens":10,"output_tokens":5}}`
+
+			tool := &recordingTool{name: "echo", output: "ran"}
+			var calls int
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				tools:    map[string]toolkit.Tool{"echo": tool},
+				hooks: Hooks{
+					PostModelCall: func(_ context.Context, in PostModelCallInfo) error {
+						// Scribble over every mutable surface of the snapshot; none of it
+						// may reach the live conversation or the tool about to run.
+						for i := range in.ToolCalls {
+							for j := range in.ToolCalls[i].Input {
+								in.ToolCalls[i].Input[j] = 'x'
+							}
+						}
+						for _, b := range in.Response.Content {
+							if b.Text != nil {
+								b.Text.Text = "MUTATED"
+							}
+							if b.ToolUse != nil {
+								for j := range b.ToolUse.Input {
+									b.ToolUse.Input[j] = 'y'
+								}
+							}
+						}
+						return nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					calls++
+					if calls == 1 {
+						return mustResponse(toolMsg), nil
+					}
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.loop(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonCompleted))
+
+			// The tool ran with the original arguments, not the scribbled copy.
+			Expect(tool.ranInputs).To(ConsistOf(`{"n":1}`))
+
+			// The live assistant turn is untouched.
+			asst := r.messages[1]
+			Expect(asst.Role).To(Equal(llm.RoleAssistant))
+			var sawText, sawToolUse bool
+			for _, b := range asst.Content {
+				if b.Text != nil {
+					sawText = true
+					Expect(b.Text.Text).To(Equal("hi"))
+				}
+				if b.ToolUse != nil {
+					sawToolUse = true
+					Expect(string(b.ToolUse.Input)).To(Equal(`{"n":1}`))
+				}
+			}
+			Expect(sawText).To(BeTrue())
+			Expect(sawToolUse).To(BeTrue())
+		})
+
+		It("aborts before the call when PreModelCall returns an error, counting no LLM call", func() {
+			var calls int
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				hooks: Hooks{
+					PreModelCall: func(context.Context, PreModelCallInfo) error {
+						return errors.New("boom")
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					calls++
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.loop(context.Background())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("PreModelCall hook"))
+			Expect(reason).To(Equal(runstate.ReasonError))
+			Expect(calls).To(Equal(0))
+			Expect(r.stats.LlmCalls).To(Equal(int64(0)))
+		})
+
+		It("aborts the run when PostModelCall returns an error", func() {
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				messages: []llm.Message{userMsg("go")},
+				hooks: Hooks{
+					PostModelCall: func(context.Context, PostModelCallInfo) error {
+						return errors.New("boom")
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.loop(context.Background())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("PostModelCall hook"))
+			Expect(reason).To(Equal(runstate.ReasonError))
+		})
+	})
+
+	Describe("lifecycle hooks (TurnEnd/follow-up UserPromptSubmit)", func() {
+		newCfg := func() *config.Config {
+			cfg := &config.Config{}
+			cfg.LLM.Model = "test-model"
+			cfg.LLM.Budget.MaxIterations = 10
+			cfg.LLM.Budget.CallTimeoutParsed = time.Second
+			return cfg
+		}
+
+		echoToolMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"echo","input":{}}],"usage":{"input_tokens":1,"output_tokens":1}}`
+		finalMsg := `{"id":"m2","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+
+		scriptPrompts := func(conts ...Continuation) func(context.Context) Continuation {
+			i := 0
+			return func(context.Context) Continuation {
+				c := conts[i]
+				i++
+				return c
+			}
+		}
+
+		It("fires TurnEnd once per continuation boundary, not per model call", func() {
+			var turnEnds []TurnEndInfo
+			var submits []UserPromptSubmitInfo
+			var calls int
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				messages:   []llm.Message{userMsg("go")},
+				tools:      map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}},
+				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "again"}, Continuation{Continue: false}),
+				hooks: Hooks{
+					TurnEnd: func(_ context.Context, in TurnEndInfo) error {
+						turnEnds = append(turnEnds, in)
+						return nil
+					},
+					UserPromptSubmit: func(_ context.Context, in UserPromptSubmitInfo) (UserPromptSubmitResult, error) {
+						submits = append(submits, in)
+						return UserPromptSubmitResult{}, nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					calls++
+					// Turn 1 is a tool turn (two model calls); turn 2 is a single final reply.
+					if calls == 1 {
+						return mustResponse(echoToolMsg), nil
+					}
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.run(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonCompleted))
+
+			// Three model calls across two turns, but only two continuation boundaries.
+			Expect(calls).To(Equal(3))
+			Expect(turnEnds).To(HaveLen(2))
+			Expect(turnEnds[0].Reason).To(Equal(runstate.ReasonCompleted))
+
+			// The single follow-up prompt is submitted as a non-initial prompt.
+			Expect(submits).To(HaveLen(1))
+			Expect(submits[0].Initial).To(BeFalse())
+			Expect(submits[0].Text).To(Equal("again"))
+		})
+
+		It("denies a follow-up prompt: reopens the input, journals no record for it, and surfaces the reason", func() {
+			store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			id := ksuid.New().String()
+			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
+			Expect(err).NotTo(HaveOccurred())
+
+			ev := &captureEvents{}
+			var calls int
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: ev,
+				messages:   []llm.Message{userMsg("go")},
+				journal:    j,
+				seq:        1,
+				tools:      map[string]toolkit.Tool{},
+				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "blocked"}, Continuation{Continue: true, Text: "allowed"}, Continuation{Continue: false}),
+				hooks: Hooks{
+					UserPromptSubmit: func(_ context.Context, in UserPromptSubmitInfo) (UserPromptSubmitResult, error) {
+						if in.Text == "blocked" {
+							return UserPromptSubmitResult{Deny: true, DenyReason: "nope"}, nil
+						}
+						return UserPromptSubmitResult{}, nil
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					calls++
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.run(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal(runstate.ReasonSuspended))
+			Expect(j.Close()).To(Succeed())
+
+			// Only the initial turn and the allowed follow-up ran; the denied prompt did not.
+			Expect(calls).To(Equal(2))
+
+			// The deny reason surfaced to the operator.
+			denied := false
+			for _, w := range ev.warns {
+				if w.Kind == WarnPromptDenied {
+					denied = true
+					Expect(w.Name).To(Equal("nope"))
+				}
+			}
+			Expect(denied).To(BeTrue())
+
+			// The journal holds the allowed prompt but no dangling record for the denied one.
+			rs, err := store.Load(id)
+			Expect(err).NotTo(HaveOccurred())
+			texts := userTexts(rs.Messages)
+			Expect(texts).To(ContainElement("allowed"))
+			Expect(texts).NotTo(ContainElement("blocked"))
+		})
+
+		It("aborts the run when TurnEnd returns an error", func() {
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				messages:   []llm.Message{userMsg("go")},
+				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "x"}),
+				hooks: Hooks{
+					TurnEnd: func(context.Context, TurnEndInfo) error {
+						return errors.New("boom")
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.run(context.Background())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("TurnEnd hook"))
+			Expect(reason).To(Equal(runstate.ReasonError))
+		})
+
+		It("aborts the run when a follow-up UserPromptSubmit returns an error", func() {
+			r := &runner{
+				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				messages:   []llm.Message{userMsg("go")},
+				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "x"}),
+				hooks: Hooks{
+					UserPromptSubmit: func(context.Context, UserPromptSubmitInfo) (UserPromptSubmitResult, error) {
+						return UserPromptSubmitResult{}, errors.New("boom")
+					},
+				},
+				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+					return mustResponse(finalMsg), nil
+				}),
+			}
+
+			reason, err := r.run(context.Background())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("UserPromptSubmit hook"))
+			Expect(reason).To(Equal(runstate.ReasonError))
 		})
 	})
 

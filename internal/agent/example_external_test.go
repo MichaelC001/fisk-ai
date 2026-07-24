@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -43,6 +44,18 @@ func exampleConfirmApp() *fisk.Application {
 	do := app.Command("do", "do a thing").Tag("ai:confirm")
 	do.Flag("level", "log level").Enum("debug", "info", "warn")
 	do.Arg("subject", "the subject").Required().String()
+	return app
+}
+
+// examplePolicyApp is exampleApp plus a destructive command, so a policy hook has both
+// something to deny and something to let through.
+func examplePolicyApp() *fisk.Application {
+	app := fisk.New("app", "an app")
+	do := app.Command("do", "do a thing")
+	do.Flag("level", "log level").Enum("debug", "info", "warn")
+	do.Arg("subject", "the subject").Required().String()
+	wipe := app.Command("wipe", "delete everything")
+	wipe.Arg("target", "what to delete").Required().String()
 	return app
 }
 
@@ -670,6 +683,117 @@ func TestExample_CustomToolRoundTrip(t *testing.T) {
 	g.Expect(calls).To(HaveLen(1))
 	g.Expect(calls[0].Name).To(Equal("lookup_ticket"))
 	g.Expect(calls[0].Display).To(ContainSubstring("lookup_ticket T-42"))
+}
+
+// requestToolResults collects the tool_result blocks of a request's messages, keyed by
+// the tool_use id each answers, so an example can assert what the model was actually
+// told about a call rather than only what ran.
+func requestToolResults(req llm.Request) map[string]llm.ToolResultBlock {
+	out := map[string]llm.ToolResultBlock{}
+	for _, msg := range req.Messages {
+		for _, block := range msg.Content {
+			if block.ToolResult == nil {
+				continue
+			}
+			out[block.ToolResult.ToolUseID] = *block.ToolResult
+		}
+	}
+
+	return out
+}
+
+// TestExample_ToolPolicyHooks is the worked composition of the two tool hooks: PreToolUse
+// as a policy gate that refuses one call outright and rewrites another's arguments, and
+// PostToolUse as an output filter that keeps a credential out of the conversation. This is
+// the shape a caller reaches for to wrap a run in its own rules without forking the loop,
+// so it asserts what the model is told as much as what ran.
+func TestExample_ToolPolicyHooks(t *testing.T) {
+	g := NewWithT(t)
+
+	app := agenttest.NewFakeApp(t, examplePolicyApp())
+
+	// The model reaches for the destructive tool first, is refused, and adapts: it does
+	// real work instead, whose output echoes a credential back.
+	provider := agenttest.NewScriptedProvider(t,
+		agenttest.ToolUseResponse("call-1", "wipe", json.RawMessage(`{"target":"/"}`)),
+		agenttest.ToolUseResponse("call-2", "do", json.RawMessage(`{"subject":"password=hunter2"}`)),
+		agenttest.TextResponse("finished"),
+	)
+	events := agenttest.NewRecordingEvents()
+
+	opts := agent.Options{
+		Config:     agenttest.Config(t, app),
+		ConfigFile: "agent.yaml",
+		Prompt:     []string{"tidy up the estate"},
+		Provider:   provider,
+		Hooks: agent.Hooks{
+			PreToolUse: func(_ context.Context, in agent.PreToolUseInfo) (agent.PreToolUseResult, error) {
+				if in.ToolName == "wipe" {
+					// A deny is never a silent skip: the model is handed an error result
+					// carrying this reason, so it can adapt and try another approach.
+					return agent.PreToolUseResult{Deny: true, DenyReason: "wipe is not permitted by policy"}, nil
+				}
+
+				// Read-modify-write. RewriteInput replaces the whole argument object, so
+				// an edit of one field starts from the model's own arguments.
+				var args map[string]any
+				uerr := json.Unmarshal(in.Input, &args)
+				if uerr != nil {
+					return agent.PreToolUseResult{}, nil // leave it to the argument validator
+				}
+				args["level"] = "debug"
+
+				edited, merr := json.Marshal(args)
+				if merr != nil {
+					return agent.PreToolUseResult{}, nil
+				}
+
+				return agent.PreToolUseResult{RewriteInput: edited}, nil
+			},
+			PostToolUse: func(_ context.Context, in agent.PostToolUseInfo) (agent.PostToolUseResult, error) {
+				if !strings.Contains(in.Output, "password=") {
+					return agent.PostToolUseResult{}, nil
+				}
+
+				// Replace is an explicit bool rather than an empty-Output sentinel,
+				// because replacing a result with nothing is a legitimate filter.
+				return agent.PostToolUseResult{Replace: true, Output: "[redacted]", IsError: in.IsError}, nil
+			},
+		},
+	}
+
+	res, err := agent.Run(context.Background(), opts, events, agenttest.NewScriptedPrompter(t))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+
+	// The denied tool never ran, so it was never traced; the rewrite reached the tool that
+	// did, and the operator sees the arguments it actually ran with.
+	calls := events.ToolCalls()
+	g.Expect(calls).To(HaveLen(1))
+	g.Expect(calls[0].Name).To(Equal("do"))
+	g.Expect(calls[0].Display).To(ContainSubstring("debug"))
+
+	// The filter runs before the result is traced, so the credential never reaches the
+	// operator's screen either.
+	results := events.ToolResults()
+	g.Expect(results).To(HaveLen(1))
+	g.Expect(results[0].Output).To(Equal("[redacted]"))
+
+	// Both calls are still exactly one tool call each: a deny is accounted like any other.
+	g.Expect(res.Stats.ToolCalls).To(Equal(int64(2)))
+
+	// The model was told the refusal, as an error it can work around rather than a final
+	// answer, and it was told the filtered output rather than the credential.
+	reqs := provider.Requests()
+	g.Expect(reqs).To(HaveLen(3))
+
+	denied := requestToolResults(reqs[1])["call-1"]
+	g.Expect(denied.IsError).To(BeTrue())
+	g.Expect(denied.Content).To(ContainSubstring("wipe is not permitted by policy"))
+
+	filtered := requestToolResults(reqs[2])["call-2"]
+	g.Expect(filtered.IsError).To(BeFalse())
+	g.Expect(filtered.Content).To(Equal("[redacted]"))
 }
 
 // TestExample_CustomToolError shows the handler error path: a handler that returns an

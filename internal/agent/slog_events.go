@@ -223,6 +223,10 @@ func warningKindName(k WarningKind) string {
 		return "journal_close"
 	case WarnTraceWrite:
 		return "trace_write"
+	case WarnPromptDenied:
+		return "prompt_denied"
+	case WarnSessionEndHook:
+		return "session_end_hook"
 	default:
 		return "unknown"
 	}
