@@ -136,6 +136,14 @@ const (
 	// WarnTraceWrite: writing a line to the trace file failed with Err, so the trace is
 	// incomplete. Reported once per run; the run continues, the trace is best-effort.
 	WarnTraceWrite
+	// WarnPromptDenied: a UserPromptSubmit hook denied an interactive follow-up prompt.
+	// Name carries the operator-facing deny reason. The prompt was not run and the input
+	// bar reopens; the session continues.
+	WarnPromptDenied
+	// WarnSessionEndHook: the SessionEnd hook failed with Err. It runs during teardown,
+	// once the run's outcome is already decided, so its failure cannot change that
+	// outcome and is reported as an advisory rather than ending the run.
+	WarnSessionEndHook
 )
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;

@@ -1,6 +1,12 @@
 ## Project Overview
 
 
+## Never do these
+
+- Stop saying `seam`
+- Dont use the `gh` command
+- Dont use the `git` command
+
 ## Testing
 
 - Framework: Ginkgo v2 + Gomega with gomock.
