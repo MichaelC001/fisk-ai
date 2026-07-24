@@ -104,12 +104,14 @@ Each command becomes an MCP tool named by its command path, for example `stream_
 description built from the command's help. Both the short help and any long help are surfaced to the client, so a
 command that carries detailed long help gives the model richer guidance than a one-line summary alone.
 
-Each tool also carries MCP annotations:
+Each tool also carries one MCP annotation, a readable title holding the space-separated command path, so `stream rm`
+rather than the underscore tool name.
 
-* a readable title, the space-separated command path, so `stream rm` rather than the underscore tool name
-* a read-only hint, derived from the command's tags, when a command declares through a tagging convention that it only
-  reads rather than mutates its environment, so a client can tell a safe query from a command that changes state; a
-  command that declares no impact is left without the hint
+What a command declares about itself reaches the client as description text rather than as an annotation: every tag it
+carries is appended to the description, as described under [Command tags over MCP](#command-tags-over-mcp) below.
+
+Approval is not expressed as an annotation, because annotations are advisory hints a client may ignore rather than a
+control channel.
 
 The served tools are the agent's `include`/`exclude` selection, narrowed further by `expose.agent.tools` when it is set.
 With neither, every command is served, subject to the tag rules below. Tool selection uses the same regular expressions

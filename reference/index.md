@@ -68,7 +68,7 @@ With no `application_path`, the identity defaults to `fisk`; set an explicit `id
 # The name of the agent. Used in discovery and reused as a NATS queue
 # group, so it must contain only letters, digits, "-" or "_". If you
 # leave it out it defaults to the application binary's base name, or to
-# "fisk" when no application_path is set; set it explicitly when the
+# "fisk-ai" when no application_path is set; set it explicitly when the
 # derived name carries a dot, a space, or other characters, which are
 # rejected, or to keep memory/knowledge stores separate between agents.
 identity: nats
