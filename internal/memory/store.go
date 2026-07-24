@@ -13,7 +13,8 @@
 // usually from the backend package's init so a program links a backend in by
 // importing it. New looks the configured backend up in that registry, so adding
 // a backend touches no code here. The file backend lives in the file subpackage
-// and is the only implementation today.
+// and the jetstream backend, which binds a pre-existing NATS KV bucket, in the
+// jetstream subpackage.
 package memory
 
 import (

@@ -71,10 +71,11 @@ type Journal interface {
 	Close() error
 }
 
-// Store persists run journals. The file implementation is used today; a
-// JetStream stream (subject <prefix>.<run>.<seq>, MaxMsgsPerSubject=1 with
-// discard-new-per-subject for an unbounded dedup window) is the intended second
-// backend, hence the append-oriented, seq-keyed interface.
+// Store persists run journals. The interface is append-oriented and seq-keyed so
+// that both backends can honor it: the file implementation appends to a JSON-lines
+// journal, and the jetstream implementation puts each record on its own subject
+// (<prefix>.<run>.<seq>, MaxMsgsPerSubject=1 with discard-new-per-subject for an
+// unbounded dedup window).
 type Store interface {
 	// Create starts a new run, writing meta as seq 1, and returns the locked
 	// journal. It fails with ErrExists if the id is already present.

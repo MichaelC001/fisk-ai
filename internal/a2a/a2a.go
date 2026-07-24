@@ -7,9 +7,11 @@
 // The protocol is transport agnostic: every message is a single, flat JSON
 // object that carries all of its own framing in the body (see Header), so a
 // captured message is fully self describing outside of any transport. The first
-// transport binding is NATS JetStream, where a reply set is correlated by the
-// Header.Request id and ordered by Header.Sequence; later bindings wrap the same
-// body inside the Choria Protocol.
+// transport binding is core NATS request-reply over a micro service (see the nats
+// subpackage), which carries discovery and direct tool calls. The streaming task
+// flow, where a reply set is correlated by the Header.Request id and ordered by
+// Header.Sequence, is defined here but not yet bound to a transport; later
+// bindings wrap the same body inside the Choria Protocol.
 //
 // Message bodies are versioned by their protocol id, e.g.
 // "io.choria.fisk-ai.v1.request". The matching JSON schemas live under

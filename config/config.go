@@ -138,8 +138,9 @@ type HarnessConfig struct {
 // loudly as an unknown top-level key. For the file backend the options accept
 // {directory: <path>}, defaulting to the absolute XDG state directory.
 type SessionConfig struct {
-	// Backend selects the store implementation. It defaults to "file", the only
-	// backend today, which keeps each run in a JSON-lines journal under a directory.
+	// Backend selects the store implementation. It defaults to "file", which keeps
+	// each run in a JSON-lines journal under a directory; "jetstream" keeps each
+	// record on its own subject in a pre-existing NATS JetStream stream.
 	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
 	// Options carries backend-specific settings as a raw block, decoded against a
 	// typed per-backend schema at store construction. For the file backend it
@@ -172,9 +173,9 @@ func (s *SessionConfig) RawOptions() json.RawMessage {
 // SessionConfigFromStateDir synthesizes the session config from the --state-dir
 // flag. An empty dir yields the file backend with no options, so the file backend
 // applies its default (the absolute XDG state directory); a set dir populates the
-// file backend's directory option. The flag is the sole source today and always
-// wins: when a YAML block is later added, this override is applied last so an
-// explicit --state-dir still takes precedence over a configured directory.
+// file backend's directory option. The flag always wins over the harness.sessions
+// block: this override is applied last, so an explicit --state-dir takes precedence
+// over a configured directory.
 func SessionConfigFromStateDir(dir string) *SessionConfig {
 	if dir == "" {
 		return &SessionConfig{Backend: "file"}
@@ -269,8 +270,9 @@ type MemoryConfig struct {
 	// Enabled turns the memory tools on. The block being absent, or present with
 	// enabled false, leaves them off.
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	// Backend selects the store implementation. It defaults to "file", the only
-	// backend today, which keeps each memory in a markdown file under a directory.
+	// Backend selects the store implementation. It defaults to "file", which keeps
+	// each memory in a markdown file under a directory; "jetstream" keeps each in a
+	// pre-existing NATS KV bucket.
 	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
 	// NoIndex opts out of injecting the list of stored memories (key and
 	// description) into the system prompt at run start. The index is on by default

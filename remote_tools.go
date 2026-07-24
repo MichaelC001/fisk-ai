@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -34,17 +35,27 @@ func printRemoteToolStatus(c *columns.Document, cfg *config.Config, imports []re
 
 		c.Printf("  %s (%s): reachable in %s, advertised %d tool(s), imported %d as %q\n",
 			imp.Host.Name, imp.Version, imp.RTT.Round(time.Millisecond), imp.Discovered, len(imp.Tools), imp.Host.EffectiveAlias())
-		warnHostNotes(c, imp)
+		for _, note := range hostNotes(imp) {
+			c.Printf("warning: %s\n", note)
+		}
 	}
 }
 
-// warnHostNotes emits the per-host warnings shared by run and info: an ignored
-// tag-based include filter and any tools skipped during import.
-func warnHostNotes(c *columns.Document, imp remotetools.HostImport) {
+// hostNotes returns the per-host advisories shared by run and info: an ignored
+// tag-based include filter and any tools skipped during import. It returns the
+// text rather than writing it so each surface renders it its own way, a columns
+// document for info, stderr for the line UI and a warning line for the full-screen
+// UI, while the wording stays in one place. The notes carry no severity prefix;
+// the caller adds whatever its surface uses.
+func hostNotes(imp remotetools.HostImport) []string {
+	var notes []string
+
 	if imp.IgnoredIncludeTags {
-		c.Printf("warning: remote agent %q include filter uses tags, which discovery does not carry; the tag filter was ignored (filter by tool name instead)\n", imp.Host.Name)
+		notes = append(notes, fmt.Sprintf("remote agent %q include filter uses tags, which discovery does not carry; the tag filter was ignored (filter by tool name instead)", imp.Host.Name))
 	}
 	if len(imp.Skipped) > 0 {
-		c.Printf("warning: remote agent %q: skipped %s\n", imp.Host.Name, strings.Join(imp.Skipped, "; "))
+		notes = append(notes, fmt.Sprintf("remote agent %q: skipped %s", imp.Host.Name, strings.Join(imp.Skipped, "; ")))
 	}
+
+	return notes
 }

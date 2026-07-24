@@ -14,9 +14,10 @@ import (
 )
 
 // ProviderName is the neutral provider id this codec speaks. It is stamped into
-// the run fingerprint so a resume against a different provider is refused (the
-// on-disk format is one neutral shape, but a foreign turn is still incoherent);
-// see SECURITY.md finding 4.
+// the run fingerprint so a resume against a different provider is refused: the
+// on-disk format is one neutral shape, but a foreign turn is still incoherent
+// (a stored thinking signature or provider block belongs to the provider that
+// produced it).
 const ProviderName = "anthropic"
 
 // ToolDefToAnthropic renders a neutral tool definition as an Anthropic custom

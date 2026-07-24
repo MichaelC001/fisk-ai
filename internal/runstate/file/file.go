@@ -12,6 +12,7 @@ package file
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,6 +107,15 @@ func (s *FileStore) lockPath(id string) string {
 	return filepath.Join(s.dir, id+".lock")
 }
 
+// journalExists reports whether a run's journal is on disk. It is advisory: the
+// authoritative create-guard is the O_EXCL open in openJournal, and this only
+// disambiguates a lock held by a live run from one held by a concurrent creator.
+func (s *FileStore) journalExists(id string) bool {
+	_, err := os.Stat(s.journalPath(id))
+
+	return err == nil
+}
+
 // Create implements runstate.Store.
 func (s *FileStore) Create(id string, meta runstate.MetaRecord) (runstate.Journal, error) {
 	err := runstate.ValidateID(id)
@@ -113,16 +123,19 @@ func (s *FileStore) Create(id string, meta runstate.MetaRecord) (runstate.Journa
 		return nil, err
 	}
 
-	_, err = os.Stat(s.journalPath(id))
-	if err == nil {
-		return nil, fmt.Errorf("%w: %q", runstate.ErrExists, id)
-	}
-	if !os.IsNotExist(err) {
-		return nil, err
-	}
-
+	// The existence check lives inside openJournal, which holds the run's lock and
+	// opens O_EXCL, so checking and creating are one atomic step rather than a stat
+	// followed by an open that a second creator can interleave with.
+	//
+	// A lock held by someone else means the id is either already live or being
+	// created right now. Only the first of those is ErrExists, so the journal is
+	// stat'd to tell them apart; a caller racing an established run reports the id
+	// as present rather than merely busy.
 	j, err := s.openJournal(id, true)
 	if err != nil {
+		if errors.Is(err, runstate.ErrLocked) && s.journalExists(id) {
+			return nil, fmt.Errorf("%w: %q", runstate.ErrExists, id)
+		}
 		return nil, err
 	}
 
@@ -153,15 +166,27 @@ func (s *FileStore) Open(id string) (runstate.Journal, error) {
 	return s.openJournal(id, false)
 }
 
+// openJournal locks the run and opens its journal for appending. With created set
+// the journal must not already exist: the open adds O_EXCL so the create cannot
+// race another creator holding no lock yet, and an existing journal surfaces as
+// ErrExists rather than being silently appended to.
 func (s *FileStore) openJournal(id string, created bool) (*fileJournal, error) {
 	lock, err := acquireLock(s.lockPath(id))
 	if err != nil {
 		return nil, err
 	}
 
-	f, err := os.OpenFile(s.journalPath(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if created {
+		flags |= os.O_EXCL
+	}
+
+	f, err := os.OpenFile(s.journalPath(id), flags, 0o600)
 	if err != nil {
 		lock.release()
+		if created && errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("%w: %q", runstate.ErrExists, id)
+		}
 		return nil, err
 	}
 

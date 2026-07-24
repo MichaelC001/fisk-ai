@@ -1,16 +1,17 @@
 ## Project Overview
 
 
-## Never do these
+## Things not to do, ever
 
-- Stop saying `seam`
-- Dont use the `gh` command
-- Dont use the `git` command
+- Don't use the word `seam`
+- Don't use the `gh` command
+- Don't use the `git` command
+- Never run `find /` with any arguments, stick to the go code directories
 
 ## Testing
 
 - Framework: Ginkgo v2 + Gomega with gomock.
-- Run unit tests with `abt t u [dir]` (wraps `ginkgo -r --skip Integration`). Use `go test ./path/... -v -run "<name>"` only for targeted single-test runs.
+- Run unit tests with `abt t u [dir]`. Use `go test ./path/... -v -run "<name>"` only for targeted single-test runs.
 - Before marking any coding task complete, run `abt t lint` and resolve everything it reports. This runs `go fmt`, `go mod tidy`, misspell, `go vet`, and `staticcheck`.
 - No stray `FDescribe`/`FIt`/`FContext` focus prefixes in committed tests.
 
@@ -59,6 +60,3 @@
 - Add, remove, or upgrade external dependencies (including Go toolchain version).
 - Change public APIs outside the scope of the requested task.
 - Modify `ABTaskFile`, `Dockerfile.goreleaser`, or CI configuration.
-- Run destructive git operations (force-push, reset --hard, branch -D) or skip hooks.
-- Change any git configuration
-- Do not perform `find` operations over the entire OS `/`

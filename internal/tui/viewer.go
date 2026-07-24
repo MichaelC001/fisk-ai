@@ -3,11 +3,12 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 // Package tui is the opt-in full-screen terminal UI, an alternative to the
-// default line-oriented CLI. This first piece is a read-only transcript viewer:
-// it renders a saved session's conversation in a scrolling viewport with a
-// statusbar, driving no live run and reaching no operator, so it carries none of
-// the run-lifecycle, signal, or prompt concerns the live UI will. The live loop
-// and its native prompts land in later phases.
+// default line-oriented CLI. It has two entry points over one shared viewport:
+// ShowTranscript is a read-only viewer that renders a saved session's
+// conversation, driving no live run and reaching no operator, so it carries none
+// of the run-lifecycle, signal, or prompt concerns; Live drives a running agent,
+// owning the screen, the statusbar state machine, the suspend and abort contract,
+// and the native prompts that back the confirm gate.
 package tui
 
 import (

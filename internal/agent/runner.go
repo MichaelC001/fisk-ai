@@ -347,8 +347,9 @@ func (r *runner) appendUserPrompt(text string) {
 // system prompt, tools and the session's confirm-gate approvals. The iteration budget is
 // re-baselined to the current position so the cleared context gets a full turn's allowance
 // from the next prompt rather than inheriting the budget the prior turns already spent.
-// It is only reached for a non-checkpointed run; clearing a journaled session needs session
-// rotation, which the interactive caller gates until that path is wired.
+// It is only reached for a non-checkpointed run; a journaled session is cleared by
+// rotateSession instead, which the run loop defers until the next real prompt so the new
+// session's meta never carries an empty prompt.
 func (r *runner) resetContext() {
 	r.messages = nil
 	r.maxIter = r.iter

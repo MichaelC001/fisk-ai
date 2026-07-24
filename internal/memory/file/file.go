@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -232,6 +233,12 @@ func (s *fileStore) count() (int, error) {
 // readFile reads a memory file without following a symlink and rejecting any
 // non-regular file, so a symlink or device planted in the directory cannot make
 // the store return the contents of an unrelated file to the model.
+//
+// The content is read from the descriptor the no-follow open returned, never by
+// re-opening the path: the open and the Stat below establish what this descriptor
+// is, and a second open by name would resolve the path again and follow whatever
+// was swapped in since, which is exactly the substitution the no-follow open is
+// there to prevent.
 func (s *fileStore) readFile(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
 	if err != nil {
@@ -247,7 +254,7 @@ func (s *fileStore) readFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("memory file %q is not a regular file", path)
 	}
 
-	return os.ReadFile(f.Name())
+	return io.ReadAll(f)
 }
 
 // writeAtomic stages data in a temp file in the same directory and moves it into
