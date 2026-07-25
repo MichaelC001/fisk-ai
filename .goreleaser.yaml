@@ -27,7 +27,7 @@ builds:
       - "7"
 
 archives:
-  - name_template: "fisk-{{.Version}}-{{.Os}}-{{.Arch}}{{if .Arm}}{{.Arm}}{{end}}"
+  - name_template: "fisk-ai-{{.Version}}-{{.Os}}-{{.Arch}}{{if .Arm}}{{.Arm}}{{end}}"
     wrap_in_directory: true
     formats: [tar.gz]
     format_overrides:

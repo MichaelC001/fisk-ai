@@ -2,7 +2,7 @@
 title = "Code Map"
 description = "A guided deep-dive into the codebase: architecture, subsystems, and the decisions behind them"
 toc = true
-weight = 10
+weight = 20
 +++
 
 Fisk AI turns a Fisk command-line application into an LLM agent by introspecting its command tree and exposing the
@@ -10,8 +10,7 @@ allowed commands as tools. This section is a reading guide to how that is implem
 and anyone auditing the harness before trusting it with a production tool.
 
 {{% notice style="note" title="Snapshot" %}}
-Generated 2026-07-24 against commit `561dade` on branch `main`. The working tree carried one untracked file unrelated to
-the source. Commits after this one may make parts of this map stale.
+Generated 2026-07-24 against tag `v0.0.3`. Commits after this one may make parts of this map stale.
 {{% /notice %}}
 
 ## The mental model
