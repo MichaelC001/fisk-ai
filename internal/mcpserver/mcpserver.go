@@ -3,9 +3,10 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 // Package mcpserver exposes a fisk application's tools over the Model Context
-// Protocol. The same util.FiskCommandTool values the agent calls are registered as MCP
+// Protocol. The same toolkit.Tool values the agent calls are registered as MCP
 // tools, so an external MCP client can invoke the underlying commands directly,
-// without an LLM in the loop.
+// without an LLM in the loop. Every tool kind is served through one path; what may
+// be served is each tool's own MCP exposure declaration, not its Go type.
 package mcpserver
 
 import (
@@ -21,8 +22,6 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -101,12 +100,6 @@ type Options struct {
 	// never be the JSON-RPC stream, and may be written concurrently from multiple
 	// client sessions, so it must be safe for concurrent use (os.Stderr is).
 	LogOutput io.Writer
-	// Builtins are fisk-ai's own in-process tools to serve alongside the wrapped-CLI
-	// tools (today only the read-only knowledge_search). They are registered with
-	// their own schema and dispatched in-process; they carry no confirm tags and so
-	// skip the elicitation gate, and they are invoked with a default-deny prompter
-	// since there is no operator on the MCP path. Empty means none.
-	Builtins []*functool.Tool
 }
 
 func (o *Options) applyDefaults() {
@@ -140,7 +133,7 @@ func (o *Options) applyDefaults() {
 //
 // A single semaphore is shared across all handlers, so Concurrency bounds the
 // total number of in-flight tool calls, not the count per tool.
-func BuildServer(tools []*fisk.FiskCommandTool, opts Options) (*mcp.Server, []string) {
+func BuildServer(tools []toolkit.Tool, opts Options) (*mcp.Server, []string) {
 	opts.applyDefaults()
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: opts.Name, Version: opts.Version}, &mcp.ServerOptions{
@@ -154,8 +147,27 @@ func BuildServer(tools []*fisk.FiskCommandTool, opts Options) (*mcp.Server, []st
 	taken := make(map[string]bool)
 	var confirmCount int
 	for _, t := range tools {
-		if !toolNamePattern.MatchString(t.Name()) {
+		confirmable, canAnswerConfirm := t.(toolkit.Confirmable)
+
+		// A tool that cannot report whether it is confirmation-gated is refused rather
+		// than served ungated: absence of a gate must not be indistinguishable from
+		// not having one.
+		switch {
+		case !t.MCPExposable():
+			fmt.Fprintf(opts.LogOutput, "warning: skipping tool %q: it does not declare MCP exposure\n", t.Name())
+			continue
+		case !canAnswerConfirm:
+			fmt.Fprintf(opts.LogOutput, "warning: skipping tool %q: it cannot report whether it is confirmation-gated\n", t.Name())
+			continue
+		case !toolNamePattern.MatchString(t.Name()):
 			fmt.Fprintf(opts.LogOutput, "warning: skipping tool %q: not a valid MCP tool name\n", t.Name())
+			continue
+		case taken[t.Name()]:
+			// First registration wins, so a caller ordering the wrapped application's
+			// commands ahead of the built-ins keeps a command tool's name (and its
+			// confirm gate) rather than having a built-in shadow it. Serve refuses such
+			// a collision up front; this is the library-level backstop.
+			fmt.Fprintf(opts.LogOutput, "warning: skipping tool %q: that name is already exposed\n", t.Name())
 			continue
 		}
 
@@ -168,34 +180,9 @@ func BuildServer(tools []*fisk.FiskCommandTool, opts Options) (*mcp.Server, []st
 		registered = append(registered, t.Name())
 		taken[t.Name()] = true
 
-		if t.NeedsConfirm(opts.ConfirmTags) {
+		if confirmable.NeedsConfirm(opts.ConfirmTags) {
 			confirmCount++
 		}
-	}
-
-	// Built-in tools register after the wrapped-CLI tools so a name already taken by
-	// a command tool wins and the built-in is skipped rather than double-registered
-	// (Serve refuses such a collision up front via checkBuiltinCollisions; this is
-	// the library-level backstop). They share the concurrency semaphore and per-call timeout and skip
-	// the confirm gate, since a built-in carries no confirm tags.
-	for _, b := range opts.Builtins {
-		if !toolNamePattern.MatchString(b.Name()) {
-			fmt.Fprintf(opts.LogOutput, "warning: skipping built-in %q: not a valid MCP tool name\n", b.Name())
-			continue
-		}
-		if taken[b.Name()] {
-			fmt.Fprintf(opts.LogOutput, "warning: skipping built-in %q: a wrapped command already exposes that name\n", b.Name())
-			continue
-		}
-
-		srv.AddTool(&mcp.Tool{
-			Name:        b.Name(),
-			Description: b.Description(),
-			InputSchema: builtinInputSchema(b),
-			Annotations: &mcp.ToolAnnotations{Title: b.Name()},
-		}, builtinHandler(b, sem, opts.CallTimeout, opts.LogOutput))
-		registered = append(registered, b.Name())
-		taken[b.Name()] = true
 	}
 
 	if confirmCount > 0 {
@@ -205,29 +192,39 @@ func BuildServer(tools []*fisk.FiskCommandTool, opts Options) (*mcp.Server, []st
 	return srv, registered
 }
 
-// checkBuiltinCollisions refuses to serve when a wrapped command tool already
-// exposes a name a built-in would use. The model addresses every tool by one flat
-// name, so a collision would silently shadow one with the other; a built-in is a
-// deliberate allowlist opt-in, so this is a hard error naming the fix rather than
-// the silently skipped registration BuildServer falls back to. Serve calls it up
-// front; the skip in BuildServer remains the library-level backstop for callers
-// that do not.
-func checkBuiltinCollisions(tools []*fisk.FiskCommandTool, builtins []*functool.Tool) error {
-	if len(builtins) == 0 {
-		return nil
-	}
-
-	names := make(map[string]bool, len(tools))
+// checkToolCollisions refuses to serve when two tools would be exposed under one
+// name. The model addresses every tool by one flat name, so a collision would
+// silently shadow one with the other, and shadowing a confirm-gated command tool
+// would strip its gate. Serve calls it up front so the operator gets a hard error
+// naming the fix; the skip in BuildServer remains the library-level backstop for
+// callers that do not.
+func checkToolCollisions(tools []toolkit.Tool) error {
+	seen := make(map[string]toolkit.Tool, len(tools))
 	for _, t := range tools {
-		names[t.Name()] = true
-	}
-	for _, b := range builtins {
-		if names[b.Name()] {
-			return fmt.Errorf("cannot expose built-in %q over MCP: a wrapped command already exposes a tool with that name; exclude or rename it", b.Name())
+		if !t.MCPExposable() {
+			continue
 		}
+
+		first, dup := seen[t.Name()]
+		if dup {
+			return fmt.Errorf("cannot expose %s tool %q over MCP: the %s tool of that name already exposes it; exclude or rename one of them", kindOf(t), t.Name(), kindOf(first))
+		}
+		seen[t.Name()] = t
 	}
 
 	return nil
+}
+
+// kindOf names the provider a tool comes from, for a collision message that tells
+// the operator which of the two to change. A tool that does not describe itself is
+// reported by the neutral sentinel rather than guessed at.
+func kindOf(t toolkit.Tool) toolkit.Kind {
+	d, ok := t.(toolkit.Describer)
+	if !ok {
+		return toolkit.KindUnknown
+	}
+
+	return d.Describe(nil).Kind
 }
 
 // confirmModeSummary describes, for the startup note, how confirm-tagged tools are
@@ -251,17 +248,21 @@ func confirmModeSummary(mode ConfirmMode) string {
 // BuildServer. The behavioral hints (the ReadOnlyHint, DestructiveHint) are left unset:
 // fisk-ai has no standard tag describing a command's effect, so asserting one would
 // be a guess, and leaving them unset carries the spec's conservative default.
-func toolAnnotations(t *fisk.FiskCommandTool) *mcp.ToolAnnotations {
-	return &mcp.ToolAnnotations{Title: t.Command()}
+func toolAnnotations(t toolkit.Tool) *mcp.ToolAnnotations {
+	if c, ok := t.(toolkit.Confirmable); ok {
+		return &mcp.ToolAnnotations{Title: c.Command()}
+	}
+
+	return &mcp.ToolAnnotations{Title: t.Name()}
 }
 
 // Serve builds the MCP server and serves it over HTTP until ctx is canceled.
 // It returns an error if there are no registrable tools or the listener fails;
 // a clean shutdown via ctx returns nil.
-func Serve(ctx context.Context, tools []*fisk.FiskCommandTool, opts Options) error {
+func Serve(ctx context.Context, tools []toolkit.Tool, opts Options) error {
 	opts.applyDefaults()
 
-	if err := checkBuiltinCollisions(tools, opts.Builtins); err != nil {
+	if err := checkToolCollisions(tools); err != nil {
 		return err
 	}
 
@@ -357,12 +358,12 @@ func claudeAddHint(name string, addr net.Addr) string {
 	return fmt.Sprintf("claude mcp add --transport http %s http://%s:%s", name, host, port)
 }
 
-// inputSchema renders a tool's fisk input schema as raw JSON for MCP. The schema
+// inputSchema renders a tool's input schema as raw JSON for MCP. The schema
 // is passed through verbatim: it is already a restricted JSON-schema object, and
 // MCP clients consume the schema directly, so no agent-specific rewriting (such
 // as the optional-parameter annotation used for the Anthropic API) is applied. A
 // missing schema falls back to an empty object schema.
-func inputSchema(t *fisk.FiskCommandTool) json.RawMessage {
+func inputSchema(t toolkit.Tool) json.RawMessage {
 	schema := t.InputSchema()
 	if schema == nil {
 		return json.RawMessage(`{"type":"object"}`)
@@ -374,58 +375,6 @@ func inputSchema(t *fisk.FiskCommandTool) json.RawMessage {
 	}
 
 	return data
-}
-
-// builtinInputSchema renders a built-in tool's JSON-schema input as raw JSON for
-// MCP, mirroring inputSchema for command tools: passed through verbatim, with an
-// empty object schema as the fallback.
-func builtinInputSchema(b *functool.Tool) json.RawMessage {
-	schema := b.InputSchema()
-	if schema == nil {
-		return json.RawMessage(`{"type":"object"}`)
-	}
-
-	data, err := json.Marshal(schema)
-	if err != nil {
-		return json.RawMessage(`{"type":"object"}`)
-	}
-
-	return data
-}
-
-// builtinHandler runs a built-in tool for a tools/call request. Like toolHandler it
-// bounds the call with the shared concurrency semaphore and the per-call timeout,
-// and logs a single sanitized line naming what ran (the built-in's own trace, never
-// the raw client-supplied arguments). It invokes the built-in with a default-deny
-// prompter, since there is no operator on the MCP path, and returns the built-in's
-// JSON result verbatim as text content: the string is already JSON, so it is not
-// re-encoded. A handler error becomes an IsError result rather than a Go error, so
-// the client can reason about it, matching the command-tool mapping.
-func builtinHandler(b *functool.Tool, sem chan struct{}, timeout time.Duration, logOut io.Writer) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		select {
-		case sem <- struct{}{}:
-			defer func() { <-sem }()
-		case <-ctx.Done():
-			return errorResult(ctx.Err().Error()), nil
-		}
-
-		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		if line := b.TraceLine(req.Params.Arguments); line != "" {
-			fmt.Fprintf(logOut, "Running %s\n", line)
-		}
-
-		out, err := b.Call(callCtx, req.Params.Arguments, toolkit.DefaultDenyPrompter())
-		if err != nil {
-			return errorResult(err.Error()), nil
-		}
-
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: out}},
-		}, nil
-	}
 }
 
 // confirmPolicy carries the confirm-gating configuration a handler needs: the tags
@@ -458,20 +407,21 @@ type confirmPolicy struct {
 // JSON body carries the exit code and output. Failures are never returned as a
 // Go error, which the SDK would treat as a protocol-level error the client
 // cannot reason about.
-func toolHandler(t *fisk.FiskCommandTool, policy confirmPolicy, sem chan struct{}, timeout time.Duration, logOut io.Writer) mcp.ToolHandler {
+func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeout time.Duration, logOut io.Writer) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Resolve the command line up front: it names the command in the approval
-		// prompt and the run log, and an argument-resolution failure here is the same
-		// one Execute would return, so reporting it now, before any prompt or
-		// concurrency slot, keeps the error identical and avoids asking a user to
-		// approve a command that cannot run.
-		cmdLine, err := t.CommandLine(req.Params.Arguments)
+		// Resolve the command line up front for a tool that runs one: it names the
+		// command in the approval prompt and the run log, and an argument-resolution
+		// failure here is the same one Execute would return, so reporting it now,
+		// before any prompt or concurrency slot, keeps the error identical and avoids
+		// asking a user to approve a command that cannot run. A tool that runs no
+		// command has nothing to resolve and nothing that can fail this early.
+		cmdLine, err := commandLine(t, req.Params.Arguments)
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
 
-		if policy.mode != ConfirmNever && t.NeedsConfirm(policy.tags) {
-			if denied := confirmRun(ctx, req, t, policy, cmdLine, logOut); denied != nil {
+		if c, ok := t.(toolkit.Confirmable); ok && policy.mode != ConfirmNever && c.NeedsConfirm(policy.tags) {
+			if denied := confirmRun(ctx, req, c, policy, cmdLine, logOut); denied != nil {
 				return denied, nil
 			}
 		}
@@ -486,16 +436,32 @@ func toolHandler(t *fisk.FiskCommandTool, policy confirmPolicy, sem chan struct{
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		fmt.Fprintf(logOut, "Running %s\n", cmdLine)
+		if cmdLine != "" {
+			fmt.Fprintf(logOut, "Running %s\n", cmdLine)
+		}
 
 		// The served tool runs in the process working directory; a per-call scratch
-		// directory for served tools is future server work, not this run path.
-		result, err := t.Execute(callCtx, req.Params.Arguments, "")
+		// directory for served tools is future server work, not this run path. There
+		// is no operator on the MCP path, so an in-process tool that asks a question
+		// is denied rather than left waiting.
+		result, err := t.Execute(callCtx, req.Params.Arguments, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
+		if result == nil {
+			return errorResult("tool returned no result"), nil
+		}
 
-		data, err := json.Marshal(result)
+		// An in-process tool's output is already the JSON the client asked for and is
+		// passed through without re-encoding; a command's is wrapped so the client
+		// sees the exit code and truncation flag.
+		if result.Exec == nil {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: result.Output}},
+			}, nil
+		}
+
+		data, err := json.Marshal(result.CommandResult())
 		if err != nil {
 			return errorResult(fmt.Sprintf("marshaling tool result: %v", err)), nil
 		}
@@ -504,6 +470,29 @@ func toolHandler(t *fisk.FiskCommandTool, policy confirmPolicy, sem chan struct{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
 		}, nil
 	}
+}
+
+// commandLine renders the command a call will run, for the approval prompt and the
+// run log. A tool that runs an external command resolves its arguments now so a
+// resolution failure is reported before anything is asked or run; a tool that runs
+// none reports its own trace line instead, which may be empty for a tool that
+// renders no call.
+func commandLine(t toolkit.Tool, input json.RawMessage) (string, error) {
+	if c, ok := t.(commandLineRenderer); ok {
+		return c.CommandLine(input)
+	}
+
+	if c, ok := t.(toolkit.Confirmable); ok {
+		return c.TraceLine(input), nil
+	}
+
+	return "", nil
+}
+
+// commandLineRenderer is implemented by a tool kind that turns a call's arguments
+// into a concrete command line, and can fail doing so.
+type commandLineRenderer interface {
+	CommandLine(input json.RawMessage) (string, error)
 }
 
 // errorResult builds a tool result carrying an error message with IsError set.
@@ -540,7 +529,7 @@ var approvalSchema = map[string]any{
 // execution visible per call rather than only at connect time. A nil return means
 // the command may run. It is not called under ConfirmNever, where the caller skips
 // gating entirely.
-func confirmRun(ctx context.Context, req *mcp.CallToolRequest, t *fisk.FiskCommandTool, policy confirmPolicy, cmdLine string, logOut io.Writer) *mcp.CallToolResult {
+func confirmRun(ctx context.Context, req *mcp.CallToolRequest, t toolkit.Confirmable, policy confirmPolicy, cmdLine string, logOut io.Writer) *mcp.CallToolResult {
 	trigger := t.ConfirmTrigger(policy.tags)
 
 	if !sessionElicits(req.Session) {

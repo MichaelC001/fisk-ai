@@ -93,7 +93,8 @@ func MemoryIndexBlock(entries []memory.Item) string {
 
 func memoryListTool(store memory.Store) *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: memoryListName,
+		Name:   memoryListName,
+		Expose: &functool.ExposeSpec{},
 		Description: "List the keys and descriptions of everything currently in your persistent memory. " +
 			"This is the live view: it reflects memories you have written or deleted during this run, unlike the " +
 			"index captured in your instructions at the start of the run. Use it to find a memory to read, or to " +
@@ -131,7 +132,8 @@ func memoryKeyTrace(name string) func(json.RawMessage) string {
 
 func memoryReadTool(store memory.Store) *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: memoryReadName,
+		Name:   memoryReadName,
+		Expose: &functool.ExposeSpec{},
 		Description: "Read one memory by its key and return its description and body. " +
 			"Use it to load a memory whose key (from the index or memory_list) looks relevant to your task. " +
 			"It returns {\"found\": true, \"key\": ..., \"description\": ..., \"content\": ...} when the key exists, " +
@@ -153,7 +155,8 @@ func memoryReadTool(store memory.Store) *functool.Tool {
 
 func memoryWriteTool(store memory.Store) *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: memoryWriteName,
+		Name:   memoryWriteName,
+		Expose: &functool.ExposeSpec{},
 		Description: "Save a memory so a future run can use it. Provide a short stable key, a one-line " +
 			"description summarizing the memory, and the body in content. Do not write YAML frontmatter yourself: " +
 			"give the summary as description and the body as content, and memory_read returns only the body you stored. " +
@@ -190,7 +193,8 @@ func memoryWriteTool(store memory.Store) *functool.Tool {
 
 func memoryDeleteTool(store memory.Store) *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: memoryDeleteName,
+		Name:   memoryDeleteName,
+		Expose: &functool.ExposeSpec{},
 		Description: "Delete a memory by its key. Use it to remove a memory that is wrong or no longer useful. " +
 			"It is idempotent: deleting a key that does not exist is not an error. " +
 			"It returns {\"deleted\": true} when a memory was removed, or {\"deleted\": false} when nothing was stored under that key.",

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/choria-io/fisk"
+	tools2 "github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	. "github.com/onsi/ginkgo/v2"
@@ -59,7 +60,7 @@ var _ = Describe("BuildServer built-ins", func() {
 
 	It("serves a built-in-only server and returns its JSON result verbatim", func() {
 		builtins := lexicalKnowledgeBuiltins(ctx)
-		srv, registered := BuildServer(nil, Options{Name: "app", Version: "v1", LogOutput: io.Discard, Builtins: builtins})
+		srv, registered := BuildServer(tools2.Tools(builtins), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("knowledge_search"))
 
 		cs := connect(ctx, srv)
@@ -85,6 +86,39 @@ var _ = Describe("BuildServer built-ins", func() {
 		Expect(out.Results[0].Citation).To(ContainSubstring("a.md#"))
 	})
 
+	// Both kinds now register through one loop and one handler, so the split between
+	// the two result shapes is a runtime decision rather than two code paths. This
+	// pins both halves of it against one server, which is the case a single-kind
+	// spec cannot cover.
+	It("serves a command tool and a built-in from one list, each in its own shape", func() {
+		app := fisk.New("app", "an app")
+		app.Command("ping", "a command")
+		cmdTools := cmdToolsFor(app)
+		cmdTools[0].AppPath = writeExecutable("#!/bin/sh\necho pong\n")
+
+		served := append(tools2.Tools(cmdTools), tools2.Tools(lexicalKnowledgeBuiltins(ctx))...)
+		srv, registered := BuildServer(served, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+		Expect(registered).To(ConsistOf("ping", "knowledge_search"))
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		// A command's output is wrapped so the client sees the exit code.
+		text, isError := callText(ctx, cs, "ping", nil)
+		Expect(isError).To(BeFalse())
+
+		var res tools2.CommandResult
+		Expect(json.Unmarshal([]byte(text), &res)).To(Succeed())
+		Expect(res.ExitCode).To(Equal(0))
+		Expect(res.Output).To(ContainSubstring("pong"))
+
+		// The built-in's own JSON travels verbatim, with no envelope around it.
+		text, isError = callText(ctx, cs, "knowledge_search", map[string]any{"query": "backpressure"})
+		Expect(isError).To(BeFalse())
+		Expect(text).To(ContainSubstring(`"tier"`))
+		Expect(text).ToNot(ContainSubstring("exit_code"))
+	})
+
 	It("skips a built-in whose name a wrapped command already exposes", func() {
 		app := fisk.New("app", "an app")
 		k := app.Command("knowledge", "a group")
@@ -92,7 +126,7 @@ var _ = Describe("BuildServer built-ins", func() {
 		cmdTools := toolsFor(app)
 
 		var logs bytes.Buffer
-		_, registered := BuildServer(cmdTools, Options{Name: "app", Version: "v1", LogOutput: &logs, Builtins: lexicalKnowledgeBuiltins(ctx)})
+		_, registered := BuildServer(append(cmdTools, tools2.Tools(lexicalKnowledgeBuiltins(ctx))...), Options{Name: "app", Version: "v1", LogOutput: &logs})
 
 		// The command tool wins; the built-in is skipped, so the name registers once.
 		count := 0
@@ -102,12 +136,12 @@ var _ = Describe("BuildServer built-ins", func() {
 			}
 		}
 		Expect(count).To(Equal(1))
-		Expect(logs.String()).To(ContainSubstring("a wrapped command already exposes that name"))
+		Expect(logs.String()).To(ContainSubstring("that name is already exposed"))
 	})
 
 	It("dispatches concurrent calls to one read-only store", func() {
 		builtins := lexicalKnowledgeBuiltins(ctx)
-		srv, _ := BuildServer(nil, Options{Name: "app", Version: "v1", LogOutput: io.Discard, Builtins: builtins})
+		srv, _ := BuildServer(tools2.Tools(builtins), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 
 		cs := connect(ctx, srv)
 		defer cs.Close()

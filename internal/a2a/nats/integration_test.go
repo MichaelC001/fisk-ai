@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -45,7 +46,7 @@ func runNATS() *nats.Conn {
 
 // serveOver builds an a2a server for tools reachable at identity over a nats
 // transport on nc.
-func serveOver(nc *nats.Conn, identity string, tools []*fisk2.FiskCommandTool) *a2a.Server {
+func serveOver(nc *nats.Conn, identity string, tools []toolkit.Tool) *a2a.Server {
 	GinkgoHelper()
 
 	transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: identity})
@@ -73,30 +74,22 @@ func clientOver(nc *nats.Conn, sender string, timeout time.Duration) *a2a.Client
 
 // servingApp builds tools whose single command runs a stand-in executable, so a
 // served tool call actually executes.
-func servingApp(name, body string) []*fisk2.FiskCommandTool {
+func servingApp(name, body string) []toolkit.Tool {
 	GinkgoHelper()
 
 	app := fisk.New("app", "an app")
 	app.Command(name, "a command")
 
-	tools := toolsFor(app)
+	tools, err := fisk2.ApplicationTools(introspect(app))
+	Expect(err).NotTo(HaveOccurred())
+
 	path := filepath.Join(GinkgoT().TempDir(), "app")
 	Expect(os.WriteFile(path, []byte(body), 0o700)).To(Succeed())
 	for _, t := range tools {
 		t.AppPath = path
 	}
 
-	return tools
-}
-
-// toolsFor builds tools from an in-process fisk application's introspection.
-func toolsFor(app *fisk.Application) []*fisk2.FiskCommandTool {
-	GinkgoHelper()
-
-	tools, err := fisk2.ApplicationTools(introspect(app))
-	Expect(err).NotTo(HaveOccurred())
-
-	return tools
+	return toolkit.Tools(tools)
 }
 
 var _ = Describe("Integration: a2a NATS round-trip", func() {

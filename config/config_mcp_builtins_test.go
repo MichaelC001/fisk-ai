@@ -28,16 +28,17 @@ var _ = Describe("MCP builtins allowlist", func() {
 		Expect(cfg.MCPExposesKnowledgeSearch()).To(BeTrue())
 	})
 
-	It("rejects a real but unexposable built-in, naming the exposable set", func() {
+	It("rejects a real but unexposable built-in, naming the accepted set", func() {
 		cfg := build([]string{"ask_human_confirm"}, true)
 		err := cfg.prepare()
-		Expect(err).To(MatchError(ContainSubstring("cannot be exposed over MCP")))
+		Expect(err).To(MatchError(ContainSubstring("is not an accepted built-in name")))
 		Expect(err).To(MatchError(ContainSubstring("knowledge_search")))
+		Expect(err).To(MatchError(ContainSubstring("an operator at a terminal")))
 	})
 
 	It("rejects an unknown built-in name", func() {
 		cfg := build([]string{"frobnicate"}, true)
-		Expect(cfg.prepare()).To(MatchError(ContainSubstring("cannot be exposed over MCP")))
+		Expect(cfg.prepare()).To(MatchError(ContainSubstring("is not an accepted built-in name")))
 	})
 
 	It("rejects knowledge_search when knowledge is not enabled", func() {

@@ -112,7 +112,8 @@ type HarnessConfig struct {
 	NoBell bool `json:"no_bell,omitempty" yaml:"no_bell,omitempty"`
 	// Memory, when enabled, gives the model built-in tools to keep durable notes in
 	// a key/value store that survives across runs. Agent mode only; like the
-	// human-in-the-loop tools it is not exposed over MCP.
+	// human-in-the-loop tools the memory tools declare no serving exposure, so
+	// neither MCP nor a2a carries them.
 	Memory *MemoryConfig `json:"memory,omitempty" yaml:"memory,omitempty"`
 	// RAG, when enabled, gives the model a built-in knowledge_search tool over a
 	// locally-built index of the operator's markdown/text documents. The user-facing
@@ -646,8 +647,8 @@ func Validate(cfg *Config) error {
 
 // ValidateForMode checks that the fields required by mode are set. application_path
 // is optional for ModeAgent and ModeMCP, which can run on built-in and remote tools
-// alone; ModeServer still requires it, since a2a serves only the wrapped
-// application's tools and never the built-ins. ModeMCP needs nothing more, since it
+// alone; ModeServer still requires it, since no built-in declares a2a exposure and
+// an application-less a2a server would therefore serve nothing. ModeMCP needs nothing more, since it
 // serves tools and uses neither a prompt nor a model. ModeServer needs a valid
 // identity and a NATS context but, like MCP, no prompt or model. ModeAgent
 // additionally needs a model, and a prompt and identity unless the agent is also
@@ -679,10 +680,13 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	}
 
 	if mode == ModeServer {
-		// a2a serves only the wrapped application's tools, never the built-ins, so an
-		// application-less a2a server could never have anything to serve.
+		// The a2a server can carry any tool kind, but no built-in declares a2a
+		// exposure today, so an application-less a2a server would start with an empty
+		// tool set. This is an earlier, clearer version of the empty-set error
+		// a2a_command already produces, not a correctness gate: when a built-in first
+		// opts into a2a, delete this and let the downstream check do the work.
 		if cfg.ApplicationPath == "" {
-			return fmt.Errorf("application_path is required for the a2a server: a2a serves the wrapped application's tools and cannot serve the built-in tools")
+			return fmt.Errorf("application_path is required for the a2a server: no built-in tool declares a2a exposure, so an a2a server with no wrapped application would have nothing to serve; set application_path to the fisk application whose commands you want to serve")
 		}
 		if cfg.NatsContext == "" {
 			return fmt.Errorf("nats_context is required for the a2a server")
@@ -1115,11 +1119,19 @@ func normalizeConfirmOverMCP(v string) (string, error) {
 }
 
 // normalizeMCPBuiltins trims and de-duplicates the expose.agent.mcp.builtins
-// allowlist and validates every entry. Only the read-only knowledge_search may be
-// exposed over MCP: any other name (a typo, or a real but unexposable built-in
-// such as a memory or human_in_the_loop tool) is rejected with a message that
-// names the exposable set and why the others are excluded. A non-empty allowlist
-// with knowledge disabled is also rejected, since there would be nothing to serve.
+// allowlist and validates every entry against the names an operator may select.
+//
+// This is the SELECTION half of MCP exposure: which of the servable built-ins this
+// operator wants served. The CAPABILITY half, whether a tool may ever be served at
+// all, is declared on the tool itself and applied by the serving surface, which can
+// only narrow this list further and never widen it. Both gates apply, so a tool
+// added to a built-in set is not served on the strength of a neighbour's selection.
+// The duplication is deliberate: config is the lowest layer and cannot import the
+// tools it names, so this list is maintained here and every entry must also declare
+// MCP exposure on its Spec, or no operator can ever select it.
+//
+// A non-empty allowlist with knowledge disabled is rejected, since there would be
+// nothing to serve.
 func (c *Config) normalizeMCPBuiltins(names []string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
@@ -1133,7 +1145,7 @@ func (c *Config) normalizeMCPBuiltins(names []string) ([]string, error) {
 			continue
 		}
 		if name != KnowledgeSearchToolName {
-			return nil, fmt.Errorf("expose.agent.mcp.builtins: %q cannot be exposed over MCP; the only exposable built-in is the read-only %s (the memory and human_in_the_loop built-ins are never exposable because they need operator state or interaction)", name, KnowledgeSearchToolName)
+			return nil, fmt.Errorf("expose.agent.mcp.builtins: %q is not an accepted built-in name; accepted: %s. The memory and ask_human_* built-ins are not offered over MCP because they need operator state or an operator at a terminal, and an MCP client is neither", name, KnowledgeSearchToolName)
 		}
 		seen[name] = true
 		out = append(out, name)

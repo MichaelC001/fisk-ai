@@ -119,9 +119,17 @@ func (t *recordingTool) Description() string         { return t.name }
 func (t *recordingTool) InputSchema() map[string]any { return map[string]any{"type": "object"} }
 func (t *recordingTool) Definition(bool) llm.ToolDef { return llm.ToolDef{Name: t.name} }
 
-func (t *recordingTool) ExecuteUse(_ context.Context, use llm.ToolUseBlock, _ toolkit.ExecDeps) llm.ToolResultBlock {
-	t.ranInputs = append(t.ranInputs, string(use.Input))
-	return llm.ToolResultBlock{ToolUseID: use.ID, Content: t.output, IsError: t.isError}
+func (t *recordingTool) ModelDescription() string { return t.name }
+func (t *recordingTool) MCPExposable() bool       { return false }
+func (t *recordingTool) A2AExposable() bool       { return false }
+
+func (t *recordingTool) Execute(_ context.Context, input json.RawMessage, _ toolkit.ExecDeps) (*toolkit.Outcome, error) {
+	t.ranInputs = append(t.ranInputs, string(input))
+	if t.isError {
+		return nil, errors.New(t.output)
+	}
+
+	return &toolkit.Outcome{Output: t.output}, nil
 }
 
 // findToolResult returns the tool_result block answering id in a reconstructed

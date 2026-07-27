@@ -6,6 +6,7 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -85,9 +86,12 @@ func (f fakeTool) Definition(deferLoading bool) llm.ToolDef {
 	return llm.ToolDef{Name: f.name, DeferLoading: deferLoading}
 }
 
-func (fakeTool) ExecuteUse(context.Context, llm.ToolUseBlock, toolkit.ExecDeps) llm.ToolResultBlock {
-	return llm.ToolResultBlock{}
+func (fakeTool) Execute(context.Context, json.RawMessage, toolkit.ExecDeps) (*toolkit.Outcome, error) {
+	return &toolkit.Outcome{}, nil
 }
+func (f fakeTool) ModelDescription() string { return f.Description() }
+func (fakeTool) MCPExposable() bool         { return false }
+func (fakeTool) A2AExposable() bool         { return false }
 
 // fakeTools builds n fakeTools named t0..tN-1.
 func fakeTools(n int) []toolkit.Tool {

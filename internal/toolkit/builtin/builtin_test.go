@@ -300,7 +300,7 @@ var _ = Describe("Built-in tools", func() {
 			prompter.confirmFn = func(string) (bool, error) { return false, nil }
 			use := llm.ToolUseBlock{ID: "tu_1", Name: "ask_human_confirm", Input: json.RawMessage(`{"question":"Proceed?"}`)}
 
-			text, isError := resultBlock(askHumanConfirmTool().ExecuteUse(context.Background(), use, toolkit.ExecDeps{Prompter: prompter}))
+			text, isError := resultBlock(toolkit.ExecuteUse(askHumanConfirmTool(), context.Background(), use, toolkit.ExecDeps{Prompter: prompter}))
 			Expect(isError).To(BeFalse())
 			Expect(text).To(ContainSubstring(`"confirmed":false`))
 		})
@@ -308,7 +308,7 @@ var _ = Describe("Built-in tools", func() {
 		It("Should return malformed input as an error result", func() {
 			use := llm.ToolUseBlock{ID: "tu_2", Name: "ask_human_confirm", Input: json.RawMessage(`{"question":`)}
 
-			text, isError := resultBlock(askHumanConfirmTool().ExecuteUse(context.Background(), use, toolkit.ExecDeps{Prompter: prompter}))
+			text, isError := resultBlock(toolkit.ExecuteUse(askHumanConfirmTool(), context.Background(), use, toolkit.ExecDeps{Prompter: prompter}))
 			Expect(isError).To(BeTrue())
 			Expect(text).To(ContainSubstring("invalid ask_human_confirm input"))
 		})

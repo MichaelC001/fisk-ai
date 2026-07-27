@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
@@ -19,10 +20,10 @@ import (
 )
 
 // knowledgeSearchName is the single built-in retrieval tool over the local
-// knowledge index. It is the one built-in that may also be served over MCP,
-// unlike the memory and human-in-the-loop tools. It is defined in the config
-// package (the lowest layer, which validates the MCP allowlist) and aliased here
-// so the tool name and the allowlist validation never drift.
+// knowledge index. It is the one built-in that declares MCP exposure, unlike the
+// memory and human-in-the-loop tools, which need operator state or interaction. It
+// is defined in the config package (the lowest layer, which validates the operator's
+// MCP allowlist) and aliased here so the tool name and that validation never drift.
 const knowledgeSearchName = config.KnowledgeSearchToolName
 
 // approxCharsPerToken converts the max_injected_tokens cap into an approximate
@@ -54,9 +55,10 @@ func RAGTools(cfg *config.Config, store *rag.Store) []*functool.Tool {
 // the index over MCP; because the operator explicitly opted in, an index that
 // cannot be opened cleanly (a stale rag_meta, a bad embeddings block) returns an
 // error rather than silently dropping the tool. It returns a nil store when
-// knowledge_search is not exposed. Operator-facing progress and discoverability
-// notes are written to notes (typically os.Stderr); it is never the MCP protocol
-// stream.
+// knowledge_search is not exposed. The returned set is filtered per tool against
+// the allowlist, so it carries only what the operator named and never the whole of
+// RAGTools. Operator-facing progress and discoverability notes are written to
+// notes (typically os.Stderr); it is never the MCP protocol stream.
 func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writer) ([]*functool.Tool, *rag.Store, error) {
 	if !cfg.MCPExposesKnowledgeSearch() {
 		if cfg.RAGEnabled() {
@@ -82,7 +84,26 @@ func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writ
 		fmt.Fprintln(notes, "note: the knowledge index is not built yet; knowledge_search will return index_not_built until you run: fisk-ai knowledge index")
 	}
 
-	return RAGTools(cfg, store), store, nil
+	return mcpSelectedBuiltins(cfg, RAGTools(cfg, store)), store, nil
+}
+
+// mcpSelectedBuiltins narrows a built-in set to the tools the operator listed in
+// expose.agent.mcp.builtins. The allowlist is applied per tool rather than
+// consulted once as a boolean, so a tool added to a set alongside an allowlisted
+// one is never served on the strength of its neighbour's selection: adding to
+// RAGTools cannot widen what MCP clients can reach without an explicit config
+// change, which config in turn refuses for any name but knowledge_search.
+func mcpSelectedBuiltins(cfg *config.Config, tools []*functool.Tool) []*functool.Tool {
+	selected := cfg.MCPBuiltins()
+
+	out := make([]*functool.Tool, 0, len(tools))
+	for _, t := range tools {
+		if slices.Contains(selected, t.Name()) {
+			out = append(out, t)
+		}
+	}
+
+	return out
 }
 
 // RAGSystemNote returns the system-prompt note telling the model the knowledge
@@ -104,6 +125,10 @@ func RAGSystemNote(cfg *config.Config) string {
 func knowledgeSearchTool(store *rag.Store) *functool.Tool {
 	return mustNew(functool.Spec{
 		Name: knowledgeSearchName,
+		// Read-only retrieval over the operator's own index, and the only built-in an
+		// operator may serve. Not a2a: there is no a2a builtins allowlist, so declaring
+		// it there would serve it the moment a2a is enabled, with no opt-in.
+		Expose: &functool.ExposeSpec{MCP: true},
 		Description: "Search the operator's local knowledge base (their indexed markdown and text documents) " +
 			"and return the most relevant sections, each with a citation. " +
 			"Call this whenever answering depends on project-specific knowledge you are not certain of: a " +

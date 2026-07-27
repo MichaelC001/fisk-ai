@@ -9,10 +9,12 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/mcpserver"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/util"
@@ -58,12 +60,12 @@ func mcpAction(_ *fisk.ParseContext) error {
 		fmt.Fprintln(os.Stderr, "note: no wrapped application configured (application_path unset); serving built-in tools only")
 	}
 
-	if cfg.HumanInTheLoopEnabled() {
-		fmt.Fprintln(os.Stderr, "warning: human_in_the_loop has no effect over MCP; built-in human-in-the-loop tools are never exposed to MCP clients")
-	}
-
-	if cfg.MemoryEnabled() {
-		fmt.Fprintln(os.Stderr, "warning: memory has no effect over MCP; the built-in memory tools are only available in an agent run")
+	// Derived from each tool's own exposure declaration rather than written out per
+	// feature, so this cannot claim a tool is withheld after it stops being. A config
+	// that enables memory for agent runs and is also served over MCP is correct, so
+	// this is a note about where those tools are reachable, not a warning.
+	if withheld := builtin.WithheldFromMCP(cfg); len(withheld) > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d built-in tool(s) this config enables are not served over MCP: %s. They need operator state or an operator at a terminal, so they are reachable only in an agent run\n", len(withheld), strings.Join(withheld, ", "))
 	}
 
 	tools, err := fisktool.ServedTools(ctx, cfg)
@@ -102,14 +104,17 @@ func mcpAction(_ *fisk.ParseContext) error {
 		address = defaultMCPAddress
 	}
 
-	return mcpserver.Serve(ctx, tools, mcpserver.Options{
+	// The wrapped application's commands are listed first so one of them keeps a
+	// name a built-in would also claim, rather than being shadowed by it.
+	served := append(toolkit.Tools(tools), toolkit.Tools(ragBuiltins)...)
+
+	return mcpserver.Serve(ctx, served, mcpserver.Options{
 		Name:         cfg.Identity,
 		Version:      util.Version(),
 		Addr:         net.JoinHostPort(address, strconv.Itoa(port)),
 		Instructions: cfg.MCPInstructions(),
 		ConfirmTags:  cfg.ConfirmTags(),
 		ConfirmMode:  mcpserver.ConfirmMode(cfg.ConfirmOverMCPMode()),
-		Builtins:     ragBuiltins,
 		Concurrency:  cfg.MCPMaxConcurrentTools(),
 		CallTimeout:  cfg.MCPToolTimeout(),
 	})

@@ -83,7 +83,7 @@ var _ = Describe("Memory tools", func() {
 
 	call := func(name, input string) (map[string]any, error) {
 		GinkgoHelper()
-		out, err := tools[name].Call(ctx, json.RawMessage(input), nil)
+		out, err := callTool(tools[name], ctx, json.RawMessage(input), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -218,7 +218,7 @@ var _ = Describe("Memory tools", func() {
 	Describe("nil store guard", func() {
 		It("Should error rather than panic when a handler is invoked with no store", func() {
 			listWithoutStore := MemoryTools(enabled, nil)[0]
-			_, err := listWithoutStore.Call(ctx, json.RawMessage(`{}`), nil)
+			_, err := callTool(listWithoutStore, ctx, json.RawMessage(`{}`), nil)
 			Expect(err).To(MatchError(ContainSubstring("not configured")))
 		})
 	})

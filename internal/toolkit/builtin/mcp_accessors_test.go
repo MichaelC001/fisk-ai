@@ -31,7 +31,7 @@ var _ = Describe("BuiltinTool MCP accessors", func() {
 
 		// A nil store makes the handler return an invocation error without touching
 		// the network; the deny prompter is inert here since the handler ignores it.
-		_, err := ks.Call(ctx, json.RawMessage(`{"query":"x"}`), toolkit.DefaultDenyPrompter())
+		_, err := callTool(ks, ctx, json.RawMessage(`{"query":"x"}`), toolkit.DefaultDenyPrompter())
 		Expect(err).To(HaveOccurred())
 	})
 })

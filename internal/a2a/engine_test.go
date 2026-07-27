@@ -26,13 +26,13 @@ func discardLogger() *slog.Logger {
 
 // toolsFor builds tools from an in-process fisk application's introspection, the
 // same path the real commands use.
-func toolsFor(app *fisk.Application) []*fisk2.FiskCommandTool {
+func toolsFor(app *fisk.Application) []toolkit.Tool {
 	GinkgoHelper()
 
 	tools, err := fisk2.ApplicationTools(introspect(app))
 	Expect(err).NotTo(HaveOccurred())
 
-	return tools
+	return toolkit.Tools(tools)
 }
 
 var _ = Describe("expectProtocol", func() {
@@ -80,7 +80,7 @@ var _ = Describe("buildCard", func() {
 
 var _ = Describe("selectExposed", func() {
 	server := func() *Server {
-		return &Server{opts: ServerOptions{Logger: discardLogger()}, byName: map[string]*fisk2.FiskCommandTool{}}
+		return &Server{opts: ServerOptions{Logger: discardLogger()}, byName: map[string]toolkit.Tool{}}
 	}
 
 	It("Should drop confirmation-gated tools and keep the rest", func() {
@@ -105,7 +105,7 @@ var _ = Describe("selectExposed", func() {
 		app.Command("keep", "kept")
 		app.Command("rw", "writes").Tag("impact:rw")
 
-		s := &Server{opts: ServerOptions{Logger: discardLogger(), ConfirmTags: []string{"impact:rw"}}, byName: map[string]*fisk2.FiskCommandTool{}}
+		s := &Server{opts: ServerOptions{Logger: discardLogger(), ConfirmTags: []string{"impact:rw"}}, byName: map[string]toolkit.Tool{}}
 		exposed := s.selectExposed(toolsFor(app))
 		Expect(exposed).To(HaveLen(1))
 		Expect(exposed[0].Name()).To(Equal("keep"))
@@ -137,12 +137,33 @@ var _ = Describe("resultToToolResult", func() {
 	})
 
 	It("Should map a command outcome to a successful result with exec metadata", func() {
-		res := resultToToolResult(&toolkit.CommandResult{Command: "ping", ExitCode: 2, Output: "out", Truncated: true}, nil)
+		res := resultToToolResult(&toolkit.Outcome{
+			Output: "out",
+			Exec:   &toolkit.CommandExec{Command: "ping", ExitCode: 2, Truncated: true},
+		}, nil)
 		Expect(res.IsError).To(BeFalse())
 		Expect(res.Output).To(Equal("out"))
 		Expect(res.Exec.Command).To(Equal("ping"))
 		Expect(res.Exec.ExitCode).To(Equal(2))
 		Expect(res.Exec.Truncated).To(BeTrue())
+	})
+
+	// An in-process tool produces no exec metadata, and its output must travel
+	// verbatim: wrapping it would hand the importing agent a command envelope with a
+	// fabricated exit code for a command that never ran.
+	It("Should carry an in-process outcome with no exec block", func() {
+		res := resultToToolResult(&toolkit.Outcome{Output: `{"status":"ok"}`}, nil)
+		Expect(res.IsError).To(BeFalse())
+		Expect(res.Output).To(Equal(`{"status":"ok"}`))
+		Expect(res.Exec).To(BeNil())
+	})
+
+	// This runs on a goroutine serving a remote caller, where a nil dereference
+	// would take the process down rather than fail one call.
+	It("Should report a nil outcome as an error rather than panicking", func() {
+		res := resultToToolResult(nil, nil)
+		Expect(res.IsError).To(BeTrue())
+		Expect(res.Output).To(Equal("tool returned no result"))
 	})
 })
 
