@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 )
 
 const (
@@ -80,7 +79,7 @@ func (o *ServerOptions) applyDefaults() {
 type Server struct {
 	opts      ServerOptions
 	identity  string
-	byName    map[string]*fisk.FiskCommandTool
+	byName    map[string]toolkit.Tool
 	card      AgentCard
 	validator *Validator
 	sem       chan struct{}
@@ -88,12 +87,16 @@ type Server struct {
 }
 
 // NewServer builds a Server over transport and registers its discovery and tool
-// handlers. The exposed set is tools minus those gated behind operator
-// confirmation (which a served agent cannot satisfy), and minus any tool whose
-// name a caller could not use; skipped tools are logged. Use ai:deny to keep a
-// command out of the served set entirely. The Transport is borrowed: Stop releases
-// only the Transport, and the caller closes the Provider behind it.
-func NewServer(transport Transport, tools []*fisk.FiskCommandTool, opts ServerOptions) (*Server, error) {
+// handlers. It accepts any toolkit.Tool, so a wrapped application's commands and
+// the harness's own in-process tools are served through one path; what may be
+// carried is each tool's own a2a exposure declaration rather than its Go type. The
+// exposed set is tools minus those that do not declare a2a exposure, minus those
+// gated behind operator confirmation (which a served agent cannot satisfy), and
+// minus any tool whose name a caller could not use; skipped tools are logged. Use
+// ai:deny to keep a command out of the served set entirely. The Transport is
+// borrowed: Stop releases only the Transport, and the caller closes the Provider
+// behind it.
+func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*Server, error) {
 	opts.applyDefaults()
 
 	validator, err := NewValidator()
@@ -104,7 +107,7 @@ func NewServer(transport Transport, tools []*fisk.FiskCommandTool, opts ServerOp
 	s := &Server{
 		opts:      opts,
 		identity:  opts.Identity,
-		byName:    make(map[string]*fisk.FiskCommandTool, len(tools)),
+		byName:    make(map[string]toolkit.Tool, len(tools)),
 		validator: validator,
 		sem:       make(chan struct{}, opts.Concurrency),
 		transport: transport,
@@ -149,16 +152,28 @@ func (s *Server) Stop() error {
 }
 
 // selectExposed filters tools to those safe to serve and records them by name for
-// invocation. Confirm-gated tools have no operator to approve them on a served
-// agent and are dropped; a tool with a name a caller could not use is dropped; a
-// tool that advertises no description is dropped, since a remote agent importing it
-// would reject it as giving the model nothing to decide on. Each drop is logged with
-// its reason.
-func (s *Server) selectExposed(tools []*fisk.FiskCommandTool) []*fisk.FiskCommandTool {
-	var exposed []*fisk.FiskCommandTool
+// invocation. A tool that does not declare a2a exposure is dropped, which is the
+// ceiling every other rule sits under; confirm-gated tools have no operator to
+// approve them on a served agent and are dropped; a tool with a name a caller could
+// not use is dropped; a tool that advertises no description is dropped, since a
+// remote agent importing it would reject it as giving the model nothing to decide
+// on. Each drop is logged with its reason.
+//
+// Confirmability is an optional capability, so a tool that does not implement it
+// cannot be asked whether it needs approval. That is treated as a refusal rather
+// than as "no gate needed": an exposed tool must be able to answer, or the absence
+// of a gate would be indistinguishable from not having one.
+func (s *Server) selectExposed(tools []toolkit.Tool) []toolkit.Tool {
+	var exposed []toolkit.Tool
 	for _, t := range tools {
+		confirmable, canAnswerConfirm := t.(toolkit.Confirmable)
+
 		switch {
-		case t.NeedsConfirm(s.opts.ConfirmTags):
+		case !t.A2AExposable():
+			s.opts.Logger.Warn("Skipping tool: it does not declare a2a exposure", "tool", t.Name())
+		case !canAnswerConfirm:
+			s.opts.Logger.Warn("Skipping tool: it cannot report whether it is confirmation-gated, so it cannot be served", "tool", t.Name())
+		case confirmable.NeedsConfirm(s.opts.ConfirmTags):
 			s.opts.Logger.Warn("Skipping tool: confirmation-gated commands are not served over a2a (no operator to approve); use ai:deny to suppress this", "tool", t.Name())
 		case !toolNamePattern.MatchString(t.Name()):
 			s.opts.Logger.Warn("Skipping tool: not a valid a2a tool name", "tool", t.Name())
@@ -223,20 +238,22 @@ func (s *Server) handleTool(ctx context.Context, body []byte, reply Replier) {
 		runCtx, cancel := context.WithTimeout(ctx, s.opts.CallTimeout)
 		defer cancel()
 
-		log := s.opts.Logger.With("tool", tool.Name(), "command", tool.Command(), "sender", sender)
+		log := s.opts.Logger.With("tool", tool.Name(), "command", commandOf(tool), "sender", sender)
 		log.Info("Running tool call")
 
 		start := time.Now()
 		// The served tool runs in the process working directory; a per-call scratch
-		// directory for served tools is future server work, not this run path.
-		result, err := tool.Execute(runCtx, tr.Input, "")
+		// directory for served tools is future server work, not this run path. There
+		// is no operator behind a served call, so the deny prompter refuses any
+		// question a tool asks rather than blocking the call forever.
+		result, err := tool.Execute(runCtx, tr.Input, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
 		duration := time.Since(start)
 
 		switch {
 		case err != nil:
 			log.Error("Tool call failed", "duration", duration, "error", err)
-		case result != nil:
-			log.Info("Tool call completed", "duration", duration, "exit_code", result.ExitCode, "truncated", result.Truncated)
+		case result != nil && result.Exec != nil:
+			log.Info("Tool call completed", "duration", duration, "exit_code", result.Exec.ExitCode, "truncated", result.Exec.Truncated)
 		default:
 			log.Info("Tool call completed", "duration", duration)
 		}
@@ -288,7 +305,7 @@ func (s *Server) toolReply(reqHdr *Header, result *ToolResult) *ToolReply {
 }
 
 // buildCard assembles an agent card from the exposed tools.
-func buildCard(identity, version string, tools []*fisk.FiskCommandTool) AgentCard {
+func buildCard(identity, version string, tools []toolkit.Tool) AgentCard {
 	card := AgentCard{
 		Name:      identity,
 		Version:   versionOrDev(version),
@@ -306,22 +323,43 @@ func buildCard(identity, version string, tools []*fisk.FiskCommandTool) AgentCar
 	return card
 }
 
-// resultToToolResult maps a command execution outcome to the shared ToolResult.
-// A harness failure (the command could not run) sets IsError; a command that ran,
-// including one that exited non-zero, is a successful result carrying the output
-// and the exec metadata, so the caller can reconstruct the same CommandResult a
-// local tool would have produced.
-func resultToToolResult(result *toolkit.CommandResult, err error) *ToolResult {
-	if err != nil {
+// commandOf renders the bare command a call runs, for the server log. It is an
+// optional capability: a tool that runs no command reports its name instead.
+func commandOf(t toolkit.Tool) string {
+	if c, ok := t.(toolkit.Confirmable); ok {
+		return c.Command()
+	}
+
+	return t.Name()
+}
+
+// resultToToolResult maps a tool's outcome to the shared ToolResult. A harness
+// failure (the tool could not run) sets IsError; a tool that ran, including a
+// command that exited non-zero, is a successful result. A command's outcome carries
+// its exec metadata so the caller can reconstruct the same CommandResult a local
+// tool would have produced; an in-process tool has none, and its output travels
+// verbatim so the importing agent hands the model exactly what the tool returned
+// rather than a command envelope wrapped around it.
+//
+// A nil outcome with no error is a tool kind misbehaving rather than a reachable
+// state, but this runs on a goroutine serving a remote caller, where a nil
+// dereference would take the process down; it is reported as an error instead.
+func resultToToolResult(result *toolkit.Outcome, err error) *ToolResult {
+	switch {
+	case err != nil:
 		return &ToolResult{IsError: true, Output: err.Error()}
+	case result == nil:
+		return &ToolResult{IsError: true, Output: "tool returned no result"}
+	case result.Exec == nil:
+		return &ToolResult{Output: result.Output}
 	}
 
 	return &ToolResult{
 		Output: result.Output,
 		Exec: &ExecResult{
-			Command:   result.Command,
-			ExitCode:  result.ExitCode,
-			Truncated: result.Truncated,
+			Command:   result.Exec.Command,
+			ExitCode:  result.Exec.ExitCode,
+			Truncated: result.Exec.Truncated,
 		},
 	}
 }

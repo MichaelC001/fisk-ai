@@ -521,7 +521,7 @@ var _ = Describe("Command execution", func() {
 	It("Should run the command and return its output and exit code", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"level":"info","subject":"hello"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"level":"info","subject":"hello"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(result.ExitCode).To(Equal(0))
@@ -533,7 +533,7 @@ var _ = Describe("Command execution", func() {
 	It("Should report a non-zero exit in the result rather than as an error", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\necho oops >&2\nexit 3\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(result.ExitCode).To(Equal(3))
@@ -606,7 +606,7 @@ var _ = Describe("Command execution", func() {
 	It("Should set LLMFORMAT=1 in the command environment", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\nprintf 'LLMFORMAT=%s\\n' \"$LLMFORMAT\"\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Output).To(Equal("LLMFORMAT=1\n"))
 	})
@@ -620,7 +620,7 @@ var _ = Describe("Command execution", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\n" +
 			"printf '" + fakeCredEnvVar + "=[%s]\\n' \"$" + fakeCredEnvVar + "\"\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Output).To(Equal(fakeCredEnvVar + "=[]\n"))
 	})
@@ -633,7 +633,7 @@ var _ = Describe("Command execution", func() {
 			"printf 'MY_OTHER_VAR=[%s]\\n' \"$MY_OTHER_VAR\"\n"))
 		tool.SensitiveEnvVars = []string{"MY_EMBED_KEY"}
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Output).To(Equal("MY_EMBED_KEY=[]\nMY_OTHER_VAR=[keep-me]\n"))
 	})
@@ -642,7 +642,7 @@ var _ = Describe("Command execution", func() {
 		GinkgoT().Setenv("ANTHROPIC_BASE_URL", "https://example.test")
 		tool := doTool(writeExecutable("#!/bin/sh\nprintf 'URL=[%s]\\n' \"$ANTHROPIC_BASE_URL\"\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Output).To(Equal("URL=[https://example.test]\n"))
 	})
@@ -650,7 +650,7 @@ var _ = Describe("Command execution", func() {
 	It("Should combine stdout and stderr preserving their order", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\necho first\necho second >&2\necho third\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(result.Output).To(Equal("first\nsecond\nthird\n"))
@@ -659,7 +659,7 @@ var _ = Describe("Command execution", func() {
 	It("Should treat a null input as an empty argument object", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"))
 
-		result, err := tool.Execute(context.Background(), json.RawMessage(`null`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`null`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.ExitCode).To(Equal(0))
 		Expect(result.Command).To(Equal("do"))
@@ -668,7 +668,7 @@ var _ = Describe("Command execution", func() {
 	It("Should treat an empty input as an empty argument object", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"))
 
-		result, err := tool.Execute(context.Background(), nil, "")
+		result, err := tool.RunCommand(context.Background(), nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.ExitCode).To(Equal(0))
 		Expect(result.Command).To(Equal("do"))
@@ -677,7 +677,7 @@ var _ = Describe("Command execution", func() {
 	It("Should error when no application path is set", func() {
 		tool := doTool("")
 
-		_, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		_, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("no application path"))
 	})
@@ -685,7 +685,7 @@ var _ = Describe("Command execution", func() {
 	It("Should error when the binary cannot be run", func() {
 		tool := doTool(filepath.Join(GinkgoT().TempDir(), "does-not-exist"))
 
-		_, err := tool.Execute(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		_, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("running command"))
 	})
@@ -693,7 +693,7 @@ var _ = Describe("Command execution", func() {
 	It("Should error when the arguments cannot be mapped to a command line", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\n"))
 
-		_, err := tool.Execute(context.Background(), json.RawMessage(`{"unknown":"x"}`), "")
+		_, err := tool.RunCommand(context.Background(), json.RawMessage(`{"unknown":"x"}`), "")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("unknown property"))
 	})
@@ -704,7 +704,7 @@ var _ = Describe("Command execution", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := tool.Execute(ctx, json.RawMessage(`{"subject":"x"}`), "")
+		_, err := tool.RunCommand(ctx, json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).To(HaveOccurred())
 	})
 })
@@ -1091,7 +1091,7 @@ var _ = Describe("bounded subprocess output", func() {
 			Expect(tool).NotTo(BeNil())
 			tool.AppPath = writeExecutable("#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' a\n")
 
-			result, err := tool.Execute(context.Background(), json.RawMessage(`{}`), "")
+			result, err := tool.RunCommand(context.Background(), json.RawMessage(`{}`), "")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.ExitCode).To(Equal(0))
 			Expect(result.Truncated).To(BeTrue())
@@ -1153,7 +1153,7 @@ var _ = Describe("Execute working directory", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		tool := noArgTool("#!/bin/sh\npwd -P\n")
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{}`), dir)
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{}`), dir)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(result.Output)).To(Equal(dir))
 	})
@@ -1165,7 +1165,7 @@ var _ = Describe("Execute working directory", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		tool := noArgTool("#!/bin/sh\npwd -P\n")
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{}`), "")
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{}`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(result.Output)).To(Equal(wd))
 	})
@@ -1174,7 +1174,7 @@ var _ = Describe("Execute working directory", func() {
 		dir := GinkgoT().TempDir()
 
 		tool := noArgTool("#!/bin/sh\necho \"$PWD\"\n")
-		result, err := tool.Execute(context.Background(), json.RawMessage(`{}`), dir)
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{}`), dir)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(result.Output)).To(Equal(dir))
 	})
@@ -1184,7 +1184,7 @@ var _ = Describe("Execute working directory", func() {
 		dirB := GinkgoT().TempDir()
 		tool := noArgTool("#!/bin/sh\necho hi > marker.txt\n")
 
-		_, err := tool.Execute(context.Background(), json.RawMessage(`{}`), dirA)
+		_, err := tool.RunCommand(context.Background(), json.RawMessage(`{}`), dirA)
 		Expect(err).NotTo(HaveOccurred())
 
 		data, err := os.ReadFile(filepath.Join(dirA, "marker.txt"))
@@ -1194,7 +1194,7 @@ var _ = Describe("Execute working directory", func() {
 		Expect(filepath.Join(dirB, "marker.txt")).NotTo(BeAnExistingFile())
 
 		// The same tool run in the sibling directory writes only there.
-		_, err = tool.Execute(context.Background(), json.RawMessage(`{}`), dirB)
+		_, err = tool.RunCommand(context.Background(), json.RawMessage(`{}`), dirB)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(filepath.Join(dirB, "marker.txt")).To(BeAnExistingFile())
 	})
@@ -1210,7 +1210,7 @@ var _ = Describe("Execute working directory", func() {
 		defer cancel()
 
 		start := time.Now()
-		_, err := tool.Execute(ctx, json.RawMessage(`{}`), dir)
+		_, err := tool.RunCommand(ctx, json.RawMessage(`{}`), dir)
 		Expect(err).To(HaveOccurred())
 		// It returned on cancellation, not after the command's own 5s sleep.
 		Expect(time.Since(start)).To(BeNumerically("<", 3*time.Second))

@@ -62,14 +62,21 @@ func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteI
 			return "", errors.New(reply.Output)
 		}
 
-		result := toolkit.CommandResult{Output: reply.Output}
-		if reply.Exec != nil {
-			result.Command = reply.Exec.Command
-			result.ExitCode = reply.Exec.ExitCode
-			result.Truncated = reply.Exec.Truncated
+		// Only a reply carrying exec metadata came from a command, and only that one
+		// is rebuilt into the CommandResult a local command tool would have produced.
+		// A reply without it came from an in-process tool whose output is already the
+		// JSON its caller asked for: wrapping it would hand the model a command
+		// envelope with a fabricated exit code for a command that never ran.
+		if reply.Exec == nil {
+			return reply.Output, nil
 		}
 
-		return functool.Result(result)
+		return functool.Result(toolkit.CommandResult{
+			Output:    reply.Output,
+			Command:   reply.Exec.Command,
+			ExitCode:  reply.Exec.ExitCode,
+			Truncated: reply.Exec.Truncated,
+		})
 	}
 
 	return functool.New(functool.Spec{

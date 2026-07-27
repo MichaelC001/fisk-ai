@@ -550,9 +550,11 @@ func (t *FiskCommandTool) TraceLineShort(args json.RawMessage) string {
 	return util.SanitizeCommandLine(strings.Join(argv, " "))
 }
 
-// Execute runs the command for a tool call. The model's JSON arguments are
+// RunCommand runs the command for a tool call. The model's JSON arguments are
 // turned into the command line by the fisk model, the application binary is
-// executed, and its output is returned as a CommandResult.
+// executed, and its output is returned as a CommandResult. It is the concrete
+// subprocess path; callers dispatching over toolkit.Tool use Execute, which wraps
+// this and returns the surface-neutral outcome.
 //
 // A non-zero exit is reported in the result rather than as an error, so the model
 // can read the failure output and react; only an inability to run the binary, or
@@ -563,7 +565,7 @@ func (t *FiskCommandTool) TraceLineShort(args json.RawMessage) string {
 // sibling run's. It sets cmd.Dir only; it is not a sandbox, and the command can still
 // write anywhere the process uid can (an absolute path, $HOME, $TMPDIR). Empty inherits
 // the process working directory, today's behavior.
-func (t *FiskCommandTool) Execute(ctx context.Context, args json.RawMessage, workDir string) (*toolkit.CommandResult, error) {
+func (t *FiskCommandTool) RunCommand(ctx context.Context, args json.RawMessage, workDir string) (*toolkit.CommandResult, error) {
 	if t.AppPath == "" {
 		return nil, fmt.Errorf("command %q has no application path to execute", t.Command())
 	}

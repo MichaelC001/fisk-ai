@@ -51,12 +51,62 @@ const maxSelectOptions = 25
 // the kind at this one chokepoint keeps each factory from having to remember it.
 func mustNew(spec functool.Spec) *functool.Tool {
 	spec.Kind = toolkit.KindBuiltin
+
+	// Exposure is the one thing a built-in cannot leave to the zero value. A nil
+	// Expose would silently mean "served nowhere", which is the right default for a
+	// caller's own tool but the wrong way for a harness built-in to arrive at it: the
+	// author must have decided. Use &functool.ExposeSpec{} to say "agent runs only".
+	if spec.Expose == nil {
+		panic(fmt.Sprintf("built-in tool %q does not state where it may be served; set Expose (use &functool.ExposeSpec{} for agent runs only)", spec.Name))
+	}
+
 	t, err := functool.New(spec)
 	if err != nil {
 		panic(fmt.Sprintf("invalid built-in tool %q: %v", spec.Name, err))
 	}
 
 	return t
+}
+
+// enabledBuiltins enumerates every built-in cfg turns on, with no store bound. It
+// answers naming and exposure questions only; a handler reached through it would
+// error rather than run, which is the same contract info uses to list tools.
+func enabledBuiltins(cfg *config.Config) []*functool.Tool {
+	var out []*functool.Tool
+
+	out = append(out, HITLTools(cfg)...)
+	out = append(out, MemoryTools(cfg, nil)...)
+	out = append(out, RAGTools(cfg, nil)...)
+
+	return out
+}
+
+// WithheldFromMCP names the built-ins cfg enables that the MCP server will not
+// carry. It is derived from each tool's own exposure declaration rather than
+// written out, so an operator note cannot drift from what is actually served the
+// way a hand-maintained list does.
+func WithheldFromMCP(cfg *config.Config) []string {
+	var out []string
+	for _, t := range enabledBuiltins(cfg) {
+		if !t.MCPExposable() {
+			out = append(out, t.Name())
+		}
+	}
+
+	return out
+}
+
+// WithheldFromA2A names the built-ins cfg enables that the a2a server will not
+// carry, on the same terms as WithheldFromMCP.
+func WithheldFromA2A(cfg *config.Config) []string {
+	var out []string
+	for _, t := range enabledBuiltins(cfg) {
+		if !t.A2AExposable() {
+			out = append(out, t.Name())
+		}
+	}
+
+	return out
 }
 
 // withPrompter adapts a built-in handler, which takes the operator prompter
@@ -109,7 +159,8 @@ func HITLSystemNote(builtins []*functool.Tool) string {
 // askHumanConfirmTool builds the ask_human_confirm confirmation tool.
 func askHumanConfirmTool() *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: askHumanConfirmName,
+		Name:   askHumanConfirmName,
+		Expose: &functool.ExposeSpec{},
 		Description: "Ask the human operator a yes/no question at the terminal and wait for their answer. " +
 			"Use this only for a decision you should not make alone: confirming an irreversible or destructive action before you take it (deleting data, overwriting, restarting a service), or resolving a genuine ambiguity that turns on the operator's intent. " +
 			"Do not use it for anything you can determine yourself, to narrate progress, or to ask permission for ordinary read-only steps. " +
@@ -176,7 +227,8 @@ func askHumanConfirm(ctx context.Context, input json.RawMessage, prompter toolki
 // askHumanSelectTool builds the ask_human_select chooser tool.
 func askHumanSelectTool() *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: askHumanSelectName,
+		Name:   askHumanSelectName,
+		Expose: &functool.ExposeSpec{},
 		Description: "Ask the human operator to choose one option from a list you provide, at the terminal, and wait for their choice. " +
 			"Use this when the decision depends on the operator's intent or knowledge and you have a concrete, bounded set of options to pick among (which environment, which of several matching resources, which approach). " +
 			"Do not use it for a yes/no question (use ask_human_confirm) or for anything you can determine yourself. " +
@@ -254,7 +306,8 @@ func askHumanSelect(ctx context.Context, input json.RawMessage, prompter toolkit
 // askHumanInputTool builds the ask_human_input free-text tool.
 func askHumanInputTool() *functool.Tool {
 	return mustNew(functool.Spec{
-		Name: askHumanInputName,
+		Name:   askHumanInputName,
+		Expose: &functool.ExposeSpec{},
 		Description: "Ask the human operator to type a free-text value at the terminal and wait for their answer. " +
 			"Use this for a value you genuinely cannot determine yourself and that depends on the operator (a name, a path, an identifier, a short reason). " +
 			"You may provide a default the operator can accept or edit, which is the preferred way to let them correct a value you drafted. " +

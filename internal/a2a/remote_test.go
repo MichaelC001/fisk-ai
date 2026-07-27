@@ -95,7 +95,7 @@ var _ = Describe("RemoteTool", func() {
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := rt.ExecuteUse(context.Background(), use, toolkit.ExecDeps{})
+			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeFalse())
 
 			var result toolkit.CommandResult
@@ -116,7 +116,7 @@ var _ = Describe("RemoteTool", func() {
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := rt.ExecuteUse(context.Background(), use, toolkit.ExecDeps{})
+			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeFalse())
 
 			var result toolkit.CommandResult
@@ -124,11 +124,28 @@ var _ = Describe("RemoteTool", func() {
 			Expect(result.ExitCode).To(Equal(3))
 		})
 
+		// A reply with no exec metadata came from an in-process tool on the serving
+		// agent, whose output is already the JSON the model asked for. Rebuilding a
+		// CommandResult around it would hand the model a command envelope carrying a
+		// fabricated exit_code 0 for a command that never ran, with the tool's own
+		// JSON string-escaped inside it.
+		It("Should pass an exec-less reply through verbatim rather than wrapping it", func() {
+			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{
+				Output: `{"status":"ok","results":[]}`,
+			}}}
+			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
+
+			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
+			Expect(block.IsError).To(BeFalse())
+			Expect(block.Content).To(Equal(`{"status":"ok","results":[]}`))
+			Expect(block.Content).ToNot(ContainSubstring("exit_code"))
+		})
+
 		It("Should map a remote harness failure to an error result", func() {
 			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{IsError: true, Output: "tool not available"}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := rt.ExecuteUse(context.Background(), use, toolkit.ExecDeps{})
+			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeTrue())
 			Expect(block.Content).To(Equal("tool not available"))
 		})
@@ -137,7 +154,7 @@ var _ = Describe("RemoteTool", func() {
 			inv := &fakeInvoker{err: errors.New("no responders")}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := rt.ExecuteUse(context.Background(), use, toolkit.ExecDeps{})
+			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeTrue())
 			Expect(block.Content).To(ContainSubstring("no responders"))
 		})

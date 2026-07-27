@@ -44,9 +44,12 @@ func (s staticTool) Name() string                { return s.name }
 func (s staticTool) Description() string         { return "a static tool" }
 func (s staticTool) InputSchema() map[string]any { return map[string]any{"type": "object"} }
 func (s staticTool) Definition(bool) llm.ToolDef { return llm.ToolDef{Name: s.defName} }
-func (s staticTool) ExecuteUse(context.Context, llm.ToolUseBlock, toolkit.ExecDeps) llm.ToolResultBlock {
-	return llm.ToolResultBlock{}
+func (s staticTool) Execute(context.Context, json.RawMessage, toolkit.ExecDeps) (*toolkit.Outcome, error) {
+	return &toolkit.Outcome{}, nil
 }
+func (s staticTool) ModelDescription() string { return s.Description() }
+func (staticTool) MCPExposable() bool         { return false }
+func (staticTool) A2AExposable() bool         { return false }
 
 // emptyFiskApp is a fisk application with no commands, so LoadTools yields no
 // application tools and a run's only tools are the ones the test injects.

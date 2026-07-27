@@ -62,7 +62,15 @@ func introspect(app *fisk.Application) *fisk.ApplicationModel {
 }
 
 // toolsFor introspects app and returns its tools.
-func toolsFor(app *fisk.Application) []*fisk2.FiskCommandTool {
+func toolsFor(app *fisk.Application) []tools2.Tool {
+	GinkgoHelper()
+
+	return tools2.Tools(cmdToolsFor(app))
+}
+
+// cmdToolsFor builds the concrete command tools, for specs that set AppPath before
+// serving them.
+func cmdToolsFor(app *fisk.Application) []*fisk2.FiskCommandTool {
 	GinkgoHelper()
 
 	tools, err := fisk2.ApplicationTools(introspect(app))
@@ -130,17 +138,17 @@ func connectElicit(ctx context.Context, srv *mcp.Server, handler func(context.Co
 
 // taggedExecutable builds one command carrying tag, backed by an executable that
 // prints marker, ready to serve.
-func taggedExecutable(name, tag, marker string) []*fisk2.FiskCommandTool {
+func taggedExecutable(name, tag, marker string) []tools2.Tool {
 	GinkgoHelper()
 
 	app := fisk.New("app", "an app")
 	app.Command(name, "a command").Tag(tag)
 
-	tools := toolsFor(app)
+	tools := cmdToolsFor(app)
 	Expect(tools).To(HaveLen(1))
 	tools[0].AppPath = writeExecutable("#!/bin/sh\necho " + marker + "\n")
 
-	return tools
+	return tools2.Tools(tools)
 }
 
 // safeBuffer is an io.Writer safe for the concurrent writes a running server makes
@@ -267,11 +275,13 @@ var _ = Describe("BuildServer", func() {
 		app.Command("keep", "kept tool")
 		app.Command("secret", "denied tool").Tag("ai:deny")
 
+		cmdTools := cmdToolsFor(app)
+
 		// The deny strip is the same first FilterTools pass the agent uses.
-		filtered, err := fisk2.FilterTools(toolsFor(app), nil, fisk2.IncludeFilter)
+		filtered, err := fisk2.FilterTools(cmdTools, nil, fisk2.IncludeFilter)
 		Expect(err).NotTo(HaveOccurred())
 
-		srv, registered := BuildServer(filtered, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+		srv, registered := BuildServer(tools2.Tools(filtered), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("keep"))
 
 		cs := connect(ctx, srv)
@@ -297,7 +307,7 @@ var _ = Describe("BuildServer", func() {
 		valid := &fisk2.FiskCommandTool{Path: []string{"ok"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{"type": "object"}}}
 		invalid := &fisk2.FiskCommandTool{Path: []string{"bad.name"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{"type": "object"}}}
 
-		_, registered := BuildServer([]*fisk2.FiskCommandTool{valid, invalid}, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+		_, registered := BuildServer([]tools2.Tool{valid, invalid}, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("ok"))
 	})
 })
@@ -311,7 +321,7 @@ var _ = Describe("tool calls", func() {
 
 	// appWithExecutables builds an app whose named commands are each bound to a
 	// stand-in executable body, returning tools ready to call.
-	appWithExecutables := func(bodies map[string]string) []*fisk2.FiskCommandTool {
+	appWithExecutables := func(bodies map[string]string) []tools2.Tool {
 		GinkgoHelper()
 
 		app := fisk.New("app", "an app")
@@ -319,7 +329,8 @@ var _ = Describe("tool calls", func() {
 			app.Command(name, "a command")
 		}
 
-		tools := toolsFor(app)
+		tools := cmdToolsFor(app)
+
 		byName := map[string]*fisk2.FiskCommandTool{}
 		for _, t := range tools {
 			byName[t.Name()] = t
@@ -329,7 +340,7 @@ var _ = Describe("tool calls", func() {
 			byName[name].AppPath = writeExecutable(body)
 		}
 
-		return tools
+		return tools2.Tools(tools)
 	}
 
 	It("Should return command output as a successful result", func() {
@@ -366,10 +377,10 @@ var _ = Describe("tool calls", func() {
 	It("Should report an execution failure as an error result", func() {
 		app := fisk.New("app", "an app")
 		app.Command("broken", "a command")
-		tools := toolsFor(app)
+		tools := cmdToolsFor(app)
 		tools[0].AppPath = "/nonexistent/binary"
 
-		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+		srv, _ := BuildServer(tools2.Tools(tools), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 
 		cs := connect(ctx, srv)
 		defer cs.Close()
@@ -442,10 +453,10 @@ var _ = Describe("Serve", func() {
 		// shutdownTimeout. This guards that the shutdown returns well within it.
 		app := fisk.New("app", "an app")
 		app.Command("ping", "a command")
-		tools := toolsFor(app)
+		tools := cmdToolsFor(app)
 		tools[0].AppPath = writeExecutable("#!/bin/sh\necho pong\n")
 
-		srv, registered := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+		srv, registered := BuildServer(tools2.Tools(tools), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("ping"))
 
 		ln, err := net.Listen("tcp", "127.0.0.1:0")

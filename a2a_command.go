@@ -7,12 +7,15 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	_ "github.com/choria-io/fisk-ai/internal/a2a/nats"
 	"github.com/choria-io/fisk-ai/internal/conns"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/util"
 	"github.com/choria-io/ui/columns"
@@ -44,6 +47,13 @@ func a2aAction(_ *fisk.ParseContext) error {
 		return fmt.Errorf("fisk-ai a2a requires expose.agent.agent_to_agent: true in %q; this agent is not configured to serve its tools to other agents", configFile)
 	}
 
+	// The a2a server can carry any tool kind, so an operator whose config enables
+	// built-ins would otherwise see a served set that silently excludes them with no
+	// explanation. No built-in declares a2a exposure today, so this names all of them.
+	if withheld := builtin.WithheldFromA2A(cfg); len(withheld) > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d built-in tool(s) this config enables are not served over a2a: %s. a2a serves the wrapped application's commands; no built-in declares a2a exposure yet\n", len(withheld), strings.Join(withheld, ", "))
+	}
+
 	tools, err := fisktool.ServedTools(ctx, cfg)
 	if err != nil {
 		return err
@@ -63,7 +73,7 @@ func a2aAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	srv, err := a2a.NewServer(transport, tools, a2a.ServerOptions{
+	srv, err := a2a.NewServer(transport, toolkit.Tools(tools), a2a.ServerOptions{
 		Identity:    cfg.Identity,
 		Version:     util.Version(),
 		ConfirmTags: cfg.ConfirmTags(),

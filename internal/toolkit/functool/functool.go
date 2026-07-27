@@ -55,9 +55,25 @@ type RemoteSpec struct {
 	Agent string
 }
 
+// ExposeSpec declares the serving surfaces a function tool may ever be carried on.
+// It is the capability ceiling, not the selection: an operator's allowlist narrows
+// it further and can never widen past it, so a tool reaches a client only when the
+// code that wrote it and the operator running it agree.
+//
+// The zero value exposes nothing, and so does a nil ExposeSpec on a Spec. Every
+// field is therefore an opt-in a person had to type, which is what keeps a tool
+// added to an existing set from being served on its neighbour's selection.
+type ExposeSpec struct {
+	// MCP allows the MCP server to carry the tool.
+	MCP bool
+	// A2A allows the a2a server to carry the tool.
+	A2A bool
+}
+
 // Spec describes a function tool: its model-facing identity and handler, and the
 // optional hooks that give it operator confirmation, argument validation, a call
-// trace, deferral control, or remote presentation. New validates it into a *Tool.
+// trace, deferral control, remote presentation, or exposure on a serving surface.
+// New validates it into a *Tool.
 type Spec struct {
 	// Name is the model-facing tool name, unique within a run; it is the key the
 	// runner dispatches on. Required.
@@ -88,6 +104,10 @@ type Spec struct {
 	NoDefer bool
 	// Remote, when set, marks the tool as served by another agent.
 	Remote *RemoteSpec
+	// Expose declares the serving surfaces that may carry the tool. Nil exposes it
+	// nowhere, so a tool is reachable only from an agent run until someone says
+	// otherwise. Built-ins must state it explicitly; see builtin.mustNew.
+	Expose *ExposeSpec
 	// Kind is the provider the tool is accounted under. It is left unset by a caller's
 	// own tool, which is accounted as toolkit.KindCustom; a remote tool is always
 	// accounted remote regardless of this field; the harness sets toolkit.KindBuiltin
@@ -120,6 +140,7 @@ type Tool struct {
 	trace            func(input json.RawMessage) string
 	noDefer          bool
 	remote           *RemoteSpec
+	expose           ExposeSpec
 	kind             toolkit.Kind
 }
 
@@ -159,6 +180,23 @@ func New(spec Spec) (*Tool, error) {
 		return nil, fmt.Errorf("tool %q is remote and cannot be confirm-gated; a remote tool is gated by its serving agent", spec.Name)
 	}
 
+	expose := ExposeSpec{}
+	if spec.Expose != nil {
+		expose = *spec.Expose
+	}
+
+	// Re-serving another agent's tool under this agent's identity is a proxying
+	// decision, and confirming a call needs an operator that a served surface does
+	// not have. Both are refused here rather than left to each surface to remember.
+	if expose.MCP || expose.A2A {
+		switch {
+		case spec.Remote != nil:
+			return nil, fmt.Errorf("tool %q is remote and cannot be exposed on a serving surface; serving it would re-advertise another agent's tool as this agent's own", spec.Name)
+		case spec.Confirm != nil:
+			return nil, fmt.Errorf("tool %q is confirm-gated and cannot be exposed on a serving surface; there is no operator to approve a served call", spec.Name)
+		}
+	}
+
 	return &Tool{
 		name:             spec.Name,
 		description:      spec.Description,
@@ -169,6 +207,7 @@ func New(spec Spec) (*Tool, error) {
 		trace:            spec.Trace,
 		noDefer:          spec.NoDefer,
 		remote:           spec.Remote,
+		expose:           expose,
 		kind:             spec.Kind,
 	}, nil
 }
@@ -178,6 +217,19 @@ func (t *Tool) Name() string { return t.name }
 
 // Description is the model-facing description.
 func (t *Tool) Description() string { return t.description }
+
+// ModelDescription is what a model or a peer agent is told the tool does. A
+// function tool carries no tags, so it is its description; the method exists so
+// every kind answers the question the same way.
+func (t *Tool) ModelDescription() string { return t.description }
+
+// MCPExposable reports whether the tool may be served over MCP, as declared on its
+// Spec. It is the ceiling an operator's allowlist narrows, never widens.
+func (t *Tool) MCPExposable() bool { return t.expose.MCP }
+
+// A2AExposable reports whether the tool may be served over a2a, on the same terms
+// as MCPExposable.
+func (t *Tool) A2AExposable() bool { return t.expose.A2A }
 
 // InputSchema returns the tool's JSON-schema input, for a caller that consumes the
 // raw schema directly (the MCP server).
@@ -195,27 +247,23 @@ func (t *Tool) Definition(deferLoading bool) llm.ToolDef {
 	}
 }
 
-// ExecuteUse runs the handler for a model tool_use block and returns the matching
-// tool result: a handler error becomes an error result, its output a normal result,
-// so the model sees every tool kind the same way. It builds the handler's
-// CallContext from the per-run ExecDeps.
-func (t *Tool) ExecuteUse(ctx context.Context, use llm.ToolUseBlock, deps toolkit.ExecDeps) llm.ToolResultBlock {
-	out, err := t.handler(ctx, use.Input, &CallContext{workDir: deps.WorkDir, prompter: deps.Prompter})
+// Execute runs the handler in-process and returns its outcome. The handler's
+// result string is already the JSON its caller asked for, so the outcome carries no
+// exec metadata and every surface passes the output through verbatim rather than
+// wrapping it. A returned error is an invocation failure; an outcome the caller
+// should reason about is carried in the string.
+//
+// deps.Prompter is the operator path a handler uses for a question. A caller with
+// no operator passes toolkit.DefaultDenyPrompter so an unexpected prompt fails
+// closed; CallContext substitutes it when the field is nil, so forgetting it denies
+// rather than panics.
+func (t *Tool) Execute(ctx context.Context, input json.RawMessage, deps toolkit.ExecDeps) (*toolkit.Outcome, error) {
+	out, err := t.handler(ctx, input, &CallContext{workDir: deps.WorkDir, prompter: deps.Prompter})
 	if err != nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: err.Error(), IsError: true}
+		return nil, err
 	}
 
-	return llm.ToolResultBlock{ToolUseID: use.ID, Content: out}
-}
-
-// Call runs the tool in-process and returns its JSON result string. It is the direct
-// handler seam for a non-agent caller (the MCP server); the agent path uses
-// ExecuteUse. prompter is the operator path a handler uses for a question; a caller
-// with no operator passes toolkit.DefaultDenyPrompter so any unexpected prompt fails
-// closed. It supplies no working directory. A returned error is an invocation
-// failure; an outcome the caller should reason about is carried in the string.
-func (t *Tool) Call(ctx context.Context, input json.RawMessage, prompter toolkit.Prompter) (string, error) {
-	return t.handler(ctx, input, &CallContext{prompter: prompter})
+	return &toolkit.Outcome{Output: out}, nil
 }
 
 // TraceLine renders the one-line display of a call: the confirm summary for a

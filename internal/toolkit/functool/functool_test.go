@@ -151,7 +151,7 @@ var _ = Describe("ExecuteUse", func() {
 
 	It("Should return a normal result carrying the handler output", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler})
-		res := tool.ExecuteUse(context.Background(), use("{}"), toolkit.ExecDeps{})
+		res := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
 		Expect(res.ToolUseID).To(Equal("u1"))
 		Expect(res.Content).To(Equal("ok"))
 		Expect(res.IsError).To(BeFalse())
@@ -162,7 +162,7 @@ var _ = Describe("ExecuteUse", func() {
 			return "", errors.New("boom")
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res := tool.ExecuteUse(context.Background(), use("{}"), toolkit.ExecDeps{})
+		res := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
 		Expect(res.Content).To(Equal("boom"))
 		Expect(res.IsError).To(BeTrue())
 	})
@@ -172,7 +172,7 @@ var _ = Describe("ExecuteUse", func() {
 			return tc.WorkDir(), nil
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res := tool.ExecuteUse(context.Background(), use("{}"), toolkit.ExecDeps{WorkDir: "/run/42"})
+		res := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{WorkDir: "/run/42"})
 		Expect(res.Content).To(Equal("/run/42"))
 	})
 
@@ -185,7 +185,7 @@ var _ = Describe("ExecuteUse", func() {
 			return "no-operator", nil
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res := tool.ExecuteUse(context.Background(), use("{}"), toolkit.ExecDeps{})
+		res := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
 		Expect(res.Content).To(Equal("no-operator"))
 	})
 })
@@ -193,7 +193,7 @@ var _ = Describe("ExecuteUse", func() {
 var _ = Describe("Call", func() {
 	It("Should run the handler directly and return its string", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler})
-		out, err := tool.Call(context.Background(), json.RawMessage("{}"), toolkit.DefaultDenyPrompter())
+		out, err := callTool(tool, context.Background(), json.RawMessage("{}"), toolkit.DefaultDenyPrompter())
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out).To(Equal("ok"))
 	})
@@ -205,7 +205,7 @@ var _ = Describe("Call", func() {
 			return "", err
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		_, err := tool.Call(context.Background(), json.RawMessage("{}"), toolkit.DefaultDenyPrompter())
+		_, err := callTool(tool, context.Background(), json.RawMessage("{}"), toolkit.DefaultDenyPrompter())
 		Expect(err).To(HaveOccurred())
 	})
 })
@@ -379,12 +379,12 @@ var _ = Describe("Prompter fail-closed", func() {
 	}
 
 	It("Should deny, not panic, when dispatched with the default-deny prompter", func() {
-		_, err := promptingTool().Call(context.Background(), json.RawMessage(`{}`), toolkit.DefaultDenyPrompter())
+		_, err := callTool(promptingTool(), context.Background(), json.RawMessage(`{}`), toolkit.DefaultDenyPrompter())
 		Expect(err).To(MatchError(ContainSubstring("no operator is available")))
 	})
 
 	It("Should default a nil prompter to deny rather than dereferencing it", func() {
-		_, err := promptingTool().Call(context.Background(), json.RawMessage(`{}`), nil)
+		_, err := callTool(promptingTool(), context.Background(), json.RawMessage(`{}`), nil)
 		Expect(err).To(MatchError(ContainSubstring("no operator is available")))
 	})
 })

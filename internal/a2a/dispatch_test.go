@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -102,7 +103,7 @@ var _ = Describe("handleTool dispatch", func() {
 
 // servingApp builds a single-command tool whose command runs a stand-in script,
 // so a served tool call actually executes.
-func servingApp(name, body string) []*fisk2.FiskCommandTool {
+func servingApp(name, body string) []toolkit.Tool {
 	GinkgoHelper()
 
 	app := fisk.New("app", "an app")
@@ -117,7 +118,7 @@ func servingApp(name, body string) []*fisk2.FiskCommandTool {
 		t.AppPath = path
 	}
 
-	return tools
+	return toolkit.Tools(tools)
 }
 
 var _ = Describe("Integration: a2a intake back-pressure", func() {

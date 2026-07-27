@@ -734,7 +734,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 		r.stats.RemoteToolCalls++
 	}
 
-	result := effTool.ExecuteUse(ctx, effUse, deps)
+	result := toolkit.ExecuteUse(effTool, ctx, effUse, deps)
 
 	// PostToolUse observes the result before it is traced and journaled and may replace
 	// what the model sees. Info.Output is the tool's own output; a Replace substitutes

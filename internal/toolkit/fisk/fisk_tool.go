@@ -7,7 +7,6 @@ package fisk
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"slices"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -51,23 +50,34 @@ func (t *FiskCommandTool) Definition(deferLoading bool) llm.ToolDef {
 	}
 }
 
-// ExecuteUse runs the command behind the tool for a model tool_use block and
-// returns the matching tool result. A command that could not be run (a missing
-// binary, a canceled context, unusable arguments) becomes an error result; a
-// command that ran, including one that exited non-zero, becomes a normal result
-// whose JSON body carries the exit code and output for the model. It uses only the
-// WorkDir from ExecDeps (a command tool never prompts), running the command in the
-// caller's per-run directory so concurrent runs do not collide.
-func (t *FiskCommandTool) ExecuteUse(ctx context.Context, use llm.ToolUseBlock, deps toolkit.ExecDeps) llm.ToolResultBlock {
-	result, err := t.Execute(ctx, use.Input, deps.WorkDir)
+// Execute runs the command behind the tool and returns its outcome. A command that
+// could not be run (a missing binary, a canceled context, unusable arguments) is an
+// error; a command that ran, including one that exited non-zero, is a normal
+// outcome carrying the exit code and output. It uses only the WorkDir from ExecDeps
+// (a command tool never prompts), running the command in the caller's per-run
+// directory so concurrent runs do not collide.
+func (t *FiskCommandTool) Execute(ctx context.Context, input json.RawMessage, deps toolkit.ExecDeps) (*toolkit.Outcome, error) {
+	result, err := t.RunCommand(ctx, input, deps.WorkDir)
 	if err != nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: err.Error(), IsError: true}
+		return nil, err
 	}
 
-	data, err := json.Marshal(result)
-	if err != nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("marshaling tool result: %v", err), IsError: true}
-	}
-
-	return llm.ToolResultBlock{ToolUseID: use.ID, Content: string(data)}
+	return &toolkit.Outcome{
+		Output: result.Output,
+		Exec: &toolkit.CommandExec{
+			Command:   result.Command,
+			ExitCode:  result.ExitCode,
+			Truncated: result.Truncated,
+		},
+	}, nil
 }
+
+// MCPExposable reports that a wrapped application's command may be served over
+// MCP: serving them is what the surface exists for. Which commands an operator
+// actually serves is narrowed by the exposure selection and the ai:deny tag, not
+// here.
+func (t *FiskCommandTool) MCPExposable() bool { return true }
+
+// A2AExposable reports that a wrapped application's command may be served over
+// a2a, on the same terms as MCPExposable.
+func (t *FiskCommandTool) A2AExposable() bool { return true }

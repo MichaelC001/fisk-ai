@@ -32,9 +32,12 @@ func (describelessTool) Name() string                { return "mystery" }
 func (describelessTool) Description() string         { return "a tool of unforeseen kind" }
 func (describelessTool) InputSchema() map[string]any { return map[string]any{"type": "object"} }
 func (describelessTool) Definition(bool) llm.ToolDef { return llm.ToolDef{Name: "mystery"} }
-func (describelessTool) ExecuteUse(context.Context, llm.ToolUseBlock, toolkit.ExecDeps) llm.ToolResultBlock {
-	return llm.ToolResultBlock{}
+func (describelessTool) Execute(context.Context, json.RawMessage, toolkit.ExecDeps) (*toolkit.Outcome, error) {
+	return &toolkit.Outcome{Output: "ok"}, nil
 }
+func (d describelessTool) ModelDescription() string { return d.Description() }
+func (describelessTool) MCPExposable() bool         { return false }
+func (describelessTool) A2AExposable() bool         { return false }
 
 // findBuiltin returns the built-in tool with the given name, failing the spec when
 // it is absent so a rename in the tool set is caught rather than silently skipped.
