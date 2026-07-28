@@ -30,6 +30,27 @@ const (
 
 	// minFTSTermRunes drops one-character terms, which add noise, not recall.
 	minFTSTermRunes = 2
+
+	// MinTermRunes is minFTSTermRunes for callers that have to explain the drop to a
+	// reader. A term below it is never queried, and under a completeness contract
+	// that has to be said out loud rather than left as a silent discard.
+	MinTermRunes = minFTSTermRunes
+
+	// bm25Weights are the per-column BM25 weights for chunks_fts, in column order:
+	// body then heading_path. The heading is weighted 2.0 because a section title is
+	// often the most search-relevant phrase in a chunk, and because it restores the
+	// ranking the index had while the breadcrumb was stored folded into the body and
+	// so counted twice. Measured against the ranking recorded before that change.
+	bm25Weights = "1.0, 2.0"
+
+	// ftsSearchQuery ranks chunks by BM25 for a prepared MATCH expression. The
+	// weights are concatenated at compile time rather than formatted in at runtime,
+	// so the statement is a constant and no value can reach the query text; the match
+	// expression and the limit are bound. Both bm25() calls must carry the same
+	// weights or the ORDER BY and the returned score disagree, which is why the
+	// weights are named once.
+	ftsSearchQuery = `SELECT rowid, bm25(chunks_fts, ` + bm25Weights + `) FROM chunks_fts ` +
+		`WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts, ` + bm25Weights + `) LIMIT ?`
 )
 
 // SearchStatus classifies a search outcome the caller reports to the model or the
@@ -182,10 +203,13 @@ func (s *Store) embedQueryVector(ctx context.Context, query string) ([]float32, 
 }
 
 // ftsSearch returns chunk ids ranked by BM25 for the prepared MATCH expression.
+//
+// The column weights are the deliberate replacement for an implicit one. While the
+// breadcrumb was folded into the indexed body, heading tokens were counted twice
+// and headings were weighted without anyone choosing to; storing the two apart
+// removed that, and bm25Weights puts it back where it can be seen and changed.
 func (s *Store) ftsSearch(ctx context.Context, match string, limit int) ([]result, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT rowid, bm25(chunks_fts) FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?`,
-		match, limit)
+	rows, err := s.db.QueryContext(ctx, ftsSearchQuery, match, limit)
 	if err != nil {
 		return nil, fmt.Errorf("lexical search: %w", err)
 	}
@@ -242,7 +266,7 @@ func (s *Store) hydrate(ctx context.Context, ranked []result) ([]Hit, error) {
 	}
 
 	q := fmt.Sprintf(
-		`SELECT c.id, d.path, c.heading_path, c.ordinal, c.content
+		`SELECT c.id, d.path, c.heading_path, c.ordinal, c.body
 		 FROM chunks c JOIN documents d ON d.id = c.document_id
 		 WHERE c.id IN (%s)`, strings.Join(placeholders, ","))
 	rows, err := s.db.QueryContext(ctx, q, ids...)

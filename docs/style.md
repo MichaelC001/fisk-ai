@@ -1,13 +1,11 @@
 +++
 title = "Docs Style Guide"
-description = "Define writing conventions for CCM documentation"
+description = "Define writing conventions for documentation"
 toc = true
 weight = 110
 +++
 
-This guide describes the writing conventions used throughout the CCM documentation. Follow these rules when adding or editing pages.
-
-All sections apply to every documentation page. The Page structure section applies only to resource reference pages under `resources/`.
+This guide describes the writing conventions used throughout the documentation. Follow these rules when adding or editing pages.
 
 ## Voice and tone
 
@@ -129,7 +127,7 @@ Use **Warning** for constraints the reader must follow to avoid errors. Use **No
 
 ## Version badges
 
-Mark features with the CCM release that introduced them using a Hugo `badge` shortcode. Place the badge immediately after the section heading or, for new properties, at the end of the description cell:
+Mark features with the release that introduced them using a Hugo `badge` shortcode. Place the badge immediately after the section heading or, for new properties, at the end of the description cell:
 
 ```markdown
 ## Manage attributes only {{% badge style="primary" title="Version" %}}0.0.29{{% /badge %}}
@@ -151,7 +149,6 @@ Add a version badge only when a feature is introduced. Do not retroactively badg
 
 - Use "resource," "provider," "property," "manifest" consistently.
 - Refer to ensure states and property names in backticks: `present`, `name`, `ensure`.
-- Reference other resources using the `type#name` notation in backticks: `package#httpd`.
 - When cross-referencing other documentation pages, use relative Hugo links.
 
 ## General formatting

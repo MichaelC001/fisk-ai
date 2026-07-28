@@ -304,11 +304,27 @@ const (
 )
 
 // KnowledgeSearchToolName is the name of the read-only knowledge_search built-in
-// tool. It is the only built-in that may be served over MCP. It is defined here,
-// the lowest layer, so config can validate the expose.agent.mcp.builtins allowlist
-// without importing the util package that implements the tool; util references this
-// same constant so the two never drift.
+// tool. It is defined here, the lowest layer, so config can validate the
+// expose.agent.mcp.builtins allowlist without importing the util package that
+// implements the tool; util references this same constant so the two never drift.
 const KnowledgeSearchToolName = "knowledge_search"
+
+// KnowledgeEnumerateToolName is the name of the read-only knowledge_enumerate
+// built-in tool, on the same terms as KnowledgeSearchToolName.
+const KnowledgeEnumerateToolName = "knowledge_enumerate"
+
+// mcpExposableBuiltins are the built-in tools an operator may name in
+// expose.agent.mcp.builtins. Both are read-only knowledge tools that need no
+// operator at a terminal, which is what the memory and ask_human_* built-ins
+// cannot say. Membership here is only the selection half: a tool must also declare
+// MCP exposure on its own spec, so this list can never widen what is servable.
+//
+// They are two halves of one capability and are meant to be served together.
+// knowledge_search ranks and so cannot tell absence from a low score, which is the
+// question knowledge_enumerate answers; a client given only the first has the
+// defect the second exists to fix. Each is nonetheless selectable on its own,
+// because selection stays per tool and an operator who wants one gets one.
+var mcpExposableBuiltins = []string{KnowledgeSearchToolName, KnowledgeEnumerateToolName}
 
 // HumanInTheLoopConfig configures the built-in human-in-the-loop tools, which let
 // the model ask the operator a question at the terminal during an agent run.
@@ -1015,11 +1031,19 @@ func (c *Config) MCPBuiltins() []string {
 	return c.Expose.Agent.MCP.Builtins
 }
 
-// MCPExposesKnowledgeSearch reports whether the read-only knowledge_search
-// built-in is allowlisted for MCP exposure. It is the gate mcp_command uses to
-// decide whether to open the knowledge store and serve the tool.
-func (c *Config) MCPExposesKnowledgeSearch() bool {
-	return slices.Contains(c.MCPBuiltins(), KnowledgeSearchToolName)
+// MCPExposesKnowledge reports whether any read-only knowledge built-in is
+// allowlisted for MCP exposure. It is the gate mcp_command uses to decide whether
+// to open the knowledge store, so it asks about the whole group rather than one
+// name: an operator who allowlisted only knowledge_enumerate still needs the store
+// opened, and gating on knowledge_search alone would serve them nothing.
+func (c *Config) MCPExposesKnowledge() bool {
+	for _, name := range mcpExposableBuiltins {
+		if slices.Contains(c.MCPBuiltins(), name) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // prepare fills in default budgets and parses all duration strings.
@@ -1144,15 +1168,15 @@ func (c *Config) normalizeMCPBuiltins(names []string) ([]string, error) {
 		if name == "" || seen[name] {
 			continue
 		}
-		if name != KnowledgeSearchToolName {
-			return nil, fmt.Errorf("expose.agent.mcp.builtins: %q is not an accepted built-in name; accepted: %s. The memory and ask_human_* built-ins are not offered over MCP because they need operator state or an operator at a terminal, and an MCP client is neither", name, KnowledgeSearchToolName)
+		if !slices.Contains(mcpExposableBuiltins, name) {
+			return nil, fmt.Errorf("expose.agent.mcp.builtins: %q is not an accepted built-in name; accepted: %s. The memory and ask_human_* built-ins are not offered over MCP because they need operator state or an operator at a terminal, and an MCP client is neither", name, strings.Join(mcpExposableBuiltins, ", "))
 		}
 		seen[name] = true
 		out = append(out, name)
 	}
 
 	if len(out) > 0 && !c.RAGEnabled() {
-		return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but knowledge is not enabled; add a harness.knowledge block with 'enabled: true' or remove %s from builtins", KnowledgeSearchToolName, KnowledgeSearchToolName)
+		return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but knowledge is not enabled; add a harness.knowledge block with 'enabled: true' or remove them from builtins", strings.Join(out, ", "))
 	}
 
 	return out, nil

@@ -285,7 +285,11 @@ func (s *Store) ingestFile(ctx context.Context, key string, mtime int64, hash, c
 	if s.emb != nil && len(chunks) > 0 {
 		docs := make([]Document, len(chunks))
 		for i, c := range chunks {
-			docs[i] = Document{Title: c.HeadingPath, Text: c.Content}
+			// The one place the breadcrumb is folded into the body. The lexical index
+			// keeps the two apart, but the vector is built from both, so the section
+			// title pulls the on-topic chunk to rank 1 rather than being invisible to
+			// the model. This exact string is what the index was built from.
+			docs[i] = Document{Title: c.HeadingPath, Text: foldHeading(c.HeadingPath, c.Body)}
 		}
 		raw, err := s.emb.EmbedDocuments(ctx, docs)
 		if err != nil {
@@ -325,8 +329,8 @@ func (s *Store) ingestFile(ctx context.Context, key string, mtime int64, hash, c
 	for i, c := range chunks {
 		var chunkID int64
 		err = tx.QueryRowContext(ctx,
-			`INSERT INTO chunks(document_id, heading_path, ordinal, content) VALUES(?,?,?,?) RETURNING id`,
-			docID, c.HeadingPath, i, c.Content).Scan(&chunkID)
+			`INSERT INTO chunks(document_id, heading_path, ordinal, body) VALUES(?,?,?,?) RETURNING id`,
+			docID, c.HeadingPath, i, c.Body).Scan(&chunkID)
 		if err != nil {
 			return fmt.Errorf("insert chunk: %w", err)
 		}
@@ -493,29 +497,27 @@ func (s *Store) pinLexicalMeta(ctx context.Context) error {
 
 // Reset wipes all indexed data from an open writer store, leaving a clean empty
 // index: the file and base schema remain, ready for the next knowledge index. It
-// drops the vector table (so a later model or dimension change is unconstrained),
-// clears the manifest, and runs the FTS 'rebuild' repair. It works even against an
-// index whose pinned embedding identity no longer matches the config.
+// works even against an index whose pinned embedding identity no longer matches the
+// config, and even against one whose full-text index no longer matches its content
+// table.
 func (s *Store) Reset(ctx context.Context) error {
 	return s.resetForReindex(ctx)
 }
 
-// resetForReindex drops the vector objects (so the dimension can change), clears
-// all data (the FK cascade plus triggers clear chunks and the FTS/vec rows),
-// clears the manifest, and runs the FTS 'rebuild' repair, leaving a clean empty
-// index for a full rebuild.
+// resetForReindex drops every schema object and recreates it, leaving a clean empty
+// index for a full rebuild. The vector table is among them, so a later model or
+// dimension change is unconstrained without that being a special case; so is the
+// manifest, which is why a reset store has nothing pinned.
+//
+// It drops rather than clearing rows, which is what lets it repair an index whose
+// full-text tables no longer match their content table: see dropSchema. Recreating
+// is ensureBaseSchema and nothing else, so the schema has one definition.
 func (s *Store) resetForReindex(ctx context.Context) error {
-	stmts := []string{
-		`DROP TRIGGER IF EXISTS chunks_ad_vec`,
-		`DROP TABLE IF EXISTS chunks_vec`,
-		`DELETE FROM documents`,
-		`DELETE FROM rag_meta`,
-		`INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`,
+	if err := s.dropSchema(ctx); err != nil {
+		return fmt.Errorf("resetting index for reindex: %w", err)
 	}
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("resetting index for reindex: %w", err)
-		}
+	if err := s.ensureBaseSchema(ctx); err != nil {
+		return fmt.Errorf("resetting index for reindex: %w", err)
 	}
 
 	return nil

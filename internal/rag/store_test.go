@@ -51,6 +51,12 @@ var _ = Describe("resolveDir", func() {
 	It("resolves relative to the working directory when no base is set", func() {
 		Expect(resolveDir(ragCfg(""), "")).To(Equal(filepath.Join("knowledge", "agent")))
 	})
+
+	// StorePath names the file without opening or creating anything, which is what
+	// lets a caller report an index it could not open.
+	It("names the index file under the resolved directory", func() {
+		Expect(StorePath(ragCfg("kb"), "/srv/base")).To(Equal(filepath.Join("/srv/base", "kb", dbFileName)))
+	})
 })
 
 // writeDoc writes a document under root, creating parent directories.

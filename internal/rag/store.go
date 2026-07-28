@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	// The pure-Go SQLite driver registers the "sqlite" driver name; the vec
@@ -36,10 +38,14 @@ import (
 )
 
 const (
-	// formatVersion is the schema/format generation pinned in rag_meta. The read
-	// path refuses an index whose format_version is newer than this, so an older
-	// binary never misreads a future layout.
-	formatVersion = 1
+	// formatVersion is the schema/format generation pinned in rag_meta. Both the
+	// read and the write path refuse an index at any other generation: a newer one
+	// so an older binary never misreads a future layout, an older one because
+	// nothing migrates it today and the layouts differ in ways that would otherwise
+	// surface as a query-time "no such column". Bump it for any change to the stored
+	// schema or to the text handed to the embedder, since neither is a function of
+	// anything else rag_meta pins.
+	formatVersion = 2
 
 	// dbFileName is the SQLite index file inside the store directory.
 	dbFileName = "knowledge.db"
@@ -94,6 +100,14 @@ var (
 	// ErrFormatTooNew reports an index written by a newer fisk-ai than this one.
 	ErrFormatTooNew = errors.New("knowledge index format is newer than this build supports")
 
+	// ErrFormatTooOld reports an index written by an older fisk-ai. It is the mirror
+	// of ErrFormatTooNew and the fix is the opposite one: nothing migrates such an
+	// index today, so it is discarded and rebuilt from the documents rather than
+	// upgraded. Every open refuses it, and 'knowledge reset --force' is the one
+	// command that can act on it, since an index nothing can open has no rows to
+	// clear.
+	ErrFormatTooOld = errors.New("knowledge index was built by an older fisk-ai and cannot be read by this build")
+
 	// ErrLocked reports that another knowledge index writer holds the advisory lock.
 	ErrLocked = errors.New("another knowledge index is already running")
 
@@ -139,12 +153,19 @@ func resolveDir(cfg *config.Config, storeDir string) string {
 	return dir
 }
 
+// StorePath returns the index file path for cfg without opening or creating
+// anything, so a caller can name the file in a message about an index it could not
+// open.
+func StorePath(cfg *config.Config, storeDir string) string {
+	return filepath.Join(resolveDir(cfg, storeDir), dbFileName)
+}
+
 // StoreExists reports whether an index file exists for cfg, without opening it or
 // validating its contents. The rm and reset CLI commands use it to avoid creating
 // an empty store when there is nothing to act on, and so they work even against an
 // index whose pinned embedding identity no longer matches the config.
 func StoreExists(cfg *config.Config, storeDir string) (bool, error) {
-	path := filepath.Join(resolveDir(cfg, storeDir), dbFileName)
+	path := StorePath(cfg, storeDir)
 	_, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -154,6 +175,44 @@ func StoreExists(cfg *config.Config, storeDir string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// Destroy removes the index file and its WAL sidecars, discarding an index rather
+// than clearing it. It exists for the one state no Reset can reach: an index from
+// another format generation, which every open refuses, so there is no handle to
+// delete rows through. It takes the same advisory write lock as OpenWriter, so it
+// cannot race a live indexer, and refuses a symlink at any of the three paths
+// rather than deleting through it. It returns the path it removed, and a store that
+// was already absent is not an error.
+func Destroy(cfg *config.Config, storeDir string) (string, error) {
+	dir := resolveDir(cfg, storeDir)
+
+	lock, err := acquireWriteLock(filepath.Join(dir, lockFileName))
+	if err != nil {
+		return "", err
+	}
+	defer lock.release()
+
+	dbPath := filepath.Join(dir, dbFileName)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		path := dbPath + suffix
+
+		fi, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("checking knowledge index %q: %w", path, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("knowledge index path %q is a symlink; refusing to follow it", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return "", fmt.Errorf("removing knowledge index %q: %w", path, err)
+		}
+	}
+
+	return dbPath, nil
 }
 
 // resolvedTopK and resolvedMaxInjectedTokens apply the defaults for a config that
@@ -223,6 +282,14 @@ func Open(cfg *config.Config, storeDir string) (*Store, error) {
 		return nil, err
 	}
 
+	// A reader cannot repair an index from another generation, so it names the fix
+	// and stops rather than querying columns that layout does not have. This runs
+	// before the identity check because a rebuild resolves both.
+	if err := s.refuseUnusableIndex(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	if err := s.validateReadMeta(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -237,7 +304,8 @@ func Open(cfg *config.Config, storeDir string) (*Store, error) {
 // WAL, ensures the base schema and triggers, and validates the config the same way
 // Open does. The vector table and its dimension are created later, during ingest,
 // once the live model's dimension is known (see index.go), so this never contacts
-// the embeddings server. Close releases the lock.
+// the embeddings server. Close releases the lock. An index from another format
+// generation is refused here, before the schema statements run.
 func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
 	emb, err := buildEmbedder(cfg)
 	if err != nil {
@@ -283,6 +351,12 @@ func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
 
 	ctx := context.Background()
 	if err := s.verifyFTS5(ctx); err != nil {
+		s.Close()
+		return nil, err
+	}
+	// Before ensureBaseSchema, which is the statement that would otherwise no-op
+	// against an older layout and leave the store half-migrated.
+	if err := s.refuseUnusableIndex(ctx); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -354,11 +428,247 @@ func (s *Store) verifyFTS5(ctx context.Context) error {
 	return nil
 }
 
+// chunksColumns is the column set ensureBaseSchema creates for the chunks table,
+// in declaration order. It has to be stated separately because CREATE TABLE IF NOT
+// EXISTS silently no-ops against a chunks table from an older layout: the stored
+// schema keeps its own columns and the first ingest dies with "table chunks has no
+// column named ...". Keep it in step with the CREATE TABLE below.
+var chunksColumns = []string{"id", "document_id", "heading_path", "ordinal", "body"}
+
+// baseSchemaObjects is every object ensureBaseSchema creates unconditionally. The
+// vector table and its trigger are absent deliberately: they exist only when the
+// vector tier is on, so their absence is a configuration, not a defect.
+//
+// The gate checks for all of these, not just the chunks columns, because a schema
+// can gain an object without any column changing. An index written before the
+// unstemmed table existed has the right columns and the right pinned format and
+// still cannot answer what this build asks of it, and reporting zero literal counts
+// as though they were measured is worse than refusing.
+var baseSchemaObjects = []string{
+	"documents",
+	"chunks",
+	"chunks_fts",
+	"chunks_fts_exact",
+	"chunks_vocab",
+	"rag_meta",
+	"chunks_ai",
+	"chunks_ad",
+	"chunks_au",
+}
+
+// indexCheck is what the format gate learned about the open database. At most one
+// of the two fields is set; both unset means the index is this build's own, or that
+// there is no schema yet.
+type indexCheck struct {
+	// tooNew reports a format newer than this build. It is refused everywhere the
+	// older one is, but the fix is the opposite: upgrade fisk-ai, since discarding
+	// it would throw away an index a newer binary can still read.
+	tooNew int
+	// tooOld describes why the index predates this build, or is empty when it does
+	// not, phrased to complete "cannot be read because ...".
+	tooOld string
+}
+
+// checkIndexFormat classifies the open database against this build's format and
+// schema. An empty database is never too old: it is what ensureBaseSchema is about
+// to create, and ensureFileMode creates the file before openDB, so file existence
+// is not evidence of an index.
+//
+// Two checks are needed rather than one. The format alone misses a store the
+// shipped reset cleared, because that reset emptied rag_meta but kept the table
+// shape, leaving no pinned format to compare, and an unpinned manifest is also what
+// a fresh schema has. The column shape settles those cases.
+func (s *Store) checkIndexFormat(ctx context.Context) (indexCheck, error) {
+	cols, err := s.tableColumns(ctx, "chunks")
+	if err != nil {
+		return indexCheck{}, err
+	}
+	if len(cols) == 0 {
+		return indexCheck{}, nil
+	}
+
+	// A chunks table implies a rag_meta table: ensureBaseSchema has always created
+	// both, so readMeta cannot fail for a missing table here.
+	m, err := s.readMeta(ctx)
+	if err != nil {
+		return indexCheck{}, err
+	}
+
+	switch {
+	case m.FormatVersion > formatVersion:
+		return indexCheck{tooNew: m.FormatVersion}, nil
+
+	case m.FormatVersion > 0 && m.FormatVersion < formatVersion:
+		return indexCheck{tooOld: fmt.Sprintf("its format_version is %d and this build writes %d", m.FormatVersion, formatVersion)}, nil
+
+	case !slices.Equal(cols, chunksColumns):
+		return indexCheck{tooOld: fmt.Sprintf("its chunks table has columns (%s) where this build needs (%s)",
+			strings.Join(cols, ", "), strings.Join(chunksColumns, ", "))}, nil
+	}
+
+	missing, err := s.missingSchemaObjects(ctx)
+	if err != nil {
+		return indexCheck{}, err
+	}
+	if len(missing) > 0 {
+		return indexCheck{tooOld: fmt.Sprintf("its schema is missing %s", strings.Join(missing, ", "))}, nil
+	}
+
+	return indexCheck{}, nil
+}
+
+// missingSchemaObjects returns the base schema objects absent from the open
+// database, in declaration order. CREATE ... IF NOT EXISTS adds what is missing, so
+// this is not about what the writer can repair; it is about a reader, and about a
+// writer whose repair would leave the existing rows unindexed by the new table.
+func (s *Store) missingSchemaObjects(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM sqlite_master`)
+	if err != nil {
+		return nil, fmt.Errorf("reading knowledge schema: %w", err)
+	}
+	defer rows.Close()
+
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("reading knowledge schema: %w", err)
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var missing []string
+	for _, name := range baseSchemaObjects {
+		if !present[name] {
+			missing = append(missing, name)
+		}
+	}
+
+	return missing, nil
+}
+
+// formatTooNewError renders the refusal for an index from a newer build, whose fix
+// is to run the binary that wrote it rather than to discard anything.
+func formatTooNewError(pinned int) error {
+	return fmt.Errorf("%w: index format_version=%d, this build supports up to %d; upgrade fisk-ai", ErrFormatTooNew, pinned, formatVersion)
+}
+
+// refuseUnusableIndex fails when the open database is from any format generation
+// but this one. Every path refuses, readers and writers alike: there is no
+// migration, so the index is discarded and rebuilt from the documents, and
+// discarding it stays a thing the operator does deliberately rather than something
+// an ordinary index run does on their behalf.
+func (s *Store) refuseUnusableIndex(ctx context.Context) error {
+	check, err := s.checkIndexFormat(ctx)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case check.tooNew > 0:
+		return formatTooNewError(check.tooNew)
+	case check.tooOld != "":
+		return fmt.Errorf("%w: the index at %q cannot be read because %s; discard it with 'fisk-ai knowledge reset --force' and rebuild it with 'fisk-ai knowledge index'", ErrFormatTooOld, s.dir, check.tooOld)
+	}
+
+	return nil
+}
+
+// schemaDropStatements removes every schema object, in the order it removes them.
+// The triggers go first: DROP TABLE fires no triggers of its own, but the foreign
+// key from chunks to documents does cascade, and a cascade into a live delete
+// trigger is the path that fails SQLITE_CORRUPT against a broken index. With no
+// triggers left, drop order stops mattering at all. chunks_vocab is dropped before
+// the table it reads.
+var schemaDropStatements = []string{
+	`DROP TRIGGER IF EXISTS chunks_ai`,
+	`DROP TRIGGER IF EXISTS chunks_ad`,
+	`DROP TRIGGER IF EXISTS chunks_au`,
+	`DROP TRIGGER IF EXISTS chunks_ad_vec`,
+	`DROP TABLE IF EXISTS chunks_vocab`,
+	`DROP TABLE IF EXISTS chunks_fts`,
+	`DROP TABLE IF EXISTS chunks_fts_exact`,
+	`DROP TABLE IF EXISTS chunks_vec`,
+	`DROP TABLE IF EXISTS chunks`,
+	`DROP TABLE IF EXISTS documents`,
+	`DROP TABLE IF EXISTS rag_meta`,
+}
+
+// dropSchema removes every schema object, leaving an empty database for
+// ensureBaseSchema to recreate.
+//
+// Dropping is what makes a reset a repair rather than another way to hit the same
+// wall. Against an index that no longer matches its content table, clearing rows
+// fails SQLITE_CORRUPT before any rebuild statement can run, because the cascade
+// fires the delete trigger into the broken index; DROP TABLE fires no row triggers,
+// so the corruption stops mattering instead of needing to be repaired. It also
+// leaves ensureBaseSchema as the single definition of the schema, so a table added
+// there needs no matching edit here beyond its own drop, where the alternative is a
+// per-table rebuild list that has to be kept in step forever.
+func (s *Store) dropSchema(ctx context.Context) error {
+	for _, stmt := range schemaDropStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("dropping knowledge schema: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// tableColumns returns the column names of table in declaration order, or an empty
+// slice when the table does not exist.
+func (s *Store) tableColumns(ctx context.Context, table string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("reading knowledge schema: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("reading knowledge schema: %w", err)
+		}
+		out = append(out, name)
+	}
+
+	return out, rows.Err()
+}
+
 // ensureBaseSchema creates the documents and chunks tables, the external-content
 // FTS5 index, the FTS sync triggers, and the rag_meta manifest. The triggers are
 // the sole path that keeps chunks_fts in step with chunks; application code never
 // writes chunks_fts directly. The vector table and its delete trigger are created
 // later, during ingest, once the dimension is known.
+//
+// chunks.body is the chunk body alone. The heading breadcrumb lives in
+// heading_path and nowhere else, so body: and heading: are answerable separately
+// and a phrase cannot match across the join between them. Only the embedder sees
+// the two folded together, at its one call site in index.go.
+//
+// There are two FTS tables over the same rows because FTS5 sets the tokenizer per
+// table rather than per column. chunks_fts stems, and is what every query runs
+// against, so a zero result means no document holds the word in any form. Its
+// prefix behavior is not monotonic, though, and its vocabulary is stems rather than
+// words, which is what chunks_fts_exact is for: it earns its size by naming the
+// real words behind a stem, by being the only table where a prefix search grows
+// monotonically, and by letting a stemmed count state how many documents contain
+// the word as it was typed. chunks_vocab exposes that table's terms with their
+// frequencies, and is writer-created because a read-only connection cannot create
+// a virtual table at all.
+//
+// Three rules govern the triggers, each of which corrupts silently when broken.
+// The hidden first column of a command insert is the target table's own name, so a
+// copy-paste that leaves the wrong name there writes into the wrong index. Every
+// indexed column must be supplied on a delete, with the old value, or terms are
+// left behind against a rowid that no longer exists and every later delete wedges
+// SQLITE_CORRUPT. And the FTS5 column names must equal the content-table column
+// names: a mismatch still answers MATCH and still passes a bare integrity check,
+// failing only at rebuild, which is why the body rename lands in both DDLs at once.
 func (s *Store) ensureBaseSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS documents (
@@ -373,28 +683,44 @@ func (s *Store) ensureBaseSchema(ctx context.Context) error {
 			document_id  INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
 			heading_path TEXT,
 			ordinal      INTEGER,
-			content      TEXT NOT NULL
+			body         TEXT NOT NULL
 		)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-			content,
+			body,
 			heading_path,
 			content='chunks',
 			content_rowid='id',
 			tokenize='porter unicode61'
 		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts_exact USING fts5(
+			body,
+			heading_path,
+			content='chunks',
+			content_rowid='id',
+			tokenize='unicode61'
+		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vocab USING fts5vocab('chunks_fts_exact', 'row')`,
 		`CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-			INSERT INTO chunks_fts(rowid, content, heading_path)
-			VALUES (new.id, new.content, new.heading_path);
+			INSERT INTO chunks_fts(rowid, body, heading_path)
+			VALUES (new.id, new.body, new.heading_path);
+			INSERT INTO chunks_fts_exact(rowid, body, heading_path)
+			VALUES (new.id, new.body, new.heading_path);
 		END`,
 		`CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content, heading_path)
-			VALUES ('delete', old.id, old.content, old.heading_path);
+			INSERT INTO chunks_fts(chunks_fts, rowid, body, heading_path)
+			VALUES ('delete', old.id, old.body, old.heading_path);
+			INSERT INTO chunks_fts_exact(chunks_fts_exact, rowid, body, heading_path)
+			VALUES ('delete', old.id, old.body, old.heading_path);
 		END`,
 		`CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content, heading_path)
-			VALUES ('delete', old.id, old.content, old.heading_path);
-			INSERT INTO chunks_fts(rowid, content, heading_path)
-			VALUES (new.id, new.content, new.heading_path);
+			INSERT INTO chunks_fts(chunks_fts, rowid, body, heading_path)
+			VALUES ('delete', old.id, old.body, old.heading_path);
+			INSERT INTO chunks_fts_exact(chunks_fts_exact, rowid, body, heading_path)
+			VALUES ('delete', old.id, old.body, old.heading_path);
+			INSERT INTO chunks_fts(rowid, body, heading_path)
+			VALUES (new.id, new.body, new.heading_path);
+			INSERT INTO chunks_fts_exact(rowid, body, heading_path)
+			VALUES (new.id, new.body, new.heading_path);
 		END`,
 		`CREATE TABLE IF NOT EXISTS rag_meta (key TEXT PRIMARY KEY, value TEXT)`,
 	}
@@ -519,21 +845,17 @@ func writeMeta(ctx context.Context, tx *sql.Tx, m Meta) error {
 }
 
 // validateReadMeta checks the pinned manifest against this store's configured
-// embedder before any query runs. It refuses a too-new format outright, and, when
-// the vector tier is configured, refuses an index whose pinned model, prefixes, or
-// normalization differ from the configuration (a stale index that would return
-// garbage rankings) or that was built lexical-only. Dimension is validated at
-// query time against the live model's probe so Open never contacts the server.
+// embedder before any query runs: when the vector tier is configured it refuses an
+// index whose pinned model, prefixes, or normalization differ from the
+// configuration (a stale index that would return garbage rankings) or that was
+// built lexical-only. Dimension is validated at query time against the live model's
+// probe so Open never contacts the server. The format generation itself is settled
+// before this runs, by refuseUnusableIndex, which is the single place both
+// directions are refused.
 func (s *Store) validateReadMeta(ctx context.Context) error {
 	m, err := s.readMeta(ctx)
 	if err != nil {
 		return err
-	}
-
-	// A base schema with no pinned format yet (empty index) is acceptable; a search
-	// reports index_empty. Only a present, newer format is refused.
-	if m.FormatVersion > formatVersion {
-		return fmt.Errorf("%w: index format_version=%d, this build supports up to %d; upgrade fisk-ai", ErrFormatTooNew, m.FormatVersion, formatVersion)
 	}
 
 	if s.emb == nil {

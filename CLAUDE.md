@@ -17,6 +17,7 @@
 
 ## Working protocol
 
+- **Collaborate not Autonomy** The prevailing model is that we collaborate on solving a problem, you do not autonomously work and edit whatever you like. This means you summarize steps, you seek permission and you explain what is landing. 
 - **Exploratory questions** ("how could we…", "what do you think about…"): propose an approach and wait for explicit confirmation before implementing. Do not start work on the assumption that exploration implies approval.
 - **Non-trivial plans** must be reviewed before presenting to the user:
   1. Draft the plan.
@@ -27,6 +28,7 @@
      questions or steer the plan as a final step. Just because he answered your questions does not mean you are 
      ready to move on. Ask for final user input.
 - **Suspected bugs in existing code**: do not write tests that lock in behavior you suspect is wrong. Stop, describe the concern, ask the user how to proceed.
+- **Change code only after approval**: While discussing or working on a plan, do not change code without explicit approval, questions like "What's next?" does not mean edit code, it means answer the question - what will we work on next.
 
 ## Code style
 

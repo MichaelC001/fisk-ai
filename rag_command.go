@@ -37,12 +37,15 @@ var (
 
 // registerRAGCommand registers the user-facing knowledge command and its
 // subcommands, which build and inspect the local knowledge index. The agent's
-// knowledge_search tool is not a CLI command; the CLI only builds and inspects the
+// knowledge tools are not CLI commands; the CLI only builds and inspects the
 // index. Every subcommand prints the canonical tier line so it is never ambiguous
 // which tier is active.
 func registerRAGCommand(cmd *fisk.Application) {
-	k := cmd.Command("knowledge", "Builds and inspects the local knowledge base for the knowledge_search tool").Alias("rag").Alias("k")
-	k.Flag("config", "Path to the agent configuration file").Default("agent.yaml").ExistingFileVar(&configFile)
+	k := cmd.Command("knowledge", "Builds and inspects the local knowledge base the agent searches").Alias("rag").Alias("k")
+	// Not ExistingFileVar: it validates the default too, so a bare "fisk knowledge"
+	// fails on a missing agent.yaml instead of printing the subcommand help. The file
+	// is read by whichever subcommand runs, which reports a missing one itself.
+	k.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
 	// The store base must match the one the agent runs with (agent.Options.StoreDir),
 	// or the CLI writes the index to a different directory than the agent reads it from.
 	// It is distinct from --state-dir, which locates session state, not the knowledge
@@ -64,6 +67,8 @@ func registerRAGCommand(cmd *fisk.Application) {
 	search.Flag("top-k", "Maximum number of results to return").IntVar(&knowledgeTopK)
 	search.Flag("full", "Print the full chunk content instead of a snippet").UnNegatableBoolVar(&knowledgeFull)
 
+	registerRAGMatchCommand(k)
+
 	show := k.Command("show", "Prints one chunk verbatim, resolving a citation").Action(knowledgeShowAction)
 	show.Arg("citation", "A citation token of the form <relpath>#<ordinal>").Required().StringVar(&knowledgeCitation)
 
@@ -74,8 +79,12 @@ func registerRAGCommand(cmd *fisk.Application) {
 	reset.Flag("force", "Perform the wipe; without it, reset only reports what would be deleted").UnNegatableBoolVar(&knowledgeForce)
 
 	k.Command("sources", "Lists indexed files with chunk counts and last-indexed time").Action(knowledgeSourcesAction)
+
 	k.Command("doctor", "Checks the index and, when configured, the embeddings server").Action(knowledgeDoctorAction)
+	k.Command("rebuild", "Rebuilds the search index from the stored text, without re-embedding").Action(knowledgeRebuildAction)
 	k.Command("stats", "Prints the tier banner and index counts and sizes").Action(knowledgeStatsAction)
+
+	registerKnowledgeWordsCommand(k)
 }
 
 // knowledgeConfig parses the config in the lenient MCP mode (the knowledge CLI
@@ -252,8 +261,12 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
+	// A user staring at a search that found nothing is precisely the user who needs
+	// the other question, and this line is the cheapest discovery surface there is.
 	if len(res.Hits) == 0 {
 		c.Print("no results")
+		c.Blank()
+		c.Print(matchSuggestion(knowledgeQuery))
 		return nil
 	}
 
@@ -373,6 +386,26 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 	}
 
 	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	// An index from another format generation cannot be opened, so its rows can be
+	// neither counted nor cleared, and discarding the file is the whole of the fix.
+	// Reset is the command that does that, so it answers for itself here rather than
+	// passing on an error that would tell the operator to run reset.
+	if errors.Is(err, rag.ErrFormatTooOld) {
+		if !knowledgeForce {
+			return fmt.Errorf("knowledge reset would discard the index at %s, which this build cannot read; re-run with --force to confirm",
+				rag.StorePath(cfg, knowledgeStoreDir))
+		}
+
+		path, destroyErr := rag.Destroy(cfg, knowledgeStoreDir)
+		if destroyErr != nil {
+			return destroyErr
+		}
+
+		fmt.Printf("reset: discarded %s, which was built by an older format and could not be read\n", path)
+		fmt.Println("run: fisk-ai knowledge index")
+
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -393,6 +426,54 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 	}
 
 	fmt.Printf("reset: removed %d documents and %d chunks from %s\n", st.Documents, st.Chunks, st.StorePath)
+
+	return nil
+}
+
+// knowledgeRebuildAction repairs a search index that has drifted from the stored
+// text, which is the state knowledge doctor --integrity reports.
+//
+// It is its own verb rather than a repair offered by the doctor because it is not
+// diagnosis: given a damaged chunks table it will build a consistent index over the
+// damage, after which the integrity check passes and reports nothing. That makes it
+// something an operator chooses, having read what it does.
+func knowledgeRebuildAction(_ *fisk.ParseContext) error {
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	cfg, err := knowledgeConfig()
+	if err != nil {
+		return err
+	}
+
+	store, err := rag.Open(cfg, knowledgeStoreDir)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	c := columns.New()
+	defer c.WriteTo(os.Stdout)
+
+	// Said before the work starts, because the reassuring half is the part an
+	// operator staring at a corruption error needs: their documents are not at risk
+	// and this does not cost another embedding run.
+	c.Print("Rebuilding the search index from the stored document text.")
+	c.Print("The documents, their text and any vectors are left untouched, so nothing is re-embedded.")
+	c.Blank()
+
+	if err := store.RebuildFTS(ctx); err != nil {
+		switch {
+		case errors.Is(err, rag.ErrIndexNotBuilt):
+			return fmt.Errorf("there is no knowledge index to rebuild; run: fisk-ai knowledge index")
+		case errors.Is(err, rag.ErrLocked):
+			return fmt.Errorf("another knowledge writer holds the index lock; rebuild needs it, so try again when it finishes")
+		}
+
+		return err
+	}
+
+	c.Print("Rebuilt. Verify with: fisk-ai knowledge doctor --integrity")
 
 	return nil
 }
@@ -449,9 +530,16 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
+	c := columns.New()
+	defer c.WriteTo(os.Stdout)
+
+	// An index doctor cannot open is exactly what the operator ran doctor to learn
+	// about, so a stale format or a mismatched embedding identity is reported as a
+	// failed check carrying its own fix rather than returned as a bare error.
 	store, err := rag.Open(cfg, knowledgeStoreDir)
 	if err != nil {
-		return err
+		c.Item("Store readable", columns.Style(fmt.Sprintf("[%s] %v", doctorMark(rag.DoctorFail), err)))
+		return fmt.Errorf("knowledge doctor found problems that must be fixed")
 	}
 	defer store.Close()
 
@@ -460,16 +548,10 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	c := columns.New()
-	defer c.WriteTo(os.Stdout)
-
 	c.Heading(report.TierLine)
 
 	for _, check := range report.Checks {
-		mark := " {green}ok{/green} "
-		if !check.OK {
-			mark = "{red}FAIL{/red}"
-		}
+		mark := doctorMark(check.State)
 		if check.Detail != "" {
 			c.Item(check.Name, columns.Style(fmt.Sprintf("[%s] %s", mark, check.Detail)))
 		} else {
@@ -477,11 +559,30 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 		}
 	}
 
+	if report.HasUnrun() {
+		c.Blank()
+		c.Print("Some checks did not run, so this report verified less than it lists.")
+	}
+
 	if report.HasFatal() {
 		return fmt.Errorf("knowledge doctor found problems that must be fixed")
 	}
 
 	return nil
+}
+
+// doctorMark renders a check state. A skipped check reads as neither a pass nor a
+// failure, because it is neither and a reader scanning a column of marks will take
+// whichever one it borrows at face value.
+func doctorMark(state rag.DoctorState) string {
+	switch state {
+	case rag.DoctorPass:
+		return " {green}ok{/green} "
+	case rag.DoctorFail:
+		return "{red}FAIL{/red}"
+	default:
+		return "{yellow}skip{/yellow}"
+	}
 }
 
 func knowledgeStatsAction(_ *fisk.ParseContext) error {

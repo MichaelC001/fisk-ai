@@ -23,7 +23,7 @@ import (
 
 func registerA2AAction(cmd *fisk.Application) {
 	a2aCmd := cmd.Command("a2a", "Serves the tools to other agents over NATS (a2a)").Action(a2aAction)
-	a2aCmd.Flag("config", "Path to the agent configuration file").Default("agent.yaml").ExistingFileVar(&configFile)
+	a2aCmd.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
 }
 
 // a2aAction serves the configured tools to other fisk-ai agents over NATS, the
