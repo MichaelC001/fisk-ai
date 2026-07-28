@@ -32,7 +32,7 @@ const defaultMCPAddress = "127.0.0.1"
 
 func registerMcpAction(cmd *fisk.Application) {
 	mcpCmd := cmd.Command("mcp", "Serves the tools over the Model Context Protocol").Action(mcpAction)
-	mcpCmd.Flag("config", "Path to the agent configuration file").Default("agent.yaml").ExistingFileVar(&configFile)
+	mcpCmd.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
 	mcpCmd.Flag("port", "TCP port to listen on; overrides expose.agent.mcp.port").Envar("FISK_AI_MCP_PORT").IntVar(&mcpPort)
 	mcpCmd.Flag("address", "Host or IP to bind to (default 127.0.0.1; use 0.0.0.0 for all interfaces); overrides expose.agent.mcp.address").Envar("FISK_AI_MCP_ADDRESS").StringVar(&mcpAddress)
 }

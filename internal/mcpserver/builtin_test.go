@@ -60,8 +60,10 @@ var _ = Describe("BuildServer built-ins", func() {
 
 	It("serves a built-in-only server and returns its JSON result verbatim", func() {
 		builtins := lexicalKnowledgeBuiltins(ctx)
+		// BuildServer applies capability only, so it registers both knowledge tools
+		// here; narrowing to the operator's allowlist happens before this point.
 		srv, registered := BuildServer(tools2.Tools(builtins), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
-		Expect(registered).To(ConsistOf("knowledge_search"))
+		Expect(registered).To(ConsistOf("knowledge_search", "knowledge_enumerate"))
 
 		cs := connect(ctx, srv)
 		defer cs.Close()
@@ -98,7 +100,7 @@ var _ = Describe("BuildServer built-ins", func() {
 
 		served := append(tools2.Tools(cmdTools), tools2.Tools(lexicalKnowledgeBuiltins(ctx))...)
 		srv, registered := BuildServer(served, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
-		Expect(registered).To(ConsistOf("ping", "knowledge_search"))
+		Expect(registered).To(ConsistOf("ping", "knowledge_search", "knowledge_enumerate"))
 
 		cs := connect(ctx, srv)
 		defer cs.Close()

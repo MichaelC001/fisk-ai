@@ -132,7 +132,7 @@ func (s *Store) ChunkText(ctx context.Context, relPath string, ordinal int) (hea
 	}
 
 	err = s.db.QueryRowContext(ctx,
-		`SELECT c.heading_path, c.content
+		`SELECT c.heading_path, c.body
 		 FROM chunks c JOIN documents d ON d.id = c.document_id
 		 WHERE d.path = ? AND c.ordinal = ?`, relPath, ordinal).Scan(&headingPath, &content)
 	if err != nil {
@@ -142,15 +142,36 @@ func (s *Store) ChunkText(ctx context.Context, relPath string, ordinal int) (hea
 	return headingPath, content, nil
 }
 
+// DoctorState is the outcome of one check. It is three-valued rather than a
+// boolean because "not run" is a real answer and neither of the other two can carry
+// it: reporting an unrun check as passing is the dishonesty the whole report exists
+// to avoid, and reporting it as failing tells an operator something is broken when
+// nothing is.
+type DoctorState string
+
+const (
+	DoctorPass DoctorState = "pass"
+	DoctorFail DoctorState = "fail"
+
+	// DoctorNotRun marks a check that was skipped, whether because it needs a flag,
+	// needs a lock it could not take, or has nothing to examine. A report containing
+	// one is not a clean bill of health, and says so.
+	DoctorNotRun DoctorState = "not run"
+)
+
 // DoctorCheck is one preflight result. Fatal marks a check whose failure should
 // make knowledge doctor exit non-zero; an absent embeddings server is never fatal,
 // so a lexical-only user is not told their setup is broken.
 type DoctorCheck struct {
 	Name   string
-	OK     bool
+	State  DoctorState
 	Detail string
 	Fatal  bool
 }
+
+// OK reports whether the check passed, for callers that only care whether anything
+// is wrong. A check that did not run is not OK and not a failure.
+func (c DoctorCheck) OK() bool { return c.State == DoctorPass }
 
 // DoctorReport is the full doctor output: the canonical tier line and the ordered
 // checks.
@@ -159,10 +180,13 @@ type DoctorReport struct {
 	Checks   []DoctorCheck
 }
 
-// HasFatal reports whether any fatal check failed, so the CLI can set the exit code.
+// HasFatal reports whether any fatal check failed, so the CLI can set the exit
+// code. A fatal check that did not run does not set it: not knowing is not the same
+// as knowing something is wrong, and an opt-in check must not change the exit status
+// of every run that did not ask for it.
 func (r *DoctorReport) HasFatal() bool {
 	for _, c := range r.Checks {
-		if c.Fatal && !c.OK {
+		if c.Fatal && c.State == DoctorFail {
 			return true
 		}
 	}
@@ -170,11 +194,23 @@ func (r *DoctorReport) HasFatal() bool {
 	return false
 }
 
-// Doctor runs the preflight checks: it always verifies the store, FTS5, WAL, write
-// permission, and that the configured index paths resolve; only when the vector
-// tier is configured does it probe the embeddings endpoint and check the manifest.
-// It degrades for lexical users and never fails solely because embeddings are
-// absent.
+// HasUnrun reports whether any check was skipped, so the report can say plainly
+// that it verified less than it lists.
+func (r *DoctorReport) HasUnrun() bool {
+	for _, c := range r.Checks {
+		if c.State == DoctorNotRun {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Doctor runs the preflight checks: it verifies the store, FTS5, WAL, write
+// permission, full-text index integrity, and that the configured index paths
+// resolve; only when the vector tier is configured does it probe the embeddings
+// endpoint and check the manifest. It degrades for lexical users and never fails
+// solely because embeddings are absent.
 func (s *Store) Doctor(ctx context.Context, paths []string) (*DoctorReport, error) {
 	tier, err := s.TierLine(ctx)
 	if err != nil {
@@ -182,7 +218,14 @@ func (s *Store) Doctor(ctx context.Context, paths []string) (*DoctorReport, erro
 	}
 	report := &DoctorReport{TierLine: tier}
 	add := func(name string, ok bool, fatal bool, detail string) {
-		report.Checks = append(report.Checks, DoctorCheck{Name: name, OK: ok, Detail: detail, Fatal: fatal})
+		state := DoctorFail
+		if ok {
+			state = DoctorPass
+		}
+		report.Checks = append(report.Checks, DoctorCheck{Name: name, State: state, Detail: detail, Fatal: fatal})
+	}
+	skip := func(name string, fatal bool, detail string) {
+		report.Checks = append(report.Checks, DoctorCheck{Name: name, State: DoctorNotRun, Detail: detail, Fatal: fatal})
 	}
 
 	if s.db == nil {
@@ -192,10 +235,56 @@ func (s *Store) Doctor(ctx context.Context, paths []string) (*DoctorReport, erro
 		s.doctorDBChecks(ctx, add)
 	}
 
+	s.doctorIntegrityCheck(ctx, add, skip)
 	s.doctorPathChecks(paths, add)
 	s.doctorEmbeddingChecks(ctx, add)
 
 	return report, nil
+}
+
+// doctorIntegrityCheck verifies that the full-text indexes still match the chunk
+// text.
+//
+// It runs on every doctor invocation, and it needs the advisory write lock to do
+// so. That was gated behind a flag at first, on the theory that holding the lock
+// could kill a concurrent knowledge watch at startup, but the two are admin CLI
+// commands that are not run against each other in practice, and the two costs the
+// gate was really guarding against turned out not to exist: the check measures 0.2s
+// over 600 documents and 4,727 chunks, and it leaves the database file's mtime
+// alone, so what knowledge stats reports as Modified does not move.
+//
+// The check is fatal when it fails, because a drifted index answers MATCH with
+// fewer rows than the corpus holds: every search silently under-reports while
+// knowledge match still claims a complete set, which is the worst failure this
+// system has. It is never fatal when it did not run.
+//
+// Everything that can stop it from running is reported as skipped rather than as a
+// failure. A read-only index and a read-only store directory are both supported
+// deployments, a concurrent writer is ordinary, and none of them says anything
+// about whether the index is sound.
+func (s *Store) doctorIntegrityCheck(ctx context.Context, add func(string, bool, bool, string), skip func(string, bool, string)) {
+	const name = "Search index integrity"
+
+	err := s.CheckFTSIntegrity(ctx)
+	switch {
+	case err == nil:
+		add(name, true, true, "")
+
+	case errors.Is(err, ErrFTSDesynced):
+		add(name, false, true, err.Error())
+
+	case errors.Is(err, ErrIndexNotBuilt):
+		skip(name, true, "no index to check")
+
+	case errors.Is(err, ErrLocked):
+		skip(name, true, "another knowledge writer holds the index lock")
+
+	default:
+		// A read-only file or directory lands here, as does anything else that stops
+		// the write lock or the writable handle from being taken. None of it is a
+		// finding about the index.
+		skip(name, true, fmt.Sprintf("no write lock: %v", err))
+	}
 }
 
 // doctorDBChecks runs the checks that need an open index: FTS5 support, WAL mode,

@@ -20,10 +20,7 @@ var _ = Describe("BuiltinTool MCP accessors", func() {
 	cfg := &config.Config{Harness: config.HarnessConfig{RAG: &config.RAGConfig{Enabled: true}}}
 
 	It("exposes the input schema and dispatches the handler in-process", func() {
-		ragTools := RAGTools(cfg, nil)
-		Expect(ragTools).To(HaveLen(1))
-		ks := ragTools[0]
-		Expect(ks.Name()).To(Equal("knowledge_search"))
+		ks := ragToolNamed(RAGTools(cfg, nil), "knowledge_search")
 
 		props, ok := ks.InputSchema()["properties"].(map[string]any)
 		Expect(ok).To(BeTrue())

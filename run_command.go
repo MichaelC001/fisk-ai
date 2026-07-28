@@ -28,7 +28,7 @@ import (
 func registerRunCommand(cmd *fisk.Application) {
 	run := cmd.Command("run", "Runs the agent").Action(runAction)
 	run.Arg("q", "Interactive prompt").StringsVar(&q)
-	run.Flag("config", "Path to the agent configuration file").Default("agent.yaml").ExistingFileVar(&configFile)
+	run.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
 	run.Flag("api-key", "Anthropic API key to use").Required().Envar("ANTHROPIC_API_KEY").StringVar(&apiKey)
 	run.Flag("base-url", "Anthropic API base URL to use").Envar("ANTHROPIC_BASE_URL").StringVar(&baseURL)
 	run.Flag("http-debug", "Dump Anthropic API request and response bodies to "+httpDebugFilename).Envar("HTTP_DEBUG").UnNegatableBoolVar(&httpDebug)

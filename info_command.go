@@ -29,7 +29,7 @@ const maxInfoDescriptionLen = 50
 
 func registerInfoAction(cmd *fisk.Application) {
 	info := cmd.Command("info", "Shows the tools and prompt loaded from a configuration").Action(infoAction)
-	info.Flag("config", "Path to the agent configuration file").Default("agent.yaml").ExistingFileVar(&configFile)
+	info.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
 	info.Flag("no-color", "Disable markdown rendering of the prompt, emitting raw text").Envar("NO_COLOR").UnNegatableBoolVar(&noColor)
 }
 
@@ -73,7 +73,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	for _, b := range builtin.MemoryTools(cfg, nil) {
 		taken[b.Name()] = true
 	}
-	// The knowledge_search tool is likewise enumerated with a nil store.
+	// The knowledge tools are likewise enumerated with a nil store.
 	for _, b := range builtin.RAGTools(cfg, nil) {
 		taken[b.Name()] = true
 	}
@@ -118,7 +118,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	for _, b := range builtin.MemoryTools(cfg, nil) {
 		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
-	// The built-in knowledge_search tool, likewise, when RAG is enabled.
+	// The built-in knowledge tools, likewise, when RAG is enabled.
 	for _, b := range builtin.RAGTools(cfg, nil) {
 		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
 	}

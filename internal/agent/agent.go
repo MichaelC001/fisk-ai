@@ -562,8 +562,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
-	// The built-in knowledge_search tool is added here in the agent run path too,
-	// tracked in its own slice like the memory tools. rag.Open validates the config
+	// The built-in knowledge tools are added here in the agent run path too,
+	// tracked in their own slice like the memory tools. rag.Open validates the config
 	// (a bad embeddings block fails before the loop) but treats a missing index file
 	// as a soft empty state, so a first run never fails to start. The store is opened
 	// read-only; knowledge index is the writer.
@@ -686,8 +686,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	}
 
 	// The run needs at least one callable tool, counting every source the model can
-	// address: filtered application tools, the built-in HITL/memory/knowledge_search
-	// tools, imported remote tools, and caller-injected custom tools. Checking only the
+	// address: filtered application tools, the built-in HITL/memory/knowledge tools,
+	// imported remote tools, and caller-injected custom tools. Checking only the
 	// application tools would abort a run whose sole tools are native (e.g.
 	// knowledge_search), remote, or injected by the caller.
 	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(opts.CustomTools) == 0 {

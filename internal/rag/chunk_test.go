@@ -12,14 +12,20 @@ import (
 )
 
 var _ = Describe("Chunking", func() {
-	It("builds a heading breadcrumb and folds it into the content", func() {
+	It("builds a heading breadcrumb and keeps it out of the body", func() {
 		md := "# Design\n\n## Backpressure\n\nThe buffer fills and producers slow down.\n"
 		chunks := ChunkDocument(md)
 
 		Expect(chunks).To(HaveLen(1))
 		Expect(chunks[0].HeadingPath).To(Equal("Design > Backpressure"))
-		Expect(chunks[0].Content).To(HavePrefix("Design > Backpressure"))
-		Expect(chunks[0].Content).To(ContainSubstring("producers slow down"))
+		Expect(chunks[0].Body).To(Equal("The buffer fills and producers slow down."))
+
+		// The breadcrumb lives in one column only. Folding it back into the body is
+		// what made body-only questions unanswerable, let a phrase match across the
+		// join between a heading and a body, and rendered the breadcrumb twice on
+		// every surface that prints both.
+		Expect(chunks[0].Body).ToNot(ContainSubstring("Design"))
+		Expect(chunks[0].Body).ToNot(ContainSubstring("Backpressure"))
 	})
 
 	It("keeps a fenced code block intact even when it exceeds the chunk size", func() {
@@ -34,9 +40,9 @@ var _ = Describe("Chunking", func() {
 
 		fenced := 0
 		for _, c := range chunks {
-			if strings.Contains(c.Content, "```go") {
+			if strings.Contains(c.Body, "```go") {
 				fenced++
-				Expect(strings.Count(c.Content, "```")).To(Equal(2), "the fence must open and close in the same chunk")
+				Expect(strings.Count(c.Body, "```")).To(Equal(2), "the fence must open and close in the same chunk")
 			}
 		}
 		Expect(fenced).To(Equal(1))

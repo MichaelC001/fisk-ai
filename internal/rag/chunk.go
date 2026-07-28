@@ -20,14 +20,15 @@ const (
 	maxChunkBytes = 1500
 )
 
-// Chunk is one heading-delimited, size-packed unit of a document. Content folds
-// the heading breadcrumb into the body (which the spike showed pulls the on-topic
-// section to rank 1 for any model), and HeadingPath is the same breadcrumb stored
-// as its own FTS5 column, since the section title is often the most search-relevant
-// phrase in a chunk.
+// Chunk is one heading-delimited, size-packed unit of a document. Body is the
+// section text alone and HeadingPath is its breadcrumb, stored apart so each can be
+// searched without the other and so no surface renders the breadcrumb twice. The
+// two are folded together in exactly one place, where the chunk is handed to the
+// embedder, because carrying the section title into the vector pulls the on-topic
+// section to rank 1 for any model.
 type Chunk struct {
 	HeadingPath string
-	Content     string
+	Body        string
 }
 
 // heading is one entry on the breadcrumb stack: a markdown heading level and its
@@ -156,7 +157,7 @@ func (p *sectionPacker) take() Chunk {
 	p.buf = nil
 	p.size = 0
 
-	return Chunk{HeadingPath: p.breadcrumb, Content: foldHeading(p.breadcrumb, body)}
+	return Chunk{HeadingPath: p.breadcrumb, Body: body}
 }
 
 // flush emits every chunk completed while packing plus the final pending buffer
@@ -170,7 +171,9 @@ func (p *sectionPacker) flush(out *[]Chunk) {
 }
 
 // foldHeading prefixes the body with its breadcrumb so the section title travels
-// with the chunk text into the embedding and the lexical index.
+// with the chunk text into the embedding. It has one caller, in index.go, and the
+// string it returns is what the vectors were built from: changing it changes every
+// vector in the index, which is why a spec pins it.
 func foldHeading(breadcrumb, body string) string {
 	if breadcrumb == "" {
 		return body
