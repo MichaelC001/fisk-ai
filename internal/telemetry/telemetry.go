@@ -32,6 +32,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/go-logr/stdr"
@@ -43,7 +45,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	// The resource is described at the schema the SDK's own detectors use, which is not
+	// the schema the gen_ai keys come from. resource.Merge refuses to merge resources
+	// whose schema URLs differ, so declaring an older one here fails every Setup with a
+	// conflict the moment the SDK moves on. The span and metric attributes elsewhere in
+	// this package stay on v1.41.0, which is the last version to ship the GenAI
+	// conventions; see attrs.go.
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -255,19 +263,46 @@ func traceOptions(r Resolved) []otlptracehttp.Option {
 		return opts
 	}
 
-	// WithEndpointURL takes a full URL and defaults an empty path to /v1/traces, so a
-	// bare base URL from the config file behaves as the documentation promises.
-	return append(opts, otlptracehttp.WithEndpointURL(r.Endpoint.Value))
+	return append(opts, otlptracehttp.WithEndpointURL(signalEndpoint(r.Endpoint.Value, tracesPath)))
 }
 
-// metricOptions is traceOptions for the metric signal, defaulting the path to
-// /v1/metrics on the same terms.
+// metricOptions is traceOptions for the metric signal.
 func metricOptions(r Resolved) []otlpmetrichttp.Option {
 	if !r.EndpointFromConfig {
 		return nil
 	}
 
-	return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(r.Endpoint.Value)}
+	return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(signalEndpoint(r.Endpoint.Value, metricsPath))}
+}
+
+// The per-signal paths OTLP/HTTP defines, appended to the configured base URL.
+const (
+	tracesPath  = "/v1/traces"
+	metricsPath = "/v1/metrics"
+)
+
+// signalEndpoint appends a signal's path to the configured base endpoint.
+//
+// telemetry.endpoint is a base URL, matching OTEL_EXPORTER_OTLP_ENDPOINT, so the signal
+// path is this package's to add. The exporters will not do it: WithEndpointURL treats a
+// URL with no path as targeting the root, deliberately, so handing it a bare base URL
+// posts every export to / and a collector answers 404. That reads as a broken collector
+// rather than a misconfigured client, and OTLP being fire and forget it is invisible
+// without the delivery counts.
+//
+// A base URL carrying a path prefix keeps it, so a collector mounted at /otlp receives
+// /otlp/v1/traces, which is what the OTLP specification says the base variable means.
+// An unparseable endpoint is returned unchanged rather than mangled; Resolve has already
+// rejected those, and this is not the place to discover it.
+func signalEndpoint(base string, signalPath string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+
+	u.Path = strings.TrimSuffix(u.Path, "/") + signalPath
+
+	return u.String()
 }
 
 // NewFromProviders builds a Provider over providers the caller already runs. It is
