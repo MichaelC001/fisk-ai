@@ -101,6 +101,16 @@ type Meta struct {
 	// live view skips the startup card in that case: it would only flash up and vanish as
 	// the first response is already in hand.
 	Resume bool
+	// Telemetry marks a run that exports OpenTelemetry, shown on the live view's startup
+	// card so an operator can see at a glance that this run is being recorded. Like Dir
+	// it is consulted only by the live splash.
+	Telemetry bool
+	// TelemetryContent marks a run that exports the conversation itself, not only the
+	// structure and timing. It is on the startup card because the startup note that says
+	// the same thing is printed before this UI takes the terminal and is then covered for
+	// the whole run: an operator watching this screen for an hour should be able to see
+	// that their prompts are leaving the machine.
+	TelemetryContent bool
 	// InTokens and OutTokens are the session's accumulated token usage, shown on the
 	// static statusbar the same way the live bar shows its running counter. Both zero
 	// (a view with no usage to report) hides the count rather than showing "0/0".
@@ -687,7 +697,17 @@ func (v *viewer) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	case "search":
-		// The search input owns all keys; its done handler closes the overlay.
+		// The search input owns all keys so a term can contain anything, with one
+		// exception. Ctrl-C must abort from here too, the same guarantee the prompt page
+		// below makes: swallowing it is what turns a search box left open at a turn
+		// boundary into a view the operator can neither search, type into, nor leave.
+		if ev.Key() == tcell.KeyCtrlC {
+			v.closeOverlay("search")
+			v.onQuit()
+
+			return nil
+		}
+
 		return ev
 	case "help":
 		// Any key dismisses help.
@@ -1008,7 +1028,22 @@ func (v *viewer) activatePrompt(deliver func(text string, reset, cont bool)) {
 	// recalls the most recent follow-up rather than resuming a stale scroll position.
 	v.histIdx = len(v.history)
 	v.histDraft = ""
+	// An overlay opened before the turn boundary arrived would otherwise stay on top
+	// while focus moves to the field beneath it, and the two disagree in a way that
+	// wedges the view: onKey routes by front page, tview delivers by focus, so the
+	// operator sees the search box, types into the hidden prompt, and neither responds.
+	// The overlay is transient and the input row is the point of this moment, so the
+	// overlay gives way.
+	v.dismissOverlays()
 	v.focusInput()
+}
+
+// dismissOverlays hides the transient overlays so the front page and the focused widget
+// agree. Unlike closeOverlay it does not move focus, because the caller is about to
+// place it deliberately.
+func (v *viewer) dismissOverlays() {
+	v.pages.HidePage("search")
+	v.pages.HidePage("help")
 }
 
 // deactivatePrompt turns the input row off, returning focus to the transcript and

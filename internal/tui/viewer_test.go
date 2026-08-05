@@ -13,6 +13,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/rivo/tview"
 )
 
 func TestTui(t *testing.T) {
@@ -443,6 +444,75 @@ var _ = Describe("transcript viewer", func() {
 
 			// With no key pressed the notice clears itself once the TTL elapses.
 			Eventually(readScreen, time.Second).ShouldNot(ContainSubstring("sent 2 lines to clipboard"))
+
+			v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
+		// The search field owns every key so a term can contain anything, which is right
+		// until it swallows the one key that must always work. With the overlay up and no
+		// way out of it, an operator has no abort at all.
+		It("Should still abort on Ctrl-C while the search overlay owns the keys", func() {
+			sim := tcell.NewSimulationScreen("")
+			v := newViewer(Meta{Title: "s"}, []Line{{Kind: LineNarration, Text: "alpha"}}, true, false)
+			v.app.SetScreen(sim)
+			v.app.SetRoot(v.pages, true).SetFocus(v.view)
+
+			quit := make(chan struct{}, 1)
+			v.onQuit = func() { quit <- struct{}{} }
+
+			done := make(chan error, 1)
+			go func() { done <- v.app.Run() }()
+			v.app.QueueUpdateDraw(func() {})
+
+			sim.InjectKey(tcell.KeyRune, '/', tcell.ModNone)
+			Eventually(func() string {
+				var front string
+				v.app.QueueUpdate(func() { front, _ = v.pages.GetFrontPage() })
+				return front
+			}, time.Second).Should(Equal("search"))
+
+			sim.InjectKey(tcell.KeyCtrlC, 0, tcell.ModNone)
+			Eventually(quit, time.Second).Should(Receive())
+
+			v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
+		// A turn boundary can arrive while an overlay is up, and then two things disagree:
+		// onKey routes by front page while tview delivers by focus. The operator sees the
+		// search box, types into the prompt hidden beneath it, and neither responds. The
+		// overlay is transient and the input row is the point of this moment, so the
+		// overlay gives way rather than the focus.
+		It("Should dismiss an open overlay when the input row takes focus", func() {
+			sim := tcell.NewSimulationScreen("")
+			v := newViewer(Meta{Title: "s", Interactive: true}, []Line{{Kind: LineNarration, Text: "alpha"}}, true, true)
+			v.enableInput()
+			v.app.SetScreen(sim)
+			v.app.SetRoot(v.pages, true).SetFocus(v.view)
+
+			done := make(chan error, 1)
+			go func() { done <- v.app.Run() }()
+			v.app.QueueUpdateDraw(func() {})
+
+			sim.InjectKey(tcell.KeyRune, '/', tcell.ModNone)
+			Eventually(func() string {
+				var front string
+				v.app.QueueUpdate(func() { front, _ = v.pages.GetFrontPage() })
+				return front
+			}, time.Second).Should(Equal("search"))
+
+			// The turn boundary arrives with the search box still up.
+			v.app.QueueUpdateDraw(func() { v.activatePrompt(func(string, bool, bool) {}) })
+
+			var front string
+			var focused tview.Primitive
+			v.app.QueueUpdate(func() {
+				front, _ = v.pages.GetFrontPage()
+				focused = v.app.GetFocus()
+			})
+			Expect(front).ToNot(Equal("search"))
+			Expect(focused).To(BeIdenticalTo(tview.Primitive(v.promptInput)))
 
 			v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))

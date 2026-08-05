@@ -3,7 +3,7 @@ title = "Design"
 description = "How Fisk AI is built and why"
 toc = true
 weight = 40
-pre = "<b>5. </b>"
+pre = "<b>6. </b>"
 +++
 
 The rest of the documentation describes what Fisk AI does. This section describes how it is built and why the design

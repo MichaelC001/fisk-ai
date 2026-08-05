@@ -20,8 +20,10 @@ import (
 // from outside its own package using only exported identifiers, and it is safe for
 // the concurrent use runs sharing one store make of it.
 type FakeMemoryStore struct {
-	mu    sync.Mutex
-	items map[string]fakeMemory
+	mu      sync.Mutex
+	items   map[string]fakeMemory
+	info    memory.Info
+	listErr error
 }
 
 // fakeMemory is one stored entry, description plus body.
@@ -38,13 +40,49 @@ var _ memory.Store = (*FakeMemoryStore)(nil)
 // NewFakeMemoryStore returns an empty in-memory store.
 func NewFakeMemoryStore(tb testing.TB) *FakeMemoryStore {
 	tb.Helper()
-	return &FakeMemoryStore{items: map[string]fakeMemory{}}
+	return &FakeMemoryStore{items: map[string]fakeMemory{}, info: memory.Info{Backend: "fake"}}
+}
+
+// SetInfo overrides what the store reports about its backend.
+//
+// It exists so a test can prove an injected store is asked what it is rather than the
+// config being asked what was requested. Those two agree for every configured backend,
+// so nothing else can tell them apart.
+func (s *FakeMemoryStore) SetInfo(info memory.Info) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.info = info
+}
+
+// Info implements memory.Store.
+func (s *FakeMemoryStore) Info() memory.Info {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.info
+}
+
+// SetListError makes List fail with err, or succeed again when err is nil.
+//
+// A listing failure is advisory rather than fatal, so it is easy to build a store that
+// cannot produce one and then to believe the failure path is covered. It is reachable
+// in practice: List is a round trip per entry on a network backend.
+func (s *FakeMemoryStore) SetListError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.listErr = err
 }
 
 // List implements memory.Store.
 func (s *FakeMemoryStore) List(context.Context) ([]memory.Item, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 
 	out := make([]memory.Item, 0, len(s.items))
 	for k, v := range s.items {

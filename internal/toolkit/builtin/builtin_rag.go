@@ -262,8 +262,8 @@ func knowledgeSearchHandler(store *rag.Store) builtinHandler {
 
 		out := knowledgeSearchOutcome{Tier: tier, Status: string(res.Status), Results: []knowledgeHitJSON{}}
 		if res.Degraded {
-			out.Tier = rag.DegradedTierLine(res.DegradeReason)
-			out.Note = "the embeddings server was unreachable, so this query used the lexical tier only"
+			out.Tier = rag.DegradedTierLine(res.DegradeKind, res.DegradeReason)
+			out.Note = rag.DegradeNote(res.DegradeKind)
 		}
 		switch res.Status {
 		case rag.StatusIndexNotBuilt:

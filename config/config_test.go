@@ -12,12 +12,27 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	// Imported by the test binary only, to assert this package's credential list stays
+	// a superset of the one internal/telemetry checks. The config package itself
+	// imports nothing from the tree and must stay that way.
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 func TestConfig(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Config")
 }
+
+// minimalAgentConfig is the smallest config that validates in agent mode, for specs
+// about one block that need the rest of the file to be valid and uninteresting. It
+// ends in a newline so a block under test appends cleanly.
+const minimalAgentConfig = `
+identity: agent1
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+`
 
 var _ = Describe("Config", func() {
 	Describe("NewConfig", func() {
@@ -1036,9 +1051,9 @@ harness:
 	})
 
 	Describe("CredentialEnvNames", func() {
-		It("Should be empty when the vector tier is off", func() {
+		It("Should carry no operator-named variable when the vector tier is off", func() {
 			cfg := &Config{Harness: HarnessConfig{RAG: &RAGConfig{Enabled: true}}}
-			Expect(cfg.CredentialEnvNames()).To(BeEmpty())
+			Expect(cfg.CredentialEnvNames()).To(Equal(otlpCredentialEnvNames))
 		})
 
 		It("Should return the embeddings api_key_env when the vector tier is on", func() {
@@ -1046,7 +1061,7 @@ harness:
 				Enabled:    true,
 				Embeddings: &RAGEmbeddingsConfig{APIKeyEnv: "MY_EMBED_KEY"},
 			}}}
-			Expect(cfg.CredentialEnvNames()).To(Equal([]string{"MY_EMBED_KEY"}))
+			Expect(cfg.CredentialEnvNames()).To(ContainElement("MY_EMBED_KEY"))
 		})
 
 		It("Should trim and drop an empty or whitespace api_key_env", func() {
@@ -1054,7 +1069,124 @@ harness:
 				Enabled:    true,
 				Embeddings: &RAGEmbeddingsConfig{APIKeyEnv: "   "},
 			}}}
-			Expect(cfg.CredentialEnvNames()).To(BeEmpty())
+			Expect(cfg.CredentialEnvNames()).To(Equal(otlpCredentialEnvNames))
+		})
+
+		// The OpenTelemetry export credentials are ambient operator variables, present
+		// regardless of what one agent's config says. Gating them on telemetry being
+		// enabled would mean --no-telemetry re-exposes the token to every tool
+		// subprocess, which is the opposite of what an operator reaches for it to do.
+		DescribeTable("Should strip the OpenTelemetry export credentials unconditionally",
+			func(cfg *Config) {
+				names := cfg.CredentialEnvNames()
+
+				for _, name := range otlpCredentialEnvNames {
+					Expect(names).To(ContainElement(name))
+				}
+				Expect(names).To(ContainElement("OTEL_EXPORTER_OTLP_HEADERS"))
+				Expect(names).To(ContainElement("OTEL_EXPORTER_OTLP_LOGS_HEADERS"))
+				Expect(names).To(ContainElement("OTEL_EXPORTER_OTLP_CLIENT_KEY"))
+			},
+			Entry("an empty config", &Config{}),
+			Entry("telemetry never mentioned", &Config{Identity: "demo"}),
+			Entry("telemetry explicitly off", &Config{Telemetry: TelemetryConfig{Enabled: false}}),
+			Entry("telemetry on", &Config{Telemetry: TelemetryConfig{Enabled: true}}),
+		)
+
+		// internal/telemetry lists the bearer-token variables again for its own startup
+		// checks, because neither package can import the other in production code. This
+		// is the spec that stops the two copies drifting apart, and it reads the real
+		// list rather than restating it: a third hand-written copy here would assert
+		// nothing, since adding a name in telemetry would leave all three of us agreeing
+		// with each other and disagreeing with the code.
+		//
+		// The direction is one way on purpose. config holds the superset, adding the mTLS
+		// variables that telemetry has no reason to know about, so this asserts inclusion
+		// rather than equality.
+		It("Should be a superset of the names internal/telemetry checks", func() {
+			cfg := &Config{}
+
+			shared := telemetry.HeaderEnvNames()
+			Expect(shared).ToNot(BeEmpty())
+
+			for _, name := range shared {
+				Expect(cfg.CredentialEnvNames()).To(ContainElement(name))
+			}
+		})
+
+		It("Should not return duplicates when an api_key_env repeats a known name", func() {
+			cfg := &Config{Harness: HarnessConfig{RAG: &RAGConfig{
+				Enabled:    true,
+				Embeddings: &RAGEmbeddingsConfig{APIKeyEnv: "OTEL_EXPORTER_OTLP_HEADERS"},
+			}}}
+
+			names := cfg.CredentialEnvNames()
+			Expect(names).To(HaveLen(len(otlpCredentialEnvNames)))
+		})
+	})
+
+	Describe("Telemetry", func() {
+		It("Should be off with no telemetry block", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.TelemetryEnabled()).To(BeFalse())
+			Expect(cfg.TelemetryMetricsEnabled()).To(BeTrue())
+			Expect(cfg.Telemetry.SampleRatio).To(BeNil())
+		})
+
+		It("Should parse a full telemetry block", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+telemetry:
+  enabled: true
+  endpoint: http://127.0.0.1:4318
+  service_name: demo-agent
+  sample_ratio: 0.25
+  no_metrics: true
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.TelemetryEnabled()).To(BeTrue())
+			Expect(cfg.Telemetry.Endpoint).To(Equal("http://127.0.0.1:4318"))
+			Expect(cfg.Telemetry.ServiceName).To(Equal("demo-agent"))
+			Expect(cfg.Telemetry.SampleRatio).ToNot(BeNil())
+			Expect(*cfg.Telemetry.SampleRatio).To(Equal(0.25))
+			Expect(cfg.TelemetryMetricsEnabled()).To(BeFalse())
+		})
+
+		// The reason sample_ratio is a pointer. An explicit zero means sample nothing,
+		// and a plain float64 would make it indistinguishable from an absent key, so it
+		// would be defaulted back to sampling everything and every trace would reach a
+		// paid backend. Nothing may collapse it to the Go zero value on the way through.
+		It("Should keep an explicit zero sample_ratio distinct from an absent one", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+telemetry:
+  enabled: true
+  sample_ratio: 0
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.Telemetry.SampleRatio).ToNot(BeNil())
+			Expect(*cfg.Telemetry.SampleRatio).To(Equal(0.0))
+		})
+
+		It("Should reject an unknown key in the telemetry block", func() {
+			_, err := ParseConfig([]byte(minimalAgentConfig + `
+telemetry:
+  enabled: true
+  capture_content: true
+`))
+			Expect(err).To(HaveOccurred())
+		})
+
+		// Validation belongs to internal/telemetry, not to prepare: the config object
+		// stays literal, and a stale endpoint in a file with telemetry off must never
+		// fail a run that will export nothing.
+		It("Should not validate the endpoint or the ratio at parse time", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+telemetry:
+  endpoint: not-a-url
+  sample_ratio: 7
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.Telemetry.Endpoint).To(Equal("not-a-url"))
 		})
 	})
 })

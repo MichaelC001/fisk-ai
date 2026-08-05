@@ -20,6 +20,14 @@ import (
 // produced it).
 const ProviderName = "anthropic"
 
+// SemconvProviderName is the gen_ai.provider.name value the OpenTelemetry GenAI
+// semantic conventions define for this backend, reported on traces and metrics. It
+// happens to match ProviderName, but the two answer to different owners and are kept
+// apart: ProviderName is ours to choose and is stamped into the run fingerprint,
+// while this one is the conventions' registry value for the Anthropic API and
+// changes only if that registry changes.
+const SemconvProviderName = "anthropic"
+
 // ToolDefToAnthropic renders a neutral tool definition as an Anthropic custom
 // tool. defer_loading is emitted unconditionally, including a present false, so
 // the rendered tool is a pure function of the neutral value rather than varying

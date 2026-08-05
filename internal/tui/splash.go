@@ -150,19 +150,48 @@ func (v *viewer) enableSplash(meta Meta) {
 	v.pages.AddPage(splashName, overlay(v.splashCard, splashWidth, count+2), true, true)
 }
 
-// splashInfoLines is the right column of the startup card: the version, model and working
-// directory, label-aligned so the values line up. Values are sanitized and escaped; the
-// model is truncated and the directory left-elided so a long one does not overflow.
+// splashInfoLines is the right column of the startup card: the version, model, working
+// directory and whether the run is being recorded, label-aligned so the values line up.
+// Values are sanitized and escaped; the model is truncated and the directory left-elided
+// so a long one does not overflow.
 func splashInfoLines(meta Meta) []string {
 	lines := []string{
-		fmt.Sprintf("[gray]version[-]  %s", escapeSplash(meta.Version)),
-		fmt.Sprintf("[gray]model[-]    %s", escapeSplash(truncateRunes(meta.Model, splashValueMax))),
+		splashInfoLine("version", escapeSplash(meta.Version)),
+		splashInfoLine("model", escapeSplash(truncateRunes(meta.Model, splashValueMax))),
 	}
 	if meta.Dir != "" {
-		lines = append(lines, fmt.Sprintf("[gray]dir[-]      %s", escapeSplash(elideLeft(meta.Dir, splashValueMax))))
+		lines = append(lines, splashInfoLine("dir", escapeSplash(elideLeft(meta.Dir, splashValueMax))))
+	}
+	// Shown only when export is on. A line reporting telemetry as off would be noise on
+	// every run of the many agents that never configure it.
+	if meta.Telemetry {
+		value := "OTEL Enabled"
+		// Content capture is a different thing from export being on, and it is the one
+		// an operator would want to notice from across the room.
+		if meta.TelemetryContent {
+			value += " + content"
+		}
+		lines = append(lines, splashInfoLine("telemetry", value))
 	}
 
 	return lines
+}
+
+// splashLabelWidth is the cell offset every value in the info column starts at, wide
+// enough for the longest label plus a gap. It bounds the value width with
+// splashValueMax: the two together must fit the card's body column.
+const splashLabelWidth = 11
+
+// splashInfoLine renders one label and value of the info column, padding the label to
+// the shared value offset. The padding is computed rather than written out so adding a
+// label cannot silently misalign the column, which counting spaces by hand invites.
+func splashInfoLine(label string, value string) string {
+	pad := splashLabelWidth - utf8.RuneCountInString(label)
+	if pad < 1 {
+		pad = 1
+	}
+
+	return fmt.Sprintf("[gray]%s[-]%s%s", label, strings.Repeat(" ", pad), value)
 }
 
 // splashCaptionText is the animated waiting line: an accented spinner glyph then the

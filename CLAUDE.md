@@ -30,6 +30,24 @@
 - **Suspected bugs in existing code**: do not write tests that lock in behavior you suspect is wrong. Stop, describe the concern, ask the user how to proceed.
 - **Change code only after approval**: While discussing or working on a plan, do not change code without explicit approval, questions like "What's next?" does not mean edit code, it means answer the question - what will we work on next.
 
+## Library shape
+
+The packages under `internal/` are being prepared to leave `internal/`, so that others can
+build agents on these libraries. Design them as public APIs: names, signatures and doc
+comments are contracts we intend to keep.
+
+- **Logic an embedder would have to reimplement does not belong in `package main`.** The root
+  package holds command registration, flag parsing, terminal presentation and wiring. Anything
+  else belongs in a library package, even when only one command uses it today.
+- **A library supplies the value; the caller decides what to do with it.** Where something is
+  the CLI's business (where to print, whether to be verbose, what the config file is called,
+  what a terminal is doing), the library returns the value or takes it as a parameter rather
+  than deciding.
+- **This applies now to the agent libraries**: `agent`, `llm`, `telemetry`, `toolkit`,
+  `memory`, `rag`, `runstate`, `util`, `conns`. Hold changes there to a public standard.
+- **`a2a` and `mcpserver` are not there yet.** Their shape is not settled, so do not hold work
+  on them to the same bar and do not treat their current API as a contract.
+
 ## Code style
 
 - License header: Apache-2.0 with Choria copyright. Match existing files.

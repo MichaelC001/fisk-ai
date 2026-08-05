@@ -29,12 +29,15 @@ func knowledgeEnumerateTool(store *rag.Store) *functool.Tool {
 		// Not a2a, for the reason knowledge_search is not: there is no a2a builtins
 		// allowlist, so declaring it there would serve it the moment a2a is enabled.
 		Expose: &functool.ExposeSpec{MCP: true},
-		Description: "Check which of the operator's indexed documents contain particular words, and how often. " +
-			"Returns a complete list of matching document paths with match counts, never document text. " +
-			"Use this before answering that something is absent, undocumented, or not mentioned: knowledge_search " +
-			"ranks by relevance and so cannot tell absence from a low score, while this returns every matching " +
-			"document or an empty list that genuinely means none. Also use it to size a topic before reading it, " +
-			"or to find where a term is used. " +
+		Description: "Map which of the operator's indexed documents contain particular words, and how often." +
+			"Returns a complete, unranked list of matching document paths with match counts, never document text. " +
+			"Use it to orient│before you read: to see how large a topic is, which documents own it, and which terms " +
+			"the corpus actually uses, so that your  knowledge_search  queries — and any list of related or further " +
+			"reading you offer reflect the full picture rather than a top-k slice. Because the list is complete, it is " +
+			"also the only reliable way to confirm something is genuinely absent:  knowledge_search  ranks by relevance " +
+			"and cannot distinguish absence from a low score. When mapping rather than checking absence, prefer precision:  " +
+			"heading:word  finds documents where a term is structural, \"quoted phrase\"  finds real usage rather than incidental " +
+			"mentions." +
 			"Query syntax: words side by side must all appear in the same document; \"quoted words\" must be " +
 			"adjacent within one section; -word excludes; body: and heading: scope a word to one part of a " +
 			"section. Matching is by word stem, so deprecated also finds deprecate and deprecation. " +

@@ -220,5 +220,43 @@ var _ = Describe("Anthropic codec", func() {
 			Expect(resp.Usage).To(Equal(llm.Usage{In: 100, Out: 8, CacheRead: 40, CacheCreate: 12}))
 			Expect(resp.Content[0].Text.Text).To(Equal("partial"))
 		})
+
+		// The response id correlates a call here with the same call in the provider's own
+		// logs, and the model is the resolved snapshot rather than the alias the request
+		// named: a run asking for claude-sonnet-5 is answered by a dated build, and the
+		// snapshot is what bills and what a reproduction has to pin.
+		It("carries the response id and the resolved model", func() {
+			raw := `{
+				"id": "msg_01ABC",
+				"model": "claude-sonnet-5-20260101",
+				"role": "assistant",
+				"stop_reason": "end_turn",
+				"content": [{"type": "text", "text": "done"}],
+				"usage": {"input_tokens": 1, "output_tokens": 1}
+			}`
+			var msg sdk.Message
+			Expect(json.Unmarshal([]byte(raw), &msg)).To(Succeed())
+
+			resp, err := ResponseToNeutral(&msg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.ID).To(Equal("msg_01ABC"))
+			Expect(resp.Model).To(Equal("claude-sonnet-5-20260101"))
+		})
+
+		It("leaves the id and model empty when the reply carries neither", func() {
+			raw := `{
+				"role": "assistant",
+				"stop_reason": "end_turn",
+				"content": [{"type": "text", "text": "done"}],
+				"usage": {"input_tokens": 1, "output_tokens": 1}
+			}`
+			var msg sdk.Message
+			Expect(json.Unmarshal([]byte(raw), &msg)).To(Succeed())
+
+			resp, err := ResponseToNeutral(&msg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.ID).To(BeEmpty())
+			Expect(resp.Model).To(BeEmpty())
+		})
 	})
 })

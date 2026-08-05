@@ -365,6 +365,14 @@ func (s *store) Delete(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// Info reports the backend and the KV bucket it is bound to. The bucket is an
+// operator-configured name, not a path or a credential, so it is safe to export.
+// The key prefix is not reported: it is derived from the agent identity, which every
+// span already carries.
+func (s *store) Info() memory.Info {
+	return memory.Info{Backend: memory.BackendJetStream, Location: s.bucket}
+}
+
 func (s *store) List(ctx context.Context) ([]memory.Item, error) {
 	items, err := s.snapshot(ctx, false)
 	if err != nil {

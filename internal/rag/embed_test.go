@@ -16,6 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // embedRequest and embedItem mirror the OpenAI embeddings request/response shapes
@@ -85,7 +86,7 @@ var _ = Describe("Embedding client", func() {
 			})
 			defer srv.Close()
 
-			vecs, err := newEmbedder(srv.URL).embedBatch(ctx, []string{"a", "b", "c"})
+			vecs, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a", "b", "c"})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(vecs[0][0]).To(Equal(float32(1))) // index 0 -> value idx+1 = 1
 			Expect(vecs[1][0]).To(Equal(float32(2)))
@@ -95,14 +96,14 @@ var _ = Describe("Embedding client", func() {
 		It("fails the batch on a duplicated index", func() {
 			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) { writeVectors(w, []int{0, 0}) })
 			defer srv.Close()
-			_, err := newEmbedder(srv.URL).embedBatch(ctx, []string{"a", "b"})
+			_, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a", "b"})
 			Expect(err).To(MatchError(ContainSubstring("duplicate index")))
 		})
 
 		It("fails the batch on a count mismatch", func() {
 			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) { writeVectors(w, []int{0}) })
 			defer srv.Close()
-			_, err := newEmbedder(srv.URL).embedBatch(ctx, []string{"a", "b"})
+			_, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a", "b"})
 			Expect(err).To(MatchError(ContainSubstring("2 inputs")))
 		})
 
@@ -111,12 +112,12 @@ var _ = Describe("Embedding client", func() {
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": "model not loaded"}})
 			})
 			defer srv.Close()
-			_, err := newEmbedder(srv.URL).embedBatch(ctx, []string{"a"})
+			_, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a"})
 			Expect(err).To(MatchError(ContainSubstring("model not loaded")))
 		})
 
 		It("rejects an empty input before sending", func() {
-			_, err := newEmbedder("http://127.0.0.1:1").embedBatch(ctx, []string{"  "})
+			_, err := newEmbedder("http://127.0.0.1:1").embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"  "})
 			Expect(err).To(MatchError(ContainSubstring("empty")))
 		})
 	})

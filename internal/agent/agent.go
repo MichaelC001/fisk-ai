@@ -55,6 +55,8 @@ import (
 	// Link the jetstream session backend in so it registers itself; it binds a
 	// pre-existing NATS JetStream stream over the shared connection.
 	_ "github.com/choria-io/fisk-ai/internal/runstate/jetstream"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
@@ -291,6 +293,21 @@ type Options struct {
 	// hook aborts the run as a *PanicError (SessionEnd apart, which fires once the
 	// outcome is decided). See the Hooks type for the full contract.
 	Hooks Hooks
+
+	// Telemetry, when non-nil, receives the run's OpenTelemetry traces and metrics. A
+	// nil field records nothing, and every method on it is nil-safe, so the run path
+	// wires it up without asking whether telemetry is on and the instrumented and
+	// uninstrumented paths cannot diverge.
+	//
+	// It is deliberately not a pair of OpenTelemetry interfaces. Nothing outside
+	// internal/telemetry knows OpenTelemetry is underneath, so a caller who does not
+	// already run it never imports it; one who does hands their own providers to
+	// telemetry.NewFromProviders and passes the result here.
+	//
+	// The caller owns its lifecycle and must Shutdown it after the run to flush what
+	// was recorded, on a context that is NOT derived from the run's: an interrupt would
+	// otherwise cancel the flush and lose exactly the run worth seeing.
+	Telemetry *telemetry.Provider
 }
 
 // Continuation is the operator's decision at an interactive turn boundary. Continue
@@ -361,6 +378,159 @@ func validateCallerDir(name, dir string) error {
 	return nil
 }
 
+// memoryInfo maps a store's self-description onto the telemetry shape. It is the whole
+// mapping: internal/telemetry imports nothing from this tree, so the memory type never
+// crosses into it and the two fields are carried by hand, once, here.
+func memoryInfo(s memory.Store) telemetry.MemoryInfo {
+	if s == nil {
+		return telemetry.MemoryInfo{}
+	}
+
+	info := s.Info()
+
+	return telemetry.MemoryInfo{Backend: info.Backend, Location: info.Location}
+}
+
+// memoryToolNames is the set of tool names the memory built-ins registered, so a tool
+// span can be told whether the call it covers was served by the memory store.
+//
+// It is derived from the tools that were actually built rather than restated as a name
+// prefix or a list of its own: this is the copy that is not authoritative, so it reads
+// the real one. A memory tool added later is attributed without touching this.
+func memoryToolNames(tools []*functool.Tool) map[string]bool {
+	if len(tools) == 0 {
+		return nil
+	}
+
+	names := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		names[t.Name()] = true
+	}
+
+	return names
+}
+
+// startupErrorClass names the telemetry error class for a failure before the run
+// loop starts. Cancellation and deadlines are told apart by their standard library
+// sentinels; everything else is reported as a configuration failure, because the
+// early returns it covers are overwhelmingly setup rejections: a bad directory
+// option, an unresolvable provider, a tool name collision, a refused resume.
+//
+// It classifies rather than reporting the error itself. error.type is low-cardinality
+// by spec, and these errors embed absolute paths, config values and the config file
+// path, none of which may leave the process on a span headed for a backend.
+func startupErrorClass(err error) telemetry.ErrorClass {
+	class, ok := telemetry.ClassifyContext(err)
+	if ok {
+		return class
+	}
+
+	return telemetry.ClassConfig
+}
+
+// setupFailedReason is the terminal reason for a run that never reached the loop. The
+// run path itself has no such outcome, because from its point of view nothing ran, but
+// a trace with an empty reason reads as a bug in the instrumentation rather than as a
+// refused resume or a bad config. It is the trace an operator goes looking for when a
+// run is rejected in CI.
+const setupFailedReason = "setup_failed"
+
+// runOutcome assembles what the root span records about a finished run.
+//
+// reachedRunner separates a crash during setup from one inside the loop, which
+// res.Reason cannot: a crash deliberately leaves the reason unset, because a crash is
+// not an outcome, so without this every crash would be reported as a setup failure.
+//
+// seed is the counter state a resume restored, nil for a fresh run. Where it is set,
+// the token attributes carry this process's own consumption and the session totals are
+// reported separately, so that summing either one across a session's traces gives an
+// answer that means something.
+func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls int64) telemetry.RunOutcome {
+	out := telemetry.RunOutcome{TerminalReason: string(res.Reason)}
+
+	var panicErr *PanicError
+	out.Crashed = errors.As(err, &panicErr)
+
+	if out.TerminalReason == "" {
+		out.TerminalReason = setupFailedReason
+		if reachedRunner {
+			// The loop was running and did not reach a terminal state, which today means
+			// it crashed; reporting that as a setup failure would send an operator to the
+			// wrong half of the run.
+			out.TerminalReason = string(runstate.ReasonError)
+		}
+	}
+
+	if err != nil {
+		out.Failed = true
+		out.Class = runErrorClass(err, reachedRunner)
+	}
+
+	if res.Stats == nil {
+		return out
+	}
+
+	out.ToolCalls = res.Stats.ToolCalls
+	out.RemoteToolCalls = res.Stats.RemoteToolCalls
+	out.Usage = telemetry.TokenUsage{
+		Input:       res.Stats.InTokens + res.Stats.CacheReadTokens + res.Stats.CacheCreateTokens,
+		Output:      res.Stats.OutTokens,
+		CacheRead:   res.Stats.CacheReadTokens,
+		CacheCreate: res.Stats.CacheCreateTokens,
+		Uncached:    res.Stats.InTokens,
+	}
+
+	if seed == nil {
+		return out
+	}
+
+	// A resume seeds the counters with the session's history, so what is in stats is
+	// cumulative from the first instruction. The cumulative view is reported under its
+	// own keys and the delta becomes this process's usage.
+	session := out.Usage
+	out.SessionUsage = &session
+	out.SessionLLMCalls = res.Stats.LlmCalls
+
+	out.Usage = telemetry.TokenUsage{
+		Input:       session.Input - (seed.Input + seed.CacheRead + seed.CacheCreate),
+		Output:      session.Output - seed.Output,
+		CacheRead:   session.CacheRead - seed.CacheRead,
+		CacheCreate: session.CacheCreate - seed.CacheCreate,
+		Uncached:    session.Uncached - seed.Input,
+	}
+	out.ToolCalls = res.Stats.ToolCalls - seedCalls
+
+	return out
+}
+
+// runErrorClass names the telemetry error class for a run that ended on an error.
+//
+// It stays deliberately coarse. Naming a class needs a domain sentinel to recognize,
+// and the ones that would refine this (a provider failure, a store failure) are raised
+// deep in packages this classification would otherwise have to import. A wrong class is
+// worse than a vague one, so anything not positively identified is the spec's catch-all
+// rather than a guess, and never the error's own text: these errors embed absolute
+// paths and config values, and error.type is low cardinality by spec.
+func runErrorClass(err error, reachedRunner bool) telemetry.ErrorClass {
+	var panicErr *PanicError
+	if errors.As(err, &panicErr) {
+		return telemetry.ClassPanic
+	}
+
+	class, ok := telemetry.ClassifyContext(err)
+	if ok {
+		return class
+	}
+
+	// Everything before the runner exists is setup: a bad directory option, an
+	// unresolvable provider, a tool name collision, a refused resume.
+	if !reachedRunner {
+		return telemetry.ClassConfig
+	}
+
+	return telemetry.ClassOther
+}
+
 // Run loads the tools and prompt from opts.Config, sets up checkpointing and
 // resume as requested, and drives the agentic loop to a terminal state. It emits
 // the run's narration, tool traces and advisories through events and returns a
@@ -380,10 +550,84 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// activeRunner is nil until the runner is constructed; the panic barrier reads it to
 	// report the session the run ended on, which the normal path sets only after the
-	// runner returns.
+	// runner returns, and the root span reads it to tell a crash during setup from one
+	// inside the loop.
 	var activeRunner *runner
 
-	// Panic barrier. Registered first so it runs last (defers are LIFO): the deferred
+	// resumeSeed is the counter state a resume restored, captured the instant it is
+	// applied. The root span reports this process's own consumption, which means
+	// subtracting what was inherited: without that, summing token usage across a
+	// session's traces counts the restored prefix once per resume, so a session resumed
+	// five times reports roughly fifteen times its true input tokens. It is nil for a
+	// fresh run, which is also what suppresses the session-cumulative attributes.
+	var resumeSeed *telemetry.TokenUsage
+	var resumeSeedCalls int64
+
+	// Resolved here rather than where it is first used, because the root span's
+	// operation name turns on it: a one-shot run is a single agent invocation, so its
+	// root is that invocation, while a chat is several invocations of one agent, which
+	// is what a workflow describes, with each turn nested underneath.
+	interactive := opts.NextPrompt != nil
+
+	// The root span is the entire run, which is what makes one run one trace. It starts
+	// as the first statement so it covers every early return, and its Finish is deferred
+	// immediately, before the panic barrier below: defers unwind
+	// last-registered-first, so the barrier runs first and this runs last, seeing the
+	// final named return values including the PanicError the barrier substituted.
+	// The provider rides the context from here so subsystems that hold a ctx but are
+	// not constructed per run can open spans: a2a's client today, the knowledge store
+	// next. Options.Telemetry stays the injection point; this is only how it reaches
+	// them, and it is per call rather than global, so concurrent runs in one process do
+	// not see each other's.
+	ctx = telemetry.ContextWithProvider(ctx, opts.Telemetry)
+
+	ctx, runSpan := opts.Telemetry.StartRun(ctx, telemetry.RunInfo{
+		Identity:    cfg.Identity,
+		Interactive: interactive,
+		Resumed:     opts.Checkpoint.ResumeID != "",
+		Model:       cfg.LLM.Model,
+	})
+	defer func() {
+		runSpan.Finish(runOutcome(res, err, activeRunner != nil, resumeSeed, resumeSeedCalls))
+	}()
+
+	// The startup span covers everything from here to the handoff to the run loop:
+	// loading tools, dialing NATS, opening the stores, importing remote tools, and
+	// resolving or restoring the session. It is a child of the root, which is why the
+	// root's ctx goes in.
+	//
+	// Its context is kept SEPARATE and never assigned to ctx. Setup now opens a child
+	// span of its own (the memory index load), which needs this context, but the run
+	// loop must not: reassigning ctx here would make every span the loop opens a child
+	// of startup instead of the root, nesting the whole run inside a span that ended at
+	// the handoff. That was a real defect once. The loop is handed ctx, the root's, and
+	// anything in setup that wants to nest uses setupCtx.
+	setupCtx, startupSpan := opts.Telemetry.StartStartup(ctx, telemetry.StartupInfo{
+		Identity:    cfg.Identity,
+		RemoteHosts: len(cfg.RemoteTools),
+	})
+
+	// startupDone is set at the handoff, where the span is ended explicitly. Until
+	// then this deferred End is what closes it, and it has to exist: Run has 38 early
+	// returns before the runner is constructed, and they are exactly the slow paths
+	// this span is for (the NATS dial, opening the knowledge index, the remote tool
+	// import). A plain deferred End at the handoff would leak every one of them, and an
+	// unended span is never exported, so those runs would produce no trace at all.
+	//
+	// Registered before the panic barrier below, so it unwinds after it. Fail is a
+	// no-op for a nil err, which is why the named return can be passed unguarded.
+	startupDone := false
+	defer func() {
+		if startupDone {
+			return
+		}
+		startupSpan.Fail(err, startupErrorClass(err))
+		startupSpan.End()
+	}()
+
+	// Panic barrier. Registered after the root and startup spans so it runs before both
+	// of them (defers are LIFO), which is what lets the root's Finish observe the
+	// PanicError this substitutes. Otherwise as before: the deferred
 	// stores, journal and tracer close before it, so it also catches a panic thrown by
 	// one of those cleanups. It converts a panic into a PanicError the caller tells from
 	// a terminal outcome with errors.As (a job system requeues or escalates a crash but
@@ -551,6 +795,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				return res, err
 			}
 		}
+
+		// Asked of the store, not of the config. They agree for every configured
+		// backend and disagree for an injected one, where the config still says "file"
+		// while something else entirely is serving the tools.
+		startupSpan.SetMemory(memoryInfo(memStore))
 
 		memBuiltins = builtin.MemoryTools(cfg, memStore)
 		for _, b := range memBuiltins {
@@ -745,7 +994,16 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		prompt = []string{"assist the user"}
 	}
 
-	stats := &util.RunStats{Start: time.Now(), Model: cfg.LLM.Model}
+	// TraceID is set from the root span so the run's own summary points at the trace it
+	// produced. It is empty when telemetry is off, which is what keeps it off the line.
+	// ContentExported is read off the provider for the same reason and one more: it is a
+	// privacy marker, so it has to report what happened rather than what was asked for.
+	stats := &util.RunStats{
+		Start:           time.Now(),
+		Model:           cfg.LLM.Model,
+		TraceID:         runSpan.TraceID(),
+		ContentExported: opts.Telemetry.CaptureEnabled(),
+	}
 	res.Stats = stats
 
 	// The provider owns the wire call. When the caller injected one on Options it is
@@ -791,6 +1049,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			middlewares = append(middlewares, tracer.Middleware)
 		}
 
+		// Appended last, which puts it innermost: the SDK runs the first element
+		// outermost, so anything after this one would have its work charged to the
+		// attempt duration this records. It annotates the chat span it finds on the
+		// request context and is inert when there is none, so it is installed
+		// unconditionally like every other telemetry call site.
+		middlewares = append(middlewares, telemetry.HTTPMiddleware())
+
 		provider, err = llm.NewProvider(cfg.LLMProvider(), llm.Config{
 			APIKey:      opts.APIKey,
 			BaseURL:     opts.BaseURL,
@@ -808,6 +1073,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// when the resolved provider supports tool search and the operator has not disabled
 	// it, so a backend that cannot honor deferred loading always gets every tool direct.
 	caps := provider.Capabilities()
+
+	// Read off the backend actually in use rather than off the config: an injected
+	// provider never went through the registry, so the config would report what was
+	// asked for while this reports what ran.
+	runSpan.SetProvider(caps.SemconvProviderName())
+
 	toolSearchAllowed := caps.SupportsToolSearch && cfg.ToolSearchEnabled()
 	deferrable := make([]toolkit.Tool, 0, len(tools)+len(remoteTools)+len(customByName))
 	for _, t := range tools {
@@ -848,6 +1119,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		events.Warn(*w)
 	}
 
+	// The first point where every tool source has resolved, which is why this is a
+	// setter on the span rather than an argument to it: the span had to start far
+	// earlier, before the work that can fail on the way here.
+	startupSpan.SetTools(telemetry.ToolCounts{
+		Application: len(tools),
+		Builtin:     len(builtins) + len(memBuiltins) + len(ragBuiltins),
+		Remote:      len(remoteTools),
+		Custom:      len(customByName),
+		Deferred:    toolSearch,
+	})
+
 	messages := []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: strings.Join(prompt, " ")}}}},
 	}
@@ -877,10 +1159,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	thinking := cfg.ThinkingEnabled()
 	maxOutputTokens := resolveMaxOutputTokens(cfg, thinking)
 
-	// checkpointing was resolved above the NATS dial (the session store it gates
-	// depends on that connection); only interactive is decided here.
-	interactive := opts.NextPrompt != nil
+	// The feature switches are constant for the run, so they belong here rather than
+	// repeated on every model call, where they would cost export bandwidth per span and
+	// carry no extra information. toolSearch is what was actually decided, not what the
+	// operator allowed: the provider has to support it and the tool count has to cross
+	// the threshold.
+	runSpan.SetMaxTokens(maxOutputTokens)
+	runSpan.SetFeatures(thinking, cfg.PromptCacheEnabled(), toolSearch)
 
+	// checkpointing was resolved above the NATS dial (the session store it gates
+	// depends on that connection); interactive was resolved at the top, where the root
+	// span needed it.
 	info := RunInfo{
 		Tools:           len(tools),
 		ThinkingEnabled: cfg.ThinkingEnabled(),
@@ -1047,6 +1336,19 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
 			stats.CacheCreateTokens = rs.Counters.CacheCreateTokens
 
+			// Snapshot what was just seeded, immediately, so the root span can report
+			// this process's own consumption rather than the session's. From the next
+			// statement on, stats is cumulative and there is no other way back to the
+			// split. Uncached carries the raw restored InTokens because that is what the
+			// delta above subtracts it from.
+			resumeSeed = &telemetry.TokenUsage{
+				Input:       rs.Counters.InTokens,
+				Output:      rs.Counters.OutTokens,
+				CacheRead:   rs.Counters.CacheReadTokens,
+				CacheCreate: rs.Counters.CacheCreateTokens,
+			}
+			resumeSeedCalls = rs.Counters.ToolCalls
+
 			// Tell the model it resumed so it re-verifies external state before
 			// acting on possibly-stale results. Appended after the fingerprint was
 			// computed so it never perturbs the fingerprint comparison, and it is
@@ -1109,6 +1411,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	res.SessionID = sessionID
 
+	// The session id the run STARTS on, recorded as soon as it resolves and before any
+	// turn, which is also the right moment for an attribute a sampler might read. A
+	// context reset can rotate it mid-run; that is reported separately rather than by
+	// overwriting this, so every turn stays attributed to the session that journaled it.
+	// It is empty for a run that is not checkpointed, and the spec forbids inventing
+	// one, so an un-checkpointed chat correlates by trace id alone.
+	runSpan.SetConversation(sessionID)
+
 	// The memory index lists the stored memories for the model. It is appended after
 	// the fingerprint was computed so that memory changing between a suspend and a
 	// resume never blocks the resume: memory is data, not configuration, and the
@@ -1116,7 +1426,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// snapshot; memory_list is the live view during the run. A read failure is an
 	// advisory, not fatal, since the tools still reach the store.
 	if cfg.MemoryIndexEnabled() {
-		entries, lerr := memStore.List(ctx)
+		// Spanned because List reads every value to recover its description, which on a
+		// network backend is a round trip per entry, and it happens here inside setup
+		// with nothing else naming it. setupCtx, not ctx: this nests under startup.
+		indexCtx, memSpan := opts.Telemetry.StartMemoryIndex(setupCtx, memoryInfo(memStore))
+		entries, lerr := memStore.List(indexCtx)
+		memSpan.Finish(lerr, len(entries))
+
 		if lerr != nil {
 			events.Warn(Warning{Kind: WarnMemoryIndex, Err: lerr})
 		} else {
@@ -1172,6 +1488,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		nextPrompt:      opts.NextPrompt,
 		sessionID:       sessionID,
 		newSession:      newSession,
+		telemetry:       opts.Telemetry,
+		providerName:    caps.SemconvProviderName(),
+		sessionBackend:  cfg.SessionBackend(),
+		identity:        cfg.Identity,
+		memoryTools:     memoryToolNames(memBuiltins),
+		memory:          memoryInfo(memStore),
 
 		resumeAtInputBoundary: resumeAtInputBoundary,
 	}
@@ -1179,6 +1501,18 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	if checkpointing {
 		r.suspendRequested = opts.SuspendRequested
 	}
+
+	// The system prompt, when content capture is on. It has to be recorded here and
+	// not beside the other startup setters: it is not final where it looks final, since
+	// a resumed run appends its reminder and a memory-enabled run appends the memory
+	// index long after the tool inventory resolves, and a prompt captured early is
+	// short, plausible and missing exactly those pieces.
+	startupSpan.SetSystemInstructions(genai.SystemInstructions(system))
+
+	// Setup is over: close the startup span here rather than letting the deferred End
+	// above run at function exit, which would charge the whole run loop to startup.
+	startupDone = true
+	startupSpan.End()
 
 	reason, err := r.run(ctx)
 	res.Reason = reason
@@ -1188,6 +1522,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	stats.Session = r.sessionID
 	if reason == runstate.ReasonSuspended {
 		stats.Suspended = true
+	}
+
+	// Only when a rotation actually moved it. Recording an end id equal to the start id
+	// on every run would make the attribute meaningless as a search key, and the event
+	// would claim a transition that never happened.
+	if r.sessionID != sessionID {
+		runSpan.SetSessionRotated(r.sessionID)
 	}
 
 	return res, err

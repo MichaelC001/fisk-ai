@@ -59,6 +59,9 @@ func ResponseToNeutral(msg *sdk.Message) (llm.Response, error) {
 	}
 
 	return llm.Response{
+		ID: msg.ID,
+		// The resolved snapshot the API answered with, not the alias the request named.
+		Model:      string(msg.Model),
 		Content:    content.Content,
 		StopReason: stopReasonToNeutral(msg.StopReason),
 		Usage: llm.Usage{

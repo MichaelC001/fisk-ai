@@ -169,6 +169,17 @@ func (s *fileStore) Delete(_ context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// Info reports the backend and, deliberately, no location.
+//
+// This store's container is its directory, an absolute local filesystem path, and Info
+// is exported on a telemetry span. A path there is high cardinality and describes the
+// operator's machine rather than the run, which is the same reason the knowledge store's
+// data source id must not fall back to its database path. Nothing is lost: the directory
+// is in the config and in fisk info, where it is not leaving the process.
+func (s *fileStore) Info() memory.Info {
+	return memory.Info{Backend: memory.BackendFile}
+}
+
 func (s *fileStore) List(_ context.Context) ([]memory.Item, error) {
 	names, err := s.keyFiles()
 	if err != nil {

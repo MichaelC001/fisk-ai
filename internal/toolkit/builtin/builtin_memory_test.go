@@ -32,6 +32,8 @@ type fakeValue struct {
 
 func newFakeStore() *fakeStore { return &fakeStore{values: map[string]fakeValue{}} }
 
+func (f *fakeStore) Info() memory.Info { return memory.Info{Backend: "fake"} }
+
 func (f *fakeStore) List(context.Context) ([]memory.Item, error) {
 	if f.forceListErr != nil {
 		return nil, f.forceListErr

@@ -638,6 +638,42 @@ var _ = Describe("Command execution", func() {
 		Expect(result.Output).To(Equal("MY_EMBED_KEY=[]\nMY_OTHER_VAR=[keep-me]\n"))
 	})
 
+	// The OpenTelemetry export credentials are stripped whether or not this agent
+	// enables telemetry, so telemetry off is the case worth pinning: gating the scrub
+	// on the config would mean --no-telemetry re-exposes the operator's collector token
+	// to every tool subprocess, which is the opposite of what they reached for it to
+	// do. This drives the whole path, config through tool to subprocess environment,
+	// rather than restating the list config's own specs already assert.
+	It("Should strip the OpenTelemetry export credentials with telemetry off", func() {
+		cfg := &config.Config{Telemetry: config.TelemetryConfig{Enabled: false}}
+
+		names := []string{
+			"OTEL_EXPORTER_OTLP_HEADERS",
+			"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+			"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+			"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+			"OTEL_EXPORTER_OTLP_CLIENT_KEY",
+			"OTEL_EXPORTER_OTLP_CERTIFICATE",
+			"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+		}
+
+		script := "#!/bin/sh\n"
+		want := ""
+		for _, name := range names {
+			Expect(cfg.CredentialEnvNames()).To(ContainElement(name))
+			GinkgoT().Setenv(name, "super-secret")
+			script += "printf '" + name + "=[%s]\\n' \"$" + name + "\"\n"
+			want += name + "=[]\n"
+		}
+
+		tool := doTool(writeExecutable(script))
+		tool.SensitiveEnvVars = cfg.CredentialEnvNames()
+
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Output).To(Equal(want))
+	})
+
 	It("Should preserve non-credential environment variables", func() {
 		GinkgoT().Setenv("ANTHROPIC_BASE_URL", "https://example.test")
 		tool := doTool(writeExecutable("#!/bin/sh\nprintf 'URL=[%s]\\n' \"$ANTHROPIC_BASE_URL\"\n"))

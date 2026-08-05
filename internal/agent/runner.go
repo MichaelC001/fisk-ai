@@ -9,12 +9,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
@@ -93,9 +97,57 @@ type runner struct {
 	// numbering rather than restarting it), keeping AssistantRecord.Iteration and the
 	// trace iteration unique per turn.
 	iter int64
+	// turn is the one-based index of the current interactive turn. It is separate from
+	// iter, which counts model calls and continues across turns; a turn is the unit an
+	// operator recognizes and one turn spans many iterations.
+	turn int64
+	// telemetry records the run's spans and metrics. Nil records nothing and every
+	// method on it is nil-safe, so the loop calls it without asking whether it is on.
+	telemetry *telemetry.Provider
+	// providerName is the gen_ai.provider.name value for the backend in use, read from
+	// its capabilities rather than from the config so an injected provider reports what
+	// actually ran rather than what was configured.
+	providerName string
+	// sessionBackend names the session store backend, for the journal append metric. It
+	// is resolved once at construction like providerName and identity below, rather than
+	// read through cfg on every append.
+	sessionBackend string
+	// identity is the agent identity, held here rather than reached for through cfg so
+	// the telemetry paths do not depend on the whole config object being present.
+	identity string
+	// contentFrom is the conversation index the next model call's captured input starts
+	// at: everything from here on is what this call adds to what the previous one
+	// already carried. It is maintained whether or not content capture is on, which is
+	// the one place this design pays for keeping enable/disable branches out of the
+	// loop, and it is cheap: one int, assigned where the conversation changes.
+	//
+	// It exists because the alternative is quadratic. gen_ai.input.messages is the
+	// whole conversation, so capturing it per call re-exports a growing transcript on
+	// every iteration, and a thirty-iteration run ships thirty copies.
+	//
+	// Every site that REPLACES the conversation must reset it, and the reset belongs
+	// with the assignment rather than near the decision that led to it: resetContext is
+	// only reached when the run is not checkpointed, a bare /clear on a checkpointed run
+	// clears nothing until the next real prompt arrives, and a rotation that fails
+	// leaves the original conversation in place. The builder clamps as well, so a
+	// mutation site added later degrades to an empty delta rather than slicing out of
+	// range and taking the run down through the panic barrier.
+	contentFrom int
+	// memoryTools names the built-in memory tools, and memory describes the store they
+	// are bound to, so a tool span can say which backend served it. Both are handed in
+	// by the setup that built them: the alternative, a name prefix or a list in here,
+	// would be a second copy of the memory tool list, and a memory tool added later
+	// would leave this file and builtin.MemoryTools each internally consistent while
+	// the new tool silently lost its attribution. Empty when memory is off, which
+	// leaves the attributes absent rather than blank.
+	memoryTools map[string]bool
+	memory      telemetry.MemoryInfo
 	// pending is an in-flight tool batch restored on resume: its unanswered tools
 	// are run before the loop proceeds.
 	pending *runstate.PendingTurn
+	// completingPending is true while that restored batch is running, so those tool
+	// spans can be marked as belonging to a resume.
+	completingPending bool
 	// suspendRequested reports that a graceful suspend was asked for; it is polled
 	// at the loop boundary, never mid-tool. Nil when suspension is not wired.
 	suspendRequested func() bool
@@ -128,18 +180,177 @@ type runner struct {
 
 // emit appends a record to the journal, advancing the seq. It is a no-op when
 // snapshotting is disabled.
+//
+// It times the append and records the duration metric. That is measured from out here
+// rather than inside the store because it needs no interface change to be correct:
+// runstate.Journal takes no context, and threading one through Store, Journal and both
+// backends to open a span per append would buy a hundred near-identical spans per run
+// for something that is a local write on the default backend. The metric answers the
+// question those spans were wanted for. See telemetry.MetricSessionAppendDuration.
 func (r *runner) emit(rec runstate.Record) error {
 	if r.journal == nil {
 		return nil
 	}
 
 	r.seq++
+
+	start := time.Now()
 	err := r.journal.Append(r.seq, rec)
+	r.recordAppend(start, err)
+
 	if err != nil {
 		return fmt.Errorf("journaling run: %w", err)
 	}
 
 	return nil
+}
+
+// recordAppend reports one append's duration, classifying a failure as a store error
+// unless the context cases claim it first.
+//
+// ClassifyContext runs before ClassStore for the same reason the memory index span does
+// it (section 6.2): an interrupt landing during a network-backed append would otherwise
+// be reported as a broken session store, sending an operator to look at JetStream when
+// what happened is that someone pressed Ctrl-C.
+//
+// The context is a background one because no context reaches emit: one of its call sites
+// is appendUserPrompt, which has none, and threading one there for this would cascade
+// through callers that have no other use for it. Nothing on this instrument is derived
+// from a context; the cost is that a metric exemplar cannot link back to the active span,
+// which this build does not enable exemplars for anyway.
+func (r *runner) recordAppend(start time.Time, err error) {
+	var class telemetry.ErrorClass
+
+	if err != nil {
+		var ok bool
+		class, ok = telemetry.ClassifyContext(err)
+		if !ok {
+			class = telemetry.ClassStore
+		}
+	}
+
+	r.telemetry.RecordSessionAppend(context.Background(), r.sessionBackend, time.Since(start), class)
+}
+
+// runTurn drives one turn and records it.
+//
+// It wraps every call into the loop, including a one-shot run's only one, because the
+// turn is the unit the agent metrics are keyed on and a one-shot run is a single turn.
+// The SPAN is interactive-only: a one-shot run's root already is the agent invocation,
+// so a turn span there would nest an identically named span exactly inside it, which
+// reads in a flame graph as a defect rather than as structure.
+//
+// The usage delta is taken around the call rather than read from the loop, because
+// stats accumulates across the whole run (and, on a resume, across the whole session)
+// and only the difference belongs to this turn.
+func (r *runner) runTurn(ctx context.Context) (runstate.TerminalReason, error) {
+	r.turn++
+	started := time.Now()
+	beforeUsage := runStatsUsage(r.stats)
+	beforeCalls, beforeTools := r.stats.LlmCalls, r.stats.ToolCalls
+
+	turnCtx := ctx
+	var span *telemetry.TurnSpan
+	if r.interactive {
+		turnCtx, span = r.telemetry.StartTurn(ctx, telemetry.TurnInfo{
+			Identity: r.identity,
+			// The session current now, which a context reset may have rotated away from
+			// the one the run started on. Attributing this turn to the earlier session
+			// would name a journal that does not hold it.
+			ConversationID: r.sessionID,
+			Index:          r.turn,
+		})
+	}
+
+	reason, err := r.loop(turnCtx)
+
+	if span != nil {
+		outcome := telemetry.TurnOutcome{
+			TerminalReason: string(reason),
+			Usage:          runStatsUsage(r.stats).Sub(beforeUsage),
+		}
+		if err != nil {
+			outcome.Failed = true
+			outcome.Class = runErrorClass(err, true)
+		}
+		span.Finish(outcome)
+	}
+
+	// Recorded in both modes, so the series means one thing: a one-shot run is a single
+	// turn. Recording it at the root for one-shot runs and here for chats would mix "one
+	// turn" with "a whole session including operator think time", and a p95 over that
+	// mixture answers no question anyone has.
+	//
+	// The counts are deltas taken around this turn, never the running totals: a resume
+	// seeds those with the whole session's history, so the first turn after a resume
+	// would otherwise report every call the session has ever made.
+	r.telemetry.RecordTurn(ctx, telemetry.TurnMetrics{
+		AgentName:      r.identity,
+		TerminalReason: string(reason),
+		Interactive:    r.interactive,
+		Duration:       time.Since(started),
+		InferenceCalls: r.stats.LlmCalls - beforeCalls,
+		ToolCalls:      r.stats.ToolCalls - beforeTools,
+	})
+
+	return reason, err
+}
+
+// chatOutcome describes a finished model call for its span.
+//
+// A reply the loop treats as a failure is reported as one even though the call itself
+// succeeded: a turn truncated at the output cap is an incomplete answer and a refusal
+// is a non-answer, and both end the run. A span that showed those as successful calls
+// would disagree with the run's own outcome.
+func chatOutcome(resp *llm.Response, err error) telemetry.ChatOutcome {
+	if err != nil {
+		out := telemetry.ChatOutcome{Failed: true, Class: telemetry.ClassProvider}
+		class, ok := telemetry.ClassifyContext(err)
+		if ok {
+			out.Class = class
+		}
+		return out
+	}
+
+	if resp == nil {
+		return telemetry.ChatOutcome{}
+	}
+
+	out := telemetry.ChatOutcome{
+		ResponseID:    resp.ID,
+		ResponseModel: resp.Model,
+		FinishReason:  string(resp.StopReason),
+		Usage: telemetry.TokenUsage{
+			Input:       resp.Usage.In + resp.Usage.CacheRead + resp.Usage.CacheCreate,
+			Output:      resp.Usage.Out,
+			CacheRead:   resp.Usage.CacheRead,
+			CacheCreate: resp.Usage.CacheCreate,
+			Uncached:    resp.Usage.In,
+		},
+		Output: genai.OutputMessages(resp.Content, string(resp.StopReason)),
+	}
+
+	switch resp.StopReason {
+	case llm.StopMaxTokens:
+		out.Failed, out.Class = true, telemetry.ClassTruncated
+	case llm.StopRefusal:
+		out.Failed, out.Class = true, telemetry.ClassRefusal
+	}
+
+	return out
+}
+
+// runStatsUsage reads the run's running token totals in the shape telemetry reports.
+// Input carries the cached tiers as the semantic conventions require, while Uncached
+// keeps the raw remainder that the run summary line prints.
+func runStatsUsage(stats *util.RunStats) telemetry.TokenUsage {
+	return telemetry.TokenUsage{
+		Input:       stats.InTokens + stats.CacheReadTokens + stats.CacheCreateTokens,
+		Output:      stats.OutTokens,
+		CacheRead:   stats.CacheReadTokens,
+		CacheCreate: stats.CacheCreateTokens,
+		Uncached:    stats.InTokens,
+	}
 }
 
 // run executes the agentic loop to a terminal state, returning the reason it
@@ -164,7 +375,7 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	if r.resumeAtInputBoundary {
 		reason = runstate.ReasonCompleted
 	} else {
-		reason, err = r.loop(ctx)
+		reason, err = r.runTurn(ctx)
 	}
 
 	// Interactive continuation: after a turn the operator can act on, hand back for a
@@ -294,7 +505,7 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 		}
 
 		r.maxIter += r.cfg.LLM.Budget.MaxIterations
-		reason, err = r.loop(ctx)
+		reason, err = r.runTurn(ctx)
 	}
 
 	if r.journal != nil {
@@ -337,6 +548,15 @@ func (r *runner) appendUserPrompt(text string) {
 	n := len(r.messages)
 	if n > 0 && r.messages[n-1].Role == llm.RoleUser {
 		r.messages[n-1].Content = append(r.messages[n-1].Content, block)
+
+		// The fold changed a message the previous model call already carried, so the
+		// next capture has to reach back far enough to include it. It clamps rather
+		// than subtracting one: this folds into any trailing user message, and a
+		// tool-results batch is one, so on the max-iterations path the mutated message
+		// is not the one immediately before the baseline and stepping back by one
+		// re-exports a message that already went out.
+		r.contentFrom = min(r.contentFrom, n-1)
+
 		return
 	}
 
@@ -352,6 +572,7 @@ func (r *runner) appendUserPrompt(text string) {
 // session's meta never carries an empty prompt.
 func (r *runner) resetContext() {
 	r.messages = nil
+	r.contentFrom = 0
 	r.maxIter = r.iter
 }
 
@@ -387,6 +608,7 @@ func (r *runner) rotateSession(prompt string) error {
 	r.iter = 0
 	r.maxIter = 0
 	r.messages = []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: prompt}}}}}
+	r.contentFrom = 0
 
 	r.events.SessionRotated(prevID)
 
@@ -449,7 +671,33 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			return runstate.ReasonError, fmt.Errorf("PreModelCall hook: %w", preErr)
 		}
 
-		resp, err := r.provider.Call(util.WithTraceIteration(ctx, int(i)), req)
+		chatInfo := telemetry.ChatInfo{
+			Model:          req.Model,
+			Provider:       r.providerName,
+			ConversationID: r.sessionID,
+			MaxTokens:      req.MaxOutputTokens,
+			Iteration:      i,
+			Messages:       len(r.messages),
+			Tools:          len(r.toolDefs),
+			// Built unconditionally and serialized only if capture is on, which is what
+			// keeps this call site free of a branch on whether telemetry is configured.
+			// The builder closes over the live conversation and is invoked before this
+			// function returns, so the slice it reads is the one that was sent.
+			Input: genai.InputMessages(r.messages, r.contentFrom),
+		}
+		callCtx, chatSpan := r.telemetry.StartChat(ctx, chatInfo)
+
+		// Everything this call carried has now been accounted for, so the next one
+		// starts from here: what it adds is the assistant turn appended below and any
+		// tool results that answer it. Advanced before the call rather than after, so a
+		// call that fails does not leave the baseline behind and re-export the whole
+		// conversation on the retry.
+		r.contentFrom = len(r.messages)
+
+		resp, err := r.provider.Call(util.WithTraceIteration(callCtx, int(i)), req)
+		// Finished on both paths, from one place, so the span cannot be left open by an
+		// early return; the span covers the call alone, not the journaling below it.
+		chatSpan.Finish(ctx, chatInfo, chatOutcome(resp, err))
 		if err != nil {
 			return runstate.ReasonError, fmt.Errorf("llm call: %w", err)
 		}
@@ -569,6 +817,13 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 func (r *runner) completePending(ctx context.Context) error {
 	p := r.pending
 
+	// These tools run before the iteration loop, so their spans have no model call
+	// above them in this trace: the call that asked for them lives in the previous
+	// run's. The flag marks them so that shape reads as a resume rather than as tools
+	// running unprompted.
+	r.completingPending = true
+	defer func() { r.completingPending = false }()
+
 	results := make([]llm.ContentBlock, 0, len(p.Assistant.Content))
 	for i := range p.Results {
 		res := p.Results[i]
@@ -613,8 +868,58 @@ func (r *runner) completePending(ctx context.Context) error {
 // replace the output. The second return reports whether the call was dispatched to a
 // remote agent, for the journal and stats; the third is non-nil only when a hook aborted
 // the run, which the caller surfaces on the ReasonError path.
-func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.ToolResultBlock, bool, error) {
+// The returns are named so the deferred span finish can read what the model was
+// actually told, from one place rather than from each of the eight ways this ends.
+func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result llm.ToolResultBlock, remote bool, herr error) {
 	tool, ok := r.tools[use.Name]
+
+	// The span covers every way this can end, and there are eight of them, so it is
+	// ended from one defer rather than at each return. outcome is filled in as the call
+	// resolves; the zero Outcome would be a bug, so it starts at the one that applies
+	// before anything else has run.
+	toolName := ""
+	if ok {
+		toolName = use.Name
+	}
+	ctx, toolSpan := r.telemetry.StartTool(ctx, telemetry.ToolInfo{
+		Name: toolName,
+		// Only recorded when the name resolved to nothing, and only ever as a span
+		// attribute: it is unvalidated model output.
+		RequestedName: use.Name,
+		CallID:        use.ID,
+		Identity:      r.identity,
+		Kind:          toolkit.KindUnknown.String(),
+		ConfirmGated:  ok && confirmGated(tool, r.confirmTags),
+		Datastore:     isKnowledgeTool(use.Name),
+		Resumed:       r.completingPending,
+	})
+	outcome := telemetry.ToolOutcome{
+		Outcome:   telemetry.ToolOutcomeUnknownTool,
+		ArgKeys:   argumentKeys(use.Input),
+		Arguments: genai.ToolArguments(use.Input),
+	}
+	defer func() {
+		// What the model was told, whatever produced it. The four paths that answer a
+		// call which never ran (an unknown tool, a policy denial, a missing argument,
+		// an operator's refusal) all return something the model then acts on, so all
+		// four are recorded: a trace showing the call and not the answer describes half
+		// of what happened. fisk.tool.outcome on the same span says which it was.
+		if result.Content != "" {
+			outcome.Result = genai.ToolResult(result.Content)
+		}
+
+		// Which store served the call, resolved here rather than at any of the eight
+		// returns because outcome.Name is the effective tool by the time this runs: a
+		// hook that rewrote a memory call to something else is attributed to what
+		// actually ran, and so is the reverse. An unknown tool has no name and so
+		// matches nothing.
+		if r.memoryTools[outcome.Name] {
+			outcome.Memory = r.memory
+		}
+
+		toolSpan.Finish(ctx, outcome)
+	}()
+
 	if !ok {
 		// An unknown tool never resolves to a kind or a PreToolUse snapshot, so it is
 		// counted under KindUnknown and answered with an error result before any hook,
@@ -625,12 +930,15 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("unknown tool %q", use.Name), IsError: true}, false, nil
 	}
 
+	outcome.Name = use.Name
+
 	// The tool describes its own call and evaluates its confirm gate up front, before any
 	// hook or mutation, so PreToolUse observes the call the model actually asked for and a
 	// later rewrite can be gated on the union with this original gate. Describe must not
 	// run the tool or mutate state, so calling it here is safe.
 	origInfo := describeCall(tool, use.Input)
 	origGated := confirmGated(tool, r.confirmTags)
+	outcome.Kind = origInfo.Kind.String()
 
 	// PreToolUse sees a copy of the model's raw arguments so a hook cannot mutate the
 	// run's own buffer through the snapshot. A returned error aborts the run.
@@ -651,6 +959,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 	// original tool's kind since nothing ran and no rewrite was resolved. A rewrite is
 	// ignored when Deny.
 	if pre.Deny {
+		outcome.Outcome = telemetry.ToolOutcomePolicyDenied
 		r.stats.ToolCalls++
 		r.stats.CountToolKind(origInfo.Kind)
 		reason := pre.DenyReason
@@ -696,6 +1005,17 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 	r.stats.ToolCalls++
 	r.stats.CountToolKind(effInfo.Kind)
 
+	// From here the effective call is what runs, so the span reports it rather than what
+	// the model originally asked for. The name is still registry-validated: a rewrite
+	// can only target a registered tool.
+	outcome.Name = effName
+	outcome.Kind = effInfo.Kind.String()
+	outcome.Rewritten = pre.RewriteTool != "" || pre.RewriteInput != nil
+	if outcome.Rewritten {
+		outcome.ArgKeys = argumentKeys(effInput)
+		outcome.Arguments = genai.ToolArguments(effInput)
+	}
+
 	// fisk does not enforce a command's required flags or arguments: a missing one is
 	// silently dropped, so the command runs incomplete and fails only on its own non-zero
 	// exit. When the model omits a required parameter, reject the call before it runs and
@@ -707,6 +1027,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 	if v, ok := effTool.(toolkit.ArgumentValidator); ok {
 		missing := v.MissingRequired(effInput)
 		if len(missing) > 0 {
+			outcome.Outcome = telemetry.ToolOutcomeMissingArguments
 			r.events.Warn(Warning{Kind: WarnMissingRequired, Name: effName, Params: missing})
 			return llm.ToolResultBlock{ToolUseID: use.ID, Content: v.MissingRequiredMessage(missing), IsError: true}, false, nil
 		}
@@ -720,8 +1041,17 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 	// no trace or result.
 	effGated := confirmGated(effTool, r.confirmTags)
 	if origGated || effGated {
+		// The wait is human time, so it is recorded as a duration and an event pair
+		// rather than a child span: a span would dominate every duration chart and make
+		// a four-minute tool call look like a four-minute tool.
+		toolSpan.ConfirmRequested()
+		askedAt := time.Now()
 		allowed, reason := r.approveEffective(ctx, tool, effTool, effName, effInput, effInfo)
+		outcome.ConfirmWait = time.Since(askedAt)
+		toolSpan.ConfirmAnswered()
+
 		if !allowed {
+			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
 			return util.ConfirmDeniedResult(use.ID, reason), false, nil
 		}
 	}
@@ -733,8 +1063,18 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 	if remote {
 		r.stats.RemoteToolCalls++
 	}
+	outcome.Remote = remote
+	outcome.RemoteAgent = effInfo.Agent
 
-	result := toolkit.ExecuteUse(effTool, ctx, effUse, deps)
+	result, exec := toolkit.ExecuteUse(effTool, ctx, effUse, deps)
+
+	// Recorded before the hooks below, and deliberately not disturbed by them: a
+	// PostToolUse Replace changes what the model sees, while this describes what
+	// actually ran. exec is nil for every tool that ran no command, which leaves the
+	// attribute absent rather than reporting a zero exit for a command that never was.
+	if exec != nil {
+		outcome.ExitCode = &exec.ExitCode
+	}
 
 	// PostToolUse observes the result before it is traced and journaled and may replace
 	// what the model sees. Info.Output is the tool's own output; a Replace substitutes
@@ -755,8 +1095,50 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (llm.Too
 		result = llm.ToolResultBlock{ToolUseID: use.ID, Content: post.Output, IsError: post.IsError}
 	}
 
+	// The call ran, so the outcome is decided by what it returned. A non-zero command
+	// exit is deliberately NOT an error here: it round-trips as an ordinary result
+	// envelope, so flagging it would mark every routine "grep found nothing" as a
+	// failure and make the error rate useless.
+	outcome.Outcome = telemetry.ToolOutcomeExecuted
+	if result.IsError {
+		outcome.Outcome = telemetry.ToolOutcomeError
+		outcome.Failed = true
+	}
+
 	r.events.ToolResult(toolResultTrace(effInfo.Present, effInfo.Kind, result))
 	return result, remote, nil
+}
+
+// argumentKeys returns the top-level key names of a tool call's arguments, never their
+// values. It is the no-content middle tier: it turns "it called stream_edit" into
+// "with stream, max_age, retention", which is usually the question, without opting into
+// content capture. Arguments that are not a JSON object yield nothing.
+func argumentKeys(input json.RawMessage) []string {
+	if len(input) == 0 {
+		return nil
+	}
+
+	var fields map[string]json.RawMessage
+	err := json.Unmarshal(input, &fields)
+	if err != nil {
+		return nil
+	}
+
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	return keys
+}
+
+// isKnowledgeTool reports whether a tool name is one of the read-only knowledge tools,
+// which the conventions type as a datastore rather than a function. Everything else
+// here is a function, a remote agent's tool included: that is client-side from the
+// model's point of view.
+func isKnowledgeTool(name string) bool {
+	return name == config.KnowledgeSearchToolName || name == config.KnowledgeEnumerateToolName
 }
 
 // confirmGated reports whether a tool is confirm-gated for the run's tags: it opts into

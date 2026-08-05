@@ -91,7 +91,11 @@ func NewProvider(opts Options) *Provider {
 // tool search; the output-token ceiling is left unset because the SDK enforces it
 // per model and the request already carries the caller's chosen cap.
 func (p *Provider) Capabilities() llm.Caps {
-	return llm.Caps{Provider: ProviderName, SupportsToolSearch: true}
+	return llm.Caps{
+		Provider:           ProviderName,
+		SemconvProvider:    SemconvProviderName,
+		SupportsToolSearch: true,
+	}
 }
 
 // Call issues one Anthropic request under the provider's per-call timeout and

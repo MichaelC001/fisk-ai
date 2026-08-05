@@ -247,7 +247,7 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 	defer c.WriteTo(os.Stdout)
 
 	if res.Degraded {
-		c.Print(rag.DegradedTierLine(res.DegradeReason))
+		c.Print(rag.DegradedTierLine(res.DegradeKind, res.DegradeReason))
 	} else if err := printTierLine(ctx, c, store); err != nil {
 		return err
 	}

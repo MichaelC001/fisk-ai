@@ -13,6 +13,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 const (
@@ -79,14 +81,37 @@ type Hit struct {
 	Content     string
 }
 
+// DegradeKind classifies why a hybrid query fell back to the lexical tier. It exists
+// because "the embeddings server was unreachable" is not true of every fallback: the
+// pinned index metadata is read on the same path and fails the same way, and the two
+// have unrelated fixes. It is derived from which step failed rather than from the
+// error's text, so nothing an error message carries takes part in the decision.
+type DegradeKind string
+
+const (
+	// DegradeNone means the query did not degrade.
+	DegradeNone DegradeKind = ""
+	// DegradeEmbeddings means the embeddings server failed to answer usefully.
+	DegradeEmbeddings DegradeKind = "embeddings"
+	// DegradeTimeout means an embeddings request ran out of time.
+	DegradeTimeout DegradeKind = "timeout"
+	// DegradeCanceled means the query's context was canceled while embedding.
+	DegradeCanceled DegradeKind = "canceled"
+	// DegradeIndexMeta means the index's own pinned metadata could not be read, which is
+	// this store failing rather than the embeddings server.
+	DegradeIndexMeta DegradeKind = "index_meta"
+)
+
 // SearchResult carries the ranked hits plus the status and degradation the caller
 // surfaces so a silent lexical fallback is never mistaken for "vectors did not
 // help". Degraded is true when the vector tier was configured but this query fell
-// back to lexical because the embeddings server could not be reached.
+// back to lexical; DegradeKind says which failure caused it and DegradeReason carries
+// the underlying text for a local surface to print.
 type SearchResult struct {
 	Hits          []Hit
 	Status        SearchStatus
 	Degraded      bool
+	DegradeKind   DegradeKind
 	DegradeReason string
 }
 
@@ -101,16 +126,37 @@ type result struct {
 // result's Status rather than as errors. A transient embeddings outage degrades to
 // lexical with Degraded set; a genuine index/config mismatch (dimension) or a DB
 // error is returned as an error.
-func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (*SearchResult, error) {
+// The span it opens covers every one of the nine ways this returns, through a deferred
+// Finish over the named returns. That is safe here only because every failing path
+// returns a nil result explicitly: the deferred read then sees nil and reports a
+// failure, where reading a partially assembled local would report the status the result
+// was initialized with. The two values the result does not carry, the corpus size and
+// the tier that actually ran, are held in locals filled in as they are learned, so a
+// return before either is known reports neither rather than reporting a default.
+//
+// It reassigns ctx, which is what makes the embeddings request a child of this span.
+func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (res *SearchResult, err error) {
+	topK := s.effectiveTopK(requestedTopK)
+
+	ctx, span := telemetry.ProviderFromContext(ctx).StartSearch(ctx, telemetry.SearchInfo{
+		Hybrid: s.emb != nil,
+		TopK:   topK,
+	})
+
+	var indexedChunks *int
+	var effectiveTier string
+	defer func() { span.Finish(ctx, searchOutcome(res, err, indexedChunks, effectiveTier)) }()
+
 	if s.db == nil {
 		return &SearchResult{Status: StatusIndexNotBuilt}, nil
 	}
 
 	var chunkCount int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM chunks`).Scan(&chunkCount)
+	err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM chunks`).Scan(&chunkCount)
 	if err != nil {
 		return nil, fmt.Errorf("counting chunks: %w", err)
 	}
+	indexedChunks = &chunkCount
 	if chunkCount == 0 {
 		return &SearchResult{Status: StatusIndexEmpty}, nil
 	}
@@ -120,18 +166,17 @@ func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (*S
 		return &SearchResult{Status: StatusIndexEmpty}, nil
 	}
 
-	topK := s.effectiveTopK(requestedTopK)
-
 	lex, err := s.ftsSearch(ctx, match, searchFanout)
 	if err != nil {
 		return nil, err
 	}
+	effectiveTier = telemetry.TierLexical
 
-	res := &SearchResult{Status: StatusOK}
+	res = &SearchResult{Status: StatusOK}
 	fused := lex
 
 	if s.emb != nil {
-		qv, derr := s.embedQueryVector(ctx, query)
+		qv, kind, derr := s.embedQueryVector(ctx, query)
 		switch {
 		case errors.Is(derr, ErrDimensionMismatch):
 			return nil, derr
@@ -139,6 +184,7 @@ func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (*S
 			// A transient outage degrades to lexical rather than failing the query,
 			// but the reason is surfaced so a persistent outage is visible.
 			res.Degraded = true
+			res.DegradeKind = kind
 			res.DegradeReason = derr.Error()
 		default:
 			vec, verr := s.vecSearch(ctx, qv, searchFanout)
@@ -146,6 +192,7 @@ func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (*S
 				return nil, verr
 			}
 			fused = rrf([][]result{lex, vec})
+			effectiveTier = telemetry.TierHybrid
 		}
 	}
 
@@ -156,6 +203,69 @@ func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (*S
 	res.Hits = hits
 
 	return res, nil
+}
+
+// searchOutcome builds the span outcome from what the search returned.
+//
+// A nil result is a failure whatever err says, because every failing return abandons it.
+func searchOutcome(res *SearchResult, err error, indexedChunks *int, effectiveTier string) telemetry.SearchOutcome {
+	if res == nil {
+		return telemetry.SearchOutcome{
+			IndexedChunks: indexedChunks,
+			EffectiveTier: effectiveTier,
+			Class:         searchErrorClass(err),
+			Failed:        true,
+		}
+	}
+
+	out := telemetry.SearchOutcome{
+		Status:        string(res.Status),
+		EffectiveTier: effectiveTier,
+		Sections:      len(res.Hits),
+		IndexedChunks: indexedChunks,
+		Degraded:      res.Degraded,
+	}
+	if res.Degraded {
+		out.Degrade = degradeReason(res.DegradeKind)
+	}
+
+	return out
+}
+
+// searchErrorClass names the class for a failed search. The context cases come first:
+// a canceled run reaches this through the same database calls a broken index does, and
+// reporting a Ctrl-C as a store failure would be wrong on the most common one.
+func searchErrorClass(err error) telemetry.ErrorClass {
+	class, ok := telemetry.ClassifyContext(err)
+	if ok {
+		return class
+	}
+	if errors.Is(err, ErrDimensionMismatch) {
+		return telemetry.ClassConfig
+	}
+
+	return telemetry.ClassStore
+}
+
+// degradeReason maps this package's degrade kind onto the telemetry vocabulary.
+//
+// The two lists exist separately because the telemetry package imports nothing from this
+// tree, so neither can name the other's values. The spec that guards them iterates this
+// package's kinds and asserts each maps to a distinct value rather than restating either
+// list, since a third hand-written copy would agree with both and catch nothing.
+func degradeReason(k DegradeKind) telemetry.DegradeReason {
+	switch k {
+	case DegradeEmbeddings:
+		return telemetry.DegradeEmbeddings
+	case DegradeTimeout:
+		return telemetry.DegradeTimeout
+	case DegradeCanceled:
+		return telemetry.DegradeCanceled
+	case DegradeIndexMeta:
+		return telemetry.DegradeIndexMeta
+	default:
+		return telemetry.DegradeOther
+	}
 }
 
 // effectiveTopK resolves the count for one search: the requested value when
@@ -180,26 +290,49 @@ func (s *Store) effectiveTopK(requested int) int {
 // model's dimension against the pinned manifest. A dimension mismatch is a real
 // index/config disagreement returned as ErrDimensionMismatch (not degraded); a
 // network failure is returned as-is so the caller degrades to lexical.
-func (s *Store) embedQueryVector(ctx context.Context, query string) ([]float32, error) {
+//
+// It also returns the kind of degradation a failure amounts to. The kind comes from
+// which of the three steps failed, never from the error's text: the errors here carry
+// the embeddings endpoint and fragments of a server's response body, and the kind is
+// reported on a span that leaves the process.
+func (s *Store) embedQueryVector(ctx context.Context, query string) ([]float32, DegradeKind, error) {
 	meta, err := s.readMeta(ctx)
 	if err != nil {
-		return nil, err
+		return nil, degradeKind(err, DegradeIndexMeta), err
 	}
 
 	dim, err := s.emb.Dim(ctx)
 	if err != nil {
-		return nil, err
+		return nil, degradeKind(err, DegradeEmbeddings), err
 	}
 	if dim != meta.Dimension {
-		return nil, fmt.Errorf("%w: model %q now emits dimension %d but the index was built at %d; run 'fisk-ai knowledge index --reindex'", ErrDimensionMismatch, s.emb.Model(), dim, meta.Dimension)
+		return nil, DegradeNone, fmt.Errorf("%w: model %q now emits dimension %d but the index was built at %d; run 'fisk-ai knowledge index --reindex'", ErrDimensionMismatch, s.emb.Model(), dim, meta.Dimension)
 	}
 
 	qv, err := s.emb.EmbedQuery(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, degradeKind(err, DegradeEmbeddings), err
 	}
 
-	return normalize(qv), nil
+	return normalize(qv), DegradeNone, nil
+}
+
+// degradeKind classifies a failure at step, giving the context cases precedence.
+//
+// The precedence matters and the common failure is what settles it: the embeddings
+// client carries its own timeout, so a hung server produces an error that is both an
+// embeddings failure and a deadline. "The server is slow" and "the server is down" are
+// the two things an operator looks for, so the deadline wins and the step is the
+// fallback.
+func degradeKind(err error, step DegradeKind) DegradeKind {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return DegradeTimeout
+	case errors.Is(err, context.Canceled):
+		return DegradeCanceled
+	default:
+		return step
+	}
 }
 
 // ftsSearch returns chunk ids ranked by BM25 for the prepared MATCH expression.
@@ -385,9 +518,42 @@ func (s *Store) TierLine(ctx context.Context) (string, error) {
 }
 
 // DegradedTierLine renders the degraded banner when a hybrid query fell back to
-// lexical because the embeddings server was unreachable.
-func DegradedTierLine(reason string) string {
-	return fmt.Sprintf("tier: hybrid -> DEGRADED to lexical (embeddings unreachable: %s)", reason)
+// lexical. It names the kind of failure rather than asserting one: the index metadata
+// is read on the same path as the embeddings call and fails the same way, so a fixed
+// "embeddings unreachable" told an operator to go and check a server that was fine.
+func DegradedTierLine(kind DegradeKind, reason string) string {
+	return fmt.Sprintf("tier: hybrid -> DEGRADED to lexical (%s: %s)", degradeSummary(kind), reason)
+}
+
+// degradeSummary is the short phrase each degrade kind is described by, shared between
+// the tier banner and the note the knowledge tool returns to the model so the two
+// surfaces cannot come to disagree about what happened.
+func degradeSummary(kind DegradeKind) string {
+	switch kind {
+	case DegradeIndexMeta:
+		return "index metadata unreadable"
+	case DegradeTimeout:
+		return "embeddings server timed out"
+	case DegradeCanceled:
+		return "canceled"
+	default:
+		return "embeddings unreachable"
+	}
+}
+
+// DegradeNote is the sentence a caller shows to explain a degraded query, including
+// the fix where there is one to name.
+func DegradeNote(kind DegradeKind) string {
+	switch kind {
+	case DegradeIndexMeta:
+		return "the knowledge index metadata could not be read, so this query used the lexical tier only; run: fisk-ai knowledge doctor"
+	case DegradeTimeout:
+		return "the embeddings server did not respond in time, so this query used the lexical tier only"
+	case DegradeCanceled:
+		return "embedding the query was canceled, so this query used the lexical tier only"
+	default:
+		return "the embeddings server was unreachable, so this query used the lexical tier only"
+	}
 }
 
 // scanCount is a small helper for count(*) queries used by the CLI stats/doctor.

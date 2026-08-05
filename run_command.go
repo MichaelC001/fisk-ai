@@ -43,6 +43,7 @@ func registerRunCommand(cmd *fisk.Application) {
 	run.Flag("resume", "Resume a checkpointed session by id instead of starting a new run").PlaceHolder("ID").StringVar(&resumeID)
 	run.Flag("force", "Resume even if the configuration no longer matches the saved session").UnNegatableBoolVar(&forceResume)
 	run.Flag("state-dir", "Directory for checkpointed sessions (default: XDG state dir)").StringVar(&stateDirFlag)
+	run.Flag("no-telemetry", "Suppress OpenTelemetry export for this run, whatever the configuration says").Envar("NO_TELEMETRY").UnNegatableBoolVar(&noTelemetry)
 }
 
 // runAction maps the run flags into an agent.Options, wires the signal contract,
@@ -77,6 +78,17 @@ func runAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
+	// Telemetry is resolved before anything else is opened so a bad endpoint or sample
+	// ratio fails here, on a normal terminal, rather than under the full-screen UI or
+	// after the http-debug file has been created. reportTelemetry flushes the pipelines
+	// and says what reached the collector; it runs on a background context of its own,
+	// so an interrupt cannot cancel the flush.
+	tel, reportTelemetry, err := setupTelemetry(cfg, runUsesTUI(cfg))
+	if err != nil {
+		return err
+	}
+	defer reportTelemetry()
+
 	// --http-debug dumps the API bodies to a file rather than stderr, so it coexists
 	// with the full-screen UI whose alt-screen stderr would otherwise be corrupted.
 	// The CLI owns the file's lifecycle.
@@ -97,6 +109,7 @@ func runAction(_ *fisk.ParseContext) error {
 		HTTPDebugOut: httpDebugOut,
 		TraceFile:    traceFile,
 		Verbose:      verbose,
+		Telemetry:    tel,
 		Checkpoint: agent.Checkpoint{
 			Enabled:  checkpoint,
 			Name:     runName,
@@ -239,6 +252,11 @@ func runWithTUI(ctx context.Context, opts agent.Options, cfg *config.Config, int
 		Interactive: interactive,
 		Resume:      opts.Checkpoint.ResumeID != "",
 		Dir:         runDir(),
+		// Read off the provider the run was actually given rather than off the config, so
+		// the card reflects what will be exported: a --no-telemetry veto or a rejected
+		// endpoint leaves this nil with the config still saying enabled.
+		Telemetry:        opts.Telemetry.Enabled(),
+		TelemetryContent: opts.Telemetry.CaptureEnabled(),
 	}, noColor, requestSuspend)
 	if err != nil {
 		return err
@@ -283,6 +301,15 @@ func runWithTUI(ctx context.Context, opts agent.Options, cfg *config.Config, int
 			return ""
 		}
 		return "resume with: fisk-ai run --resume " + res.SessionID
+	})
+	// The trace id, on screen before the alt-screen is torn down. It is empty when
+	// telemetry is off, which shows nothing, and it is the only correlator a chat run
+	// that is not checkpointed has: --chat does not imply --checkpoint.
+	live.SetTraceHintFunc(func() string {
+		if res == nil || res.Stats == nil || res.Stats.TraceID == "" {
+			return ""
+		}
+		return "trace: " + res.Stats.TraceID
 	})
 	runErr := live.Run(ctx, func(runCtx context.Context) error {
 		var e error

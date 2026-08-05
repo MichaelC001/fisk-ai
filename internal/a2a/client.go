@@ -7,7 +7,10 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // Client performs a2a request-reply interactions over a Transport: discovering a
@@ -55,21 +58,63 @@ func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error)
 // InvokeTool calls a single tool on the named agent and returns its reply. A
 // failed or denied call is reported in-band on the ToolReply (IsError set), not
 // as a Go error; a Go error means the call could not be made or answered.
-func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (*ToolReply, error) {
+//
+// The hop is traced when the caller's context carries a telemetry provider, nesting
+// under whatever span opened it. No traceparent is put on the wire: nothing on the far
+// side consumes one while the serving surfaces are out of scope, and adding a header
+// would be rejected by an older peer's schema rather than ignored by it.
+func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (reply *ToolReply, err error) {
+	ctx, span := telemetry.ProviderFromContext(ctx).StartRemoteAgent(ctx, telemetry.RemoteAgentInfo{
+		Agent: agent,
+		Tool:  tool,
+	})
+	// Ended from one defer over named returns because the failure this reports is not
+	// only the error: a tool that failed on the peer answers with IsError and a nil
+	// error, and a span that ignored that would show a green remote call under the red
+	// local one that wraps it.
+	defer func() { span.Finish(remoteOutcome(reply, err)) }()
+
 	req := NewToolRequest(tool, normalizeInput(input))
 	stampRequest(&req.Header, c.sender, agent)
 
-	reply, err := c.roundTrip(ctx, agent, OpTool, req, ToolReplyProtocol)
+	raw, err := c.roundTrip(ctx, agent, OpTool, req, ToolReplyProtocol)
 	if err != nil {
 		return nil, err
 	}
 
-	tr, ok := reply.(*ToolReply)
+	tr, ok := raw.(*ToolReply)
 	if !ok {
-		return nil, fmt.Errorf("%w: tool reply had unexpected type %T", ErrProtocolMismatch, reply)
+		return nil, fmt.Errorf("%w: tool reply had unexpected type %T", ErrProtocolMismatch, raw)
 	}
 
 	return tr, nil
+}
+
+// remoteOutcome classifies how a remote invocation ended, for the span.
+//
+// The class is named here rather than derived by the telemetry package, which imports
+// nothing from this tree and so cannot recognize this package's sentinels. Nothing
+// derived from the error text travels: these errors name hosts, subjects and reply
+// fragments.
+func remoteOutcome(reply *ToolReply, err error) telemetry.RemoteAgentOutcome {
+	switch {
+	case err == nil && reply != nil && reply.IsError:
+		// The call was made and answered; the tool itself failed on the far side.
+		return telemetry.RemoteAgentOutcome{Failed: true, Class: telemetry.ClassToolError}
+
+	case err == nil:
+		return telemetry.RemoteAgentOutcome{}
+
+	case errors.Is(err, ErrAgentUnavailable):
+		return telemetry.RemoteAgentOutcome{Failed: true, Class: telemetry.ClassRemoteUnavailable}
+	}
+
+	class, ok := telemetry.ClassifyContext(err)
+	if ok {
+		return telemetry.RemoteAgentOutcome{Failed: true, Class: class}
+	}
+
+	return telemetry.RemoteAgentOutcome{Failed: true, Class: telemetry.ClassOther}
 }
 
 // roundTrip validates and sends a request over the transport, then returns the
