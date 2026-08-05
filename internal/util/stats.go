@@ -19,6 +19,21 @@ type RunStats struct {
 	Model string
 	// Session is the checkpointed session id, shown in the summary line when set.
 	Session string
+	// TraceID is the telemetry trace this run was exported as, empty when telemetry is
+	// off. It is on the summary line because export that silently fails looks exactly
+	// like export that works, and because it is the only correlator a chat run that is
+	// not checkpointed has: --chat does not imply --checkpoint, so such a run has no
+	// session id to group its turns by.
+	TraceID string
+	// ContentExported reports that this run exported the conversation itself and not
+	// only its structure and timing.
+	//
+	// It is on the summary line because that is the durable channel: the startup note
+	// that says the same thing is printed before the full-screen UI opens and is
+	// covered for the whole run, while this survives in scrollback in both renderers
+	// and is the line an operator pastes into a ticket. A pre-run note cannot tell
+	// anyone afterwards that this run's conversation left the machine.
+	ContentExported bool
 	// Suspended reports that the run was checkpointed and paused rather than
 	// completed, so the summary reads "Run suspended" rather than "Run summary".
 	Suspended bool
@@ -102,6 +117,17 @@ func (s *RunStats) summaryLine(verbose bool) string {
 		cache += fmt.Sprintf(" cache_write=%d", s.CacheCreateTokens)
 	}
 
-	return fmt.Sprintf("%s: %s%sllm_calls=%d %s tokens=%d/%d%s latency=%s",
-		label, session, model, s.LlmCalls, tools, s.InTokens, s.OutTokens, cache, time.Since(s.Start).Round(time.Millisecond))
+	trace := ""
+	if s.TraceID != "" {
+		trace = fmt.Sprintf(" trace=%s", s.TraceID)
+	}
+	// Next to the trace id, since together they say what left the machine and where to
+	// find it. Present only when it happened: a marker on every run would be noise, and
+	// this one has to read as a fact about this run.
+	if s.ContentExported {
+		trace += " content=exported"
+	}
+
+	return fmt.Sprintf("%s: %s%sllm_calls=%d %s tokens=%d/%d%s latency=%s%s",
+		label, session, model, s.LlmCalls, tools, s.InTokens, s.OutTokens, cache, time.Since(s.Start).Round(time.Millisecond), trace)
 }

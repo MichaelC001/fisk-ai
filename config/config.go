@@ -80,9 +80,101 @@ type Config struct {
 	// terminal UI switches. It is optional; its zero value leaves every setting at its
 	// default (human-in-the-loop off, no extra confirm tags, TUI on, bell on).
 	Harness HarnessConfig `json:"harness,omitempty" yaml:"harness,omitempty"`
+	// Telemetry configures OpenTelemetry export. It sits at the top level rather than
+	// under harness, even though only the agent run honors it today: harness settings
+	// are defined as applying to the agent loop and being ignored by mcp and a2a mode,
+	// while telemetry is a process concern that is expected to grow past the run path.
+	// Moving a config key after operators have written it is a breaking change, so the
+	// cost of one key that only run honors today is preferred to a rename later.
+	Telemetry TelemetryConfig `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
 	// LLM is the model to use and general LLM setup. Always required.
 	LLM LLMConfig `json:"llm" yaml:"llm"`
+}
+
+// TelemetryConfig configures OpenTelemetry trace and metric export over OTLP/HTTP.
+//
+// It carries only what belongs in a file that is committed and shared. Transport
+// credentials and the finer transport settings come from the standard OTEL_*
+// environment variables, so a bearer token never appears in the YAML, and an operator
+// who already runs OpenTelemetry configures this the way they configure everything
+// else. Those variables never enable export by themselves: a host-wide collector
+// endpoint must not silently turn every fisk-ai process on the box into an exporter.
+//
+// The block is literal, like the rest of the config. Resolution against the
+// environment and every validation of these values happens in internal/telemetry, so
+// nothing here holds an effective value that the file did not state.
+type TelemetryConfig struct {
+	// Enabled turns export on. Nothing is exported unless it is true, whatever the
+	// environment says.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Endpoint is the OTLP/HTTP base URL; the /v1/traces and /v1/metrics paths are
+	// appended. Left empty, the endpoint comes from the standard
+	// OTEL_EXPORTER_OTLP_ENDPOINT handling, defaulting to http://localhost:4318.
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	// ServiceName names this service to the telemetry backend. Left empty it falls
+	// back to OTEL_SERVICE_NAME, then to the agent identity, then to fisk-ai. An
+	// operator who set OTEL_SERVICE_NAME in a systemd unit or a Kubernetes manifest
+	// said something explicit, so it wins over the identity; the identity reaches the
+	// backend regardless, as gen_ai.agent.name.
+	ServiceName string `json:"service_name,omitempty" yaml:"service_name,omitempty"`
+	// SampleRatio is the head sampling ratio from 0.0 to 1.0, defaulting to 1.0.
+	//
+	// It is a pointer because zero is a meaningful value here and the zero value would
+	// destroy it: an explicit "sample_ratio: 0", meaning sample nothing, would arrive
+	// as the Go zero value, be indistinguishable from an absent key, be defaulted back
+	// to 1.0, and send every trace to a paid backend. That is the exact inverse of what
+	// was asked for, and it would be silent.
+	SampleRatio *float64 `json:"sample_ratio,omitempty" yaml:"sample_ratio,omitempty"`
+	// NoMetrics turns the metric pipeline off, leaving traces alone. Metrics are on
+	// with telemetry, so this is a negative switch like no_tui and no_bell: a positive
+	// "metrics: true" would be the only default-on positive key in the file, and
+	// "metrics: false" would be indistinguishable from unset.
+	NoMetrics bool `json:"no_metrics,omitempty" yaml:"no_metrics,omitempty"`
+	// Capture exports the conversation itself alongside the structure and timing. It
+	// is off unless the block says otherwise.
+	Capture *TelemetryCaptureConfig `json:"capture,omitempty" yaml:"capture,omitempty"`
+}
+
+// TelemetryCaptureConfig turns on content capture: the system prompt, the
+// conversation, the model's replies, tool arguments and tool results, exported as span
+// attributes.
+//
+// Read this before enabling it. Everything the model saw and everything the tools
+// returned reaches the collector, so whoever can read the traces can read the
+// conversation, and an export cannot be recalled. Tool results are the verbatim output
+// of whatever command the model chose to run, the system prompt carries the agent's
+// whole durable memory index, and none of it is redacted or filtered: content capture
+// bypasses every other protection in this area by construction, including the closed
+// error vocabulary that keeps filesystem paths off spans. It is meant for a bounded
+// investigation against a collector you control, not as a fleet default.
+//
+// A run with it on says so at startup and marks its summary line.
+type TelemetryCaptureConfig struct {
+	// Enabled turns content capture on. Nothing below it does anything while this is
+	// false, and none of it is validated then either, so turning capture off never
+	// fails a run over a setting that has stopped mattering.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Messages selects how much of the conversation each model call carries: "delta",
+	// the default, exports only what that call added, and "full" exports the whole
+	// conversation every time.
+	//
+	// The default is the delta because the alternative is quadratic: the conversation
+	// only grows, so a thirty-iteration run would export thirty copies of a growing
+	// transcript, and the batch processor drops spans silently once its queue fills.
+	// The cost is that no single span holds a whole conversation; the span attribute
+	// fisk.content.from_index says where each one starts, and uses these same two
+	// words, so what a backend shows and what this file says are searchable for each
+	// other.
+	Messages string `json:"messages,omitempty" yaml:"messages,omitempty"`
+	// MaxBytes caps each content attribute, measured on the encoded JSON. It defaults
+	// to 8192 and must be between 256 and 65536.
+	//
+	// It bounds what one span can carry, which is what keeps a batch under a
+	// collector's request limit: an over-large batch is refused whole, and OTLP being
+	// fire and forget, that is close to invisible. Raising it raises the memory a run
+	// holds and lowers how many spans fit in one export.
+	MaxBytes int `json:"max_bytes,omitempty" yaml:"max_bytes,omitempty"`
 }
 
 // HarnessConfig groups the settings that govern how the agent harness behaves
@@ -832,15 +924,59 @@ func (c *Config) RAGVectorEnabled() bool {
 	return c.RAGEnabled() && c.Harness.RAG.Embeddings != nil
 }
 
+// otlpCredentialEnvNames are the OpenTelemetry export variables that carry a
+// credential. They are stripped from every tool subprocess unconditionally, whether
+// or not this agent enables telemetry, because they are ambient operator variables
+// that are present regardless of what one agent's config says, a tool subprocess
+// never needs them, and gating on config would mean --no-telemetry re-exposes the
+// token it was reached for to suppress. This follows the same precedent as the
+// anthropic provider registering its credential variables with no gate on whether
+// custom headers are configured.
+//
+// The four headers variables hold a bearer token directly. The mTLS variables name a
+// *file path* rather than holding a key, so hiding the name does not make the key
+// file unreadable by the same uid; they are stripped anyway because a tool that
+// cannot find the path is a tool that has to work for it, but this is the documented
+// limit of a name-based scrub rather than a claim that the mTLS case is closed.
+//
+// internal/telemetry lists the four headers names again for two startup checks. The
+// duplication is deliberate and matches mcpExposableBuiltins above: config is the
+// lowest layer and imports nothing from the tree. A spec asserts this list is a
+// superset of that one, so the two cannot drift apart unnoticed.
+var otlpCredentialEnvNames = []string{
+	"OTEL_EXPORTER_OTLP_HEADERS",
+	"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+	// Included even though fisk-ai exports no logs: it will be in a real operator's
+	// shell alongside the others, and a scrub that leaves one of a set behind is worse
+	// than no scrub, because it reads as covered.
+	"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+	"OTEL_EXPORTER_OTLP_CLIENT_KEY",
+	"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+	"OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY",
+	"OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY",
+	"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE",
+}
+
 // CredentialEnvNames returns the names of the environment variables that config
 // identifies as holding a credential, so a caller can strip them from the
 // environment of a subprocess whose command line the model chooses (see
 // internal/toolkit/fisk). It is the single seam a future provider extends: any
 // operator-named secret variable belongs here, never a static denylist. Names are
-// trimmed, empties dropped, and duplicates removed. Today the only such name is the
+// trimmed, empties dropped, and duplicates removed.
+//
+// It is never empty: the OpenTelemetry export credentials are always included, for
+// the reasons on otlpCredentialEnvNames. The operator-named additions today are the
 // optional RAG embeddings bearer-token variable.
 func (c *Config) CredentialEnvNames() []string {
-	var names []string
+	names := slices.Clone(otlpCredentialEnvNames)
 	if c.RAGVectorEnabled() {
 		names = append(names, c.Harness.RAG.Embeddings.APIKeyEnv)
 	}
@@ -855,6 +991,48 @@ func (c *Config) CredentialEnvNames() []string {
 	}
 
 	return out
+}
+
+// TelemetryEnabled reports whether the agent config turns OpenTelemetry export on.
+// It is only the config half of the answer: a --no-telemetry flag, NO_TELEMETRY, or
+// OTEL_SDK_DISABLED still vetoes it, which internal/telemetry resolves.
+func (c *Config) TelemetryEnabled() bool {
+	return c.Telemetry.Enabled
+}
+
+// TelemetryMetricsEnabled reports whether the metric pipeline should run alongside
+// traces. It is on unless the agent config sets no_metrics, mirroring BellEnabled.
+// Like TelemetryEnabled it says nothing about whether telemetry is on at all.
+func (c *Config) TelemetryMetricsEnabled() bool {
+	return !c.Telemetry.NoMetrics
+}
+
+// TelemetryCaptureEnabled reports whether the run exports the conversation itself and
+// not only its structure and timing. Like the two above it says nothing about whether
+// telemetry is on at all; capture without export does nothing.
+func (c *Config) TelemetryCaptureEnabled() bool {
+	return c.Telemetry.Capture != nil && c.Telemetry.Capture.Enabled
+}
+
+// TelemetryCaptureMessages returns the configured message scope, empty when the block
+// is absent or says nothing. Resolution and defaulting belong to internal/telemetry,
+// which is where every other effective telemetry value is decided; this returns what
+// the file said.
+func (c *Config) TelemetryCaptureMessages() string {
+	if c.Telemetry.Capture == nil {
+		return ""
+	}
+
+	return c.Telemetry.Capture.Messages
+}
+
+// TelemetryCaptureMaxBytes returns the configured per-attribute cap, zero when unset.
+func (c *Config) TelemetryCaptureMaxBytes() int {
+	if c.Telemetry.Capture == nil {
+		return 0
+	}
+
+	return c.Telemetry.Capture.MaxBytes
 }
 
 // ConfirmTags returns the extra confirmation gate tags configured under the

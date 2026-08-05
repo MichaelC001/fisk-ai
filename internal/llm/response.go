@@ -38,6 +38,17 @@ type Usage struct {
 // Response is a model's reply to a call: the assistant turn's content, why it
 // stopped, and what it cost.
 type Response struct {
+	// ID is the provider's own identifier for this reply, empty when a provider does
+	// not issue one. It is what correlates a call in this process with the same call in
+	// the provider's logs or dashboard, which is the only thing that can settle a
+	// question about a specific request after the fact.
+	ID string
+	// Model is the model that actually answered, as the provider reports it, empty when
+	// a provider does not say. It is deliberately kept apart from the requested model:
+	// a request naming an alias such as claude-sonnet-5 is served by a dated snapshot,
+	// and the snapshot is what bills and what a reproduction has to pin.
+	Model string
+
 	Content    []ContentBlock
 	StopReason StopReason
 	Usage      Usage

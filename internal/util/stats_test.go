@@ -45,6 +45,18 @@ var _ = Describe("RunStats", func() {
 			Expect(s.summaryLine(true)).To(ContainSubstring("cache_write=8192"))
 		})
 
+		// The startup note that says this is printed before the full-screen UI takes the
+		// terminal and is covered for the rest of the run, and a pre-run note cannot tell
+		// anyone afterwards what a finished run did. This line survives in scrollback in
+		// both renderers and is what an operator pastes into a ticket.
+		It("marks a run that exported the conversation, and only such a run", func() {
+			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("content="))
+
+			line := (&RunStats{ContentExported: true, TraceID: "4bf92f3577b34da6"}).summaryLine(false)
+			Expect(line).To(ContainSubstring("content=exported"))
+			Expect(line).To(ContainSubstring("trace=4bf92f3577b34da6"))
+		})
+
 		It("keeps the line coarse, with no per-kind breakdown", func() {
 			s := &RunStats{ToolCalls: 2, RemoteToolCalls: 1}
 			s.CountToolKind(toolkit.KindApplication)

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 	tools2 "github.com/choria-io/fisk-ai/internal/toolkit"
 	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -721,5 +722,41 @@ var _ = Describe("Confirm gating over MCP", func() {
 		var result tools2.CommandResult
 		Expect(json.Unmarshal([]byte(text), &result)).To(Succeed())
 		Expect(result.Output).To(Equal("deployed\n"))
+	})
+})
+
+// The base context every served tool call inherits. Both halves fail silently in a
+// different direction: no values and a knowledge search served over MCP exports nothing
+// while looking wired, inherited cancellation and an interrupt kills in-flight calls
+// instead of letting them drain.
+var _ = Describe("serveBaseContext", func() {
+	It("should carry the caller's values so a served tool reaches the telemetry provider", func() {
+		p := telemetry.NewFromProviders(nil, nil)
+		ctx := telemetry.ContextWithProvider(context.Background(), p)
+
+		base, cancel := serveBaseContext(ctx)
+		defer cancel()
+
+		Expect(telemetry.ProviderFromContext(base)).To(BeIdenticalTo(p))
+	})
+
+	It("should not inherit the caller's cancellation", func() {
+		ctx, cancelCaller := context.WithCancel(context.Background())
+
+		base, cancel := serveBaseContext(ctx)
+		defer cancel()
+
+		cancelCaller()
+
+		Expect(ctx.Done()).To(BeClosed())
+		Expect(base.Err()).ToNot(HaveOccurred())
+	})
+
+	It("should be cancelable on its own, which is what unblocks a held-open stream", func() {
+		base, cancel := serveBaseContext(context.Background())
+
+		cancel()
+
+		Expect(base.Done()).To(BeClosed())
 	})
 })

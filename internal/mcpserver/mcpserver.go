@@ -282,15 +282,31 @@ func Serve(ctx context.Context, tools []toolkit.Tool, opts Options) error {
 // serveListener serves the MCP server over ln until ctx is canceled. It is split
 // out from Serve so a test can drive the shutdown path over a listener it owns
 // (and read back its address); Serve and tests exercise the same serving code.
+// serveBaseContext derives the base context for every incoming request: it takes ctx's
+// values but not its cancellation, and can be canceled on its own.
+//
+// It is a function of its own because both halves are decisions a spec should pin, and
+// each fails silently in a different direction.
+//
+// Values have to be inherited because that is how a caller's telemetry provider reaches
+// a served tool. internal/rag reads the provider off the context, so a base context
+// built from Background exports nothing at all from a knowledge search served over MCP,
+// while looking correctly wired at every call site.
+//
+// Cancellation must not be inherited. The MCP streamable transport keeps a standalone
+// SSE GET request hanging until its request context is canceled, and
+// http.Server.Shutdown neither cancels request contexts nor closes such connections; it
+// only waits for them to go idle, which a held-open stream never does. Canceling this
+// context on shutdown is what unblocks those streams so Shutdown completes promptly
+// instead of waiting out shutdownTimeout, which is what once made a single interrupt
+// appear to hang. Inheriting the caller's cancellation instead would kill in-flight tool
+// calls where they stand rather than letting them drain.
+func serveBaseContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.WithoutCancel(ctx))
+}
+
 func serveListener(ctx context.Context, ln net.Listener, srv *mcp.Server, registered []string, opts Options) error {
-	// connCtx is the base context for every incoming request. The MCP streamable
-	// transport keeps a standalone SSE GET request hanging until its request
-	// context is canceled, and http.Server.Shutdown neither cancels request
-	// contexts nor closes such connections; it only waits for them to go idle,
-	// which a held-open stream never does. Canceling connCtx on shutdown unblocks
-	// those streams so Shutdown completes promptly instead of waiting out
-	// shutdownTimeout, which is what made a single interrupt appear to hang.
-	connCtx, cancelConns := context.WithCancel(context.Background())
+	connCtx, cancelConns := serveBaseContext(ctx)
 	defer cancelConns()
 
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)

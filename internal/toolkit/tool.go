@@ -125,25 +125,37 @@ func Tools[T Tool](in []T) []Tool {
 // shape, so every kind is presented to the model identically: a harness failure is
 // an error result, and an outcome the model should reason about (including a
 // non-zero exit) is a normal result.
-func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps) llm.ToolResultBlock {
+//
+// The second return is the command metadata when a command ran, and nil when none did,
+// which is every in-process tool: a built-in, a Go caller's own tool, and a tool invoked
+// on a remote agent. It is here because this is the only place that metadata survives to:
+// the model-facing result marshals it into an envelope, so a caller that wanted the exit
+// code back would have to parse its own output to find it. It is a COPY rather than the
+// tool's own pointer, because it exists to be observed and observation must not hand out
+// a handle on state the tool owns.
+func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps) (llm.ToolResultBlock, *CommandExec) {
 	out, err := t.Execute(ctx, use.Input, deps)
 	if err != nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: err.Error(), IsError: true}
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: err.Error(), IsError: true}, nil
 	}
 
 	// An in-process tool's output is already the JSON the model asked for; only a
 	// command's is wrapped, so the model sees the exit code and truncation flag.
 	if out.Exec == nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: out.Output}
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: out.Output}, nil
 	}
+
+	exec := *out.Exec
 
 	res := out.CommandResult()
 	data, err := json.Marshal(res)
 	if err != nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("marshaling tool result: %v", err), IsError: true}
+		// The command ran, so its exit code is real and travels even though the envelope
+		// around its output could not be built.
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("marshaling tool result: %v", err), IsError: true}, &exec
 	}
 
-	return llm.ToolResultBlock{ToolUseID: use.ID, Content: string(data)}
+	return llm.ToolResultBlock{ToolUseID: use.ID, Content: string(data)}, &exec
 }
 
 // Confirmable is implemented by the tool kinds that can require operator

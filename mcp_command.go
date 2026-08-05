@@ -14,6 +14,7 @@ import (
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/mcpserver"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
@@ -59,6 +60,22 @@ func mcpAction(_ *fisk.ParseContext) error {
 	if cfg.ApplicationPath == "" {
 		fmt.Fprintln(os.Stderr, "note: no wrapped application configured (application_path unset); serving built-in tools only")
 	}
+
+	// Telemetry is resolved before anything is opened so a bad endpoint fails here
+	// rather than after the listener is up. There is no full-screen UI on this path, so
+	// the SDK's diagnostics go straight to stderr, which is where this command's notes
+	// already go and is never its protocol channel.
+	//
+	// The provider rides the context rather than being handed to Serve: the knowledge
+	// tools this command serves read it off the context, which is what internal/rag
+	// needs to open a retrieval span for a search that arrived over MCP.
+	tel, reportTelemetry, err := setupTelemetry(cfg, false)
+	if err != nil {
+		return err
+	}
+	defer reportTelemetry()
+
+	ctx = telemetry.ContextWithProvider(ctx, tel)
 
 	// Derived from each tool's own exposure declaration rather than written out per
 	// feature, so this cannot claim a tool is withheld after it stops being. A config

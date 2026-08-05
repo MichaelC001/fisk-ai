@@ -1842,6 +1842,24 @@ var _ = Describe("closeJournal", func() {
 	})
 })
 
+var _ = Describe("cloneResponse", func() {
+	// The clone every PostModelCall hook receives is a JSON round-trip over a struct
+	// carrying no tags, so it adapts to a new field for free. That is only true while
+	// the fields stay exported and untagged: a json:"-" added later would drop them from
+	// the copy while the live conversation kept them, so a hook would see a reply that
+	// silently differs from the one the run is using.
+	It("carries the response id and model through the copy", func() {
+		dup, err := cloneResponse(llm.Response{
+			ID:         "msg_01ABC",
+			Model:      "claude-sonnet-5-20260101",
+			StopReason: llm.StopEndTurn,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dup.ID).To(Equal("msg_01ABC"))
+		Expect(dup.Model).To(Equal("claude-sonnet-5-20260101"))
+	})
+})
+
 var _ = Describe("validateCallerDir", func() {
 	It("accepts an empty value as inherit-today's-behavior", func() {
 		Expect(validateCallerDir("tool_work_dir", "")).To(Succeed())

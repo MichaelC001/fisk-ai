@@ -25,18 +25,19 @@ import (
 var version = "devel"
 
 var (
-	configFile string
-	apiKey     string
-	baseURL    string
-	q          []string
-	httpDebug  bool
-	noColor    bool
-	mcpPort    int
-	mcpAddress string
-	verbose    bool
-	noTUI      bool
-	chatMode   bool
-	traceFile  string
+	configFile  string
+	apiKey      string
+	baseURL     string
+	q           []string
+	httpDebug   bool
+	noColor     bool
+	mcpPort     int
+	mcpAddress  string
+	verbose     bool
+	noTUI       bool
+	chatMode    bool
+	traceFile   string
+	noTelemetry bool
 
 	showToolOutput bool
 

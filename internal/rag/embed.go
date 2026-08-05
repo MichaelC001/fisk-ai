@@ -11,12 +11,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
@@ -98,6 +101,8 @@ func buildEmbedder(cfg *config.Config) (Embedder, error) {
 		apiKey = os.Getenv(ec.APIKeyEnv)
 	}
 
+	host, port := parseServerAddress(ec.BaseURL)
+
 	return &openAIEmbedder{
 		baseURL:     strings.TrimRight(ec.BaseURL, "/"),
 		model:       ec.Model,
@@ -105,7 +110,27 @@ func buildEmbedder(cfg *config.Config) (Embedder, error) {
 		queryPrefix: ec.QueryPrefix,
 		docPrefix:   ec.DocumentPrefix,
 		client:      &http.Client{Timeout: ec.TimeoutParsed},
+		host:        host,
+		port:        port,
 	}, nil
+}
+
+// parseServerAddress splits the configured base URL into a host and a port for the
+// embeddings span. It is resolved once here rather than at each request, and the raw URL
+// is deliberately not kept alongside it: a base URL can carry userinfo credentials, and
+// the host is the part that answers which deployment a slow call went to.
+func parseServerAddress(base string) (string, int) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", 0
+	}
+
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		return u.Hostname(), 0
+	}
+
+	return u.Hostname(), port
 }
 
 // openAIEmbedder talks to a local OpenAI-compatible /v1/embeddings endpoint. The
@@ -118,6 +143,11 @@ type openAIEmbedder struct {
 	queryPrefix string
 	docPrefix   string
 	client      *http.Client
+
+	// host and port are the base URL's address, resolved once at construction for the
+	// embeddings span. See parseServerAddress for why the URL itself is not used.
+	host string
+	port int
 
 	// dimMu guards the lazily-probed dimension cache. A single openAIEmbedder is
 	// shared across concurrent readers (the MCP server serves knowledge_search to
@@ -141,7 +171,7 @@ func (e *openAIEmbedder) Dim(ctx context.Context) (int, error) {
 		return e.dim, nil
 	}
 
-	vecs, err := e.embedBatch(ctx, []string{"dimension probe"})
+	vecs, err := e.embedBatch(ctx, telemetry.EmbeddingsPurposeDimensionProbe, []string{"dimension probe"})
 	if err != nil {
 		return 0, err
 	}
@@ -163,7 +193,7 @@ func (e *openAIEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32
 		}
 	}
 
-	vecs, err := e.embedBatch(ctx, []string{e.queryPrefix + text})
+	vecs, err := e.embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{e.queryPrefix + text})
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +216,7 @@ func (e *openAIEmbedder) EmbedDocuments(ctx context.Context, docs []Document) ([
 	out := make([][]float32, 0, len(inputs))
 	for start := 0; start < len(inputs); start += embedBatchSize {
 		end := min(start+embedBatchSize, len(inputs))
-		vecs, err := e.embedWithFallback(ctx, inputs[start:end])
+		vecs, err := e.embedWithFallback(ctx, telemetry.EmbeddingsPurposeDocument, inputs[start:end])
 		if err != nil {
 			return nil, err
 		}
@@ -210,8 +240,8 @@ func (e *openAIEmbedder) documentInput(d Document) string {
 // embedWithFallback embeds a batch, and on failure splits it and retries each half
 // (preserving order) down to single inputs, so a server that caps the batch size
 // still succeeds. A single input that still fails returns the error.
-func (e *openAIEmbedder) embedWithFallback(ctx context.Context, inputs []string) ([][]float32, error) {
-	vecs, err := e.embedBatch(ctx, inputs)
+func (e *openAIEmbedder) embedWithFallback(ctx context.Context, purpose string, inputs []string) ([][]float32, error) {
+	vecs, err := e.embedBatch(ctx, purpose, inputs)
 	if err == nil {
 		return vecs, nil
 	}
@@ -220,11 +250,11 @@ func (e *openAIEmbedder) embedWithFallback(ctx context.Context, inputs []string)
 	}
 
 	mid := len(inputs) / 2
-	left, err := e.embedWithFallback(ctx, inputs[:mid])
+	left, err := e.embedWithFallback(ctx, purpose, inputs[:mid])
 	if err != nil {
 		return nil, err
 	}
-	right, err := e.embedWithFallback(ctx, inputs[mid:])
+	right, err := e.embedWithFallback(ctx, purpose, inputs[mid:])
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +279,28 @@ type embedResponse struct {
 // (non-empty, valid UTF-8, within the size cap) and asserts the returned index set
 // exactly equals the sent set, failing the whole batch on any gap, duplicate, or
 // count mismatch so a vector never lands on the wrong chunk.
-func (e *openAIEmbedder) embedBatch(ctx context.Context, inputs []string) ([][]float32, error) {
+// It is also where the embeddings span lives, one span per HTTP request, which is what
+// lets the response status sit on the span rather than on an event: unlike a model call,
+// this span is never a retry sequence, so the code describes the whole of it.
+//
+// The failures split three ways and the split matters. Everything up to the built
+// request is this process failing, and reporting those as the server's fault would send
+// an operator to a machine that is working. From the request onwards it is the server or
+// the network between. The context cases outrank both.
+func (e *openAIEmbedder) embedBatch(ctx context.Context, purpose string, inputs []string) (vecs [][]float32, err error) {
+	ctx, span := telemetry.ProviderFromContext(ctx).StartEmbeddings(ctx, telemetry.EmbeddingsInfo{
+		Model:         e.model,
+		Purpose:       purpose,
+		Inputs:        len(inputs),
+		ServerAddress: e.host,
+		ServerPort:    e.port,
+	})
+
+	// No request has left yet, so any failure from here to the Do below is ours.
+	local := true
+	var status int
+	defer func() { span.Finish(embeddingsOutcome(err, status, local)) }()
+
 	for i, in := range inputs {
 		if strings.TrimSpace(in) == "" {
 			return nil, fmt.Errorf("embedding input %d is empty", i)
@@ -276,11 +327,16 @@ func (e *openAIEmbedder) embedBatch(ctx context.Context, inputs []string) ([][]f
 		req.Header.Set("Authorization", "Bearer "+e.apiKey)
 	}
 
+	local = false
+
 	resp, err := e.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("contacting embeddings server at %s: %w", e.baseURL, err)
 	}
 	defer resp.Body.Close()
+	// Only now is there a status to report. Reading one before this branch would be a nil
+	// dereference on every DNS failure, reset and TLS error.
+	status = resp.StatusCode
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxEmbedResponseBytes))
 	if err != nil {
@@ -320,4 +376,29 @@ func (e *openAIEmbedder) embedBatch(ctx context.Context, inputs []string) ([][]f
 	}
 
 	return out, nil
+}
+
+// embeddingsOutcome builds the span outcome for one embeddings request.
+//
+// local separates a request this process could not build from one the server or the
+// network failed: the first is a defect here and calling it a provider failure would
+// report a working embeddings server as broken.
+func embeddingsOutcome(err error, status int, local bool) telemetry.EmbeddingsOutcome {
+	out := telemetry.EmbeddingsOutcome{StatusCode: status}
+	if err == nil {
+		return out
+	}
+
+	out.Failed = true
+	class, ok := telemetry.ClassifyContext(err)
+	switch {
+	case ok:
+		out.Class = class
+	case local:
+		out.Class = telemetry.ClassOther
+	default:
+		out.Class = telemetry.ClassProvider
+	}
+
+	return out
 }

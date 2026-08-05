@@ -99,11 +99,34 @@ type Item struct {
 	Description string
 }
 
+// Info describes the backend a store actually runs on.
+//
+// It exists because the configuration says what was asked for while an injected store
+// says what ran, and only the store itself knows which. Every field here is exported on
+// a telemetry span, which is what bounds what may go in one.
+type Info struct {
+	// Backend is the registered backend name, in the registry's own vocabulary, so it
+	// stays correct however many backends are added.
+	Backend string
+
+	// Location names the container this store is bound to, in whatever term the backend
+	// uses: a KV bucket today, a stream, a table or an index later. It must be an
+	// operator-configured identifier. Never a filesystem path, never a URL carrying
+	// userinfo, never a credential, because it leaves the process and cannot be
+	// un-sent. A backend with nothing safe to name returns "".
+	Location string
+}
+
 // Store is the pluggable memory backend. Implementations must be safe for
 // concurrent use by independent processes sharing a backing store; the file
 // backend achieves this with atomic create and replace. Keys are validated by
 // the implementation against ValidateKey before any backing access.
 type Store interface {
+	// Info describes the backend this store runs on. It is required rather than an
+	// optional capability for the reason Tool.MCPExposable is: it is a property every
+	// backend must have an answer for, and declaring it here makes the compiler ask, so
+	// a backend added later cannot report nothing by omission.
+	Info() Info
 	// List returns every stored memory as key and description, sorted by key. It
 	// reads each value to recover its description, so its cost grows with the
 	// number of entries; that is acceptable at the volumes this store targets.

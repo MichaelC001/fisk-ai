@@ -95,7 +95,7 @@ var _ = Describe("RemoteTool", func() {
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
+			block, _ := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeFalse())
 
 			var result toolkit.CommandResult
@@ -116,7 +116,7 @@ var _ = Describe("RemoteTool", func() {
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
+			block, _ := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeFalse())
 
 			var result toolkit.CommandResult
@@ -135,7 +135,7 @@ var _ = Describe("RemoteTool", func() {
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
+			block, _ := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeFalse())
 			Expect(block.Content).To(Equal(`{"status":"ok","results":[]}`))
 			Expect(block.Content).ToNot(ContainSubstring("exit_code"))
@@ -145,7 +145,7 @@ var _ = Describe("RemoteTool", func() {
 			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{IsError: true, Output: "tool not available"}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
+			block, _ := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeTrue())
 			Expect(block.Content).To(Equal("tool not available"))
 		})
@@ -154,7 +154,7 @@ var _ = Describe("RemoteTool", func() {
 			inv := &fakeInvoker{err: errors.New("no responders")}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
-			block := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
+			block, _ := toolkit.ExecuteUse(rt, context.Background(), use, toolkit.ExecDeps{})
 			Expect(block.IsError).To(BeTrue())
 			Expect(block.Content).To(ContainSubstring("no responders"))
 		})

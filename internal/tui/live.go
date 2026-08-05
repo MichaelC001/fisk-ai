@@ -69,6 +69,11 @@ type Live struct {
 	// suspended session's id is visible before the alt-screen is torn down. Empty when
 	// there is nothing to resume. Set by the caller before Run, read after the run ends.
 	resumeHint func() string
+	// traceHint returns the telemetry trace line to show once the run ends, so the id
+	// is on screen while the operator is still reading the view rather than only in the
+	// summary the alt-screen teardown scrolls past. Nil, or an empty return, shows
+	// nothing, which is the case for a run with telemetry off.
+	traceHint func() string
 
 	// The status fields are mutated only on the tview loop (from Message, the prompter,
 	// the ticker and teardown) so nothing races the draw. ended is read by the leave-key
@@ -263,6 +268,10 @@ func (l *Live) SetSuspendedFunc(f func() bool) { l.suspended = f }
 // in the completion line when the run suspended. Set before Run, like SetSuspendedFunc.
 func (l *Live) SetResumeHintFunc(f func() string) { l.resumeHint = f }
 
+// SetTraceHintFunc records how to render the telemetry trace id once the run ends. It
+// is deferred like the resume hint because the id is only known after the run.
+func (l *Live) SetTraceHintFunc(f func() string) { l.traceHint = f }
+
 // HideSplash removes the startup card from the run goroutine, marshaling onto the loop.
 // The caller invokes it when the first response is ready to draw, or when a resumed
 // transcript is shown, so the card gives way to the live view. It is idempotent, so a
@@ -409,6 +418,17 @@ func (l *Live) Run(parent context.Context, run func(context.Context) error) (run
 
 	loopErr := l.v.app.Run()
 
+	// The teardown goroutine stops the loop only after the run goroutine is done, so on
+	// the designed path this abort is redundant: the context is already canceled and
+	// quitCh already closed, and both are idempotent.
+	//
+	// It is here for the path that is not designed. If the loop ever stops for any other
+	// reason, the run goroutine is left parked on a live context waiting for input that
+	// can no longer be delivered, and every waiter below deadlocks with the terminal
+	// still held: the process needs SIGQUIT. That is a hang rather than a bad exit code,
+	// so the invariant is enforced rather than assumed.
+	abort()
+
 	// The loop has stopped; the run goroutine finishes before Stop, so waiting on it
 	// here just confirms the ordering before the deferred teardown runs.
 	<-runDone
@@ -443,6 +463,14 @@ func (l *Live) appendCompletion(runErr error) {
 		l.Append(Line{Kind: LineMeta, Text: "--- run aborted, press q to quit ---"})
 	default:
 		l.Append(Line{Kind: LineWarning, Text: "run ended: " + runErr.Error()})
+	}
+
+	// Shown for every outcome, not just the suspended one: a failed or aborted run is
+	// exactly when an operator wants to go and look at its trace.
+	if l.traceHint != nil {
+		if hint := l.traceHint(); hint != "" {
+			l.Append(Line{Kind: LineMeta, Text: hint})
+		}
 	}
 }
 

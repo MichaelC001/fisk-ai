@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // EnumerateStatus classifies an enumerate outcome the caller reports without
@@ -128,8 +130,25 @@ type EnumerateResult struct {
 // chunks. Each term is therefore run as its own document-set query and the sets are
 // intersected and subtracted here. Only document ids are held, never rows, so the
 // full set is computed exactly and the limit applies to hydration alone.
-func (s *Store) Enumerate(ctx context.Context, query string, opts EnumerateOptions) (*EnumerateResult, error) {
-	res := &EnumerateResult{Docs: []MatchedDoc{}, Terms: []TermReport{}, Status: EnumOK}
+//
+// Its span covers all nine returns through a deferred Finish over the named returns,
+// which is safe only because every failing path returns a nil result explicitly. Reading
+// the local instead would be the trap this shape exists to avoid: the result is
+// initialized to a successful status before anything runs, so a database failure would
+// export a span reporting a completed enumeration alongside its own error.
+func (s *Store) Enumerate(ctx context.Context, query string, opts EnumerateOptions) (res *EnumerateResult, err error) {
+	ctx, span := telemetry.ProviderFromContext(ctx).StartEnumerate(ctx, telemetry.EnumerateInfo{
+		Limit:          opts.Limit,
+		MinBodyMatches: opts.MinBodyMatches,
+	})
+
+	// The class for the one failure that is not the store's fault. It is named here
+	// rather than recognized from the error, because a compiled-query failure carries no
+	// sentinel and there is exactly one place it can come from.
+	var class telemetry.ErrorClass
+	defer func() { span.Finish(enumerateOutcome(res, err, class)) }()
+
+	res = &EnumerateResult{Docs: []MatchedDoc{}, Terms: []TermReport{}, Status: EnumOK}
 
 	// The agent opens a read-only store over a nonexistent file on an ordinary first
 	// run, so this is the common path rather than an edge case.
@@ -140,6 +159,7 @@ func (s *Store) Enumerate(ctx context.Context, query string, opts EnumerateOptio
 
 	compiled, err := compileEnumerateQuery(query)
 	if err != nil {
+		class = telemetry.ClassInvalidQuery
 		return nil, err
 	}
 	res.Compiled = compiled.Compiled()
@@ -196,6 +216,45 @@ func (s *Store) Enumerate(ctx context.Context, query string, opts EnumerateOptio
 	res.Returned = len(docs)
 
 	return res, nil
+}
+
+// enumerateOutcome builds the span outcome from what the enumeration returned. A nil
+// result is a failure whatever err says, because every failing return abandons it.
+//
+// The corpus size is reported as absent rather than zero when no index existed, since
+// the count was never taken there and a zero would read as an empty corpus, which is a
+// different answer with a different fix.
+func enumerateOutcome(res *EnumerateResult, err error, class telemetry.ErrorClass) telemetry.EnumerateOutcome {
+	if res == nil {
+		return telemetry.EnumerateOutcome{Class: enumerateErrorClass(err, class), Failed: true}
+	}
+
+	out := telemetry.EnumerateOutcome{
+		Status:    string(res.Status),
+		Matched:   res.Matched,
+		Documents: res.Returned,
+		Truncated: res.Truncated,
+	}
+	if res.Status != EnumIndexNotBuilt {
+		out.IndexedDocuments = &res.IndexedDocuments
+	}
+
+	return out
+}
+
+// enumerateErrorClass gives the context cases precedence over the class the call site
+// named, then falls back to the store. A canceled run reaches this through the same
+// database calls a broken index does.
+func enumerateErrorClass(err error, named telemetry.ErrorClass) telemetry.ErrorClass {
+	class, ok := telemetry.ClassifyContext(err)
+	if ok {
+		return class
+	}
+	if named.Set() {
+		return named
+	}
+
+	return telemetry.ClassStore
 }
 
 // enumerateDocumentSet runs one document-set query per term and composes them:

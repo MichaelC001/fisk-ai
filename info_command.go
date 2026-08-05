@@ -16,6 +16,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/memory"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/util"
@@ -92,6 +94,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	printModelSection(c, cfg)
 	printMemorySection(c, cfg)
 	printSessionsSection(c, cfg)
+	printTelemetrySection(c, cfg)
 
 	tbl := table.NewTableWriter("")
 	tbl.AddHeaders("Tool", "Source", "Confirm", "Description", "Tags")
@@ -314,6 +317,122 @@ func printSessionsSection(c *columns.Document, cfg *config.Config) {
 			c.Item("Directory", directory)
 		}
 	})
+}
+
+// printTelemetrySection shows what a run would export and, for every value, where
+// that value came from. The origin is the point of the section: telemetry is
+// configured across a config file and half a dozen environment variables, so "the
+// endpoint is X" is far less useful to someone debugging than "the endpoint is X,
+// because OTEL_EXPORTER_OTLP_ENDPOINT says so". Like the Memory and Sessions sections
+// it resolves everything locally and contacts nothing.
+//
+// It appears only when something mentions telemetry, so an operator who does not use
+// it sees no new output, and it deliberately still appears when telemetry is off but
+// configured, which is the confusing case worth surfacing.
+func printTelemetrySection(c *columns.Document, cfg *config.Config) {
+	resolved, resolveErr := telemetry.Resolve(bootstrap.SettingsFrom(cfg, ""), os.Getenv)
+	if !telemetryMentioned(cfg, resolved) {
+		return
+	}
+
+	c.Section("Telemetry", func(c *columns.Document) {
+		if resolved.Enabled {
+			c.Item("Enabled", "yes (telemetry.enabled)")
+		} else {
+			c.Item("Enabled", fmt.Sprintf("no (%s)", resolved.DisabledBy))
+		}
+
+		// A rejected configuration is shown alongside the values rather than instead of
+		// them, since seeing what was resolved is most of what makes the message
+		// actionable. info never fails on it: this command inspects a configuration
+		// without running it.
+		if resolveErr != nil {
+			c.Item("Invalid", resolveErr.Error())
+		}
+
+		c.Item("Endpoint", withOrigin(resolved.Endpoint.Value, resolved.Endpoint.Origin))
+		c.Item("Service name", withOrigin(resolved.ServiceName.Value, resolved.ServiceName.Origin))
+		c.Item("Sample ratio", withOrigin(fmt.Sprintf("%g", resolved.SampleRatio.Value), resolved.SampleRatio.Origin))
+
+		metrics := "enabled"
+		if !resolved.Metrics.Value {
+			metrics = "disabled"
+		}
+		c.Item("Metrics", withOrigin(metrics, resolved.Metrics.Origin))
+
+		printTelemetryCaptureItems(c, resolved)
+
+		c.Item("Credential scrub", telemetryScrubStatus(cfg))
+	})
+}
+
+// printTelemetryCaptureItems shows what content capture would export.
+//
+// Off is one line rather than four, because the settings underneath it mean nothing
+// then and four lines of inert configuration is how an operator comes to believe a
+// feature is on. On is four, and the fourth is the point: the export batch size is
+// derived from the content cap rather than configured, so it is invisible everywhere
+// else and it moves underneath an operator the moment they change the cap. This command
+// exists to show exactly that class of value.
+func printTelemetryCaptureItems(c *columns.Document, resolved telemetry.Resolved) {
+	if !resolved.Capture.Value {
+		c.Item("Content capture", "off (default): spans carry structure and timing only")
+		return
+	}
+
+	c.Item("Content capture", withOrigin("on", resolved.Capture.Origin)+
+		": prompts, model output, tool arguments and tool results are exported to this endpoint")
+	c.Item("Content messages", withOrigin(resolved.Messages.Value.String(), resolved.Messages.Origin))
+	c.Item("Content limit", withOrigin(fmt.Sprintf("%d bytes per attribute", resolved.MaxBytes.Value), resolved.MaxBytes.Origin))
+	c.Item("Export batch", withOrigin(fmt.Sprintf("%d spans", resolved.ExportBatch.Value), resolved.ExportBatch.Origin))
+}
+
+// withOrigin renders a resolved value with the config key or environment variable
+// that decided it.
+func withOrigin(value string, origin string) string {
+	return fmt.Sprintf("%s (%s)", value, origin)
+}
+
+// telemetryMentioned reports whether the config or the environment says anything
+// about telemetry, which is the gate on showing the section at all.
+func telemetryMentioned(cfg *config.Config, resolved telemetry.Resolved) bool {
+	// Capture counts even with export off, and that pairing is the reason it is named
+	// here rather than folded into the first condition: a file that turns content
+	// capture on and telemetry off is precisely the configuration an operator is
+	// staring at when they ask whether this thing is running.
+	if cfg.TelemetryEnabled() || cfg.TelemetryCaptureEnabled() || len(resolved.TransportEnvSet) > 0 {
+		return true
+	}
+
+	for _, name := range []string{telemetry.EnvServiceName, telemetry.EnvSDKDisabled, telemetry.EnvNoTelemetry} {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// telemetryScrubStatus names the OpenTelemetry credential variables that are set in
+// this environment and will therefore be stripped from tool subprocesses.
+//
+// It lists what is actually set rather than the whole known list, which would be
+// sixteen names of noise: what an operator wants to confirm is that the token they
+// exported is the one being hidden from the model's tools. The scrub is unconditional,
+// so this reads the same whether or not telemetry is enabled.
+func telemetryScrubStatus(cfg *config.Config) string {
+	var set []string
+	for _, name := range cfg.CredentialEnvNames() {
+		if os.Getenv(name) != "" {
+			set = append(set, name)
+		}
+	}
+
+	if len(set) == 0 {
+		return "no credential variables are set in this environment"
+	}
+
+	return fmt.Sprintf("%s (stripped from tool subprocesses)", strings.Join(set, ", "))
 }
 
 // toolSearchStatus describes how server-side tool search will behave for a run of

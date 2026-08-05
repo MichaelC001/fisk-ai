@@ -18,6 +18,7 @@ import (
 // factory; the file backend has its own package and tests.
 type stubStore struct{}
 
+func (stubStore) Info() Info                                           { return Info{Backend: "stub"} }
 func (stubStore) List(context.Context) ([]Item, error)                 { return nil, nil }
 func (stubStore) Read(context.Context, string) (string, string, error) { return "", "", ErrNotExist }
 func (stubStore) Write(context.Context, string, string, string, bool) error {
