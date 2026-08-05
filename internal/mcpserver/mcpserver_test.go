@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -123,15 +125,30 @@ func callText(ctx context.Context, cs *mcp.ClientSession, name string, args map[
 // connectElicit connects a client that answers elicitation with handler, so the
 // server sees a client that negotiated the elicitation capability (the SDK
 // advertises it automatically when a handler is set).
+//
+// It goes over a real streamable HTTP transport rather than the in-memory pair the
+// other helpers use, because elicitation is protocol-version dependent and only this
+// transport negotiates the version Serve actually runs.
+//
+// The in-memory transport advertises every version the SDK knows, and the SDK client
+// always initializes at the newest with no exported way to pin it, so an in-memory
+// session lands on 2026-07-28. That version forbids a server from sending
+// elicitation/create while serving a request (SEP-2322 replaces it with a multi
+// round-trip InputRequests flow), so the confirm gate cannot be exercised there at all.
+//
+// The HTTP transport serves 2026-07-28 only when stateless, and Serve configures it
+// stateful, so a client discovers the server supports 2025-11-25 or older and
+// negotiates down. That is what production does and what these specs need.
 func connectElicit(ctx context.Context, srv *mcp.Server, handler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)) *mcp.ClientSession {
 	GinkgoHelper()
 
-	serverT, clientT := mcp.NewInMemoryTransports()
-	_, err := srv.Connect(ctx, serverT, nil)
-	Expect(err).NotTo(HaveOccurred())
+	// Nil options, matching Serve: stateful is what keeps the negotiated version on the
+	// side of the protocol where the confirm gate works.
+	httpSrv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
+	DeferCleanup(httpSrv.Close)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v1"}, &mcp.ClientOptions{ElicitationHandler: handler})
-	cs, err := client.Connect(ctx, clientT, nil)
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: httpSrv.URL}, nil)
 	Expect(err).NotTo(HaveOccurred())
 
 	return cs

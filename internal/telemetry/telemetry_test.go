@@ -440,3 +440,34 @@ var _ = Describe("SetErrorHandler restore", func() {
 		DeferCleanup(SetErrorHandler(io.Discard))
 	})
 })
+
+// telemetry.endpoint is a base URL, so the signal path is this package's to append. The
+// exporters will not do it: WithEndpointURL treats a pathless URL as targeting the root,
+// so a bare base URL posts every export to / and the collector answers 404. Nothing in
+// the process reports that except the delivery counts, and it reads as a broken
+// collector rather than a misconfigured client.
+var _ = Describe("signalEndpoint", func() {
+	It("should append the signal path to a bare base URL", func() {
+		Expect(signalEndpoint("http://127.0.0.1:4318", tracesPath)).To(Equal("http://127.0.0.1:4318/v1/traces"))
+		Expect(signalEndpoint("http://127.0.0.1:4318", metricsPath)).To(Equal("http://127.0.0.1:4318/v1/metrics"))
+	})
+
+	It("should not double the separator on a base URL with a trailing slash", func() {
+		Expect(signalEndpoint("http://127.0.0.1:4318/", tracesPath)).To(Equal("http://127.0.0.1:4318/v1/traces"))
+	})
+
+	// The OTLP specification says the base variable's path prefix is kept, so a
+	// collector mounted behind a gateway at /otlp still receives /otlp/v1/traces.
+	It("should keep a path prefix on the base URL", func() {
+		Expect(signalEndpoint("https://gw.example.net/otlp", tracesPath)).To(Equal("https://gw.example.net/otlp/v1/traces"))
+		Expect(signalEndpoint("https://gw.example.net/otlp/", metricsPath)).To(Equal("https://gw.example.net/otlp/v1/metrics"))
+	})
+
+	It("should preserve the scheme, which is what decides TLS", func() {
+		Expect(signalEndpoint("https://otel.example.net:4318", tracesPath)).To(HavePrefix("https://"))
+	})
+
+	It("should return an unparseable endpoint unchanged rather than mangling it", func() {
+		Expect(signalEndpoint("://nonsense", tracesPath)).To(Equal("://nonsense"))
+	})
+})
