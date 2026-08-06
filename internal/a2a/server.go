@@ -180,6 +180,17 @@ func (s *Server) selectExposed(tools []toolkit.Tool) []toolkit.Tool {
 		case t.ModelDescription() == "":
 			s.opts.Logger.Warn("Skipping tool: served tools must advertise a description; remote agents will not import a description-less tool", "tool", t.Name())
 		default:
+			// The tool is served whatever its tags say; a reserved tag that does nothing
+			// looks exactly like one that works, and the behavior this agent advertises to
+			// its peers is built from the same tags.
+			unknown, conflicting := toolkit.TagIssues(t)
+			if len(unknown) > 0 {
+				s.opts.Logger.Warn("Tool carries unknown reserved tags: the ai: prefix is reserved and these do nothing", "tool", t.Name(), "tags", unknown)
+			}
+			if len(conflicting) > 0 {
+				s.opts.Logger.Warn("Tool carries contradictory behavior tags: the more dangerous reading is advertised", "tool", t.Name(), "tags", conflicting)
+			}
+
 			exposed = append(exposed, t)
 			s.byName[t.Name()] = t
 		}
@@ -317,6 +328,7 @@ func buildCard(identity, version string, tools []toolkit.Tool) AgentCard {
 			Name:        t.Name(),
 			Description: t.ModelDescription(),
 			InputSchema: marshalSchema(t.InputSchema()),
+			Behavior:    toolkit.BehaviorOf(t),
 		})
 	}
 

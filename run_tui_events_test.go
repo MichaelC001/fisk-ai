@@ -159,6 +159,17 @@ var _ = Describe("tcellEvents mapping", func() {
 			Expect(disabled).To(ContainSubstring("12 tools"))
 			Expect(disabled).To(ContainSubstring("no_tool_search"))
 		})
+
+		It("Should name the tool and the tags for a reserved tag problem", func() {
+			unknown := warningMessage(agent.Warning{Kind: agent.WarnUnknownReservedTag, Name: "stream_rm", Params: []string{"ai:readonly", "ai:nope"}})
+			Expect(unknown).To(ContainSubstring(`"stream_rm"`))
+			Expect(unknown).To(ContainSubstring("ai:readonly, ai:nope"))
+			Expect(unknown).To(ContainSubstring("do nothing"))
+
+			conflict := warningMessage(agent.Warning{Kind: agent.WarnBehaviorTagConflict, Name: "stream_rm", Params: []string{"ai:read_only", "ai:destructive"}})
+			Expect(conflict).To(ContainSubstring("ai:read_only, ai:destructive"))
+			Expect(conflict).To(ContainSubstring("more dangerous"))
+		})
 	})
 
 	Describe("runUsesTUI", func() {

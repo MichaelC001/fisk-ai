@@ -108,6 +108,11 @@ type Spec struct {
 	// nowhere, so a tool is reachable only from an agent run until someone says
 	// otherwise. Built-ins must state it explicitly; see builtin.mustNew.
 	Expose *ExposeSpec
+	// Behavior declares what calling the tool does to the world. The zero value
+	// declares nothing, which is a legitimate answer: every consumer then applies its
+	// own conservative default. What is declared is advertised to the model, carried to
+	// peer agents, and rendered as MCP tool annotations.
+	Behavior toolkit.Behavior
 	// Kind is the provider the tool is accounted under. It is left unset by a caller's
 	// own tool, which is accounted as toolkit.KindCustom; a remote tool is always
 	// accounted remote regardless of this field; the harness sets toolkit.KindBuiltin
@@ -141,25 +146,34 @@ type Tool struct {
 	noDefer          bool
 	remote           *RemoteSpec
 	expose           ExposeSpec
+	behavior         toolkit.Behavior
 	kind             toolkit.Kind
 }
 
-// A function tool is a model-facing Tool that describes its own presentation, and
-// opts into confirmation and argument validation through the narrow capability
-// interfaces the runner consults; those capabilities are inert (NeedsConfirm and
-// MissingRequired report nothing) unless the Spec enables them.
+// A function tool is a model-facing Tool that describes its own presentation and
+// behavior, and opts into confirmation and argument validation through the narrow
+// capability interfaces the runner consults; those capabilities are inert
+// (NeedsConfirm and MissingRequired report nothing) unless the Spec enables them.
 var (
 	_ toolkit.Tool              = (*Tool)(nil)
 	_ toolkit.Describer         = (*Tool)(nil)
+	_ toolkit.BehaviorDescriber = (*Tool)(nil)
 	_ toolkit.Confirmable       = (*Tool)(nil)
 	_ toolkit.ArgumentValidator = (*Tool)(nil)
 )
 
 // New validates a Spec and returns the function tool it describes. It fails when a
 // required field is missing, when ValidateRequired is set but the schema declares no
-// required parameters (which would silently validate nothing), or when a remote tool
+// required parameters (which would silently validate nothing), when a remote tool
 // is also marked confirm-gated (a remote tool is gated by its serving agent, never
-// locally).
+// locally), or when the declared Behavior contradicts itself.
+//
+// The contradictory Behavior is a hard error here because a Spec is code its author
+// owns, and a tool that claims to be both read-only and destructive is a bug worth
+// hearing about at construction. A Behavior that arrived from somewhere untrusted,
+// such as a peer agent describing its own tools, must be passed through
+// toolkit.Behavior.Resolve first: sanitizing it is the importer's job, so a peer
+// cannot make its own tool vanish from a run by describing it badly.
 func New(spec Spec) (*Tool, error) {
 	switch {
 	case spec.Name == "":
@@ -170,6 +184,8 @@ func New(spec Spec) (*Tool, error) {
 		return nil, fmt.Errorf("tool %q schema is required", spec.Name)
 	case spec.Handler == nil:
 		return nil, fmt.Errorf("tool %q handler is required", spec.Name)
+	case spec.Behavior.ReadOnly == toolkit.HintTrue && spec.Behavior.Destructive == toolkit.HintTrue:
+		return nil, fmt.Errorf("tool %q declares a behavior that is both read-only and destructive", spec.Name)
 	}
 
 	if spec.ValidateRequired && len(toolkit.SchemaRequired(spec.Schema["required"])) == 0 {
@@ -208,6 +224,7 @@ func New(spec Spec) (*Tool, error) {
 		noDefer:          spec.NoDefer,
 		remote:           spec.Remote,
 		expose:           expose,
+		behavior:         spec.Behavior,
 		kind:             spec.Kind,
 	}, nil
 }
@@ -218,10 +235,34 @@ func (t *Tool) Name() string { return t.name }
 // Description is the model-facing description.
 func (t *Tool) Description() string { return t.description }
 
-// ModelDescription is what a model or a peer agent is told the tool does. A
-// function tool carries no tags, so it is its description; the method exists so
-// every kind answers the question the same way.
-func (t *Tool) ModelDescription() string { return t.description }
+// ModelDescription is what a model or a peer agent is told the tool does: its
+// description followed by the behavior it declares, if any. A command tool carries its
+// tags in that block, and the behavior tags are among them; a function tool has no
+// tags, so the declaration it does carry is rendered here instead. Without it a
+// built-in's and a caller's own tool's behavior would reach nothing the model reads.
+//
+// A remote tool is the exception: its description is the serving agent's own
+// model-facing text, which already says whatever that agent says about the tool's
+// behavior. Its declaration travels structurally beside that text, so appending it
+// here would show the model the same claim twice.
+func (t *Tool) ModelDescription() string {
+	behavior := t.behavior.String()
+	if behavior == "" || t.remote != nil {
+		return t.description
+	}
+
+	line := "Behavior: " + behavior
+	if t.description == "" {
+		return line
+	}
+
+	return t.description + "\n\n" + line
+}
+
+// Behavior is what calling the tool does to the world, as declared on its Spec. A
+// tool that declared nothing returns the zero value, and every consumer applies its
+// own conservative default.
+func (t *Tool) Behavior() toolkit.Behavior { return t.behavior }
 
 // MCPExposable reports whether the tool may be served over MCP, as declared on its
 // Spec. It is the ceiling an operator's allowlist narrows, never widens.
@@ -235,13 +276,14 @@ func (t *Tool) A2AExposable() bool { return t.expose.A2A }
 // raw schema directly (the MCP server).
 func (t *Tool) InputSchema() map[string]any { return t.schema }
 
-// Definition renders the tool as a neutral definition. A tool marked NoDefer is
-// always sent directly, even within a deferred set, so its deferral is suppressed
-// here rather than in the caller.
+// Definition renders the tool as a neutral definition. It advertises the
+// model-facing description, so a declared behavior travels with the tool the same way
+// a command tool's tags do. A tool marked NoDefer is always sent directly, even within
+// a deferred set, so its deferral is suppressed here rather than in the caller.
 func (t *Tool) Definition(deferLoading bool) llm.ToolDef {
 	return llm.ToolDef{
 		Name:         t.name,
-		Description:  t.description,
+		Description:  t.ModelDescription(),
 		InputSchema:  t.schema,
 		DeferLoading: deferLoading && !t.noDefer,
 	}

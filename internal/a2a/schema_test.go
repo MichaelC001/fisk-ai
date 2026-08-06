@@ -10,6 +10,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // fillHeader populates the required header fields with valid values so a message
@@ -68,6 +70,12 @@ var _ = Describe("Validator", func() {
 				Name:        "nats_server_info",
 				Description: "show server info",
 				InputSchema: json.RawMessage(`{"type":"object"}`),
+				Behavior: toolkit.Behavior{
+					ReadOnly:    toolkit.HintTrue,
+					Destructive: toolkit.HintFalse,
+					Idempotent:  toolkit.HintTrue,
+					OpenWorld:   toolkit.HintFalse,
+				},
 			}}
 
 			messages := []any{
@@ -166,6 +174,37 @@ var _ = Describe("Validator", func() {
 				m["protocol"] = "io.choria.fisk-ai.v1.bogus"
 			})
 			Expect(v.Validate(bad)).To(MatchError(ErrUnknownProtocol))
+		})
+
+		It("Should reject a tool behavior hint that is not a boolean", func() {
+			reply := NewDiscoveryReply("agent-a", "1.2.3")
+			fillHeader(&reply.Header)
+			reply.Tools = []ToolDescriptor{{Name: "t", Description: "a tool"}}
+
+			data, err := json.Marshal(reply)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v.Validate(data)).To(Succeed())
+
+			bad := tamper(data, func(m map[string]any) {
+				tools := m["tools"].([]any)
+				tools[0].(map[string]any)["behavior"] = map[string]any{"read_only": "yes"}
+			})
+			Expect(v.Validate(bad)).To(HaveOccurred())
+		})
+
+		It("Should reject an unknown tool behavior hint", func() {
+			reply := NewDiscoveryReply("agent-a", "1.2.3")
+			fillHeader(&reply.Header)
+			reply.Tools = []ToolDescriptor{{Name: "t", Description: "a tool"}}
+
+			data, err := json.Marshal(reply)
+			Expect(err).ToNot(HaveOccurred())
+
+			bad := tamper(data, func(m map[string]any) {
+				tools := m["tools"].([]any)
+				tools[0].(map[string]any)["behavior"] = map[string]any{"harmless": true}
+			})
+			Expect(v.Validate(bad)).To(HaveOccurred())
 		})
 
 		It("Should reject an event whose block fails the oneOf", func() {

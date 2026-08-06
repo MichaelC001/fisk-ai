@@ -989,6 +989,21 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	// A tag under the reserved ai: namespace that the harness does not know does
+	// nothing at all, and a command carrying one is indistinguishable from a correctly
+	// tagged command until someone says so. Contradictory behavior tags are reported
+	// for the same reason: the tool still runs, resolved the more dangerous way, but
+	// its author asked for two things and got one.
+	for _, t := range tools {
+		unknown, conflicting := toolkit.TagIssues(t)
+		if len(unknown) > 0 {
+			events.Warn(Warning{Kind: WarnUnknownReservedTag, Name: t.Name(), Params: unknown})
+		}
+		if len(conflicting) > 0 {
+			events.Warn(Warning{Kind: WarnBehaviorTagConflict, Name: t.Name(), Params: conflicting})
+		}
+	}
+
 	prompt := opts.Prompt
 	if len(prompt) == 0 {
 		prompt = []string{"assist the user"}

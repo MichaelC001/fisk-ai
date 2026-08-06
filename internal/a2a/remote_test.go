@@ -73,6 +73,44 @@ var _ = Describe("RemoteTool", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rt.MissingRequired(json.RawMessage(`{}`))).To(BeNil())
 		})
+
+		It("Should carry the behavior the serving agent declared", func() {
+			desc := descriptor
+			desc.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}
+
+			rt, err := NewRemoteTool("nats_stream_info", "nats", desc, &fakeInvoker{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rt.Behavior()).To(Equal(desc.Behavior))
+		})
+
+		It("Should not repeat the behavior the serving agent already wrote into its description", func() {
+			desc := descriptor
+			desc.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue}
+
+			rt, err := NewRemoteTool("nats_stream_info", "nats", desc, &fakeInvoker{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rt.ModelDescription()).To(Equal("Reports on a stream"))
+		})
+
+		It("Should import a peer that contradicts itself, resolved, rather than dropping its tool", func() {
+			desc := descriptor
+			desc.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, Destructive: toolkit.HintTrue}
+
+			rt, err := NewRemoteTool("nats_stream_info", "nats", desc, &fakeInvoker{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rt.Behavior().ReadOnly).To(Equal(toolkit.HintFalse))
+			Expect(rt.Behavior().Destructive).To(Equal(toolkit.HintTrue))
+		})
+
+		It("Should never let a peer's claim be re-served as this agent's own", func() {
+			desc := descriptor
+			desc.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue}
+
+			rt, err := NewRemoteTool("nats_stream_info", "nats", desc, &fakeInvoker{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rt.MCPExposable()).To(BeFalse())
+			Expect(rt.A2AExposable()).To(BeFalse())
+		})
 	})
 
 	Describe("Definition", func() {

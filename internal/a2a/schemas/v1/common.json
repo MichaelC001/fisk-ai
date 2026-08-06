@@ -156,6 +156,32 @@
         "input_schema": {
           "type": "object",
           "description": "JSON schema for the tool input."
+        },
+        "behavior": {
+          "$ref": "#/$defs/tool_behavior"
+        }
+      }
+    },
+    "tool_behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the serving agent says calling a tool does to the world. Every property is a hint the serving agent asserts about its own tool, never a guarantee, and an absent property asserts nothing.",
+      "properties": {
+        "read_only": {
+          "type": "boolean",
+          "description": "The call does not modify its environment."
+        },
+        "destructive": {
+          "type": "boolean",
+          "description": "The call may destroy or overwrite existing state rather than only adding to it. Meaningful only when the call is not read-only."
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Repeating the call with the same arguments has no further effect. Meaningful only when the call is not read-only."
+        },
+        "open_world": {
+          "type": "boolean",
+          "description": "The call reaches an open set of external entities rather than a closed one the operator configured."
         }
       }
     },

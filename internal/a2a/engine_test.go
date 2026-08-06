@@ -75,6 +75,16 @@ var _ = Describe("buildCard", func() {
 		Expect(card.Tools).To(HaveLen(1))
 		Expect(card.Tools[0].Name).To(Equal("ping"))
 		Expect(card.Tools[0].InputSchema).NotTo(BeEmpty())
+		Expect(card.Tools[0].Behavior.IsZero()).To(BeTrue())
+	})
+
+	It("Should carry the behavior a served tool declares so a peer reads it as structure", func() {
+		app := fisk.New("app", "an app")
+		app.Command("ls", "list things").Tag("ai:read_only").Tag("ai:idempotent")
+
+		card := buildCard("svc", "v1", toolsFor(app))
+		Expect(card.Tools).To(HaveLen(1))
+		Expect(card.Tools[0].Behavior).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
 	})
 })
 

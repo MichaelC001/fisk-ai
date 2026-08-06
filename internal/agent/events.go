@@ -144,6 +144,15 @@ const (
 	// once the run's outcome is already decided, so its failure cannot change that
 	// outcome and is reported as an advisory rather than ending the run.
 	WarnSessionEndHook
+	// WarnUnknownReservedTag: tool Name carries the tags in Params, which claim the
+	// reserved ai: namespace but are not tags the harness knows. They do nothing, which
+	// looks exactly like a correctly tagged command, so a misspelled ai:read_only or
+	// ai:confirm would otherwise be invisible.
+	WarnUnknownReservedTag
+	// WarnBehaviorTagConflict: tool Name declares the contradictory behavior tags in
+	// Params, e.g. both ai:read_only and ai:destructive. The more dangerous reading was
+	// taken and the tool is still available.
+	WarnBehaviorTagConflict
 )
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;

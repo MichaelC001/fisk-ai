@@ -27,6 +27,7 @@
   5. If you have questions, ask them in the review. But before continuing, always give the user a chance to ask 
      questions or steer the plan as a final step. Just because he answered your questions does not mean you are 
      ready to move on. Ask for final user input.
+- **Planning documents state the design as it is now.** No revision history, no "an earlier draft said", no change log in the footer. When a decision changes, rewrite the affected text in place, including anywhere the old version leaked to. A revision marker in the status line is fine.
 - **Suspected bugs in existing code**: do not write tests that lock in behavior you suspect is wrong. Stop, describe the concern, ask the user how to proceed.
 - **Change code only after approval**: While discussing or working on a plan, do not change code without explicit approval, questions like "What's next?" does not mean edit code, it means answer the question - what will we work on next.
 

@@ -18,6 +18,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/util"
@@ -103,12 +104,24 @@ func infoAction(_ *fisk.ParseContext) error {
 	// expect rather than discovering a typo (an unmatched tag) only mid-run. Only the
 	// introspected local tools carry tags; the built-ins and remote tools are not gated
 	// here, so their cell stays blank.
+	// A tag that does nothing renders in the Tags column exactly like one that works,
+	// so the tags that are misspelled or contradictory are called out under the table
+	// rather than left for the operator to spot.
+	var tagIssues []string
 	for _, t := range tools {
 		confirm := ""
 		if t.NeedsConfirm(cfg.ConfirmTags()) {
 			confirm = "Yes"
 		}
 		tbl.AddRow(t.Name(), "local", confirm, util.TruncateString(t.Description(), maxInfoDescriptionLen), strings.Join(t.Tags(), ", "))
+
+		unknown, conflicting := toolkit.TagIssues(t)
+		if len(unknown) > 0 {
+			tagIssues = append(tagIssues, fmt.Sprintf("%s carries unknown reserved tag(s) %s, which do nothing; the recognized tags are %s", t.Name(), strings.Join(unknown, ", "), strings.Join(toolkit.ReservedTags(), ", ")))
+		}
+		if len(conflicting) > 0 {
+			tagIssues = append(tagIssues, fmt.Sprintf("%s carries contradictory behavior tags %s; the more dangerous reading is used", t.Name(), strings.Join(conflicting, ", ")))
+		}
 	}
 	// Built-in human-in-the-loop tools are not introspected from the application,
 	// so list them too when enabled, to show the full tool set a run would expose.
@@ -144,6 +157,10 @@ func infoAction(_ *fisk.ParseContext) error {
 	c.Section("Tools", func(c *columns.Document) {
 		c.Embed(tbl)
 	})
+
+	for _, issue := range tagIssues {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", issue)
+	}
 
 	printRemoteToolStatus(c, cfg, imports)
 

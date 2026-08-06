@@ -170,6 +170,14 @@ func knowledgeSearchTool(store *rag.Store) *functool.Tool {
 		// operator may serve. Not a2a: there is no a2a builtins allowlist, so declaring
 		// it there would serve it the moment a2a is enabled, with no opt-in.
 		Expose: &functool.ExposeSpec{MCP: true},
+		// It reads an index the operator built and touches nothing else: the same query
+		// returns the same sections, and the documents it can reach are the closed set
+		// the operator indexed.
+		Behavior: toolkit.Behavior{
+			ReadOnly:   toolkit.HintTrue,
+			Idempotent: toolkit.HintTrue,
+			OpenWorld:  toolkit.HintFalse,
+		},
 		Description: "Search the operator's local knowledge base (their indexed markdown and text documents) " +
 			"and return the most relevant sections, each with a citation. " +
 			"Call this whenever answering depends on project-specific knowledge you are not certain of: a " +
