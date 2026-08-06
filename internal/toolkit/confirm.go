@@ -6,14 +6,6 @@ package toolkit
 
 import "slices"
 
-// ConfirmTag marks a tool as requiring the operator's explicit approval before it
-// runs. It is always on: a tool carrying it is gated regardless of the operator's
-// configured confirm tags, so the guarantee cannot be weakened by configuration.
-// Operators gate further tools by listing additional tags, which NeedsConfirm and
-// ConfirmTrigger treat the same way. It is the single definition shared by every
-// tool kind that can be gated, so the gate logic cannot drift between them.
-const ConfirmTag = "ai:confirm"
-
 // NeedsConfirm reports whether a tool carrying toolTags must be approved by the
 // operator before it runs: it carries the always-on ConfirmTag, or any of the extra
 // confirm tags the operator configured (extraTags). ConfirmTag is matched

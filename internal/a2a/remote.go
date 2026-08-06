@@ -39,6 +39,12 @@ type RemoteInvoker interface {
 // one: a transport failure or a remote harness failure becomes an error result, while
 // a command that ran (even one that exited non-zero) becomes a successful result
 // carrying the same CommandResult JSON a local command tool produces.
+//
+// The declared behavior is carried over, resolved first so a peer that contradicts
+// itself cannot make its own tool vanish from the import. It stays the peer's claim
+// about the peer's tool: it reaches the model as part of the tool's description and
+// nothing else, since a remote tool can never itself be served on (see functool.New),
+// so this agent never republishes it as its own.
 func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteInvoker) (*functool.Tool, error) {
 	schema := map[string]any{"type": "object"}
 	if len(desc.InputSchema) > 0 {
@@ -85,5 +91,6 @@ func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteI
 		Schema:      schema,
 		Handler:     handler,
 		Remote:      &functool.RemoteSpec{Agent: agent},
+		Behavior:    desc.Behavior.Resolve(),
 	})
 }

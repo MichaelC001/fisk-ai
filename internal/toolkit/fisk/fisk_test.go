@@ -295,6 +295,36 @@ var _ = Describe("ApplicationTools", func() {
 		Expect(tools[0].Description()).To(Equal("the long form help"))
 	})
 
+	Describe("Behavior", func() {
+		It("Should declare nothing for a command with no behavior tags", func() {
+			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{confirmTag}}}
+			Expect(tool.Behavior().IsZero()).To(BeTrue())
+		})
+
+		It("Should derive the behavior its author tagged", func() {
+			tool := &FiskCommandTool{Path: []string{"stream", "ls"}, Model: &fisk.CmdModel{Tags: []string{toolkit.ReadOnlyTag, toolkit.IdempotentTag}}}
+			Expect(tool.Behavior()).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
+		})
+
+		It("Should resolve contradictory tags toward the more dangerous reading rather than refusing the command", func() {
+			tool := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{toolkit.ReadOnlyTag, toolkit.DestructiveTag}}}
+			Expect(tool.Behavior().ReadOnly).To(Equal(toolkit.HintFalse))
+			Expect(tool.Behavior().Destructive).To(Equal(toolkit.HintTrue))
+
+			unknown, conflicting := toolkit.TagIssues(tool)
+			Expect(unknown).To(BeEmpty())
+			Expect(conflicting).To(ConsistOf(toolkit.ReadOnlyTag, toolkit.DestructiveTag))
+		})
+
+		It("Should report a tag that only looks reserved", func() {
+			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{"ai:readonly"}}}
+			Expect(tool.Behavior().IsZero()).To(BeTrue())
+
+			unknown, _ := toolkit.TagIssues(tool)
+			Expect(unknown).To(Equal([]string{"ai:readonly"}))
+		})
+	})
+
 	Describe("ModelDescription", func() {
 		It("Should return the plain help when the command has no tags", func() {
 			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Help: "do a thing"}}

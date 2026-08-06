@@ -120,6 +120,62 @@ var _ = Describe("New", func() {
 		_, err := New(spec)
 		Expect(err).To(MatchError(ContainSubstring("remote and cannot be confirm-gated")))
 	})
+
+	It("Should reject a behavior that is both read-only and destructive", func() {
+		spec := base()
+		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, Destructive: toolkit.HintTrue}
+		_, err := New(spec)
+		Expect(err).To(MatchError(ContainSubstring("both read-only and destructive")))
+	})
+
+	It("Should accept a behavior an importer has already resolved", func() {
+		spec := base()
+		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, Destructive: toolkit.HintTrue}.Resolve()
+		tool, err := New(spec)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tool.Behavior().ReadOnly).To(Equal(toolkit.HintFalse))
+	})
+
+	It("Should declare no behavior when the spec sets none", func() {
+		Expect(mustNew(base()).Behavior().IsZero()).To(BeTrue())
+	})
+
+	It("Should carry the declared behavior through to the tool", func() {
+		spec := base()
+		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, OpenWorld: toolkit.HintFalse}
+		Expect(mustNew(spec).Behavior()).To(Equal(spec.Behavior))
+	})
+})
+
+var _ = Describe("ModelDescription", func() {
+	base := func() Spec {
+		return Spec{Name: "do_thing", Description: "does a thing", Schema: objectSchema(), Handler: okHandler}
+	}
+
+	It("Should be the plain description when no behavior is declared", func() {
+		Expect(mustNew(base()).ModelDescription()).To(Equal("does a thing"))
+	})
+
+	It("Should append the declared behavior so the model reads it", func() {
+		spec := base()
+		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}
+		Expect(mustNew(spec).ModelDescription()).To(Equal("does a thing\n\nBehavior: read only, idempotent"))
+	})
+
+	It("Should not append a remote tool's behavior, which its description already carries", func() {
+		spec := base()
+		spec.Remote = &RemoteSpec{Agent: "billing"}
+		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue}
+		Expect(mustNew(spec).ModelDescription()).To(Equal("does a thing"))
+	})
+
+	It("Should advertise the model-facing description in the tool definition", func() {
+		spec := base()
+		spec.Behavior = toolkit.Behavior{Destructive: toolkit.HintTrue}
+		tool := mustNew(spec)
+		Expect(tool.Definition(false).Description).To(Equal(tool.ModelDescription()))
+		Expect(tool.Definition(false).Description).To(ContainSubstring("Behavior: destructive"))
+	})
 })
 
 var _ = Describe("Definition", func() {

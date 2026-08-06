@@ -25,29 +25,25 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 )
 
-// denyTag is always-on: commands carrying it are never exposed as tools.
-const denyTag = "ai:deny"
-
-// noDeferTag forces a tool to always be loaded directly (defer_loading:false),
-// even when the tool set is large enough that the rest are deferred behind the
-// tool search tool. Use it for the few commands the model needs on most requests
-// so they stay immediately available.
-const noDeferTag = "ai:no_defer"
-
-// confirmTag is the always-on confirm tag as it appears on a fisk command's tags.
-// It is toolkit.ConfirmTag, the single definition shared with every tool kind, named
-// here for readability. A command carrying it requires the operator's explicit
-// permission before it runs: the agent prompts at the terminal, showing the command
-// and its arguments, and only runs it on an affirmative answer; an "allow for the
-// session" answer is remembered in-process for that tool for the rest of the run (see
-// ConfirmGate). It is always on; operators gate further commands by listing
-// additional tags under confirm_tags, which NeedsConfirm treats the same way.
+// The reserved tags a fisk command carries are toolkit's, the single definitions
+// shared with every tool kind, named here for readability within the package.
+//
+// A command tagged confirmTag requires the operator's explicit permission before it
+// runs: the agent prompts at the terminal, showing the command and its arguments, and
+// only runs it on an affirmative answer; an "allow for the session" answer is
+// remembered in-process for that tool for the rest of the run (see ConfirmGate).
+// Operators gate further commands by listing additional tags under confirm_tags,
+// which NeedsConfirm treats the same way.
 //
 // Confirmation does not need a terminal, so confirm-tagged commands are exposed over
 // MCP: there a client that supports elicitation is asked to approve the run, and a
 // client that does not runs the command ungated (see the mcpserver package). Use
-// ai:deny to keep a command off MCP entirely.
-const confirmTag = toolkit.ConfirmTag
+// denyTag to keep a command off MCP entirely.
+const (
+	denyTag    = toolkit.DenyTag
+	noDeferTag = toolkit.NoDeferTag
+	confirmTag = toolkit.ConfirmTag
+)
 
 // maxToolOutputBytes caps the captured output so a chatty command cannot flood
 // the model's context. Output beyond this is truncated with a marker.

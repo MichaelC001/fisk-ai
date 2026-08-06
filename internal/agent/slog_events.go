@@ -227,6 +227,10 @@ func warningKindName(k WarningKind) string {
 		return "prompt_denied"
 	case WarnSessionEndHook:
 		return "session_end_hook"
+	case WarnUnknownReservedTag:
+		return "unknown_reserved_tag"
+	case WarnBehaviorTagConflict:
+		return "behavior_tag_conflict"
 	default:
 		return "unknown"
 	}

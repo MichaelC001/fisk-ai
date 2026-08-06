@@ -29,6 +29,12 @@ func knowledgeEnumerateTool(store *rag.Store) *functool.Tool {
 		// Not a2a, for the reason knowledge_search is not: there is no a2a builtins
 		// allowlist, so declaring it there would serve it the moment a2a is enabled.
 		Expose: &functool.ExposeSpec{MCP: true},
+		// Read-only over the same closed index knowledge_search reads.
+		Behavior: toolkit.Behavior{
+			ReadOnly:   toolkit.HintTrue,
+			Idempotent: toolkit.HintTrue,
+			OpenWorld:  toolkit.HintFalse,
+		},
 		Description: "Map which of the operator's indexed documents contain particular words, and how often." +
 			"Returns a complete, unranked list of matching document paths with match counts, never document text. " +
 			"Use it to orient│before you read: to see how large a topic is, which documents own it, and which terms " +

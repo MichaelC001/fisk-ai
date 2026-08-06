@@ -288,6 +288,98 @@ var _ = Describe("BuildServer", func() {
 		Expect(res.Tools[0].Annotations.Title).To(Equal("stream info"))
 	})
 
+	It("Should advertise the behavioral hints a command's tags declare", func() {
+		app := fisk.New("app", "an app")
+		app.Command("stream_ls", "list streams").Tag("ai:read_only").Tag("ai:idempotent")
+		app.Command("stream_rm", "remove a stream").Tag("ai:destructive")
+
+		srv, _ := BuildServer(toolsFor(app), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		res, err := cs.ListTools(ctx, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		byName := map[string]*mcp.Tool{}
+		for _, t := range res.Tools {
+			byName[t.Name] = t
+		}
+
+		readOnly := byName["stream_ls"].Annotations
+		Expect(readOnly.ReadOnlyHint).To(BeTrue())
+		Expect(readOnly.IdempotentHint).To(BeTrue())
+		Expect(readOnly.DestructiveHint).To(BeNil())
+
+		destructive := byName["stream_rm"].Annotations
+		Expect(destructive.ReadOnlyHint).To(BeFalse())
+		Expect(destructive.DestructiveHint).NotTo(BeNil())
+		Expect(*destructive.DestructiveHint).To(BeTrue())
+	})
+
+	It("Should leave an undeclared hint absent so the client applies the spec default", func() {
+		app := fisk.New("app", "an app")
+		app.Command("plain", "says nothing about itself")
+
+		srv, _ := BuildServer(toolsFor(app), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		res, err := cs.ListTools(ctx, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Tools).To(HaveLen(1))
+
+		annotations := res.Tools[0].Annotations
+		Expect(annotations.DestructiveHint).To(BeNil())
+		Expect(annotations.OpenWorldHint).To(BeNil())
+		Expect(annotations.ReadOnlyHint).To(BeFalse())
+		Expect(annotations.IdempotentHint).To(BeFalse())
+	})
+
+	It("Should still advertise read-only for a confirm-gated command, which answers a different question", func() {
+		app := fisk.New("app", "an app")
+		app.Command("expensive_report", "a slow read").Tag("ai:read_only").Tag("ai:confirm")
+
+		srv, _ := BuildServer(toolsFor(app), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		res, err := cs.ListTools(ctx, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Tools).To(HaveLen(1))
+		Expect(res.Tools[0].Annotations.ReadOnlyHint).To(BeTrue())
+	})
+
+	It("Should serve a tool with contradictory behavior tags, advertising the more dangerous reading", func() {
+		app := fisk.New("app", "an app")
+		app.Command("confused", "claims both").Tag("ai:read_only").Tag("ai:destructive")
+
+		log := &bytes.Buffer{}
+		srv, registered := BuildServer(toolsFor(app), Options{Name: "app", Version: "v1", LogOutput: log})
+		Expect(registered).To(ConsistOf("confused"))
+		Expect(log.String()).To(ContainSubstring("contradictory behavior tags"))
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		res, err := cs.ListTools(ctx, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Tools[0].Annotations.ReadOnlyHint).To(BeFalse())
+		Expect(*res.Tools[0].Annotations.DestructiveHint).To(BeTrue())
+	})
+
+	It("Should warn about a tag that only looks reserved, and serve the tool anyway", func() {
+		app := fisk.New("app", "an app")
+		app.Command("typo", "misspelled its tag").Tag("ai:readonly")
+
+		log := &bytes.Buffer{}
+		_, registered := BuildServer(toolsFor(app), Options{Name: "app", Version: "v1", LogOutput: log})
+		Expect(registered).To(ConsistOf("typo"))
+		Expect(log.String()).To(ContainSubstring(`unknown reserved tag(s) ai:readonly`))
+	})
+
 	It("Should not expose tools removed by the ai:deny filter", func() {
 		app := fisk.New("app", "an app")
 		app.Command("keep", "kept tool")

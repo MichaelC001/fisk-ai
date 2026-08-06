@@ -4,7 +4,11 @@
 
 package a2a
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+)
 
 // Request starts a task. It is sent by a caller to an agent.
 type Request struct {
@@ -159,6 +163,13 @@ type ToolDescriptor struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	// Behavior is what the serving agent says calling the tool does to the world. It
+	// carries the neutral declaration rather than the serving agent's own tags, so a
+	// tool that declares its behavior some other way than a command tag is described
+	// the same way. It is the serving agent's unverified claim about its own tools, so
+	// an importer sanitizes it and never republishes it as its own; the toolkit type is
+	// used directly because this wire format has no need to differ from it.
+	Behavior toolkit.Behavior `json:"behavior,omitzero"`
 }
 
 // AgentCard is an agent's self description: who it is, its version, and the

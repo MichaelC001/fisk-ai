@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -171,6 +172,17 @@ func BuildServer(tools []toolkit.Tool, opts Options) (*mcp.Server, []string) {
 			continue
 		}
 
+		// A tool is served whatever its tags say; these are reported because a tag that
+		// does nothing looks exactly like one that works, and the annotations a client
+		// receives are built from the same tags.
+		unknown, conflicting := toolkit.TagIssues(t)
+		if len(unknown) > 0 {
+			fmt.Fprintf(opts.LogOutput, "warning: tool %q carries unknown reserved tag(s) %s: the ai: prefix is reserved and these do nothing\n", t.Name(), strings.Join(unknown, ", "))
+		}
+		if len(conflicting) > 0 {
+			fmt.Fprintf(opts.LogOutput, "warning: tool %q carries contradictory behavior tags %s: the more dangerous reading is advertised\n", t.Name(), strings.Join(conflicting, ", "))
+		}
+
 		srv.AddTool(&mcp.Tool{
 			Name:        t.Name(),
 			Description: t.ModelDescription(),
@@ -241,19 +253,43 @@ func confirmModeSummary(mode ConfirmMode) string {
 	}
 }
 
-// toolAnnotations maps a tool's metadata to MCP tool annotations: a readable
-// title, the space-separated command path (e.g. "stream rm" rather than the
-// underscore tool name). Annotations are advisory hints for clients, not a control
-// channel, so approval (ai:confirm) is deliberately not expressed here; see
-// BuildServer. The behavioral hints (the ReadOnlyHint, DestructiveHint) are left unset:
-// fisk-ai has no standard tag describing a command's effect, so asserting one would
-// be a guess, and leaving them unset carries the spec's conservative default.
+// toolAnnotations maps a tool's metadata to MCP tool annotations: a readable title,
+// the space-separated command path (e.g. "stream rm" rather than the underscore tool
+// name), and the behavioral hints the tool declares.
+//
+// Annotations are advisory hints for clients, not a control channel. Approval
+// (ai:confirm) is deliberately not expressed here; see BuildServer. Nor does a gate
+// suppress a hint: an author who says a command is read-only and an operator who says
+// it needs approving are answering different questions, and a slow read gated for its
+// cost is still a read.
+//
+// An undeclared hint is left absent so the client applies the spec's own conservative
+// default, which reads a tool as destructive and open-world. Only DestructiveHint and
+// OpenWorldHint can carry that absence: the SDK types ReadOnlyHint and IdempotentHint
+// as plain bools that are always marshaled, so for those two an undeclared tool and one
+// declared false are indistinguishable on the wire. Both send false, which is the
+// spec's default for them anyway.
 func toolAnnotations(t toolkit.Tool) *mcp.ToolAnnotations {
+	annotations := &mcp.ToolAnnotations{Title: t.Name()}
 	if c, ok := t.(toolkit.Confirmable); ok {
-		return &mcp.ToolAnnotations{Title: c.Command()}
+		annotations.Title = c.Command()
 	}
 
-	return &mcp.ToolAnnotations{Title: t.Name()}
+	behavior := toolkit.BehaviorOf(t)
+	annotations.ReadOnlyHint, _ = behavior.ReadOnly.Bool()
+	annotations.IdempotentHint, _ = behavior.Idempotent.Bool()
+
+	destructive, declared := behavior.Destructive.Bool()
+	if declared {
+		annotations.DestructiveHint = &destructive
+	}
+
+	openWorld, declared := behavior.OpenWorld.Bool()
+	if declared {
+		annotations.OpenWorldHint = &openWorld
+	}
+
+	return annotations
 }
 
 // Serve builds the MCP server and serves it over HTTP until ctx is canceled.

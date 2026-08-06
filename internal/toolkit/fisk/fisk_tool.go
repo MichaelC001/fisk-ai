@@ -13,14 +13,28 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// A FiskCommandTool is a model-facing Tool that describes its own presentation, can
-// require operator confirmation, and can pre-validate a call's required arguments.
+// A FiskCommandTool is a model-facing Tool that describes its own presentation and
+// behavior, can require operator confirmation, and can pre-validate a call's required
+// arguments.
 var (
 	_ toolkit.Tool              = (*FiskCommandTool)(nil)
 	_ toolkit.Describer         = (*FiskCommandTool)(nil)
+	_ toolkit.BehaviorDescriber = (*FiskCommandTool)(nil)
 	_ toolkit.Confirmable       = (*FiskCommandTool)(nil)
 	_ toolkit.ArgumentValidator = (*FiskCommandTool)(nil)
 )
+
+// Behavior is what running the command does to the world, as its author declared it
+// through the reserved behavior tags. A command that carries none declares nothing,
+// and every consumer applies its own conservative default. Contradictory tags are
+// resolved conservatively rather than rejected, so one mistagged command in a wrapped
+// binary cannot stop a run; toolkit.TagIssues reports the contradiction to a caller
+// that can warn about it.
+func (t *FiskCommandTool) Behavior() toolkit.Behavior {
+	behavior, _ := toolkit.BehaviorFromTags(t.Tags())
+
+	return behavior
+}
 
 // Describe presents the tool as an application command: its call is traced with the
 // resolved command line and a short form with long argument values middle-elided, so
