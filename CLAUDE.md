@@ -20,7 +20,7 @@
 - **Collaborate not Autonomy** The prevailing model is that we collaborate on solving a problem, you do not autonomously work and edit whatever you like. This means you summarize steps, you seek permission and you explain what is landing. 
 - **Exploratory questions** ("how could we…", "what do you think about…"): propose an approach and wait for explicit confirmation before implementing. Do not start work on the assumption that exploration implies approval.
 - **Non-trivial plans** must be reviewed before presenting to the user:
-  1. Draft the plan.
+  1. Draft the plan and present it to the user in short overview form
   2. Spawn three `Agent` calls in parallel: one security-and-consistency reviewer, one adversarial reviewer, one UX reviewer.
   3. Incorporate suggestions that hold up.
   4. Present the final plan to the user with a short "reviewer input adopted" section so the user can see what shifted.

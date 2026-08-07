@@ -15,6 +15,7 @@ import (
 // factory; the file backend has its own package and tests.
 type stubStore struct{}
 
+func (stubStore) Info() Info                                 { return Info{Backend: "faketest"} }
 func (stubStore) Create(string, MetaRecord) (Journal, error) { return nil, nil }
 func (stubStore) Open(string) (Journal, error)               { return nil, nil }
 func (stubStore) Load(string) (*RunState, error)             { return nil, nil }

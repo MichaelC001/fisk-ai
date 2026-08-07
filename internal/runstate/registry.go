@@ -34,7 +34,11 @@ import (
 //   - decode its options block strictly (reject unknown keys) so an operator's
 //     mistyped option fails at run start, and surface a construction failure (bad
 //     options, an unwritable backing store) as an error rather than deferring it to
-//     the first operation.
+//     the first operation;
+//   - report its registered name as Info().Backend, and as Info().Location either an
+//     operator-configured container identifier or "": never a filesystem path, a URL
+//     carrying userinfo, or a credential, since Location is intended to leave the
+//     process.
 type Factory func(env RuntimeEnv, options json.RawMessage) (Store, error)
 
 // RegisterOption declares a backend's requirements at registration, so the host can
