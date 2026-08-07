@@ -243,6 +243,11 @@ type store struct {
 	prefix     string
 }
 
+// Info implements runstate.Store, reporting the backend and the stream it is bound to.
+func (s *store) Info() runstate.Info {
+	return runstate.Info{Backend: runstate.BackendJetStream, Location: s.streamName}
+}
+
 // metaSubject is the subject of a run's meta record (seq 1).
 func (s *store) metaSubject(id string) string {
 	return s.prefix + "." + id + "." + metaToken

@@ -444,11 +444,19 @@ const MetricSessionAppendDuration = "fisk.session.append.duration"
 //
 // It is read from the configured backend name rather than from the store that served
 // the call, which is the one narrowing worth knowing: a caller injecting their own
-// runstate.Store through agent.Options is reported as whatever the config named. The
-// equivalent gap was closed for memory by giving the store an Info method (section
-// 6.2), and the same fix applies here if an injected store ever needs to be told apart.
-// It is not closed now because the value is right for every configured backend, which is
+// runstate.Store through agent.Options is reported as whatever the config named. It is
+// not closed now because the value is right for every configured backend, which is
 // every run this ships with.
+//
+// runstate.Store.Info reports the store's own backend, so closing it is a matter of
+// reading that instead. Two conditions come with doing so, and they are why it is not
+// the one-line change it looks like. This is a metric label where the memory equivalent
+// is a span attribute, and a label value mints a time series for the life of the
+// process. So the value must be clamped against runstate.Backends(), falling back to a
+// fixed literal for anything unregistered, because an injected store names itself and an
+// embedder chooses that name; and an empty name must drop the attribute rather than
+// record it, the way memoryAttrs does, because "" matches every run rather than none.
+// Until both hold, the closed-vocabulary claim above stops being true.
 var AttrSessionBackend = attribute.Key("fisk.session.backend")
 
 // ErrorClass is the closed vocabulary for the error.type attribute.

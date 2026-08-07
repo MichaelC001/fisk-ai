@@ -71,12 +71,37 @@ type Journal interface {
 	Close() error
 }
 
+// Info describes the session store a run bound. It describes the store, not a run;
+// RunInfo is the per-run summary List returns.
+//
+// It exists because the configuration says what was asked for while an injected store
+// says what ran, and only the store itself knows which.
+//
+// Its fields are intended for telemetry and for display to an operator, which is what
+// bounds what may go in one: a value here may leave the process and cannot be un-sent.
+type Info struct {
+	// Backend is the registered backend name, in the registry's own vocabulary, so it
+	// stays correct however many backends are added. It is never empty.
+	Backend string
+
+	// Location names the container this store is bound to, in whatever term the backend
+	// uses: a JetStream stream today, a table or an index later. It must be an
+	// operator-configured identifier. Never a filesystem path, never a URL carrying
+	// userinfo, never a credential. A backend with nothing safe to name returns "".
+	Location string
+}
+
 // Store persists run journals. The interface is append-oriented and seq-keyed so
 // that both backends can honor it: the file implementation appends to a JSON-lines
 // journal, and the jetstream implementation puts each record on its own subject
 // (<prefix>.<run>.<seq>, MaxMsgsPerSubject=1 with discard-new-per-subject for an
 // unbounded dedup window).
 type Store interface {
+	// Info describes the active store.
+	//
+	// It reports what the store resolved when it was built. It must not block, perform
+	// I/O, or fail, and it must be safe to call from any goroutine.
+	Info() Info
 	// Create starts a new run, writing meta as seq 1, and returns the locked
 	// journal. It fails with ErrExists if the id is already present.
 	Create(id string, meta MetaRecord) (Journal, error)

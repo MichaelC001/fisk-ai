@@ -167,6 +167,22 @@ var _ = Describe("FileStore", func() {
 	})
 })
 
+var _ = Describe("Info", func() {
+	It("reports the registered backend name", func() {
+		s, err := NewFileStore(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(s.Info().Backend).To(Equal(runstate.BackendFile))
+	})
+
+	It("reports no location, since the only one it has is a local path", func() {
+		dir := GinkgoT().TempDir()
+		s, err := NewFileStore(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(s.Info().Location).To(BeEmpty())
+		Expect(s.Info().Location).NotTo(ContainSubstring(dir))
+	})
+})
+
 var _ = Describe("newStore", func() {
 	It("defaults an empty directory to the core XDG default, not the working directory", func() {
 		def, err := runstate.DefaultDir()

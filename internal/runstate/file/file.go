@@ -116,6 +116,13 @@ func (s *FileStore) journalExists(id string) bool {
 	return err == nil
 }
 
+// Info implements runstate.Store, reporting the backend and, deliberately, no location.
+//
+// This store's container is its directory, an absolute local filesystem path so for now not exposed for security reasons
+func (s *FileStore) Info() runstate.Info {
+	return runstate.Info{Backend: runstate.BackendFile}
+}
+
 // Create implements runstate.Store.
 func (s *FileStore) Create(id string, meta runstate.MetaRecord) (runstate.Journal, error) {
 	err := runstate.ValidateID(id)

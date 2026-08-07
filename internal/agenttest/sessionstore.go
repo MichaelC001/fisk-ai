@@ -23,6 +23,7 @@ import (
 type FakeSessionStore struct {
 	mu   sync.Mutex
 	runs map[string]*fakeJournal
+	info runstate.Info
 }
 
 // FakeSessionStore implements runstate.Store and fakeJournal implements
@@ -37,7 +38,28 @@ var (
 // NewFakeSessionStore returns an empty in-memory session store.
 func NewFakeSessionStore(tb testing.TB) *FakeSessionStore {
 	tb.Helper()
-	return &FakeSessionStore{runs: map[string]*fakeJournal{}}
+	return &FakeSessionStore{runs: map[string]*fakeJournal{}, info: runstate.Info{Backend: "fake"}}
+}
+
+// SetInfo overrides what the store reports about its backend.
+//
+// It exists so a test can prove an injected store is asked what it is rather than the
+// config being asked what was requested. Those two agree for every configured backend, so
+// nothing else can tell them apart. The default backend name is not a registered one, so
+// a test that does not care cannot be mistaken for a real backend.
+func (s *FakeSessionStore) SetInfo(info runstate.Info) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.info = info
+}
+
+// Info implements runstate.Store.
+func (s *FakeSessionStore) Info() runstate.Info {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.info
 }
 
 // Create implements runstate.Store.

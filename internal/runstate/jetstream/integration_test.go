@@ -165,6 +165,15 @@ var _ = Describe("Integration: jetstream session", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(s.(*store).prefix).To(Equal("runs"))
 		})
+
+		It("Should report the backend and the bound stream, and not the subject prefix", func() {
+			createStream(goodStream("SESSIONS", "ops.audit", "runs.>"))
+			s, err := newStoreFor("SESSIONS")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(s.Info().Backend).To(Equal(runstate.BackendJetStream))
+			Expect(s.Info().Location).To(Equal("SESSIONS"))
+			Expect(s.Info().Location).ToNot(ContainSubstring("runs"))
+		})
 	})
 
 	Describe("CRUD and resume", func() {
