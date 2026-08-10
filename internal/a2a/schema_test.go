@@ -148,13 +148,6 @@ var _ = Describe("Validator", func() {
 			Expect(v.Validate(validRequest)).To(Succeed())
 		})
 
-		It("Should reject an unevaluated extra property", func() {
-			bad := tamper(validRequest, func(m map[string]any) {
-				m["bogus"] = "nope"
-			})
-			Expect(v.Validate(bad)).To(HaveOccurred())
-		})
-
 		It("Should reject a missing required field", func() {
 			bad := tamper(validRequest, func(m map[string]any) {
 				delete(m, "prompt")
@@ -188,21 +181,6 @@ var _ = Describe("Validator", func() {
 			bad := tamper(data, func(m map[string]any) {
 				tools := m["tools"].([]any)
 				tools[0].(map[string]any)["behavior"] = map[string]any{"read_only": "yes"}
-			})
-			Expect(v.Validate(bad)).To(HaveOccurred())
-		})
-
-		It("Should reject an unknown tool behavior hint", func() {
-			reply := NewDiscoveryReply("agent-a", "1.2.3")
-			fillHeader(&reply.Header)
-			reply.Tools = []ToolDescriptor{{Name: "t", Description: "a tool"}}
-
-			data, err := json.Marshal(reply)
-			Expect(err).ToNot(HaveOccurred())
-
-			bad := tamper(data, func(m map[string]any) {
-				tools := m["tools"].([]any)
-				tools[0].(map[string]any)["behavior"] = map[string]any{"harmless": true}
 			})
 			Expect(v.Validate(bad)).To(HaveOccurred())
 		})

@@ -39,6 +39,11 @@ var protocolSchemaFile = map[string]string{
 }
 
 // Validator validates message bodies against the embedded v1 JSON schemas.
+//
+// The schemas accept properties they do not name, so a peer on a newer schema
+// does not lose a whole message to one field this build has never heard of.
+// Everything else is enforced as before: required fields, types, patterns, the
+// protocol const, and the closed block type and stop reason vocabularies.
 type Validator struct {
 	schemas map[string]*jsonschema.Schema
 }
@@ -100,6 +105,10 @@ func NewValidator() (*Validator, error) {
 
 // Validate checks a raw message body against the schema for its protocol id. It
 // returns ErrUnknownProtocol when the protocol id has no schema.
+//
+// A property the schema does not name is accepted and, on decode, discarded.
+// Passing validation therefore says the fields this build knows about are
+// well formed, not that the body carried only those fields.
 func (v *Validator) Validate(data []byte) error {
 	var probe struct {
 		Protocol string `json:"protocol"`

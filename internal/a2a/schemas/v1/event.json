@@ -17,6 +17,5 @@
   },
   "required": [
     "block"
-  ],
-  "unevaluatedProperties": false
+  ]
 }
