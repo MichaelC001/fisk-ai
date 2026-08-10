@@ -326,6 +326,17 @@ type Result struct {
 	Reason    runstate.TerminalReason
 	Stats     *util.RunStats
 	SessionID string
+
+	// Text is the concatenated text of the last assistant turn the run produced,
+	// empty when it produced none. It exists for a caller that must record an answer
+	// without watching the run: Events.Message carries the same text, but only a
+	// caller rendering the stream sees it, and the turn it arrives on is not marked
+	// terminal when the run stops on the token budget or the iteration cap.
+	//
+	// It is the last turn rather than a successful answer. Pair it with Reason before
+	// treating it as one: a run that exhausted its budget or was truncated at the
+	// output cap still reports the text it had reached.
+	Text string
 }
 
 // PanicError is the error Run returns when it recovered a panic on its run goroutine.
@@ -1531,6 +1542,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	reason, err := r.run(ctx)
 	res.Reason = reason
+	res.Text = r.finalText
 	// A context reset may have rotated to a fresh session mid-run, so report the session the
 	// run ended on (the one an operator resumes) rather than the one it started with.
 	res.SessionID = r.sessionID
