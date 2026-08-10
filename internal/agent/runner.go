@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -63,6 +64,13 @@ type runner struct {
 	// events receives the run's narration, tool traces and warnings so the caller
 	// owns all wording and rendering.
 	events Events
+
+	// finalText is the text of the most recent assistant turn that carried any,
+	// which Run reports as Result.Text. It is kept here because a caller that does
+	// not render the stream has no other way to reach the answer, and because the
+	// last turn of a run stopped by the budget or the iteration cap is not marked
+	// terminal and so cannot be recognized from the events alone.
+	finalText string
 
 	// hooks are the caller's optional callbacks invoked at fixed points in the loop. A
 	// nil field does not fire. They run on this single run goroutine, in loop order.
@@ -615,6 +623,28 @@ func (r *runner) rotateSession(prompt string) error {
 	return nil
 }
 
+// recordText keeps the concatenated text of an assistant turn as the run's answer
+// so far, so Result.Text reports the last turn that said anything. A turn with no
+// text block (one that only calls tools) leaves the previous answer in place rather
+// than clearing it, because a run stopped after such a turn should still report
+// what it had reached.
+func (r *runner) recordText(resp llm.Response) {
+	var sb strings.Builder
+
+	for _, block := range resp.Content {
+		if block.Text == nil {
+			continue
+		}
+		sb.WriteString(block.Text.Text)
+	}
+
+	if sb.Len() == 0 {
+		return
+	}
+
+	r.finalText = sb.String()
+}
+
 func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 	// On resume, finish the in-flight tool batch before proceeding so the
 	// conversation reaches a coherent boundary. Its already-run tools are reused
@@ -761,12 +791,14 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		// with a clear cause rather than running malformed input or silently completing;
 		// the caller surfaces the error and, in a chat, hands back to the operator.
 		if resp.StopReason == llm.StopMaxTokens {
+			r.recordText(*resp)
 			r.events.Message(*resp, true)
 			return runstate.ReasonError, fmt.Errorf("model reply truncated at the output token limit; the answer is incomplete")
 		}
 
 		// Text on a terminal turn is the answer; text on an intermediate turn is
 		// narration. The caller decides where each goes.
+		r.recordText(*resp)
 		r.events.Message(*resp, terminal)
 
 		// A terminal turn is the final answer; deliver it regardless of remaining
