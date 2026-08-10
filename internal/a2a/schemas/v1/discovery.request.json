@@ -11,6 +11,5 @@
     "protocol": {
       "const": "io.choria.fisk-ai.v1.discovery.request"
     }
-  },
-  "unevaluatedProperties": false
+  }
 }

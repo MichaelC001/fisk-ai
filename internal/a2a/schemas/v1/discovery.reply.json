@@ -39,6 +39,5 @@
   "required": [
     "name",
     "version"
-  ],
-  "unevaluatedProperties": false
+  ]
 }

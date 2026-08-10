@@ -61,8 +61,7 @@ func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error)
 //
 // The hop is traced when the caller's context carries a telemetry provider, nesting
 // under whatever span opened it. No traceparent is put on the wire: nothing on the far
-// side consumes one while the serving surfaces are out of scope, and adding a header
-// would be rejected by an older peer's schema rather than ignored by it.
+// side consumes one while the serving surfaces are out of scope.
 func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (reply *ToolReply, err error) {
 	ctx, span := telemetry.ProviderFromContext(ctx).StartRemoteAgent(ctx, telemetry.RemoteAgentInfo{
 		Agent: agent,

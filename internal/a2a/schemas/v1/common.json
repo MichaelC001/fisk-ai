@@ -5,7 +5,6 @@
   "$defs": {
     "identity": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "name"
       ],
@@ -79,7 +78,6 @@
     },
     "usage": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {
         "input_tokens": {
           "type": "integer",
@@ -93,7 +91,6 @@
     },
     "budget": {
       "type": "object",
-      "additionalProperties": false,
       "description": "Mirrors LLMBudget. The receiver's local config is the ceiling; a request may only lower a limit.",
       "properties": {
         "max_tokens": {
@@ -125,7 +122,6 @@
     },
     "exec_result": {
       "type": "object",
-      "additionalProperties": false,
       "description": "Optional command metadata, mirroring CommandResult; absent for non-shell tools.",
       "properties": {
         "command": {
@@ -141,7 +137,6 @@
     },
     "tool_descriptor": {
       "type": "object",
-      "additionalProperties": false,
       "description": "A tool an agent exposes, as reported in a discovery reply.",
       "required": [
         "name"
@@ -164,7 +159,6 @@
     },
     "tool_behavior": {
       "type": "object",
-      "additionalProperties": false,
       "description": "What the serving agent says calling a tool does to the world. Every property is a hint the serving agent asserts about its own tool, never a guarantee, and an absent property asserts nothing.",
       "properties": {
         "read_only": {
@@ -210,7 +204,6 @@
     },
     "thinkingBlock": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "type",
         "text"
@@ -234,7 +227,6 @@
     },
     "textBlock": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "type",
         "text"
@@ -250,7 +242,6 @@
     },
     "toolCallBlock": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "type",
         "id",
@@ -274,7 +265,6 @@
     },
     "toolResultBlock": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "type",
         "call_id"
@@ -301,7 +291,6 @@
     },
     "agentCallBlock": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "type",
         "id",
@@ -327,7 +316,6 @@
     },
     "statusBlock": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "type"
       ],

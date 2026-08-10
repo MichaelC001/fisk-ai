@@ -24,6 +24,5 @@
   },
   "required": [
     "stop_reason"
-  ],
-  "unevaluatedProperties": false
+  ]
 }

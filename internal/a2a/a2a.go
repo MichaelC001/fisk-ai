@@ -16,6 +16,17 @@
 // Message bodies are versioned by their protocol id, e.g.
 // "io.choria.fisk-ai.v1.request". The matching JSON schemas live under
 // internal/a2a/schemas/io.choria.fisk-ai.v1.
+//
+// A receiver ignores properties it does not recognize rather than rejecting the
+// message carrying them, so a peer built against an older copy of the schemas
+// interoperates with one that has gained a field. There is no way for a sender to
+// demand the opposite, so an addition must be safe to skip. Closed vocabularies are
+// the exception and are rejected as before: an unrecognized protocol id, block type
+// or stop reason, none of which a receiver could act on by ignoring.
+//
+// Property names are reserved to this project. A peer carrying its own data should
+// nest it under a property assigned to it rather than add a top-level key, since two
+// peers adding the same name would both validate and mean different things.
 package a2a
 
 import (
