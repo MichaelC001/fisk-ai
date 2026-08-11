@@ -56,6 +56,10 @@ const (
 	ToolResultProtocol Protocol = protocolNamespace + ".tool_result"
 	// TerminalProtocol records why the run ended (or that it was suspended).
 	TerminalProtocol Protocol = protocolNamespace + ".terminal"
+	// ClaimProtocol records that a worker took the run over on resume. It is
+	// written before anything the resumed run does, so that appending it moves the
+	// journal's tail ahead of whatever a previous worker still holds.
+	ClaimProtocol Protocol = protocolNamespace + ".claim"
 )
 
 // Record is one journal entry. Exactly one of the payload pointers is set,
@@ -70,6 +74,24 @@ type Record struct {
 	User       *UserRecord       `json:"user,omitempty"`
 	ToolResult *ToolResultRecord `json:"tool_result,omitempty"`
 	Terminal   *TerminalRecord   `json:"terminal,omitempty"`
+	Claim      *ClaimRecord      `json:"claim,omitempty"`
+}
+
+// ClaimRecord records a worker taking over a run on resume. Writing it is what
+// makes acquisition a write: the append moves the journal's tail, so a worker that
+// still believes it holds this run is refused at its own next append.
+//
+// The payload is diagnostic and nothing in the harness reads it. An empty record
+// would fence identically; this exists so a person reading a journal can tell which
+// worker took the run and when. It is deliberately not folded into RunState:
+// nothing releases a claim on a crash, a suspend or a completion, so a claim is not
+// evidence that a run is held now.
+type ClaimRecord struct {
+	// By names the worker that took the run, in whatever terms its operator chose. It
+	// is not verified and is never used to make a decision.
+	By string `json:"by"`
+	// Claimed is when the worker took it.
+	Claimed time.Time `json:"claimed"`
 }
 
 // MetaRecord frames a run. It carries no secrets: the fingerprint holds only a

@@ -66,6 +66,13 @@ func toolResultRec(id string) runstate.Record {
 	}
 }
 
+func claimRec(by string) runstate.Record {
+	return runstate.Record{
+		Protocol: runstate.ClaimProtocol,
+		Claim:    &runstate.ClaimRecord{By: by, Claimed: time.Now().UTC()},
+	}
+}
+
 // goodStream is a stream configuration the backend accepts: a single <prefix>.>
 // wildcard, write-once subjects, and no expiry.
 func goodStream(name string, subjects ...string) jetstream.StreamConfig {
@@ -300,6 +307,27 @@ var _ = Describe("Integration: jetstream session", func() {
 			// B's next append collides with A's tail move and is safely rejected.
 			err = jB.Append(3, toolResultRec("tu_1"))
 			Expect(err).To(MatchError(runstate.ErrLocked))
+		})
+
+		It("Should report a run as held until another writer takes it, then refuse it", func() {
+			id := newID()
+			jA, err := store.Create(id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jA.Append(2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(jA.CheckHeld()).To(Succeed(), "nobody else has written, so A still holds it")
+
+			// B takes the run the way a resume does, by writing before it does anything.
+			jB, err := store.Open(id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jB.Append(3, claimRec("worker-b"))).To(Succeed())
+
+			// A now finds out without having appended, which is the whole point: it can
+			// stop before its next tool rather than after it.
+			Expect(jA.CheckHeld()).To(MatchError(runstate.ErrLocked))
+			Expect(jB.CheckHeld()).To(Succeed())
+
+			// And the fence still holds against A's own next write.
+			Expect(jA.Append(3, toolResultRec("tu_1"))).To(MatchError(runstate.ErrLocked))
 		})
 
 		It("Should list runs with their metadata", func() {

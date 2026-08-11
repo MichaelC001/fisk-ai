@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/segmentio/ksuid"
 
@@ -100,6 +101,62 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Messages).To(HaveLen(1))
 			Expect(rs.Pending).To(BeNil())
 			Expect(rs.NextIteration).To(Equal(int64(0)))
+		})
+
+		claim := func(seq uint64) Record {
+			return Record{Seq: seq, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-a", Claimed: time.Now().UTC()}}
+		}
+
+		// A claim is written on resume, so it lands wherever a takeover happened,
+		// including between an assistant turn and the tool results answering it. It must
+		// change nothing at all: a fold that committed the turn there would destroy the
+		// Pending batch the resume exists to finish.
+		It("folds identically with a claim record anywhere in the journal", func() {
+			base := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")},
+				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
+			}
+
+			want, err := Fold(base)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(want.Pending).NotTo(BeNil(), "tu_2 is unanswered, so this run has an in-flight batch")
+
+			// Every position a claim can occupy, with the following records renumbered.
+			positions := map[string][]Record{
+				"before the first turn": {
+					meta(), claim(2),
+					{Seq: 3, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")},
+					{Seq: 4, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
+				},
+				"between a turn and its results": {
+					meta(),
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")},
+					claim(3),
+					{Seq: 4, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
+				},
+				"as the trailing record": {
+					meta(),
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")},
+					{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
+					claim(4),
+				},
+			}
+
+			for name, recs := range positions {
+				got, err := Fold(recs)
+				Expect(err).NotTo(HaveOccurred(), name)
+				Expect(got.Messages).To(Equal(want.Messages), name)
+				Expect(got.Pending).To(Equal(want.Pending), name)
+				Expect(got.Counters).To(Equal(want.Counters), name)
+				Expect(got.NextIteration).To(Equal(want.NextIteration), name)
+				Expect(got.Terminal).To(Equal(want.Terminal), name)
+			}
+		})
+
+		It("rejects a claim record with no payload", func() {
+			_, err := Fold([]Record{meta(), {Seq: 2, Protocol: ClaimProtocol}})
+			Expect(err).To(MatchError(ErrCorrupt))
 		})
 
 		It("commits a complete turn and derives counters", func() {

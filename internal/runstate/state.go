@@ -216,6 +216,17 @@ func Fold(records []Record) (*RunState, error) {
 			}
 			rs.Terminal = r.Terminal
 
+		case ClaimProtocol:
+			if r.Claim == nil {
+				return nil, fmt.Errorf("%w: claim record with no payload at seq %d", ErrCorrupt, r.Seq)
+			}
+			// Deliberately inert, and load bearing that it stays so. A claim is written
+			// on resume, so it lands between an assistant turn and the tool results that
+			// answer it whenever a run is taken over mid-batch. Touching cur, curResults
+			// or curAnswer here would commit that turn early and destroy the Pending
+			// batch the resume exists to finish. It is also not folded into RunState:
+			// nothing releases a claim, so its presence is not evidence a run is held.
+
 		default:
 			return nil, fmt.Errorf("%w: unknown record protocol %q at seq %d", ErrCorrupt, r.Protocol, r.Seq)
 		}

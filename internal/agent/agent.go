@@ -138,6 +138,18 @@ type Options struct {
 
 	Checkpoint Checkpoint
 
+	// ClaimedBy names this worker in the claim a resume writes to the journal, for a
+	// person reading it later. Empty derives one from the agent identity, the hostname
+	// and the pid.
+	//
+	// It is worth setting wherever that derivation is uninformative: a container's
+	// hostname is often an opaque id, and a process running many runs under one
+	// identity would otherwise stamp every claim identically, which is exactly what a
+	// reader is trying to tell apart. A queue worker's own consumer or task id is the
+	// better answer and only the caller has it. It is never verified and nothing
+	// decides anything on it.
+	ClaimedBy string
+
 	// SuspendRequested reports that a graceful suspend was asked for; it is polled
 	// at a loop boundary. Nil when suspension is not wired.
 	SuspendRequested func() bool
@@ -1331,6 +1343,19 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 			defer closeJournal(j, events)
 
+			// Claim the run before reading the sequence, and before anything runs.
+			//
+			// The order matters twice. Against another worker, appending is what moves
+			// the tail, so a process that still believes it holds this run is refused at
+			// its own next write; doing it here means that happens before this worker has
+			// caused any effect. Against this worker, seq below has to be read after the
+			// claim landed, or the runner's first record collides with the claim's seq
+			// and CheckAppend folds it away as a duplicate, silently losing it.
+			err = claimRun(j, cfg.Identity, opts.ClaimedBy)
+			if err != nil {
+				return res, fmt.Errorf("cannot resume %q: %w", sessionID, err)
+			}
+
 			journal = j
 			seq = j.LastSeq()
 			startIter = rs.NextIteration
@@ -1564,6 +1589,40 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 // closeJournal closes a session journal, warning rather than failing the run if
 // the close errors, since the run's own outcome is already decided.
+// claimRun records this worker's takeover of a resumed run. Every failure is fatal to
+// the resume: a claim that is skipped when the store is briefly unreachable is not a
+// claim, and continuing would run the work with no idea whether anyone else is.
+func claimRun(j runstate.Journal, identity string, claimedBy string) error {
+	if claimedBy == "" {
+		claimedBy = derivedClaimant(identity)
+	}
+
+	err := j.Append(j.LastSeq()+1, runstate.Record{
+		Protocol: runstate.ClaimProtocol,
+		Claim:    &runstate.ClaimRecord{By: claimedBy, Claimed: time.Now().UTC()},
+	})
+	if errors.Is(err, runstate.ErrLocked) {
+		return fmt.Errorf("%w: another process took it while this one was starting, and is running it now; nothing here ran, so let that process finish or stop it, then resume", err)
+	}
+	if err != nil {
+		return fmt.Errorf("claiming the run: %w", err)
+	}
+
+	return nil
+}
+
+// derivedClaimant names this worker when the caller supplied no name. The identity
+// leads because it says which agent is running, which is the part an operator can act
+// on; the host and pid narrow it to a process to go and look at.
+func derivedClaimant(identity string) string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown-host"
+	}
+
+	return fmt.Sprintf("%s@%s pid %d", identity, host, os.Getpid())
+}
+
 func closeJournal(j runstate.Journal, events Events) {
 	err := j.Close()
 	if err != nil {

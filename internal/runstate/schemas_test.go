@@ -44,7 +44,8 @@ var _ = Describe("Validator", func() {
 				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
 				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
 				{Seq: 4, Protocol: UserProtocol, User: userRecord("a follow-up")},
-				{Seq: 5, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
+				{Seq: 5, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "agent@host pid 42", Claimed: time.Now().UTC()}},
+				{Seq: 6, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
 			}
 
 			for _, rec := range records {

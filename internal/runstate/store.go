@@ -67,6 +67,18 @@ type Journal interface {
 	// LastSeq returns the highest seq written, so a resuming writer continues the
 	// sequence rather than colliding with existing records.
 	LastSeq() uint64
+	// CheckHeld reports whether this journal still holds its run, returning
+	// ErrLocked when another writer has taken it over.
+	//
+	// It exists so a holder can find out before doing something it cannot undo,
+	// rather than at its next append, which is after. A caller running work with
+	// effects outside this process should call it immediately before each such step
+	// on a store it does not exclusively own.
+	//
+	// It is a point-in-time answer and a backend may have to ask the network for it.
+	// A nil return means no other writer had taken the run as of this call, never
+	// that none can before the next one.
+	CheckHeld() error
 	// Close releases the journal and its lock.
 	Close() error
 }
