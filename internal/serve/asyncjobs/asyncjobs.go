@@ -21,22 +21,39 @@
 //
 // # Lifecycle
 //
-// The engine's processor and the server are two goroutines that must stop in one
-// order. Construct the channel, serve it, cancel the server's context, wait for
-// Serve to return, and only then Close:
+// The engine's processor and the server are two goroutines that have to stop
+// together, and there are two ways to ask for it.
 //
 //	ch, err := asyncjobs.New(asyncjobs.Options{...})
 //	srv, err := serve.New(serve.Options{
 //		Channels:    []serve.Channel{ch},
 //		Concurrency: ch.Concurrency(),
 //	})
+//
+// To drain, Close while the server is still running. Jobs claimed but not started go
+// back to the queue at once, jobs already running are waited for, and Serve ends by
+// itself because a finished channel says so. Nothing is canceled, so a run stops at a
+// boundary it can be resumed from. With nothing in flight it returns immediately.
+//
+//	err = ch.Close()      // from a signal handler, while Serve runs
+//	err = srv.Serve(ctx)  // returns on its own
+//
+// To stop, cancel the server's context, wait for Serve, and then Close. Runs end
+// wherever they had reached and their jobs go back to the queue.
+//
+//	cancel()
 //	err = srv.Serve(ctx)
 //	err = ch.Close()
 //
-// Closing before Serve returns would cancel the processor while runs are still
-// finishing, and a run's answer is stored on the processor's context after the
-// handler returns. Nothing this package exposes can report that store, so the
-// ordering is the guarantee.
+// Close is idempotent, so a caller that drains on one signal and stops on the next
+// calls it on both paths.
+//
+// What must not happen is the processor stopping while a run is still finishing: an
+// answer is stored on the processor's context after its handler returns, and nothing
+// here can report that store. Close is staged against exactly that. It stops the
+// processor only once every handler has returned, and a handler returns only once its
+// run has reported, so an answer is always stored before the context that stores it is
+// canceled.
 package asyncjobs
 
 import (
@@ -285,15 +302,17 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 	}
 }
 
-// Close stops the engine's processor and waits for it.
+// Close drains the channel and stops the engine's processor: a job claimed but never
+// handed to the server is naked at once rather than left to sit out its lease, a job
+// already handed over is waited for, and only then does the processor stop. It is safe
+// to call while the server is still running, which is how a drain is asked for, and
+// safe after Serve has returned, which is how a stop finishes. See the package
+// documentation for both.
 //
-// Call it after Serve has returned, never before: a run that finishes has its answer
-// stored on the processor's context after its handler returns, so a processor stopped
-// while runs are still finishing loses answers that were paid for. See the package
-// documentation for the ordering.
+// It waits as long as the runs in flight do, so a caller draining from a signal handler
+// runs it on a goroutine of its own.
 //
-// A job that was claimed but never handed to the server is naked here rather than
-// left to sit out its lease, so it returns to the queue promptly.
+// It is idempotent and returns the same answer to every caller.
 func (c *Channel) Close() error {
 	c.closeOnce.Do(func() {
 		// Waiting handlers return first, so their nak is issued while the processor's

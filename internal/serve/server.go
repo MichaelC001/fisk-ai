@@ -81,9 +81,16 @@ type Options struct {
 	// cannot stop.
 	ToolTimeout time.Duration
 
-	// WorkDir is the directory the per-run tool working directories are created
-	// under. It must be an absolute path that already exists. Empty uses the system
-	// temporary directory.
+	// WorkDir is the directory command tools run in. It must be an absolute path that
+	// already exists. Empty inherits the process working directory, which is what a
+	// run at a terminal does.
+	//
+	// Every run shares it. Giving each run a directory of its own would keep a tool
+	// writing a relative path off a sibling run's file, but an application that
+	// resolves anything relative to where it was started could then never find it, and
+	// that is the ordinary case rather than the exotic one. A tool that mutates local
+	// state is responsible for doing so safely under concurrency; lower Concurrency to
+	// 1 if it cannot.
 	WorkDir string
 
 	// LogOutput is the sink for the default Logger; nil means os.Stderr. It is
@@ -309,18 +316,6 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 		s.report(work, out, log)
 	}()
 
-	workDir, err := os.MkdirTemp(s.opts.WorkDir, "fisk-work-")
-	if err != nil {
-		out.Err = fmt.Errorf("creating the tool working directory: %w", err)
-		return
-	}
-	defer func() {
-		rmErr := os.RemoveAll(workDir)
-		if rmErr != nil {
-			log.Warn("Removing the tool working directory failed", "dir", workDir, "error", rmErr)
-		}
-	}()
-
 	events := newEventRecorder(work.Events, log)
 
 	// A nil prompter cannot be passed through: the run and the confirm gate call
@@ -335,7 +330,7 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 	log.Info("Running", "caller", work.Caller.Name, "resume", work.Checkpoint.ResumeID)
 
 	start := time.Now()
-	res, err := agent.Run(ctx, s.runOptions(work, workDir), events, prompter)
+	res, err := agent.Run(ctx, s.runOptions(work), events, prompter)
 	duration := time.Since(start)
 
 	if res != nil {
@@ -360,8 +355,8 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 }
 
 // runOptions assembles the agent options for one piece of work: the channel's
-// attachment points, the shared resources, and this run's own working directory.
-func (s *Server) runOptions(work *Work, workDir string) agent.Options {
+// attachment points and the shared resources.
+func (s *Server) runOptions(work *Work) agent.Options {
 	opts := agent.Options{
 		Config:           s.withToolTimeout(s.clampedConfig(work.Budget)),
 		ConfigFile:       s.opts.ConfigFile,
@@ -373,7 +368,7 @@ func (s *Server) runOptions(work *Work, workDir string) agent.Options {
 		SuspendRequested: work.SuspendRequested,
 		NextPrompt:       work.Continue,
 		Provider:         s.opts.Provider,
-		ToolWorkDir:      workDir,
+		ToolWorkDir:      s.opts.WorkDir,
 		StoreDir:         s.opts.StoreDir,
 		Conns:            s.opts.Conns,
 		RAGStore:         s.opts.RAGStore,
