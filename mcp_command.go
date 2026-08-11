@@ -69,7 +69,7 @@ func mcpAction(_ *fisk.ParseContext) error {
 	// The provider rides the context rather than being handed to Serve: the knowledge
 	// tools this command serves read it off the context, which is what internal/rag
 	// needs to open a retrieval span for a search that arrived over MCP.
-	tel, reportTelemetry, err := setupTelemetry(cfg, false)
+	tel, reportTelemetry, err := setupTelemetry(cfg, telemetrySetup{ConfigFile: configFile})
 	if err != nil {
 		return err
 	}

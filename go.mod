@@ -6,7 +6,7 @@ require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/anthropics/anthropic-sdk-go v1.61.0
 	github.com/charmbracelet/glamour v1.0.0
-	github.com/choria-io/asyncjobs v0.3.1-0.20260722083924-1424f3a1bad9
+	github.com/choria-io/asyncjobs v0.3.1-0.20260811185158-04223e56eeef
 	github.com/choria-io/fisk v0.9.1
 	github.com/choria-io/ui v0.0.1
 	github.com/fsnotify/fsnotify v1.10.1
@@ -17,8 +17,8 @@ require (
 	github.com/muesli/termenv v0.16.0
 	github.com/nats-io/jsm.go v0.4.1
 	github.com/nats-io/nats-server/v2 v2.14.4
-	github.com/nats-io/nats.go v1.52.0
-	github.com/onsi/ginkgo/v2 v2.32.0
+	github.com/nats-io/nats.go v1.53.1
+	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 	github.com/rivo/tview v0.42.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
@@ -32,7 +32,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.45.0
 	go.opentelemetry.io/proto/otlp v1.11.0
 	golang.org/x/term v0.45.0
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.56.0
 )
 
@@ -71,7 +71,7 @@ require (
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.8.3 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -86,7 +86,7 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
-	github.com/prometheus/client_golang v1.24.0 // indirect
+	github.com/prometheus/client_golang v1.24.1 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
@@ -109,12 +109,12 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/mod v0.38.0 // indirect
+	golang.org/x/mod v0.39.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect

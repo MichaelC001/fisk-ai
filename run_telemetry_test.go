@@ -120,12 +120,8 @@ var _ = Describe("telemetryErrorSink", func() {
 })
 
 var _ = Describe("setupTelemetry", func() {
-	AfterEach(func() {
-		noTelemetry = false
-	})
-
 	It("Should build nothing for a config that never enabled it", func() {
-		provider, report, err := setupTelemetry(&config.Config{Identity: "demo"}, false)
+		provider, report, err := setupTelemetry(&config.Config{Identity: "demo"}, telemetrySetup{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(provider).To(BeNil())
 		Expect(report).ToNot(BeNil())
@@ -136,12 +132,10 @@ var _ = Describe("setupTelemetry", func() {
 	})
 
 	It("Should build nothing when --no-telemetry vetoes an enabled config", func() {
-		noTelemetry = true
-
 		provider, _, err := setupTelemetry(&config.Config{
 			Identity:  "demo",
 			Telemetry: config.TelemetryConfig{Enabled: true, Endpoint: "http://127.0.0.1:4318"},
-		}, false)
+		}, telemetrySetup{Disabled: true})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(provider).To(BeNil())
 	})
@@ -153,7 +147,7 @@ var _ = Describe("setupTelemetry", func() {
 		_, _, err := setupTelemetry(&config.Config{
 			Identity:  "demo",
 			Telemetry: config.TelemetryConfig{Enabled: true, Endpoint: "http://127.0.0.1:4317"},
-		}, false)
+		}, telemetrySetup{})
 		Expect(err).To(MatchError(ContainSubstring("is the OTLP/gRPC port")))
 	})
 
@@ -161,7 +155,7 @@ var _ = Describe("setupTelemetry", func() {
 		provider, report, err := setupTelemetry(&config.Config{
 			Identity:  "demo",
 			Telemetry: config.TelemetryConfig{Enabled: true, Endpoint: "http://127.0.0.1:4318"},
-		}, false)
+		}, telemetrySetup{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(provider.Enabled()).To(BeTrue())
 

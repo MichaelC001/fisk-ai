@@ -11,6 +11,7 @@ import (
 
 	"github.com/choria-io/asyncjobs"
 	"github.com/choria-io/fisk"
+	"github.com/nats-io/jsm.go"
 	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
@@ -258,11 +259,35 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 
 	Describe("Binding", func() {
 		It("Should refuse a queue that does not exist", func() {
+			// The queue is what must be missing here, so everything under it is
+			// provisioned first; without that this passes on the storage error below
+			// while claiming to be about the queue.
+			newQueue(nc, 30*time.Second, 5)
+
 			_, err := New(Options{
 				Conn: nc, Queue: "NOPE", TaskType: testTaskType,
 				Identity: "worker", Concurrency: 1, Logger: quietLogger(),
 			})
 			Expect(err).To(MatchError(ContainSubstring(`connecting to queue "NOPE"`)))
+			Expect(err).To(MatchError(asyncjobs.ErrQueueNotFound))
+		})
+
+		// The worker creates none of the storage it uses, so an unprovisioned cluster
+		// is the operator's first run and has to say what to do about it rather than
+		// quietly deciding how every answer is stored.
+		It("Should refuse to create the task store", func() {
+			_, err := New(Options{
+				Conn: nc, Queue: testQueue, TaskType: testTaskType,
+				Identity: "worker", Concurrency: 1, Logger: quietLogger(),
+			})
+			Expect(err).To(MatchError(ContainSubstring("ajc tasks initialize")))
+
+			mgr, err := jsm.New(nc)
+			Expect(err).ToNot(HaveOccurred())
+
+			known, err := mgr.IsKnownStream("CHORIA_AJ_TASKS")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(known).To(BeFalse(), "nothing was created on the way to failing")
 		})
 
 		It("Should take its renewal interval from the queue it bound", func() {
@@ -431,10 +456,11 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 			Expect(ok).To(BeTrue())
 			Expect(answer.Text).To(Equal("paid for already"), "the stored answer, not a second one")
 			Expect(answer.StopReason).To(Equal(a2a.StopEndTurn))
-			Expect(answer.Usage).To(Equal(&a2a.Usage{
-				InputTokens:  res.Stats.InTokens,
-				OutputTokens: res.Stats.OutTokens,
-			}), "the usage is what the work cost the first time")
+			// What this asserts is that the replayed answer carries the first run's
+			// accounting rather than an empty one. How stats become a Usage is the
+			// mapping's own business and is covered where it lives.
+			Expect(answer.Usage).To(Equal(usageOf(res.Stats)), "the usage is what the work cost the first time")
+			Expect(answer.Usage.LLMCalls).To(BeNumerically(">", 0), "the run it is reporting did happen")
 
 			Expect(provider.Requests()).To(BeEmpty(), "the answer was never paid for twice")
 		})

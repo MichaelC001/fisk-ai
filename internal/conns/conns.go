@@ -7,6 +7,10 @@
 // so backends do not each dial their own. Today the a2a client and server consume
 // it; the memory and session stores will follow the same way. A Choria connection
 // manager already exposes Nats(), so it can back a Provider without adaptation.
+//
+// A binding whose connection must differ (the work queue engine requires
+// nats.UseOldRequestStyle) dials its own rather than bending the shared one, but
+// still builds it from Options so it differs only in what it had to.
 package conns
 
 import (
@@ -50,12 +54,35 @@ func New(opts ...Option) *Provider {
 	return p
 }
 
+// reconnectAttempts is how many times a connection retries before it gives up.
+// Unlimited, because the processes that hold one are long lived and a broker
+// restart must not end them: a worker that stops reconnecting stops taking work
+// with nothing to say about why.
+const reconnectAttempts = -1
+
+// Options is the option set every connection this program makes is built from.
+// connName identifies the connection to the server as "fisk-ai <connName>", and
+// extra is appended last so a caller can add what its own binding requires.
+//
+// It exists so the connections are alike. Anything that should be true of all of
+// them (reconnection policy today, connection event logging next) is added here
+// once rather than at each dial, and a caller that dials its own connection for a
+// binding with a special requirement still inherits the rest.
+func Options(connName string, extra ...nats.Option) []nats.Option {
+	opts := []nats.Option{
+		nats.Name(fmt.Sprintf("fisk-ai %s", connName)),
+		nats.MaxReconnects(reconnectAttempts),
+	}
+
+	return append(opts, extra...)
+}
+
 // Connect establishes the shared core NATS connection from the named context and
-// returns a Provider that owns it. connName identifies the connection to the
-// server as "fisk-ai <connName>". The Provider owns the connection, so the caller
-// must Close it when done.
-func Connect(contextName, connName string) (*Provider, error) {
-	nc, err := natscontext.Connect(contextName, nats.Name(fmt.Sprintf("fisk-ai %s", connName)))
+// returns a Provider that owns it. Any extra options are appended to the standard
+// set in Options. The Provider owns the connection, so the caller must Close it
+// when done.
+func Connect(contextName, connName string, extra ...nats.Option) (*Provider, error) {
+	nc, err := natscontext.Connect(contextName, Options(connName, extra...)...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS context %q: %w", contextName, err)
 	}

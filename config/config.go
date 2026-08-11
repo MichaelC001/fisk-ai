@@ -273,6 +273,16 @@ func (s *SessionConfig) BackendName() string {
 	return s.Backend
 }
 
+// DeclaredBackend returns the backend the operator named, or "" when the block is
+// absent or leaves the backend unset. It is nil-safe.
+func (s *SessionConfig) DeclaredBackend() string {
+	if s == nil {
+		return ""
+	}
+
+	return s.Backend
+}
+
 // RawOptions returns the raw backend options block, decoded per backend at store
 // construction. It is nil-safe and nil when no options are set.
 func (s *SessionConfig) RawOptions() json.RawMessage {
@@ -573,6 +583,17 @@ type AgentExpose struct {
 	// optional and independent of the agent_to_agent switch above; agent_to_agent alone
 	// still serves with defaults.
 	A2A *ExposedA2AConfig `json:"a2a,omitempty" yaml:"a2a,omitempty"`
+	// Jobs opts this agent in to taking whole units of work off a Choria asyncjobs work
+	// queue. Its presence is the switch for the queued-jobs intake of `fisk-ai serve`,
+	// which refuses to start without it, and every field under it has a default, so an
+	// empty block is a working configuration.
+	//
+	// It differs in kind from the blocks above it, and the difference matters. Those
+	// serve this agent's tools to a caller that drives them; this hands the agent a
+	// whole task and runs the agent loop over it. So Tools below does NOT narrow it: a
+	// job reaches every tool the top-level include/exclude selected, and an operator
+	// who narrows the served set is narrowing MCP and a2a only.
+	Jobs *ExposedJobsConfig `json:"jobs,omitempty" yaml:"jobs,omitempty"`
 	// Tools optionally narrows the served set, applied on top of the top-level
 	// include/exclude; it can only remove tools, never add them. When absent the
 	// whole top-level-selected set is served.
@@ -651,6 +672,60 @@ type ExposedA2AConfig struct {
 	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
 	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
+}
+
+// Defaults for the queued-jobs intake. The queue and task type default to the values
+// the documentation submits with, because both ends of a task type have to agree and
+// nothing can validate the pairing: a default nobody has to think about is worth more
+// than one that is merely tidy.
+const (
+	// DefaultJobsQueue is the work queue a jobs worker consumes when none is named.
+	DefaultJobsQueue = "FISK_AI"
+	// DefaultJobsTaskType is the asyncjobs task type a jobs worker handles when none
+	// is named.
+	DefaultJobsTaskType = "fisk-ai:run"
+	// DefaultJobsWorkers is how many jobs one worker runs at once when none is set. It
+	// is one because a run is expensive and a worker quietly running several multiplies
+	// spend without anyone having asked for it.
+	DefaultJobsWorkers = 1
+)
+
+// ExposedJobsConfig configures the queued-jobs intake: which work queue this agent
+// takes whole units of work from, and how many it runs at once.
+//
+// What is deliberately not here is as much of the shape as what is. The queue's run
+// time, retry cap and concurrency belong to the queue and are set with `ajc`, then read
+// from the bound consumer at startup, because stating them in two places is one place
+// to get them out of step. The session store is harness.sessions and the tool bound is
+// harness.tool_timeout, both shared with every other surface.
+type ExposedJobsConfig struct {
+	// Queue is the work queue to consume. It must already exist: the worker binds to
+	// it and creates nothing, so its run time and retry cap stay the operator's.
+	Queue string `json:"queue,omitempty" yaml:"queue,omitempty"`
+	// TaskType is the asyncjobs task type this worker handles. A task of another type
+	// on the same queue is not this worker's and is left alone, so a submitter and a
+	// worker that disagree produce a job nobody runs and nobody reports.
+	TaskType string `json:"task_type,omitempty" yaml:"task_type,omitempty"`
+	// Workers is how many jobs this process runs at once. The --workers flag overrides
+	// it, since the number is a property of the process rather than of the agent and a
+	// configuration is often shared by every container that reads it.
+	//
+	// It cannot raise throughput past the queue's own concurrency, which bounds every
+	// worker on that queue together; above it this process simply holds slots it never
+	// fills. Lowering it is the useful direction, and one per container is a deployment
+	// shape rather than a degraded one.
+	Workers int `json:"workers,omitempty" yaml:"workers,omitempty"`
+	// NatsContext is the NATS context the queue is reached over, defaulting to the
+	// top-level nats_context. It is dialed separately from the shared connection
+	// because the queue engine requires a connection option nothing else wants, which
+	// also means the queue may live on a different cluster from the session store and
+	// remote tools.
+	NatsContext string `json:"nats_context,omitempty" yaml:"nats_context,omitempty"`
+	// MaxPayload bounds a task payload, in bytes, before anything decodes it; 0 uses
+	// the worker's own default. It is configurable because it is the only bound an
+	// operator has on a third party's input to a surface whose sole access control is
+	// permission to write to the queue.
+	MaxPayload int `json:"max_payload,omitempty" yaml:"max_payload,omitempty"`
 }
 
 // RemoteAgent is a remote agent we can talk to using a2a-like behaviors.
@@ -831,14 +906,25 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 		return fmt.Errorf("nats_context is required when remote_tools is set")
 	}
 
+	// An MCP-only agent needs neither: it serves tools and runs no agent loop. A jobs
+	// intake runs the whole loop, so it needs both, and the waiver must not extend to a
+	// config that carries an mcp block as well. Without this a config with both parses
+	// clean and fails later inside the channel, naming no key in the file.
 	mcpOnly := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.MCP != nil
-	if !mcpOnly {
+	jobs := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.Jobs != nil
+	if !mcpOnly || jobs {
 		if cfg.Identity == "" {
 			return fmt.Errorf("identity is required unless exposed over MCP")
 		}
 		if cfg.SystemPrompt == "" {
 			return fmt.Errorf("prompt is required unless exposed over MCP")
 		}
+	}
+
+	// The queue is reached over NATS, so an intake with no way to get there is a
+	// configuration that cannot start rather than one that starts and does nothing.
+	if jobs && cfg.NatsContext == "" && cfg.Expose.Agent.Jobs.NatsContext == "" {
+		return fmt.Errorf("nats_context is required when expose.agent.jobs is set, either at the top level or under the block")
 	}
 
 	if cfg.LLM.Model == "" {
@@ -907,6 +993,21 @@ func (c *Config) MemoryBackend() string {
 	return c.Harness.Memory.Backend
 }
 
+// MemoryBackendDeclared returns the memory backend the operator wrote in the file,
+// or "" when they named none and the default applies. It differs from MemoryBackend
+// in reporting what was asked for rather than what will be used.
+//
+// It exists so a caller injecting a store can tell an operator who chose a backend
+// from one who left the choice open. Injecting a store against a declared backend
+// names two stores and is refused; injecting against no declaration replaces nothing.
+func (c *Config) MemoryBackendDeclared() string {
+	if !c.MemoryEnabled() {
+		return ""
+	}
+
+	return c.Harness.Memory.Backend
+}
+
 // MemoryRawOptions returns the raw backend options block, decoded per backend at
 // store construction. It is nil when memory is off or no options are set.
 func (c *Config) MemoryRawOptions() json.RawMessage {
@@ -922,6 +1023,16 @@ func (c *Config) MemoryRawOptions() json.RawMessage {
 // that can be disabled, so an unset config still resolves to the file backend.
 func (c *Config) SessionBackend() string {
 	return c.Harness.Sessions.BackendName()
+}
+
+// SessionBackendDeclared returns the session backend the operator wrote in the
+// file, or "" when they named none and the default applies. It is the session
+// counterpart of MemoryBackendDeclared and exists for the same reason.
+//
+// ApplyStateDir declares the file backend, so a --state-dir run reports "file"
+// rather than "": the flag is an operator naming a backend as much as the block is.
+func (c *Config) SessionBackendDeclared() string {
+	return c.Harness.Sessions.DeclaredBackend()
 }
 
 // SessionRawOptions returns the raw session backend options block, decoded per
@@ -1223,6 +1334,69 @@ func (c *Config) A2ATransport() string {
 // listen port. Like a2a, a config that says nothing exposes nothing.
 func (c *Config) MCPEnabled() bool {
 	return c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.MCP != nil
+}
+
+// JobsEnabled reports whether this agent takes work off a queue, which is the
+// presence of expose.agent.jobs. Every field under it defaults, so an empty block
+// enables the intake.
+func (c *Config) JobsEnabled() bool {
+	return c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.Jobs != nil
+}
+
+// JobsQueue returns the work queue the jobs intake consumes, or the default when
+// unset. It is empty when the intake is not configured.
+func (c *Config) JobsQueue() string {
+	if !c.JobsEnabled() {
+		return ""
+	}
+	if c.Expose.Agent.Jobs.Queue == "" {
+		return DefaultJobsQueue
+	}
+
+	return c.Expose.Agent.Jobs.Queue
+}
+
+// JobsTaskType returns the task type the jobs intake handles, or the default when
+// unset. It is empty when the intake is not configured.
+func (c *Config) JobsTaskType() string {
+	if !c.JobsEnabled() {
+		return ""
+	}
+	if c.Expose.Agent.Jobs.TaskType == "" {
+		return DefaultJobsTaskType
+	}
+
+	return c.Expose.Agent.Jobs.TaskType
+}
+
+// JobsWorkers returns how many jobs the intake runs at once, or the default when
+// unset. A caller layers its own flag override on top, since the flag wins.
+func (c *Config) JobsWorkers() int {
+	if !c.JobsEnabled() || c.Expose.Agent.Jobs.Workers <= 0 {
+		return DefaultJobsWorkers
+	}
+
+	return c.Expose.Agent.Jobs.Workers
+}
+
+// JobsNatsContext returns the NATS context the queue is reached over, falling back
+// to the top-level nats_context when the block does not name one.
+func (c *Config) JobsNatsContext() string {
+	if !c.JobsEnabled() || c.Expose.Agent.Jobs.NatsContext == "" {
+		return c.NatsContext
+	}
+
+	return c.Expose.Agent.Jobs.NatsContext
+}
+
+// JobsMaxPayload returns the configured payload cap in bytes, or 0 to leave the
+// worker's own default in place.
+func (c *Config) JobsMaxPayload() int {
+	if !c.JobsEnabled() {
+		return 0
+	}
+
+	return c.Expose.Agent.Jobs.MaxPayload
 }
 
 // MCPBuiltins returns the built-in tools opted in to MCP exposure via

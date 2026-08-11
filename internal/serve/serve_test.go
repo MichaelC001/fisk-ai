@@ -137,6 +137,51 @@ var _ = Describe("Server", func() {
 			})
 			Expect(err).To(MatchError(ContainSubstring("not an absolute path")))
 		})
+
+		// A refused set of options leaves the caller holding no Server, so nothing they
+		// have can release the channels they handed over. Several of them own a
+		// connection, so leaving them open leaks it somewhere unreachable.
+		It("Should release the channels when it refuses the options", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			ch := &closableChannel{scriptedChannel: newScriptedChannel("c")}
+
+			_, err := New(Options{
+				Channels: []Channel{ch},
+				Config:   agenttest.Config(GinkgoTB(), app),
+				WorkDir:  "relative",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(ch.closed).To(Equal(1))
+		})
+
+		// The channel that cannot be released is the ordinary case, and a nil one is
+		// what the validation is refusing, so neither may take the teardown down with it.
+		It("Should survive releasing a nil channel and one with no Close", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			ch := &closableChannel{scriptedChannel: newScriptedChannel("c")}
+
+			_, err := New(Options{
+				Channels: []Channel{ch, newScriptedChannel("plain"), nil},
+				Config:   agenttest.Config(GinkgoTB(), app),
+			})
+			Expect(err).To(MatchError(ContainSubstring("is nil")))
+			Expect(ch.closed).To(Equal(1))
+		})
+
+		It("Should not release the channels of a server it returned", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			ch := &closableChannel{scriptedChannel: newScriptedChannel("c")}
+
+			srv, err := New(Options{
+				Channels: []Channel{ch},
+				Config:   agenttest.Config(GinkgoTB(), app),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ch.closed).To(Equal(0))
+
+			Expect(srv.Stop()).To(Succeed())
+			Expect(ch.closed).To(Equal(1))
+		})
 	})
 
 	Describe("Serving work", func() {
@@ -397,8 +442,8 @@ var _ = Describe("Server", func() {
 			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
 			srv := newServer(agenttest.Config(GinkgoTB(), app))
 
-			Expect(srv.opts.ToolTimeout).To(Equal(defaultToolTimeout))
-			Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(defaultToolTimeout))
+			Expect(srv.opts.ToolTimeout).To(Equal(DefaultToolTimeout))
+			Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(DefaultToolTimeout))
 
 			By("never mutating the shared configuration")
 			Expect(srv.opts.Config.ToolTimeout()).To(Equal(time.Duration(0)))
@@ -426,7 +471,7 @@ var _ = Describe("Server", func() {
 
 			cfg := srv.withToolTimeout(srv.clampedConfig(Budget{MaxIterations: 3}))
 			Expect(cfg.LLM.Budget.MaxIterations).To(BeNumerically("==", 3))
-			Expect(cfg.ToolTimeout()).To(Equal(defaultToolTimeout))
+			Expect(cfg.ToolTimeout()).To(Equal(DefaultToolTimeout))
 		})
 	})
 })

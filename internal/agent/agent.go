@@ -264,8 +264,13 @@ type Options struct {
 	// holds no subprocess-facing secret, so the credential scrub does not apply to it.
 	// When nil, Run builds a store per run from cfg and opts.StoreDir, the CLI path. It is
 	// consulted only when the config enables memory (harness.memory); with memory disabled
-	// it is ignored. Setting it while cfg also names a non-default memory backend is a
-	// run-start error, since that would name two stores.
+	// it is ignored.
+	//
+	// It must be the store the configuration asks for when the configuration asks for one.
+	// A config naming harness.memory.backend and a store reporting a different Info().Backend
+	// name two stores, and that is a run-start error; a config naming no backend leaves the
+	// choice to the caller and takes whatever is injected. The default is not a declaration,
+	// so a store may be injected against an unset backend and report anything.
 	MemoryStore memory.Store
 
 	// SessionStore, when non-nil, is the run-journal store Run borrows for checkpointing
@@ -276,7 +281,9 @@ type Options struct {
 	// concurrently. When nil, Run builds a store per run from cfg and opts.StoreDir. It
 	// is consulted only when the run journals (an explicit Checkpoint or a resume); an
 	// un-checkpointed run never touches it, so injecting it into a one-shot run is a no-op.
-	// Setting it while cfg also names a non-default session backend is a run-start error.
+	// It is accepted or refused against harness.sessions.backend on the same rule as
+	// MemoryStore. Note that ApplyStateDir declares the file backend, so a --state-dir run
+	// requires an injected store to be a file one.
 	SessionStore runstate.Store
 
 	// A2ATransport, when non-nil, is the a2a client transport Run borrows for importing
@@ -627,6 +634,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// not see each other's.
 	ctx = telemetry.ContextWithProvider(ctx, opts.Telemetry)
 
+	// The memory scope rides the context for the same reason and is established here for
+	// the same reason it is per call: a backend that gates an overwrite on this run
+	// having read the value needs to know what "this run" read, and a store injected by a
+	// host serving many runs cannot answer that from state of its own. A store built per
+	// run answers it either way, so this changes nothing on the CLI path.
+	ctx = memory.WithScope(ctx, memory.NewScope())
+
 	ctx, runSpan := opts.Telemetry.StartRun(ctx, telemetry.RunInfo{
 		Identity:    cfg.Identity,
 		Interactive: interactive,
@@ -828,11 +842,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	if cfg.MemoryEnabled() {
 		// A caller-injected store is borrowed: a fleet shares one store across runs of one
 		// identity rather than each building its own. It is used verbatim (no configured
-		// backend, no RuntimeEnv, never closed). Naming both an injected store and an
-		// explicit non-default backend would name two stores, so that is rejected.
+		// backend, no RuntimeEnv, never closed).
+		//
+		// An operator who named a backend gets the store they asked for, so an injected
+		// one must be that store: it is refused when it reports running on something else,
+		// which names two stores. Naming none leaves the choice to the caller, so any
+		// injected store is accepted and the default is never a declaration.
 		if opts.MemoryStore != nil {
-			if cfg.MemoryBackend() != memory.BackendFile {
-				return res, fmt.Errorf("Options.MemoryStore was injected but the config also selects a memory backend (harness.memory.backend %q): an injected store replaces the configured backend, so setting both is ambiguous; drop Options.MemoryStore to use the configured backend, or remove harness.memory.backend to use the injected store", cfg.MemoryBackend())
+			declared := cfg.MemoryBackendDeclared()
+			running := opts.MemoryStore.Info().Backend
+			if declared != "" && declared != running {
+				return res, fmt.Errorf("Options.MemoryStore runs on the %q backend but harness.memory.backend in %q selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.memory.backend to %q", running, opts.ConfigFile, declared, running)
 			}
 			memStore = opts.MemoryStore
 		} else {
@@ -1281,11 +1301,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	if checkpointing {
 		// A caller-injected store is borrowed: a fleet shares one session store across runs
 		// rather than each building its own. It is used verbatim (no configured backend, no
-		// RuntimeEnv, never closed). Naming both an injected store and an explicit
-		// non-default backend would name two stores, so that is rejected.
+		// RuntimeEnv, never closed). It is accepted or refused on the same rule as an
+		// injected memory store, for the same reason.
 		if opts.SessionStore != nil {
-			if cfg.SessionBackend() != runstate.BackendFile {
-				return res, fmt.Errorf("Options.SessionStore was injected but the config also selects a session backend (harness.sessions.backend %q): an injected store replaces the configured backend, so setting both is ambiguous; drop Options.SessionStore to use the configured backend, or remove harness.sessions.backend to use the injected store", cfg.SessionBackend())
+			declared := cfg.SessionBackendDeclared()
+			running := opts.SessionStore.Info().Backend
+			if declared != "" && declared != running {
+				return res, fmt.Errorf("Options.SessionStore runs on the %q backend but harness.sessions.backend in %q selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.sessions.backend to %q", running, opts.ConfigFile, declared, running)
 			}
 			store = opts.SessionStore
 		} else {

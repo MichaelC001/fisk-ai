@@ -127,7 +127,7 @@ func newStore(env memory.RuntimeEnv, identity string, raw json.RawMessage) (memo
 		bucket:      opts.Bucket,
 		prefix:      prefix,
 		requireRead: !opts.NoRequireReadBeforeUpdate,
-		revs:        map[string]uint64{},
+		own:         memory.NewScope(),
 	}, nil
 }
 
@@ -167,44 +167,52 @@ type store struct {
 	prefix      string
 	requireRead bool
 
-	// revs records the KV revision each key was last seen at through Read or a
-	// successful write in this run, so an overwrite can be gated on the model having
-	// seen the current value (read-before-update). It is per run (the store is built
-	// per run) and guarded because the Store contract allows concurrent use.
-	mu   sync.Mutex
-	revs map[string]uint64
+	// own records the KV revision each key was last seen at through Read or a
+	// successful write, so an overwrite can be gated on the model having seen the
+	// current value (read-before-update). It is used only for a caller that supplies no
+	// memory.Scope on the context, which is a store built per run: then the store and
+	// the run are the same thing and it means what it says. A host sharing one store
+	// across runs supplies a scope per run, and this is never consulted, because one
+	// run's read must not authorize another's overwrite of the same key.
+	own *memory.Scope
 
 	// countCache holds the entry count for the capacity check, seeded lazily from one
-	// keyspace scan and then tracked through this run's own creates and deletes, so a
-	// run that writes many memories does not rescan on every create. countCached
-	// guards the seed. See currentCount for the best-effort-under-concurrency story.
+	// keyspace scan and then tracked through the creates and deletes this store sees,
+	// so a run that writes many memories does not rescan on every create. countCached
+	// guards the seed. Unlike the read-before-update record it is not run state: it
+	// approximates how full the bucket is, and a shared store watching every run's
+	// writes approximates it better than one watching a single run's.
 	countMu     sync.Mutex
 	countCache  int
 	countCached bool
 }
 
-// remember records the revision a key is now known to be at, granting overwrite
-// authority for it this run. forget drops that authority.
-func (s *store) remember(key string, rev uint64) {
-	s.mu.Lock()
-	s.revs[key] = rev
-	s.mu.Unlock()
+// scope is where this call's read-before-update record lives: the run's own when the
+// host supplied one, and the store's otherwise. Resolving it per call rather than at
+// construction is what lets one store serve runs that each have their own.
+func (s *store) scope(ctx context.Context) *memory.Scope {
+	scope := memory.ScopeFrom(ctx)
+	if scope != nil {
+		return scope
+	}
+
+	return s.own
 }
 
-func (s *store) forget(key string) {
-	s.mu.Lock()
-	delete(s.revs, key)
-	s.mu.Unlock()
+// remember records the revision a key is now known to be at, granting overwrite
+// authority for it this run. forget drops that authority.
+func (s *store) remember(ctx context.Context, key string, rev uint64) {
+	s.scope(ctx).Remember(key, rev)
+}
+
+func (s *store) forget(ctx context.Context, key string) {
+	s.scope(ctx).Forget(key)
 }
 
 // knownRevision returns the revision key was last seen at this run and whether it
 // was seen at all.
-func (s *store) knownRevision(key string) (uint64, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rev, ok := s.revs[key]
-
-	return rev, ok
+func (s *store) knownRevision(ctx context.Context, key string) (uint64, bool) {
+	return s.scope(ctx).Revision(key)
 }
 
 // storageKey maps a memory key to the bucket key, applying the namespace prefix.
@@ -234,7 +242,7 @@ func (s *store) Read(ctx context.Context, key string) (string, string, error) {
 	// Only Read does this: the start-of-run index and List read values to build the
 	// key/description index, not on the model's behalf, so they must not grant
 	// overwrite authority (seeing a key in the index is not the same as reading it).
-	s.remember(key, entry.Revision())
+	s.remember(ctx, key, entry.Revision())
 
 	description, content := memory.Parse(entry.Value())
 
@@ -281,7 +289,7 @@ func (s *store) Write(ctx context.Context, key, description, content string, ove
 	// Creating a key grants overwrite authority for it: the model just wrote its
 	// value, so it may keep editing it this run without re-reading. It also adds one
 	// to the tracked entry count.
-	s.remember(key, rev)
+	s.remember(ctx, key, rev)
 	s.adjustCount(1)
 
 	return nil
@@ -297,12 +305,12 @@ func (s *store) overwrite(ctx context.Context, key, sk string, data []byte) erro
 		if err != nil {
 			return fmt.Errorf("writing memory %q: %w", key, err)
 		}
-		s.remember(key, rev)
+		s.remember(ctx, key, rev)
 
 		return nil
 	}
 
-	prev, ok := s.knownRevision(key)
+	prev, ok := s.knownRevision(ctx, key)
 	if !ok {
 		return fmt.Errorf("%w: memory %q was not read in this run; read it before overwriting", memory.ErrStale, key)
 	}
@@ -311,14 +319,14 @@ func (s *store) overwrite(ctx context.Context, key, sk string, data []byte) erro
 	if isWrongLastSequence(err) {
 		// The revision moved: another writer changed the key since it was read. Drop
 		// the stale authority so a retry must read the new value first.
-		s.forget(key)
+		s.forget(ctx, key)
 		return fmt.Errorf("%w: memory %q changed since it was read; read it again before overwriting", memory.ErrStale, key)
 	}
 	if err != nil {
 		return fmt.Errorf("writing memory %q: %w", key, err)
 	}
 
-	s.remember(key, rev)
+	s.remember(ctx, key, rev)
 
 	return nil
 }
@@ -359,7 +367,7 @@ func (s *store) Delete(ctx context.Context, key string) (bool, error) {
 	// Drop any tracked revision: a later create is the way back, and it records its
 	// own. A stale entry left here could authorize an overwrite of a re-created key.
 	// The delete also takes one off the tracked entry count.
-	s.forget(key)
+	s.forget(ctx, key)
 	s.adjustCount(-1)
 
 	return true, nil

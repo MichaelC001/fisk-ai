@@ -347,6 +347,55 @@ var _ = Describe("Integration: jetstream memory", func() {
 		})
 	})
 
+	// One store serving many runs is what a hosted worker does, and it is the
+	// arrangement the guard cannot survive on state of its own: every run would share
+	// one set of read receipts, so a key any run had read would be overwritable by every
+	// other. The receipts therefore live on the run's context, and these assert that a
+	// single store honors them per run rather than per store.
+	Describe("read-before-update across runs sharing one store", func() {
+		var shared memory.Store
+
+		BeforeEach(func() {
+			createBucket(jetstream.KeyValueConfig{Bucket: "mem", History: 1})
+
+			var err error
+			shared, err = newStoreFor("agent", `{"bucket":"mem"}`)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(shared.Write(ctx, "k", "d", "b", false)).To(Succeed())
+		})
+
+		It("Should not let one run's read authorize another run's overwrite", func() {
+			reader := memory.WithScope(ctx, memory.NewScope())
+			other := memory.WithScope(ctx, memory.NewScope())
+
+			_, _, err := shared.Read(reader, "k")
+			Expect(err).ToNot(HaveOccurred())
+
+			err = shared.Write(other, "k", "d2", "b2", true)
+			Expect(err).To(MatchError(memory.ErrStale))
+		})
+
+		It("Should allow the overwrite in the run that read it", func() {
+			run := memory.WithScope(ctx, memory.NewScope())
+
+			_, _, err := shared.Read(run, "k")
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(shared.Write(run, "k", "d2", "b2", true)).To(Succeed())
+		})
+
+		It("Should not let one run's create authorize another run's overwrite", func() {
+			creator := memory.WithScope(ctx, memory.NewScope())
+			other := memory.WithScope(ctx, memory.NewScope())
+
+			Expect(shared.Write(creator, "fresh", "d", "b", false)).To(Succeed())
+
+			err := shared.Write(other, "fresh", "d2", "b2", true)
+			Expect(err).To(MatchError(memory.ErrStale))
+		})
+	})
+
 	Describe("no_require_read_before_update", func() {
 		It("Should allow a blind overwrite when the guard is off", func() {
 			createBucket(jetstream.KeyValueConfig{Bucket: "mem", History: 1})
