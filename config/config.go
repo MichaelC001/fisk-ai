@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/choria-io/fisk"
 	"github.com/goccy/go-yaml"
 )
 
@@ -191,6 +192,25 @@ type HarnessConfig struct {
 	// it gates against the operator; over MCP it gates through client elicitation as
 	// governed by expose.agent.mcp.confirm_over_mcp.
 	ConfirmTags []string `json:"confirm_tags,omitempty" yaml:"confirm_tags,omitempty"`
+	// ToolTimeoutString bounds a single tool call in the agent loop as a duration
+	// string (e.g. 5m, or 1d for the day, week, month and year units fisk parses on
+	// top of Go's). Unset, or 0s, leaves tool execution unbounded, which is the
+	// terminal's behavior: an operator watching a run can interrupt a command that will
+	// never answer. A hosted worker has nobody to interrupt it, so internal/serve fills
+	// in a default of its own when this is unset.
+	//
+	// It bounds the agent loop only, as every harness setting does.
+	// expose.agent.mcp.tool_timeout and expose.agent.a2a.tool_timeout are separate
+	// values bounding the same unit of work on the two serving paths.
+	//
+	// The bound is cooperative: it cancels the call's context. An application command
+	// is killed along with its process group, and an in-process tool stops only if its
+	// handler observes the context. A call whose duration is set by a person answering
+	// is never bounded, since the bound would cancel the question rather than a
+	// runaway.
+	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
+	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
+	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 	// NoTUI disables the full-screen terminal UI for this agent, always using the
 	// line-by-line output even on an interactive terminal. It is a hard off switch
 	// that the command line cannot re-enable, for agents whose operators rely on the
@@ -1139,6 +1159,13 @@ func (c *Config) A2AMaxConcurrentTools() int {
 	return c.Expose.Agent.A2A.MaxConcurrentTools
 }
 
+// ToolTimeout returns the configured per-tool-call timeout for the agent loop, or 0
+// when unset. Zero means unbounded on the run path; a hosted worker applies a default
+// of its own for 0, as the MCP and a2a servers do for theirs.
+func (c *Config) ToolTimeout() time.Duration {
+	return c.Harness.ToolTimeoutParsed
+}
+
 // A2AToolTimeout returns the configured a2a per-tool-call timeout, or 0 when unset;
 // the server applies its own default for 0.
 func (c *Config) A2AToolTimeout() time.Duration {
@@ -1265,6 +1292,20 @@ func (c *Config) prepare() error {
 		c.Expose.Agent.A2A.ToolTimeoutParsed = d
 	}
 
+	// 0s parses to zero and so reads as unset, which is unbounded on the run path and
+	// the server default on a hosted worker. A negative is rejected rather than
+	// silently producing an already-expired context that fails every tool call.
+	if c.Harness.ToolTimeoutString != "" {
+		d, err := fisk.ParseDuration(c.Harness.ToolTimeoutString)
+		if err != nil {
+			return fmt.Errorf("invalid harness.tool_timeout %q: %w", c.Harness.ToolTimeoutString, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("invalid harness.tool_timeout %q: must not be negative", c.Harness.ToolTimeoutString)
+		}
+		c.Harness.ToolTimeoutParsed = d
+	}
+
 	if err := c.LLM.Budget.prepare(); err != nil {
 		return err
 	}
@@ -1291,7 +1332,7 @@ func (e *RAGEmbeddingsConfig) prepare() error {
 		return nil
 	}
 
-	d, err := time.ParseDuration(e.TimeoutString)
+	d, err := fisk.ParseDuration(e.TimeoutString)
 	if err != nil {
 		return fmt.Errorf("invalid knowledge.embeddings.timeout %q: %w", e.TimeoutString, err)
 	}
@@ -1452,7 +1493,7 @@ func prepareServerToolLimits(path string, maxConcurrent int, timeout string) (ti
 		return 0, nil
 	}
 
-	d, err := time.ParseDuration(timeout)
+	d, err := fisk.ParseDuration(timeout)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s.tool_timeout %q: %w", path, timeout, err)
 	}
@@ -1487,7 +1528,7 @@ func (b *LLMBudget) prepare() error {
 		return nil
 	}
 
-	d, err := time.ParseDuration(b.CallTimeoutString)
+	d, err := fisk.ParseDuration(b.CallTimeoutString)
 	if err != nil {
 		return fmt.Errorf("invalid llm call_timeout %q: %w", b.CallTimeoutString, err)
 	}

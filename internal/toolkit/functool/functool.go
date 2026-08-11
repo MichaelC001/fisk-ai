@@ -102,6 +102,11 @@ type Spec struct {
 	// NoDefer forces the tool to always be sent to the model directly, never hidden
 	// behind tool search, even within an otherwise deferred tool set.
 	NoDefer bool
+	// OperatorPaced declares that the call lasts as long as a person takes to answer,
+	// so a caller bounding tool execution leaves it unbounded. Set it only for a tool
+	// whose whole purpose is to put a question to an operator and wait: a tool that is
+	// merely slow, however slow, is not operator paced and wants the bound.
+	OperatorPaced bool
 	// Remote, when set, marks the tool as served by another agent.
 	Remote *RemoteSpec
 	// Expose declares the serving surfaces that may carry the tool. Nil exposes it
@@ -144,6 +149,7 @@ type Tool struct {
 	validateRequired bool
 	trace            func(input json.RawMessage) string
 	noDefer          bool
+	operatorPaced    bool
 	remote           *RemoteSpec
 	expose           ExposeSpec
 	behavior         toolkit.Behavior
@@ -222,6 +228,7 @@ func New(spec Spec) (*Tool, error) {
 		validateRequired: spec.ValidateRequired,
 		trace:            spec.Trace,
 		noDefer:          spec.NoDefer,
+		operatorPaced:    spec.OperatorPaced,
 		remote:           spec.Remote,
 		expose:           expose,
 		behavior:         spec.Behavior,
@@ -332,7 +339,8 @@ func (t *Tool) TraceLine(input json.RawMessage) string {
 // tags its built-ins), and toolkit.KindCustom otherwise, so a caller's own function
 // tool is accounted custom with no extra effort. Every in-process tool is offered the
 // operator Prompter and the per-run working directory, which a handler that needs
-// neither ignores.
+// neither ignores. Only a tool whose Spec declared it is reported as operator paced,
+// since being offered a Prompter says nothing about whether the tool waits on one.
 func (t *Tool) Describe(input json.RawMessage) toolkit.CallInfo {
 	if t.remote != nil {
 		return toolkit.CallInfo{Present: toolkit.PresentRemote, Kind: toolkit.KindRemote, Agent: t.remote.Agent}
@@ -348,6 +356,7 @@ func (t *Tool) Describe(input json.RawMessage) toolkit.CallInfo {
 		Kind:          kind,
 		NeedsPrompter: true,
 		NeedsWorkDir:  true,
+		OperatorPaced: t.operatorPaced,
 	}
 	if t.trace != nil {
 		info.Present = toolkit.PresentTraced

@@ -57,6 +57,13 @@ type CallInfo struct {
 	NeedsPrompter bool
 	// NeedsWorkDir asks the runner to supply the per-run WorkDir in ExecDeps.
 	NeedsWorkDir bool
+	// OperatorPaced reports that the call's duration is set by a person answering, so
+	// a caller bounding tool execution must leave this call alone: the bound would
+	// cancel the question rather than a runaway. A tool that is merely slow is not
+	// operator paced. It is distinct from NeedsPrompter, which every in-process tool
+	// sets because every in-process tool is offered a Prompter whether it asks
+	// anything or not.
+	OperatorPaced bool
 }
 
 // Describer is implemented by a tool that describes its own presentation and per-run

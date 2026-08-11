@@ -231,6 +231,8 @@ func warningKindName(k WarningKind) string {
 		return "unknown_reserved_tag"
 	case WarnBehaviorTagConflict:
 		return "behavior_tag_conflict"
+	case WarnToolTimeout:
+		return "tool_timeout"
 	default:
 		return "unknown"
 	}

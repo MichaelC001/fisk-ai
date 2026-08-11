@@ -305,6 +305,23 @@ var _ = Describe("Describe", func() {
 		Expect(info.NeedsWorkDir).To(BeTrue())
 	})
 
+	It("Should report a call as operator paced only when its Spec declared it", func() {
+		// Being offered a Prompter says nothing about waiting on one, so the two flags
+		// have to disagree here or a caller bounding tool execution would exempt every
+		// in-process tool.
+		plain := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler}).Describe(input)
+		Expect(plain.NeedsPrompter).To(BeTrue())
+		Expect(plain.OperatorPaced).To(BeFalse())
+
+		asks := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, OperatorPaced: true}).Describe(input)
+		Expect(asks.OperatorPaced).To(BeTrue())
+	})
+
+	It("Should never report a remote tool as operator paced", func() {
+		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, OperatorPaced: true, Remote: &RemoteSpec{Agent: "billing"}})
+		Expect(tool.Describe(input).OperatorPaced).To(BeFalse())
+	})
+
 	It("Should sanitize a handler-supplied trace before displaying it", func() {
 		trace := func(json.RawMessage) string { return "\x1b[2Jdanger\nzone" }
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, Trace: trace})

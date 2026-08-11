@@ -93,6 +93,8 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("tool %q carries unknown reserved tag(s): %s; the ai: prefix is reserved and these do nothing, check the spelling (run 'fisk-ai info' to list the reserved tags)", w.Name, strings.Join(w.Params, ", "))
 	case agent.WarnBehaviorTagConflict:
 		return fmt.Sprintf("tool %q carries contradictory behavior tags: %s; the more dangerous reading was used and the tool is still available", w.Name, strings.Join(w.Params, ", "))
+	case agent.WarnToolTimeout:
+		return fmt.Sprintf("tool %q was stopped: %v; raise harness.tool_timeout if the tool needs longer", w.Name, w.Err)
 	default:
 		return ""
 	}

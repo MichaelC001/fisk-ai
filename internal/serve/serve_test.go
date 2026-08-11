@@ -18,6 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -372,6 +373,60 @@ var _ = Describe("Server", func() {
 
 			By("never mutating the shared configuration")
 			Expect(srv.opts.Config.LLM.Budget.MaxIterations).To(BeNumerically("==", 10))
+		})
+	})
+
+	Describe("Tool timeout", func() {
+		newServer := func(cfg *config.Config, opts ...func(*Options)) *Server {
+			o := Options{
+				Channels: []Channel{newScriptedChannel("c")},
+				Config:   cfg,
+				Logger:   quietLogger(),
+			}
+			for _, opt := range opts {
+				opt(&o)
+			}
+
+			srv, err := New(o)
+			Expect(err).ToNot(HaveOccurred())
+
+			return srv
+		}
+
+		It("Should bound a hosted run by default, unlike a run at a terminal", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			srv := newServer(agenttest.Config(GinkgoTB(), app))
+
+			Expect(srv.opts.ToolTimeout).To(Equal(defaultToolTimeout))
+			Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(defaultToolTimeout))
+
+			By("never mutating the shared configuration")
+			Expect(srv.opts.Config.ToolTimeout()).To(Equal(time.Duration(0)))
+		})
+
+		It("Should leave a configured timeout alone even when it is longer", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			cfg := agenttest.Config(GinkgoTB(), app, agenttest.WithToolTimeout(time.Hour))
+			srv := newServer(cfg)
+
+			Expect(srv.withToolTimeout(cfg)).To(BeIdenticalTo(cfg), "nothing to fill in, so nothing to copy")
+			Expect(srv.withToolTimeout(cfg).ToolTimeout()).To(Equal(time.Hour))
+		})
+
+		It("Should honor an embedder's own default over the package one", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			srv := newServer(agenttest.Config(GinkgoTB(), app), func(o *Options) { o.ToolTimeout = 90 * time.Second })
+
+			Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(90 * time.Second))
+		})
+
+		It("Should apply both the clamp and the fill to one piece of work", func() {
+			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+			srv := newServer(agenttest.Config(GinkgoTB(), app, agenttest.WithMaxIterations(10)))
+
+			cfg := srv.withToolTimeout(srv.clampedConfig(Budget{MaxIterations: 3}))
+			Expect(cfg.LLM.Budget.MaxIterations).To(BeNumerically("==", 3))
+			Expect(cfg.ToolTimeout()).To(Equal(defaultToolTimeout))
 		})
 	})
 })
