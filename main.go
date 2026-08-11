@@ -73,6 +73,7 @@ func main() {
 	registerRAGCommand(cmd)
 	registerMcpAction(cmd)
 	registerA2AAction(cmd)
+	registerServeCommand(cmd)
 	registerDiscoverAction(cmd)
 
 	cmd.MustParseWithUsage(os.Args[1:])

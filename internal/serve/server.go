@@ -41,14 +41,18 @@ const (
 	// doneTimeout bounds reporting one outcome. A channel that cannot reach its store
 	// must not hold up a shutdown indefinitely.
 	doneTimeout = 30 * time.Second
-
-	// defaultToolTimeout bounds one tool call for a run this server hosts, when the
-	// configuration sets none. It is far longer than the 30 seconds the MCP and a2a
-	// servers allow a served call, because those answer a caller who is waiting while
-	// this hosts whole units of work whose commands legitimately take minutes. It is a
-	// bound on a tool that will never answer, not on a slow one.
-	defaultToolTimeout = 5 * time.Minute
 )
+
+// DefaultToolTimeout bounds one tool call for a run this server hosts, when the
+// configuration sets none. It is far longer than the 30 seconds the MCP and a2a
+// servers allow a served call, because those answer a caller who is waiting while this
+// hosts whole units of work whose commands legitimately take minutes. It is a bound on
+// a tool that will never answer, not on a slow one.
+//
+// It is exported because a caller reporting what its worker will do has to be able to
+// name the value it did not set, and a startup line saying a bound is zero when it is
+// five minutes is worse than saying nothing.
+const DefaultToolTimeout = 5 * time.Minute
 
 // Options configures a Server.
 //
@@ -57,6 +61,11 @@ const (
 // and their contracts are the ones documented there.
 type Options struct {
 	// Channels supply the work. At least one is required; each gets its own puller.
+	//
+	// The Server releases them: Drain and Stop close the ones that can be closed, and
+	// New closes them itself if it refuses these options. Handing them over is therefore
+	// handing over their lifecycle, which is what a channel holding a connection needs
+	// from a constructor that may fail.
 	Channels []Channel
 
 	// Config is the parsed agent configuration every run uses. Required.
@@ -64,8 +73,16 @@ type Options struct {
 	// ConfigFile names the file Config was read from, for diagnostics.
 	ConfigFile string
 
-	// Concurrency is the maximum number of runs executing at once across all
-	// channels; <= 0 uses the default.
+	// Concurrency is how many runs a channel may have executing at once; <= 0 uses
+	// the default. It is the default rather than the total: a channel that has an
+	// opinion of its own states it and gets that instead, so a process serving two
+	// channels at two runs each is running four.
+	//
+	// It is per channel because a channel whose work carries a lease claims that work
+	// before the run starts, and it can only size its claiming to a bound it owns. A
+	// shared bound would have one channel's runs deciding how much of another's claimed
+	// work can proceed, and the queue channel would hold claims against a queue-wide
+	// budget for jobs it is not running.
 	Concurrency int
 
 	// ToolTimeout bounds a single tool call in the runs this server hosts; <= 0 uses
@@ -139,7 +156,7 @@ func (o *Options) applyDefaults() {
 		o.Concurrency = defaultConcurrency
 	}
 	if o.ToolTimeout <= 0 {
-		o.ToolTimeout = defaultToolTimeout
+		o.ToolTimeout = DefaultToolTimeout
 	}
 	if o.LogOutput == nil {
 		o.LogOutput = os.Stderr
@@ -182,28 +199,61 @@ func (o *Options) validate() error {
 	return nil
 }
 
-// Server takes work from its channels and runs it, bounded by its concurrency.
+// Server takes work from its channels and runs it, each channel bounded by its own
+// concurrency.
 type Server struct {
 	opts Options
 	log  *slog.Logger
-	sem  chan struct{}
 }
 
-// New validates the options and returns a Server. It performs no I/O and starts
-// nothing; Serve does the work.
+// concurrentChannel is the optional interface a channel implements when it knows how
+// many of its runs may be in flight. A channel that claims work before a run starts
+// has to size that claiming to something, and only it knows what, so it states the
+// number rather than being told one and hoping the server agrees.
+//
+// A channel that does not implement it gets Options.Concurrency.
+type concurrentChannel interface {
+	Concurrency() int
+}
+
+// New validates the options and returns a Server. It starts nothing; Serve does the
+// work.
+//
+// A Server owns releasing its channels, through Drain and Stop. New therefore releases
+// them itself when it refuses the options, since a caller holding an error holds no
+// Server and has nothing to release them with: several of them own a connection, and
+// there is no third outcome where the caller is expected to clean up after a
+// constructor that failed. Either this returns a Server that will release them, or it
+// returns an error having released them.
 func New(opts Options) (*Server, error) {
 	opts.applyDefaults()
 
 	err := opts.validate()
 	if err != nil {
+		closeChannels(opts.Channels, opts.Logger)
 		return nil, err
 	}
 
 	return &Server{
 		opts: opts,
 		log:  opts.Logger,
-		sem:  make(chan struct{}, opts.Concurrency),
 	}, nil
+}
+
+// concurrencyFor is how many runs a channel may have at once: its own answer when it
+// has one, and the configured default when it does not.
+func (s *Server) concurrencyFor(ch Channel) int {
+	cc, ok := ch.(concurrentChannel)
+	if !ok {
+		return s.opts.Concurrency
+	}
+
+	n := cc.Concurrency()
+	if n <= 0 {
+		return s.opts.Concurrency
+	}
+
+	return n
 }
 
 // Serve runs every channel until ctx is canceled or all of them are finished, and
@@ -215,14 +265,22 @@ func New(opts Options) (*Server, error) {
 func (s *Server) Serve(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	s.log.Info("Serving", "channels", len(s.opts.Channels), "concurrency", s.opts.Concurrency)
+	s.log.Info("Serving", "channels", len(s.opts.Channels))
 
 	// One counter covers both the pullers and the runs they spawn. A puller only
 	// adds while it is itself counted, so waiting here cannot miss a run that was
 	// about to start.
+	//
+	// Each channel gets a slot budget of its own, so one channel's runs never decide
+	// how much of another's claimed work may proceed.
 	for _, ch := range s.opts.Channels {
+		concurrency := s.concurrencyFor(ch)
+		sem := make(chan struct{}, concurrency)
+
+		s.log.Info("Serving channel", "channel", ch.Name(), "concurrency", concurrency)
+
 		wg.Go(func() {
-			s.pull(ctx, &wg, ch)
+			s.pull(ctx, &wg, ch, sem)
 		})
 	}
 
@@ -232,14 +290,67 @@ func (s *Server) Serve(ctx context.Context) error {
 	return nil
 }
 
-// pull takes work from one channel until it is finished or the context ends.
+// Drain asks the channels to stop producing work and waits for what is already in
+// flight, so Serve ends by itself with nothing canceled and every run stopped at a
+// point it can be resumed from. It is called while Serve is still running, which is
+// what makes it a drain rather than a stop.
+//
+// It blocks for as long as the work in flight does, so a caller draining from a signal
+// handler runs it on a goroutine of its own. A channel with nothing to drain is left
+// alone, and a server whose channels are all like that returns at once.
+//
+// Signals are not this package's business. A library that called signal.Notify would
+// take SIGTERM from an embedder's supervisor with no way to decline, so the two verbs
+// are offered and the program decides which signal means which.
+func (s *Server) Drain() error {
+	return s.release("Draining channel")
+}
+
+// release closes every channel that can be, saying which phase it is doing it for. A
+// channel's Close is idempotent, so the second call in a drain-then-stop sequence does
+// nothing; it is logged differently rather than twice so the output does not read as
+// two drains.
+func (s *Server) release(reason string) error {
+	var errs []error
+
+	for _, ch := range s.opts.Channels {
+		// A channel that can be released says so by having a Close; the interface stays
+		// at what every channel can honor and asks nothing of the ones that cannot.
+		closer, ok := ch.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+
+		s.log.Debug(reason, "channel", ch.Name())
+
+		err := closer.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("releasing %s: %w", ch.Name(), err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// Stop releases the channels after Serve has returned. It is the same call as Drain
+// and differs only in when it is made: before, the runs in flight are waited for;
+// after, there are none left to wait for and it is releasing what the channels hold.
+//
+// Calling it after a Drain is safe and is how a program that drains on one signal and
+// stops on the next ends up releasing everything exactly once.
+func (s *Server) Stop() error {
+	return s.release("Releasing channel")
+}
+
+// pull takes work from one channel until it is finished or the context ends, bounded
+// by that channel's own slots.
 //
 // The order is take, then acquire a slot, then run. Acquiring first would park a slot
-// on a channel that has nothing to offer, and with more channels than slots a channel
-// with work waiting would never be served. The cost of this order is that an item is
+// on a channel that has nothing to offer. The cost of this order is that an item is
 // claimed while it waits for a slot, so a channel whose work carries a lease must
-// tolerate that wait.
-func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel) {
+// tolerate that wait; sizing the slots per channel is what keeps that wait bounded by
+// the channel's own load rather than by its neighbours'.
+func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel, sem chan struct{}) {
 	log := s.log.With("channel", ch.Name())
 
 	for {
@@ -283,11 +394,11 @@ func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel) {
 			// whoever supplied it may hand it to another worker unchanged.
 			s.report(work, Outcome{ID: work.ID, Abandoned: true}, log)
 			return
-		case s.sem <- struct{}{}:
+		case sem <- struct{}{}:
 		}
 
 		wg.Go(func() {
-			defer func() { <-s.sem }()
+			defer func() { <-sem }()
 			s.execute(ctx, work, log)
 		})
 	}

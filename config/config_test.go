@@ -604,6 +604,119 @@ llm:
 		})
 	})
 
+	Describe("Jobs", func() {
+		It("Should be off unless the block is present", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.JobsEnabled()).To(BeFalse())
+			Expect(cfg.JobsQueue()).To(BeEmpty())
+			Expect(cfg.JobsTaskType()).To(BeEmpty())
+		})
+
+		// Every field defaults, so presence alone is a working configuration. Both ends
+		// of a task type must agree and nothing validates the pairing, which is why the
+		// default is the value the documentation submits with.
+		It("Should default every field so an empty block works", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+nats_context: ngs
+expose:
+  agent:
+    jobs: {}
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.JobsEnabled()).To(BeTrue())
+			Expect(cfg.JobsQueue()).To(Equal(DefaultJobsQueue))
+			Expect(cfg.JobsTaskType()).To(Equal(DefaultJobsTaskType))
+			Expect(cfg.JobsWorkers()).To(Equal(DefaultJobsWorkers))
+			Expect(cfg.JobsMaxPayload()).To(Equal(0))
+			Expect(cfg.JobsNatsContext()).To(Equal("ngs"), "it falls back to the top-level context")
+		})
+
+		It("Should take what the block sets", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+nats_context: ngs
+expose:
+  agent:
+    jobs:
+      queue: SLOW
+      task_type: fisk-ai:slow
+      workers: 4
+      max_payload: 2048
+      nats_context: jobs_cluster
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.JobsQueue()).To(Equal("SLOW"))
+			Expect(cfg.JobsTaskType()).To(Equal("fisk-ai:slow"))
+			Expect(cfg.JobsWorkers()).To(Equal(4))
+			Expect(cfg.JobsMaxPayload()).To(Equal(2048))
+			Expect(cfg.JobsNatsContext()).To(Equal("jobs_cluster"), "its own context wins over the top-level one")
+		})
+
+		It("Should require a way to reach the queue", func() {
+			_, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    jobs: {}
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).To(MatchError(ContainSubstring("nats_context is required when expose.agent.jobs is set")))
+		})
+
+		// An MCP-only agent needs neither identity nor prompt because it runs no agent
+		// loop. A jobs intake runs the whole loop, so the waiver must not reach a config
+		// that carries both; without this it parses clean and fails later inside the
+		// channel, naming no key in the file. Identity is not what fails here only
+		// because it defaults to the application's basename.
+		It("Should not inherit the MCP waiver on identity and prompt", func() {
+			_, err := ParseConfig([]byte(`
+application_path: /usr/bin/nats
+nats_context: ngs
+expose:
+  agent:
+    mcp:
+      port: 8080
+    jobs: {}
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).To(MatchError(ContainSubstring("prompt is required")))
+		})
+
+		It("Should still waive them for an MCP-only agent", func() {
+			cfg, err := ParseConfig([]byte(`
+application_path: /usr/bin/nats
+expose:
+  agent:
+    mcp:
+      port: 8080
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.JobsEnabled()).To(BeFalse())
+		})
+	})
+
 	Describe("TUIDisabled", func() {
 		It("Should report the TUI disabled when no_tui is true", func() {
 			cfg, err := ParseConfig([]byte(`

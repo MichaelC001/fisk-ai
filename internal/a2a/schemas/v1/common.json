@@ -78,14 +78,36 @@
     },
     "usage": {
       "type": "object",
+      "description": "What a task consumed. Tokens are what it cost; calls are what it did.",
       "properties": {
         "input_tokens": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Total input tokens, cached and uncached together. The cache fields below break it down, since they bill at different rates."
         },
         "output_tokens": {
           "type": "integer",
           "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input tokens served from the prompt cache, included in input_tokens."
+        },
+        "cache_create_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input tokens written into the prompt cache, included in input_tokens."
+        },
+        "llm_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many times the agent called the model."
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many tools the agent invoked."
         }
       }
     },

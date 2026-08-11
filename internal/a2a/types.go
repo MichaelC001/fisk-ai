@@ -24,11 +24,31 @@ const (
 	StopMaxIterations StopReason = "max_iterations"
 )
 
-// Usage reports token accounting. The fields mirror the agent's own accounting
-// of input and output tokens.
+// Usage reports what a task consumed: tokens for what it cost, calls for what it
+// did.
 type Usage struct {
-	InputTokens  int64 `json:"input_tokens,omitempty"`
+	// InputTokens is every input token the task consumed, cached and uncached
+	// together. It is deliberately the total rather than the uncached remainder the
+	// agent counts separately, because a caller reading a bill wants the number it
+	// was billed for and would have no way to know it had been handed a part of one.
+	InputTokens int64 `json:"input_tokens,omitempty"`
+	// OutputTokens is every token the model produced.
 	OutputTokens int64 `json:"output_tokens,omitempty"`
+
+	// CacheReadTokens and CacheCreateTokens break InputTokens down, and are included
+	// in it rather than additional to it. They are reported separately because they
+	// are priced differently: a read is a fraction of an uncached token and a write is
+	// a premium on one, so a caller costing a task cannot do it from a total alone.
+	CacheReadTokens   int64 `json:"cache_read_tokens,omitempty"`
+	CacheCreateTokens int64 `json:"cache_create_tokens,omitempty"`
+
+	// LLMCalls and ToolCalls describe the shape of the run rather than its cost. For
+	// an agent whose tools are commands, the tool count is the closest thing to a
+	// measure of what was actually done, and the pair together is what distinguishes
+	// an agent working from an agent stuck: five calls answering four tools is
+	// progress, twenty-seven of each is a loop.
+	LLMCalls  int64 `json:"llm_calls,omitempty"`
+	ToolCalls int64 `json:"tool_calls,omitempty"`
 }
 
 // Budget bounds how much an agent may spend serving a request. The receiver's

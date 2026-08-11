@@ -22,13 +22,37 @@ import (
 // and the library deliberately does not know this command's flag names.
 const noTelemetryFlag = "--no-telemetry"
 
-// noTelemetryLabel is the veto label for this run, empty when the flag was not given.
-func noTelemetryLabel() string {
-	if !noTelemetry {
+// noTelemetryLabel is the veto label, empty when the flag was not given.
+func noTelemetryLabel(disabled bool) string {
+	if !disabled {
 		return ""
 	}
 
 	return noTelemetryFlag
+}
+
+// telemetrySetup is what resolving telemetry needs from the command doing it. Each
+// command owns its own flags, so these are passed rather than read off the package:
+// serve registers its own --no-telemetry and --verbose and reads a config file it was
+// given, and none of those are the run command's variables.
+type telemetrySetup struct {
+	// ConfigFile names the file the configuration came from, for the note that says
+	// nothing will be exported.
+	ConfigFile string
+
+	// TUI reports whether this command will render in the full-screen UI, which decides
+	// only where OpenTelemetry's own diagnostics go: collected for the end, or straight
+	// out as they happen. A long-lived process wants them as they happen, since "the
+	// end" may be weeks away.
+	TUI bool
+
+	// Disabled is the --no-telemetry veto.
+	Disabled bool
+
+	// Verbose reports the delivery counts on a successful export. It is read when the
+	// report runs rather than here, which is why it travels in this struct rather than
+	// being captured from a flag variable at call time.
+	Verbose bool
 }
 
 // telemetryErrorSink chooses where OpenTelemetry's diagnostics go, returning the writer
@@ -53,10 +77,8 @@ func telemetryErrorSink(tui bool) (io.Writer, *telemetry.ErrorBuffer) {
 // export pipelines. It returns the provider to hand to the run and a function to call
 // when the run is over, which flushes and reports what was delivered.
 //
-// tui reports whether this run will render in the full-screen UI, which decides only
-// where OpenTelemetry's diagnostics go: collected for the end, or straight out as they
-// happen. A run that asks for the UI and then falls back to the line renderer still
-// gets them, just at the end, which is a better outcome than losing them.
+// A run that asks for the UI and then falls back to the line renderer still gets the
+// diagnostics, just at the end, which is a better outcome than losing them.
 //
 // A configuration that resolves to off returns a nil provider, which every call site
 // already treats as a no-op, and a report function that does nothing. An invalid
@@ -64,7 +86,7 @@ func telemetryErrorSink(tui bool) (io.Writer, *telemetry.ErrorBuffer) {
 // operator mistake fails at startup with a message naming the fix, and OTLP being
 // connectionless is a reason to validate what is knowable locally, not to validate
 // nothing.
-func setupTelemetry(cfg *config.Config, tui bool) (*telemetry.Provider, func(), error) {
+func setupTelemetry(cfg *config.Config, opts telemetrySetup) (*telemetry.Provider, func(), error) {
 	noop := func() {}
 
 	// OpenTelemetry hands its own diagnostics to a process-global destination, so this
@@ -79,28 +101,28 @@ func setupTelemetry(cfg *config.Config, tui bool) (*telemetry.Provider, func(), 
 	// failure twice, and installing neither lets the default write through the log
 	// package's captured os.Stderr, which muzzleStderr cannot redirect and the next frame
 	// paints over. A terminal-owning command wants exactly this one.
-	errOut, collected := telemetryErrorSink(tui)
+	errOut, collected := telemetryErrorSink(opts.TUI)
 	telemetry.SetErrorHandler(errOut)
 
 	tel, err := bootstrap.Start(context.Background(), bootstrap.Options{
 		Config:     cfg,
 		Version:    util.Version(),
 		Env:        os.Getenv,
-		DisabledBy: noTelemetryLabel(),
+		DisabledBy: noTelemetryLabel(opts.Disabled),
 	})
 	if err != nil {
 		return nil, noop, err
 	}
 
 	if !tel.Resolved.Enabled {
-		note := telemetryOffNote(tel.Resolved, configFile)
+		note := telemetryOffNote(tel.Resolved, opts.ConfigFile)
 		if note != "" {
 			fmt.Fprintln(os.Stderr, note)
 		}
 		return nil, noop, nil
 	}
 
-	return tel.Provider, func() { reportTelemetryOutcome(tel, collected) }, nil
+	return tel.Provider, func() { reportTelemetryOutcome(tel, collected, opts.Verbose) }, nil
 }
 
 // reportTelemetryOutcome flushes the pipelines and says what happened, in the order an
@@ -116,7 +138,7 @@ func setupTelemetry(cfg *config.Config, tui bool) (*telemetry.Provider, func(), 
 // Some overlap with the delivery line is expected and is not duplication: these say how
 // often export failed, that says how much was lost, and an error reported here that
 // leaves the counts intact is one that never reached an exporter at all.
-func reportTelemetryOutcome(tel *bootstrap.Telemetry, collected *telemetry.ErrorBuffer) {
+func reportTelemetryOutcome(tel *bootstrap.Telemetry, collected *telemetry.ErrorBuffer, verbose bool) {
 	delivery, err := tel.Close()
 
 	if collected != nil {

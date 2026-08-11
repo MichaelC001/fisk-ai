@@ -83,7 +83,12 @@ func runAction(_ *fisk.ParseContext) error {
 	// after the http-debug file has been created. reportTelemetry flushes the pipelines
 	// and says what reached the collector; it runs on a background context of its own,
 	// so an interrupt cannot cancel the flush.
-	tel, reportTelemetry, err := setupTelemetry(cfg, runUsesTUI(cfg))
+	tel, reportTelemetry, err := setupTelemetry(cfg, telemetrySetup{
+		ConfigFile: configFile,
+		TUI:        runUsesTUI(cfg),
+		Disabled:   noTelemetry,
+		Verbose:    verbose,
+	})
 	if err != nil {
 		return err
 	}

@@ -25,10 +25,7 @@
 // together, and there are two ways to ask for it.
 //
 //	ch, err := asyncjobs.New(asyncjobs.Options{...})
-//	srv, err := serve.New(serve.Options{
-//		Channels:    []serve.Channel{ch},
-//		Concurrency: ch.Concurrency(),
-//	})
+//	srv, err := serve.New(serve.Options{Channels: []serve.Channel{ch}})
 //
 // To drain, Close while the server is still running. Jobs claimed but not started go
 // back to the queue at once, jobs already running are waited for, and Serve ends by
@@ -48,12 +45,25 @@
 // Close is idempotent, so a caller that drains on one signal and stops on the next
 // calls it on both paths.
 //
-// What must not happen is the processor stopping while a run is still finishing: an
-// answer is stored on the processor's context after its handler returns, and nothing
-// here can report that store. Close is staged against exactly that. It stops the
-// processor only once every handler has returned, and a handler returns only once its
-// run has reported, so an answer is always stored before the context that stores it is
-// canceled.
+// # What a drain can still lose, and why it costs little
+//
+// Close stops the processor only once every handler has returned, which is as close as
+// this package can get to safe. It is not all the way: the engine stores the answer and
+// acknowledges the queue item *after* the handler returns, on the processor's context,
+// so a Close that lands in that gap cancels the store of whatever finished last. The
+// handler returning is what triggers the store rather than something that follows it,
+// and nothing a handler can observe reflects whether it happened.
+//
+// The job is then neither answered on its task nor acknowledged, so its lease lapses
+// and it is delivered again. What it does not cost is the work. Every run is
+// checkpointed under the task id, so the redelivery finds a completed session and is
+// answered from its journal without calling a model: see agent.Checkpoint.CreateIfMissing.
+// The price of the window is one delivery cycle, bounded by the queue's run time, not a
+// lost answer and not a second run.
+//
+// Closing it entirely is the engine's to do, as a client drain that stops polling and
+// finishes the items already in flight. Until then this is a documented window rather
+// than a guarantee.
 package asyncjobs
 
 import (
@@ -69,6 +79,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
@@ -110,16 +121,17 @@ type Options struct {
 	// written back to the task. It is normally the configured agent identity.
 	Identity string
 
-	// Concurrency is how many jobs the engine may have in flight. It must equal the
-	// concurrency of the Server this channel is given to, and the way to make sure of
-	// that is to read it back with the Concurrency method rather than to write the
-	// number twice.
+	// Concurrency is how many jobs the engine may have in flight, which is how many
+	// runs happen at once. It should equal the concurrency of the Server this channel
+	// is given to, and the way to be sure is to read it back with the Concurrency
+	// method rather than write the number twice.
 	//
-	// The equality is load bearing and nothing can enforce it. An item the engine has
-	// claimed but the server has not started is an item whose lease is running with no
-	// work against it; when it lapses the job is delivered again, and the engine admits
-	// the second delivery because the already-active guard has expired. So the failure
-	// of this invariant is duplicated work rather than delayed work.
+	// What goes wrong when they disagree is not lease expiry: renewal starts at handler
+	// entry, before the work is handed over, so an item claimed and waiting for a slot
+	// keeps its lease for as long as it waits. It is hoarding. A queue's concurrency
+	// bounds every worker on it together, so claims held against work this process
+	// cannot start are claims another process could have run, and the job sits looking
+	// active while nothing happens to it.
 	Concurrency int
 
 	// SuspendRequested is handed to every run and polled at a loop boundary, so a
@@ -188,11 +200,20 @@ type Channel struct {
 	closeOnce sync.Once
 	shutdown  chan struct{}
 	handlers  sync.WaitGroup
+
+	// ownConn is the connection this channel dialed for itself, which Close releases.
+	// It is nil when the connection came in on Options and belongs to the caller. A nil
+	// Provider's Close is a no-op, so nothing here has to ask which it is.
+	ownConn  *conns.Provider
+	connOnce sync.Once
 }
 
-// New binds to the work queue and returns a Channel. It reaches the network: the
-// queue must already exist, and its settings are read from the bound consumer here so
-// a wrong queue name fails at construction rather than on the first job.
+// New binds to the work queue and returns a Channel. It reaches the network, and it
+// creates nothing: the queue, the task store and the engine's configuration buckets
+// must all already exist, so a cluster nobody has provisioned fails here rather than
+// being laid out by whichever worker started first. The queue's settings are read
+// from the bound consumer at the same time, so a wrong queue name also fails at
+// construction rather than on the first job.
 //
 // It starts nothing. The engine's processor starts on the first call to Next, so a
 // channel that is constructed and never served claims no work.
@@ -229,6 +250,12 @@ func New(opts Options) (*Channel, error) {
 		asyncjobs.WorkQueue(queue),
 		asyncjobs.ClientConcurrency(opts.Concurrency),
 		asyncjobs.CustomLogger(&logBridge{log: log.With("component", "asyncjobs")}),
+		// The operator owns the storage layout, all of it. Without this the client
+		// creates the task store and its configuration buckets on the way past, at one
+		// replica and with whatever retention it was built with, so the first worker to
+		// start against an unprovisioned cluster would quietly decide how every answer
+		// is kept.
+		asyncjobs.NoStorageCreate(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to queue %q: %w", opts.Queue, err)
@@ -316,13 +343,20 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 func (c *Channel) Close() error {
 	c.closeOnce.Do(func() {
 		// Waiting handlers return first, so their nak is issued while the processor's
-		// context is still live. A handler that is dispatched during this window takes
-		// the same path and may find that context already canceled; its nak then fails
-		// and the job waits out its lease instead, which is the same job returning to
-		// the queue by a slower route.
+		// context is still live. The engine issues that nak after the handler returns,
+		// though, so a handler still unwinding when the context is canceled below has
+		// its nak fail and its job waits out the lease instead. Same job, slower route.
+		// See the package documentation for the same window on the answering path.
 		close(c.shutdown)
 		c.handlers.Wait()
 		c.procStop()
+
+		// A channel the server never pulled from has no processor to wait for, so the
+		// connection is released here rather than after procDone below, which that
+		// channel never reaches.
+		if !c.running.Load() {
+			c.releaseConn()
+		}
 	})
 
 	if !c.running.Load() {
@@ -330,8 +364,17 @@ func (c *Channel) Close() error {
 	}
 
 	<-c.procDone
+	c.releaseConn()
 
 	return c.procErr
+}
+
+// releaseConn closes the connection this channel dialed for itself, once. A borrowed
+// connection is the caller's and is left alone.
+func (c *Channel) releaseConn() {
+	c.connOnce.Do(func() {
+		c.ownConn.Close()
+	})
 }
 
 // start launches the engine's processor once, on the channel's own context rather
