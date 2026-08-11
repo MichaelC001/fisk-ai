@@ -108,6 +108,20 @@ func (s *FakeSessionStore) Open(id string) (runstate.Journal, error) {
 	return j, nil
 }
 
+// Evict makes the open journal for id report that it no longer holds its run, and
+// refuse further appends, as a journal on a shared store does once another worker has
+// taken the run over. It is how a test reaches the take-over path with one writer.
+// Evicting an unknown or unopened run does nothing.
+func (s *FakeSessionStore) Evict(id string) {
+	s.mu.Lock()
+	j, ok := s.runs[id]
+	s.mu.Unlock()
+
+	if ok {
+		j.Evict()
+	}
+}
+
 // Load implements runstate.Store.
 func (s *FakeSessionStore) Load(id string) (*runstate.RunState, error) {
 	err := runstate.ValidateID(id)
@@ -160,6 +174,7 @@ func (s *FakeSessionStore) Delete(id string) error {
 type fakeJournal struct {
 	mu      sync.Mutex
 	held    bool
+	stolen  bool
 	records []runstate.Record
 	lastSeq uint64
 }
@@ -176,10 +191,16 @@ func (j *fakeJournal) acquire() bool {
 	return true
 }
 
-// Append implements runstate.Journal.
+// Append implements runstate.Journal. An evicted journal is refused here as well as in
+// CheckHeld, since a store that let a taken-over writer keep appending would model no
+// real backend.
 func (j *fakeJournal) Append(seq uint64, rec runstate.Record) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+
+	if j.stolen {
+		return fmt.Errorf("%w: the run was taken over", runstate.ErrLocked)
+	}
 
 	return j.append(seq, rec)
 }
@@ -214,6 +235,33 @@ func (j *fakeJournal) LastSeq() uint64 {
 	defer j.mu.Unlock()
 
 	return j.lastSeq
+}
+
+// CheckHeld implements runstate.Journal. The fake excludes a second opener the way the
+// file backend does, so an open journal holds its run unless a test has taken it away
+// with Evict.
+func (j *fakeJournal) CheckHeld() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	if j.stolen {
+		return fmt.Errorf("%w: the run was taken over", runstate.ErrLocked)
+	}
+
+	return nil
+}
+
+// Evict marks the run as taken over by somebody else, so this journal refuses to check
+// held and refuses to append.
+//
+// It models the shared-store case rather than the locking one: a journal whose store
+// cannot exclude a second opener discovers it lost the run only when it consults the
+// store, so opening still succeeds and writing does not. That is what a test needs to
+// reach, and no arrangement of the fake's own lock produces it.
+func (j *fakeJournal) Evict() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.stolen = true
 }
 
 // Close implements runstate.Journal, releasing the per-run lock.

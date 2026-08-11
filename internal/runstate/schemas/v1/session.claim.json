@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/session.claim.json",
+  "title": "fisk-ai session store v1 claim record",
+  "allOf": [
+    {
+      "$ref": "session.common.json#/$defs/envelope"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.session.claim"
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "claimed"
+      ],
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "claimed": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "required": [
+    "claim"
+  ],
+  "unevaluatedProperties": false
+}

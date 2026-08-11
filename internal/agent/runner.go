@@ -1104,6 +1104,16 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	outcome.Remote = remote
 	outcome.RemoteAgent = effInfo.Agent
 
+	// Last check before an effect this process cannot take back. A journaled run on a
+	// shared store can be taken over between tools, and the append that would tell us
+	// so comes after the tool has already run. Asking here moves that discovery in
+	// front of the effect. It does not cover the tool already in flight when a takeover
+	// happens, which is the residue this cannot reach.
+	heldErr := r.checkStillHeld()
+	if heldErr != nil {
+		return llm.ToolResultBlock{}, false, heldErr
+	}
+
 	// The bound goes in a context of its own rather than into ctx: ctx here is the tool
 	// span's, read by the deferred Finish above and passed to PostToolUse below, and an
 	// expired one there would end the span badly and abort the whole run on a hook that
@@ -1160,6 +1170,27 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 
 	r.events.ToolResult(toolResultTrace(effInfo.Present, effInfo.Kind, result))
 	return result, remote, nil
+}
+
+// checkStillHeld reports whether this run may go on writing to its journal, so a run
+// that was taken over stops before its next irreversible step rather than at its next
+// append, which is one tool too late.
+//
+// An un-journaled run has nothing to lose and nothing to ask, so it always may. A
+// journaled one asks the journal, and an error of any kind ends the run: losing the
+// run and being unable to tell are different facts, but neither is a state in which to
+// keep running work whose results may have nowhere to go.
+func (r *runner) checkStillHeld() error {
+	if r.journal == nil {
+		return nil
+	}
+
+	err := r.journal.CheckHeld()
+	if err != nil {
+		return fmt.Errorf("this run is no longer safe to continue: %w", err)
+	}
+
+	return nil
 }
 
 // toolContext bounds one tool call. It returns the context to execute on and a

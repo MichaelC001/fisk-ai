@@ -34,6 +34,7 @@ var protocolSchemaFile = map[Protocol]string{
 	UserProtocol:       "session.user.json",
 	ToolResultProtocol: "session.tool_result.json",
 	TerminalProtocol:   "session.terminal.json",
+	ClaimProtocol:      "session.claim.json",
 }
 
 // Validator validates record bodies against the embedded v1 JSON schemas. A

@@ -22,6 +22,7 @@ type noopJournal struct{}
 func (noopJournal) Append(uint64, runstate.Record) error { return nil }
 func (noopJournal) Records() ([]runstate.Record, error)  { return nil, nil }
 func (noopJournal) LastSeq() uint64                      { return 0 }
+func (noopJournal) CheckHeld() error                     { return nil }
 func (noopJournal) Close() error                         { return nil }
 
 var _ runstate.Journal = noopJournal{}

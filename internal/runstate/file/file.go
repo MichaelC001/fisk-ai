@@ -351,6 +351,15 @@ func (j *fileJournal) LastSeq() uint64 {
 	return j.lastSeq
 }
 
+// CheckHeld implements runstate.Journal. This backend holds an exclusive flock on
+// the run for the journal's lifetime, so holding is structural: while this journal
+// is open no other process opened it, and the answer needs no I/O. On a platform
+// without flock the lock excludes nobody, and this reports held anyway rather than
+// inventing a guarantee the platform does not offer.
+func (j *fileJournal) CheckHeld() error {
+	return nil
+}
+
 // Close implements runstate.Journal.
 func (j *fileJournal) Close() error {
 	err := j.f.Close()

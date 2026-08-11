@@ -613,6 +613,34 @@ func (j *journal) LastSeq() uint64 {
 	return j.lastSeq
 }
 
+// CheckHeld implements runstate.Journal by reading the run's tail and comparing it
+// to where this journal's own last successful append left it. A tail that moved means
+// another writer took the run, which is what Append would report at the next write.
+//
+// It exists so a holder can find that out before an effect it cannot undo rather than
+// after. Nothing here takes the run back: a caller that learns it lost has already
+// lost, and its job is to stop.
+//
+// A tail that cannot be read is not reported as lost. An unreachable stream is a
+// reason to fail the operation, not evidence that somebody else is running this work,
+// and treating it as the latter would abandon a run on every transient outage.
+func (j *journal) CheckHeld() error {
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
+
+	last, err := j.store.stream.GetLastMsgForSubject(ctx, j.store.runWildcard(j.id))
+	if err != nil {
+		return fmt.Errorf("jetstream session: reading the tail of run %q: %w", j.id, err)
+	}
+
+	if last.Sequence != j.tailStreamSeq {
+		return fmt.Errorf("%w: run %q on stream %q was advanced by another writer, so this process no longer holds it",
+			runstate.ErrLocked, j.id, j.store.streamName)
+	}
+
+	return nil
+}
+
 // Close implements runstate.Journal. There is no lock to release and the NATS
 // connection is borrowed, so there is nothing to close.
 func (j *journal) Close() error {
