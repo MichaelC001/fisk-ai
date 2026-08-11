@@ -118,6 +118,29 @@ type Checkpoint struct {
 	Name     string
 	ResumeID string
 	Force    bool
+
+	// CreateIfMissing makes ResumeID name a run rather than ask for one, and Run
+	// answers for that name whichever of three states the store is in: no session is
+	// created, an unfinished one is continued, and a completed one is reported as it
+	// stands. It has no meaning without ResumeID.
+	//
+	// It is what an at-least-once caller needs. A queue that may deliver the same
+	// item twice cannot tell a first delivery from a redelivery of a worker that
+	// died mid-run, and the delivery count is the wrong authority for it: the store
+	// is the only thing that knows whether the run exists. Naming the run and asking
+	// for it either way removes the question, and makes the call idempotent under
+	// that name.
+	//
+	// The completed case is what stops a lost acknowledgement from repeating: the
+	// answer is returned from the journal, with the stored run's counters, rather than
+	// the caller being told its own finished work is an error. Nothing runs on that
+	// path, so no hook fires and no event is emitted.
+	//
+	// One reported value narrows under it. The root span's Resumed attribute is
+	// fixed before the store is reachable, so with CreateIfMissing it reports that a
+	// resume was asked for rather than that one happened. The SessionStart hook's
+	// Resumed is unaffected and reports what the store said.
+	CreateIfMissing bool
 }
 
 // Options is everything Run needs to execute a run. Config is already parsed so
@@ -1225,6 +1248,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		sessionID             string
 		resumeAtInputBoundary bool
 		newSession            func(prompt string) (runstate.Journal, string, error)
+		store                 runstate.Store
+		rs                    *runstate.RunState
 	)
 
 	// Resolve the session id up front, before any session is created or opened, so
@@ -1242,6 +1267,73 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	// resuming is whether this run continues a stored session. It is not the same
+	// question as whether a resume was asked for: under CreateIfMissing the store is
+	// the authority, and it is asked here rather than at the branch further down
+	// because the two hooks below turn on the same answer.
+	resuming := opts.Checkpoint.ResumeID != ""
+
+	// The store is built, and a resumed session read, before either hook fires. That
+	// ordering is what SessionStart's contract already promises (it fires before any
+	// session is created or opened), and it is what lets a create-or-resume know which
+	// of the two it is doing. The cost is that a resume naming a session no store has
+	// fails before the hooks rather than after.
+	if checkpointing {
+		// A caller-injected store is borrowed: a fleet shares one session store across runs
+		// rather than each building its own. It is used verbatim (no configured backend, no
+		// RuntimeEnv, never closed). Naming both an injected store and an explicit
+		// non-default backend would name two stores, so that is rejected.
+		if opts.SessionStore != nil {
+			if cfg.SessionBackend() != runstate.BackendFile {
+				return res, fmt.Errorf("Options.SessionStore was injected but the config also selects a session backend (harness.sessions.backend %q): an injected store replaces the configured backend, so setting both is ambiguous; drop Options.SessionStore to use the configured backend, or remove harness.sessions.backend to use the injected store", cfg.SessionBackend())
+			}
+			store = opts.SessionStore
+		} else {
+			store, err = runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: opts.StoreDir, Nats: natsConns.Nats()})
+			if err != nil {
+				return res, err
+			}
+		}
+
+		if resuming {
+			loaded, lerr := store.Load(sessionID)
+			switch {
+			case errors.Is(lerr, runstate.ErrNotFound) && opts.Checkpoint.CreateIfMissing:
+				resuming = false
+			case lerr != nil:
+				return res, lerr
+			default:
+				rs = loaded
+			}
+		}
+
+		// A session that has already completed is refused below, because a finished
+		// conversation cannot be continued. Under CreateIfMissing it is answered
+		// instead: a caller naming a run and asking for it either way is asking for its
+		// answer, and the answer is journaled. An at-least-once caller whose
+		// acknowledgement was lost would otherwise be told its own completed work is an
+		// error on every redelivery, and would keep paying deliveries to be told so.
+		//
+		// Nothing runs, so nothing is narrated: no hook fires and no event is emitted.
+		// The counters are the stored run's, since they are what the work cost.
+		if resuming && rs.Completed() && opts.Checkpoint.CreateIfMissing {
+			res.SessionID = sessionID
+			res.Reason = rs.Terminal.Reason
+			res.Text = lastAssistantText(rs.Messages)
+
+			stats.Session = sessionID
+			stats.LlmCalls = rs.Counters.LlmCalls
+			stats.ToolCalls = rs.Counters.ToolCalls
+			stats.RemoteToolCalls = rs.Counters.RemoteToolCalls
+			stats.InTokens = rs.Counters.InTokens
+			stats.OutTokens = rs.Counters.OutTokens
+			stats.CacheReadTokens = rs.Counters.CacheReadTokens
+			stats.CacheCreateTokens = rs.Counters.CacheCreateTokens
+
+			return res, nil
+		}
+	}
+
 	// SessionStart fires once as the run begins, on a fresh run and a resume alike (Resumed
 	// distinguishes them), before any session is created or opened and before the first
 	// model call, so an aborting hook leaves nothing behind. ToolNames lists every tool the
@@ -1254,7 +1346,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	err = opts.Hooks.fireSessionStart(ctx, SessionStartInfo{
 		SessionID:   sessionID,
-		Resumed:     opts.Checkpoint.ResumeID != "",
+		Resumed:     resuming,
 		Interactive: interactive,
 		Model:       cfg.LLM.Model,
 		ToolNames:   toolNames,
@@ -1268,7 +1360,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// A Deny stops the run before any session is created or any model call is made; it is
 	// surfaced as an error so the caller exits with the reason. To reject the prompt the
 	// hook sets Deny; a returned error instead aborts the run.
-	if opts.Checkpoint.ResumeID == "" {
+	if !resuming {
 		dec, uerr := opts.Hooks.fireUserPromptSubmit(ctx, UserPromptSubmitInfo{
 			Text:    strings.Join(prompt, " "),
 			Initial: true,
@@ -1288,28 +1380,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			return res, err
 		}
 
-		// A caller-injected store is borrowed: a fleet shares one session store across runs
-		// rather than each building its own. It is used verbatim (no configured backend, no
-		// RuntimeEnv, never closed). Naming both an injected store and an explicit
-		// non-default backend would name two stores, so that is rejected.
-		var store runstate.Store
-		if opts.SessionStore != nil {
-			if cfg.SessionBackend() != runstate.BackendFile {
-				return res, fmt.Errorf("Options.SessionStore was injected but the config also selects a session backend (harness.sessions.backend %q): an injected store replaces the configured backend, so setting both is ambiguous; drop Options.SessionStore to use the configured backend, or remove harness.sessions.backend to use the injected store", cfg.SessionBackend())
-			}
-			store = opts.SessionStore
-		} else {
-			store, err = runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: opts.StoreDir, Nats: natsConns.Nats()})
-			if err != nil {
-				return res, err
-			}
-		}
-
-		if opts.Checkpoint.ResumeID != "" {
-			rs, err := store.Load(sessionID)
-			if err != nil {
-				return res, err
-			}
+		if resuming {
 			if rs.Completed() {
 				return res, fmt.Errorf("session %q has already completed and cannot be resumed", sessionID)
 			}
@@ -1609,6 +1680,31 @@ func claimRun(j runstate.Journal, identity string, claimedBy string) error {
 	}
 
 	return nil
+}
+
+// lastAssistantText is the concatenated text of the last assistant turn in a stored
+// conversation that carried any, which is the same answer a live run reports: a turn
+// that only called tools leaves the previous one standing rather than clearing it.
+func lastAssistantText(messages []llm.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != llm.RoleAssistant {
+			continue
+		}
+
+		var sb strings.Builder
+		for _, block := range messages[i].Content {
+			if block.Text == nil {
+				continue
+			}
+			sb.WriteString(block.Text.Text)
+		}
+
+		if sb.Len() > 0 {
+			return sb.String()
+		}
+	}
+
+	return ""
 }
 
 // derivedClaimant names this worker when the caller supplied no name. The identity

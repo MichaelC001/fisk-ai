@@ -80,6 +80,18 @@ type Work struct {
 	// the journaled one, so Prompt is not delivered to a run that resumes.
 	Checkpoint agent.Checkpoint
 
+	// ClaimedBy names this worker in the claim a resumed run writes to its journal,
+	// for a person reading it later. Empty leaves the run to derive one from the agent
+	// identity, the host and the pid.
+	//
+	// A channel should set it wherever it holds something more specific than the
+	// process, which is most of the time: one worker serving many pieces of work under
+	// one identity would otherwise stamp every claim in every journal identically,
+	// which is exactly what a reader is trying to tell apart. A channel's own item
+	// identifier is the better answer and only the channel has it. It is never verified
+	// and nothing decides anything on it.
+	ClaimedBy string
+
 	// SuspendRequested is polled at a loop boundary, so a worker draining on shutdown
 	// stops its runs at a point they can resume from. Nil never suspends.
 	SuspendRequested func() bool

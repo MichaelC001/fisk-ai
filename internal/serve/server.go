@@ -369,6 +369,7 @@ func (s *Server) runOptions(work *Work, workDir string) agent.Options {
 		APIKey:           s.opts.APIKey,
 		BaseURL:          s.opts.BaseURL,
 		Checkpoint:       work.Checkpoint,
+		ClaimedBy:        work.ClaimedBy,
 		SuspendRequested: work.SuspendRequested,
 		NextPrompt:       work.Continue,
 		Provider:         s.opts.Provider,
