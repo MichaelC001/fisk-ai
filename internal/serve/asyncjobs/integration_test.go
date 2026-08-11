@@ -548,6 +548,41 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 			w.waitServed()
 		})
 
+		// The drain ordering, which is what a signal handler wants: nothing is canceled,
+		// so a run stops where it can be resumed from rather than wherever it had got
+		// to, and Serve ends on its own once the channel reports it is finished.
+		It("Should drain when the channel is closed while the server runs", func() {
+			client := newQueue(nc, 30*time.Second, 5)
+			w := startWorker(nc, workerOpts{
+				provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			})
+
+			enqueue(client, "job1", encode(newRequest("go")))
+
+			Eventually(taskState(client, "job1"), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
+
+			Expect(w.ch.Close()).To(Succeed())
+
+			w.waitServed()
+		})
+
+		// An idle worker has nothing to wait for, so the same call is what makes a first
+		// interrupt exit rather than sit there having done nothing visible.
+		It("Should drain at once when nothing is in flight", func() {
+			newQueue(nc, 30*time.Second, 5)
+			w := startWorker(nc, workerOpts{
+				provider: agenttest.NewScriptedProvider(GinkgoTB()),
+			})
+
+			// The processor starts on the first Next, so wait for the server to have
+			// asked once; closing before that is the never-pulled case below.
+			Eventually(w.ch.running.Load, 10*time.Second).Should(BeTrue())
+
+			Expect(w.ch.Close()).To(Succeed())
+
+			w.waitServed()
+		})
+
 		It("Should be safe to close a channel the server never pulled from", func() {
 			newQueue(nc, 30*time.Second, 5)
 
