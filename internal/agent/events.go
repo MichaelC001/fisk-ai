@@ -153,6 +153,12 @@ const (
 	// Params, e.g. both ai:read_only and ai:destructive. The more dangerous reading was
 	// taken and the tool is still available.
 	WarnBehaviorTagConflict
+	// WarnToolTimeout: tool Name did not finish within the configured tool timeout and
+	// was stopped, with Err naming the window. It is an advisory as well as a tool
+	// result because the result reaches the model and, on a host with no operator
+	// attached, nothing else: a bound the operator never set firing silently is the
+	// case this exists for.
+	WarnToolTimeout
 )
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;

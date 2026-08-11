@@ -312,6 +312,84 @@ expose:
 			Expect(cfg.MCPToolTimeout()).To(Equal(time.Duration(0)))
 		})
 
+		It("Should parse the harness tool timeout", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+harness:
+  tool_timeout: 5m
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ToolTimeout()).To(Equal(5 * time.Minute))
+		})
+
+		It("Should leave the harness tool timeout at zero when unset or explicitly zero", func() {
+			base := `
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+`
+			cfg, err := ParseConfig([]byte(base))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ToolTimeout()).To(Equal(time.Duration(0)))
+
+			// 0s reads as unset, so it asks a host for its default rather than for no
+			// bound at all.
+			cfg, err = ParseConfig([]byte(base + "harness:\n  tool_timeout: 0s\n"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ToolTimeout()).To(Equal(time.Duration(0)))
+		})
+
+		It("Should accept the extended duration units fisk parses on every duration key", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+  budget:
+    call_timeout: 2m
+harness:
+  tool_timeout: 1d
+  knowledge:
+    enabled: true
+    embeddings:
+      timeout: 1h
+expose:
+  agent:
+    agent_to_agent: true
+    a2a:
+      tool_timeout: 1d
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ToolTimeout()).To(Equal(24 * time.Hour))
+			Expect(cfg.A2AToolTimeout()).To(Equal(24 * time.Hour))
+			Expect(cfg.LLM.Budget.CallTimeoutParsed).To(Equal(2 * time.Minute))
+			Expect(cfg.Harness.RAG.Embeddings.TimeoutParsed).To(Equal(time.Hour))
+		})
+
+		It("Should reject an unparsable or negative harness tool timeout", func() {
+			base := `
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+harness:
+  tool_timeout: `
+
+			_, err := ParseConfig([]byte(base + "soon\n"))
+			Expect(err).To(MatchError(ContainSubstring(`invalid harness.tool_timeout "soon"`)))
+
+			_, err = ParseConfig([]byte(base + "-5s\n"))
+			Expect(err).To(MatchError(ContainSubstring("must not be negative")))
+		})
+
 		It("Should accept a zero max_concurrent_tools as unset rather than rejecting it", func() {
 			cfg, err := ParseConfig([]byte(`
 identity: agent1

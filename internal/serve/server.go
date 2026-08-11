@@ -41,6 +41,13 @@ const (
 	// doneTimeout bounds reporting one outcome. A channel that cannot reach its store
 	// must not hold up a shutdown indefinitely.
 	doneTimeout = 30 * time.Second
+
+	// defaultToolTimeout bounds one tool call for a run this server hosts, when the
+	// configuration sets none. It is far longer than the 30 seconds the MCP and a2a
+	// servers allow a served call, because those answer a caller who is waiting while
+	// this hosts whole units of work whose commands legitimately take minutes. It is a
+	// bound on a tool that will never answer, not on a slow one.
+	defaultToolTimeout = 5 * time.Minute
 )
 
 // Options configures a Server.
@@ -60,6 +67,19 @@ type Options struct {
 	// Concurrency is the maximum number of runs executing at once across all
 	// channels; <= 0 uses the default.
 	Concurrency int
+
+	// ToolTimeout bounds a single tool call in the runs this server hosts; <= 0 uses
+	// the default. It applies only when the configuration sets no
+	// harness.tool_timeout, and a configured value wins even when it is longer. That
+	// is the opposite precedence to Budget, and deliberately: a budget clamps what a
+	// channel asks for, which is a caller this server does not control, while both of
+	// these come from whoever started it.
+	//
+	// A run at a terminal is unbounded by default because an operator can interrupt a
+	// command that will never answer. Nobody can interrupt one here, so this is set
+	// rather than left off. See config.Config.ToolTimeout for what the bound can and
+	// cannot stop.
+	ToolTimeout time.Duration
 
 	// WorkDir is the directory the per-run tool working directories are created
 	// under. It must be an absolute path that already exists. Empty uses the system
@@ -110,6 +130,9 @@ type Options struct {
 func (o *Options) applyDefaults() {
 	if o.Concurrency <= 0 {
 		o.Concurrency = defaultConcurrency
+	}
+	if o.ToolTimeout <= 0 {
+		o.ToolTimeout = defaultToolTimeout
 	}
 	if o.LogOutput == nil {
 		o.LogOutput = os.Stderr
@@ -340,7 +363,7 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 // attachment points, the shared resources, and this run's own working directory.
 func (s *Server) runOptions(work *Work, workDir string) agent.Options {
 	opts := agent.Options{
-		Config:           s.clampedConfig(work.Budget),
+		Config:           s.withToolTimeout(s.clampedConfig(work.Budget)),
 		ConfigFile:       s.opts.ConfigFile,
 		Prompt:           []string{work.Prompt},
 		APIKey:           s.opts.APIKey,
@@ -387,6 +410,27 @@ func (s *Server) clampedConfig(budget Budget) *config.Config {
 	}
 
 	return &cfg
+}
+
+// withToolTimeout fills this server's tool bound into a configuration that sets none.
+//
+// It copies rather than writes: the configuration belongs to the caller and every run
+// shares it, so filling it in place would mutate something under a run already using
+// it. The copy is shallow for the same reason clampedConfig's is, the budget and
+// timeout fields being values that nothing in the run path writes to.
+//
+// A configured harness.tool_timeout is left alone however long it is. Unlike a budget,
+// which clamps what a channel asks for, both of these come from whoever started this
+// server, and only one of the two was chosen deliberately.
+func (s *Server) withToolTimeout(cfg *config.Config) *config.Config {
+	if cfg.ToolTimeout() > 0 {
+		return cfg
+	}
+
+	out := *cfg
+	out.Harness.ToolTimeoutParsed = s.opts.ToolTimeout
+
+	return &out
 }
 
 // report hands an outcome back to its channel on a context of its own, so a run that

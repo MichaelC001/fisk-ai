@@ -6,6 +6,7 @@ package agenttest
 
 import (
 	"testing"
+	"time"
 
 	"github.com/choria-io/fisk-ai/config"
 )
@@ -41,6 +42,12 @@ func WithMaxIterations(n int64) ConfigOption {
 // ends a run with the budget outcome once crossed.
 func WithMaxTokens(n int64) ConfigOption {
 	return func(c *config.Config) { c.LLM.Budget.MaxTokens = n }
+}
+
+// WithToolTimeout bounds a single tool call, as harness.tool_timeout does. Zero
+// leaves tool execution unbounded, which is the default.
+func WithToolTimeout(d time.Duration) ConfigOption {
+	return func(c *config.Config) { c.Harness.ToolTimeoutParsed = d }
 }
 
 // WithRAG enables the knowledge (RAG) feature with its index directory left at the

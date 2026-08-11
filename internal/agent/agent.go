@@ -1496,6 +1496,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		maxOutputTokens: maxOutputTokens,
 		maxIter:         maxIter,
 		maxTokens:       maxTokens,
+		toolTimeout:     cfg.ToolTimeout(),
 		tools:           allTools,
 		confirmTags:     confirmTags,
 		gate:            gate,

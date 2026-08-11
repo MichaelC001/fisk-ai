@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -40,6 +41,11 @@ type runner struct {
 	maxOutputTokens int64
 	maxIter         int64
 	maxTokens       int64
+
+	// toolTimeout bounds one tool call, zero leaving tool execution unbounded. It is
+	// resolved once here rather than read through cfg per call, as the budgets above
+	// are.
+	toolTimeout time.Duration
 
 	// tools is the single dispatch registry: every model-facing tool, whatever its
 	// kind (local command, in-process built-in, remote), keyed by the unique name the
@@ -1098,7 +1104,22 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	outcome.Remote = remote
 	outcome.RemoteAgent = effInfo.Agent
 
-	result, exec := toolkit.ExecuteUse(effTool, ctx, effUse, deps)
+	// The bound goes in a context of its own rather than into ctx: ctx here is the tool
+	// span's, read by the deferred Finish above and passed to PostToolUse below, and an
+	// expired one there would end the span badly and abort the whole run on a hook that
+	// objects. Nothing after ExecuteUse uses execCtx.
+	execCtx, cancelExec := r.toolContext(ctx, effInfo)
+	result, exec := toolkit.ExecuteUse(effTool, execCtx, effUse, deps)
+	timedOut := cancelExec()
+
+	// A call the bound stopped is already an error result carrying whatever the tool
+	// said about its context ending. Replacing the text here, before PostToolUse, keeps
+	// the hook, the journal, the events sink and the model on one story and leaves a
+	// hook's Replace authoritative over it.
+	if timedOut && result.IsError && ctx.Err() == nil {
+		result.Content = toolTimeoutMessage(effName, r.toolTimeout)
+		r.events.Warn(Warning{Kind: WarnToolTimeout, Name: effName, Err: fmt.Errorf("did not finish within %s", r.toolTimeout)})
+	}
 
 	// Recorded before the hooks below, and deliberately not disturbed by them: a
 	// PostToolUse Replace changes what the model sees, while this describes what
@@ -1139,6 +1160,43 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 
 	r.events.ToolResult(toolResultTrace(effInfo.Present, effInfo.Kind, result))
 	return result, remote, nil
+}
+
+// toolContext bounds one tool call. It returns the context to execute on and a
+// release function that must be called exactly once, after the call returns, and
+// which reports whether the bound expired. The context must not be used after it.
+//
+// The bound is cooperative: it cancels a context and cannot unblock a handler that
+// never observes one. A command tool is stopped for real, since exec.CommandContext
+// kills the child and its process group; an in-process tool stops when its handler
+// says so.
+//
+// Two calls run on the run's own context instead. One with no bound configured, which
+// is the terminal's default, and one a person paces, where the bound would cancel the
+// operator's question rather than a runaway.
+func (r *runner) toolContext(ctx context.Context, info toolkit.CallInfo) (context.Context, func() bool) {
+	if r.toolTimeout <= 0 || info.OperatorPaced {
+		return ctx, func() bool { return false }
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, r.toolTimeout)
+
+	return execCtx, func() bool {
+		// Read before canceling, which would report Canceled over the deadline that
+		// actually fired.
+		expired := errors.Is(execCtx.Err(), context.DeadlineExceeded)
+		cancel()
+
+		return expired
+	}
+}
+
+// toolTimeoutMessage is what the model is told about a call the bound stopped. It
+// names no configuration key on purpose: the duration may be the operator's or a
+// default the host applied when they set none, and the two are indistinguishable
+// here. The operator learns which from the advisory that accompanies it.
+func toolTimeoutMessage(name string, d time.Duration) string {
+	return fmt.Sprintf("tool %q did not finish within %s and was stopped by the agent's tool timeout; it returned no output and any work it started may be incomplete. Do not repeat the same call unchanged.", name, d)
 }
 
 // argumentKeys returns the top-level key names of a tool call's arguments, never their

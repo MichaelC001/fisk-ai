@@ -176,7 +176,8 @@ func askHumanConfirmTool() *functool.Tool {
 			},
 			"required": []any{"question"},
 		},
-		Handler: withPrompter(askHumanConfirm),
+		Handler:       withPrompter(askHumanConfirm),
+		OperatorPaced: true,
 	})
 }
 
@@ -248,7 +249,8 @@ func askHumanSelectTool() *functool.Tool {
 			},
 			"required": []any{"question", "options"},
 		},
-		Handler: withPrompter(askHumanSelect),
+		Handler:       withPrompter(askHumanSelect),
+		OperatorPaced: true,
 	})
 }
 
@@ -327,7 +329,8 @@ func askHumanInputTool() *functool.Tool {
 			},
 			"required": []any{"question"},
 		},
-		Handler: withPrompter(askHumanInput),
+		Handler:       withPrompter(askHumanInput),
+		OperatorPaced: true,
 	})
 }
 
