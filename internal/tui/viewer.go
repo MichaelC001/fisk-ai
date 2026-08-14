@@ -485,10 +485,20 @@ func groupOf(kind LineKind) lineGroup {
 // transition between a turn's prose and its tool activity, in either direction, so
 // the narration is set off from the tool calls below it and from the previous turn's
 // tool output above it. Lines within a group (a call then its result, thinking then
-// narration) stay tight, and the prompt, fences and warnings never trigger a break.
+// narration) stay tight, and fences and warnings never trigger a break.
+//
+// A prompt is set off on both sides, since it is the one line an operator scrolling a
+// long chat is looking for: it marks where a turn began, and everything below it until
+// the next one is the answer to it. The trailing blank arrives with the line that
+// follows the prompt rather than with the prompt itself, so a prompt still waiting on
+// the model sits at the bottom of the viewport with nothing under it.
 func (v *viewer) breakBefore(i int) bool {
 	if i == 0 {
 		return false
+	}
+
+	if v.lines[i].Kind == LinePrompt || v.lines[i-1].Kind == LinePrompt {
+		return true
 	}
 
 	prev, cur := groupOf(v.lines[i-1].Kind), groupOf(v.lines[i].Kind)
@@ -1308,17 +1318,32 @@ func (v *viewer) insertNewline() {
 	v.forwardToInput(tcell.NewEventKey(tcell.KeyEnter, '\r', tcell.ModNone))
 }
 
-// copyTranscript posts the whole transcript as sanitized plain text to the system
-// clipboard and shows a transient confirmation. The wording says what was sent, not
-// that it landed: OSC-52 is fire-and-forget and many terminals disable or cap it, so
-// success cannot be confirmed. It is a no-op on an empty transcript or before the
-// first draw has captured the screen.
+// copyTranscript posts the transcript as sanitized plain text to the system clipboard
+// and shows a transient confirmation. The wording says what was sent, not that it
+// landed: OSC-52 is fire-and-forget and many terminals disable or cap it, so success
+// cannot be confirmed. It is a no-op on an empty transcript or before the first draw
+// has captured the screen.
+//
+// Folded content is left out entirely, not sent as its placeholder. Folding is how an
+// operator says a block is not what they are reading, and the blocks that fold are the
+// ones that would dominate a paste: a base64 tool dump or a page of reasoning is what
+// the transcript is mostly made of by volume and almost never what someone is copying
+// it for. Open a fold and it is copied; that makes the key the whole of the control,
+// with nothing to configure and nothing to explain.
 func (v *viewer) copyTranscript() {
 	if v.screen == nil || len(v.plain) == 0 {
 		return
 	}
 
-	joined := strings.Join(v.plain, "\n")
+	joined := strings.Join(v.visiblePlain(), "\n")
+	if joined == "" {
+		v.notice = "nothing to copy; everything is folded"
+		v.armNoticeExpiry()
+		v.repaintStatus()
+
+		return
+	}
+
 	v.screen.SetClipboard([]byte(joined))
 
 	n := strings.Count(joined, "\n") + 1
@@ -1329,6 +1354,24 @@ func (v *viewer) copyTranscript() {
 	v.notice = fmt.Sprintf("sent %d %s to clipboard", n, unit)
 	v.armNoticeExpiry()
 	v.repaintStatus()
+}
+
+// visiblePlain is the transcript as plain text with the folded lines dropped, in order.
+//
+// It reads the same fold decision the renderer does, off the same width, so what is
+// copied is what is on screen rather than a second opinion about it. Before the first
+// draw the width is zero and nothing is folded, which is also what the screen shows.
+func (v *viewer) visiblePlain() []string {
+	out := make([]string, 0, len(v.plain))
+	for i := range v.plain {
+		if v.isFolded(i, v.width) {
+			continue
+		}
+
+		out = append(out, v.plain[i])
+	}
+
+	return out
 }
 
 // armNoticeExpiry schedules the current notice to clear itself after noticeTTL. The
@@ -1539,7 +1582,7 @@ func helpLines(canSuspend, interactive bool) []string {
 		"  g / G               top / bottom",
 		"  / , n               search, next match",
 		"  z / Z               fold thinking / output",
-		"  y                   copy full transcript",
+		"  y                   copy visible transcript",
 		"  ?                   toggle this help",
 		leave,
 	}

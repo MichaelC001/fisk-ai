@@ -1381,6 +1381,42 @@ telemetry:
 		})
 	})
 
+	Describe("memory read_only", func() {
+		It("Should be off unless the block asks for it", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  memory:
+    enabled: true
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.MemoryReadOnly()).To(BeFalse())
+		})
+
+		It("Should report read only when the block asks for it", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  memory:
+    enabled: true
+    read_only: true
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.MemoryReadOnly()).To(BeTrue())
+		})
+
+		// There are no tools to narrow when memory is off, so this must not report a
+		// restriction that would read as a memory feature being present.
+		It("Should be off when memory itself is off", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  memory:
+    enabled: false
+    read_only: true
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.MemoryReadOnly()).To(BeFalse())
+		})
+	})
+
 	// The block's presence is what carries the third state, so these assert the two
 	// accessors against all three configurations rather than only the two obvious ones.
 	Describe("thinking", func() {

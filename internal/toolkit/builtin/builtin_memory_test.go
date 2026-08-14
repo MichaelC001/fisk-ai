@@ -94,15 +94,55 @@ var _ = Describe("Memory tools", func() {
 		return decoded, nil
 	}
 
+	readOnly := &config.Config{Harness: config.HarnessConfig{
+		Memory: &config.MemoryConfig{Enabled: true, ReadOnly: true},
+	}}
+
+	names := func(cfg *config.Config) []string {
+		GinkgoHelper()
+
+		var out []string
+		for _, t := range MemoryTools(cfg, store) {
+			out = append(out, t.Name())
+		}
+
+		return out
+	}
+
 	Describe("MemoryTools", func() {
 		It("Should offer the four tools only when enabled", func() {
 			Expect(MemoryTools(&config.Config{}, store)).To(BeEmpty())
+			Expect(names(enabled)).To(ConsistOf("memory_list", "memory_read", "memory_write", "memory_delete"))
+		})
 
-			var names []string
-			for _, t := range MemoryTools(enabled, store) {
-				names = append(names, t.Name())
+		// Withheld rather than served and refused: a tool the model can see is a call it
+		// will spend, and there is nothing useful to answer it with.
+		It("Should withhold the tools that change the store when read only", func() {
+			Expect(names(readOnly)).To(ConsistOf("memory_list", "memory_read"))
+		})
+	})
+
+	Describe("MemorySystemNote", func() {
+		It("Should name every tool a run was actually given", func() {
+			note := MemorySystemNote(enabled)
+			for _, name := range names(enabled) {
+				Expect(note).To(ContainSubstring(name))
 			}
-			Expect(names).To(ConsistOf("memory_list", "memory_read", "memory_write", "memory_delete"))
+		})
+
+		// The note is the tool advertisement as much as the instruction, so naming a tool
+		// a read-only run does not have buys a wasted call and a confusing failure.
+		It("Should not name the withheld tools nor ask for a write when read only", func() {
+			note := MemorySystemNote(readOnly)
+
+			Expect(note).To(ContainSubstring("memory_list"))
+			Expect(note).To(ContainSubstring("memory_read"))
+			Expect(note).ToNot(ContainSubstring("memory_write"))
+			Expect(note).ToNot(ContainSubstring("memory_delete"))
+		})
+
+		It("Should say nothing at all when memory is off", func() {
+			Expect(MemorySystemNote(&config.Config{})).To(BeEmpty())
 		})
 	})
 

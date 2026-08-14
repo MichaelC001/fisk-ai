@@ -178,7 +178,7 @@ var _ = Describe("transcript viewer", func() {
 	})
 
 	Describe("breakBefore", func() {
-		It("Should break at each prose/tools boundary but keep a group tight and ignore the prompt", func() {
+		It("Should break at each prose/tools boundary but keep a group tight", func() {
 			v := newViewer(Meta{}, []Line{
 				{Kind: LinePrompt, Text: "go"},
 				{Kind: LineNarration, Text: "first turn"},
@@ -191,13 +191,40 @@ var _ = Describe("transcript viewer", func() {
 			}, true, false)
 
 			Expect(v.breakBefore(0)).To(BeFalse()) // nothing precedes the prompt
-			Expect(v.breakBefore(1)).To(BeFalse()) // narration right after the prompt
+			Expect(v.breakBefore(1)).To(BeTrue())  // the prompt is set off from what answers it
 			Expect(v.breakBefore(2)).To(BeTrue())  // first tool call after the narration
 			Expect(v.breakBefore(3)).To(BeFalse()) // a result stays with its call
 			Expect(v.breakBefore(4)).To(BeTrue())  // narration after a tool result
 			Expect(v.breakBefore(5)).To(BeTrue())  // first tool call after the narration
 			Expect(v.breakBefore(6)).To(BeFalse()) // an error stays with its call
 			Expect(v.breakBefore(7)).To(BeTrue())  // thinking after a tool error
+		})
+
+		// The prompt is what an operator scrolling a long chat is looking for: it marks
+		// where a turn began. A follow-up typed in chat is the same line kind as the
+		// original, so it is set off the same way.
+		It("Should set a prompt off on both sides, including a chat follow-up", func() {
+			v := newViewer(Meta{}, []Line{
+				{Kind: LinePrompt, Text: "go"},
+				{Kind: LineNarration, Text: "an answer"},
+				{Kind: LinePrompt, Text: "a follow-up"},
+				{Kind: LineNarration, Text: "another answer"},
+			}, true, false)
+
+			Expect(v.breakBefore(0)).To(BeFalse()) // nothing precedes the first prompt
+			Expect(v.breakBefore(1)).To(BeTrue())  // blank after the prompt
+			Expect(v.breakBefore(2)).To(BeTrue())  // blank before the follow-up
+			Expect(v.breakBefore(3)).To(BeTrue())  // blank after the follow-up
+		})
+
+		It("Should break between two prompts exactly once", func() {
+			v := newViewer(Meta{}, []Line{
+				{Kind: LinePrompt, Text: "go"},
+				{Kind: LinePrompt, Text: "and again"},
+			}, true, false)
+
+			Expect(v.breakBefore(1)).To(BeTrue())
+			Expect(strings.Count(v.lineMarkup(1, 80), "\n")).To(Equal(1))
 		})
 
 		It("Should render the break as a leading blank line on the boundary line's markup", func() {
@@ -257,7 +284,7 @@ var _ = Describe("transcript viewer", func() {
 				return t
 			}, time.Second).Should(And(
 				ContainSubstring("Keys"),
-				ContainSubstring("copy full transcript"),
+				ContainSubstring("copy visible transcript"),
 				ContainSubstring("https://choria.io"),
 			))
 
@@ -444,6 +471,65 @@ var _ = Describe("transcript viewer", func() {
 
 			// With no key pressed the notice clears itself once the TTL elapses.
 			Eventually(readScreen, time.Second).ShouldNot(ContainSubstring("sent 2 lines to clipboard"))
+
+			v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
+		// Folding is how an operator says a block is not what they are reading, and the
+		// blocks that fold are the ones that would dominate a paste. The placeholder is
+		// not sent either: it is a screen affordance, not content.
+		It("Should leave folded content out of the clipboard entirely", func() {
+			sim := tcell.NewSimulationScreen("")
+			v := newViewer(Meta{Title: "r"}, []Line{
+				{Kind: LinePrompt, Text: "do a thing"},
+				{Kind: LineToolCall, Text: "stream ls"},
+				{Kind: LineToolResult, Text: "a page of raw output"},
+			}, true, false)
+			v.foldToolOutput = true
+			v.app.SetScreen(sim)
+			v.app.SetRoot(v.pages, true).SetFocus(v.view)
+
+			done := make(chan error, 1)
+			go func() { done <- v.app.Run() }()
+			v.app.QueueUpdateDraw(func() {})
+
+			sim.InjectKey(tcell.KeyRune, 'y', tcell.ModNone)
+
+			var clip []byte
+			Eventually(func() string {
+				v.app.QueueUpdate(func() { clip = sim.GetClipboardData() })
+				return string(clip)
+			}, time.Second).Should(Equal("do a thing\nstream ls"))
+
+			Expect(string(clip)).ToNot(ContainSubstring("a page of raw output"))
+			Expect(string(clip)).ToNot(ContainSubstring("output"))
+
+			v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
+		It("Should copy content once its fold is opened", func() {
+			sim := tcell.NewSimulationScreen("")
+			v := newViewer(Meta{Title: "r"}, []Line{
+				{Kind: LinePrompt, Text: "do a thing"},
+				{Kind: LineToolResult, Text: "raw output"},
+			}, true, false)
+			v.foldToolOutput = false
+			v.app.SetScreen(sim)
+			v.app.SetRoot(v.pages, true).SetFocus(v.view)
+
+			done := make(chan error, 1)
+			go func() { done <- v.app.Run() }()
+			v.app.QueueUpdateDraw(func() {})
+
+			sim.InjectKey(tcell.KeyRune, 'y', tcell.ModNone)
+
+			var clip []byte
+			Eventually(func() string {
+				v.app.QueueUpdate(func() { clip = sim.GetClipboardData() })
+				return string(clip)
+			}, time.Second).Should(ContainSubstring("raw output"))
 
 			v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))
@@ -708,7 +794,7 @@ var _ = Describe("transcript viewer", func() {
 			Eventually(done, time.Second).Should(Receive(BeNil()))
 		})
 
-		It("Should copy the full transcript even while a block is folded", func() {
+		It("Should leave a folded thinking block out of the copy", func() {
 			sim := tcell.NewSimulationScreen("")
 			v := newViewer(Meta{Title: "f"}, []Line{
 				{Kind: LinePrompt, Text: "do a thing"},
@@ -735,9 +821,12 @@ var _ = Describe("transcript viewer", func() {
 
 			var clip []byte
 			v.app.QueueUpdate(func() { clip = sim.GetClipboardData() })
-			// Copy is a view-independent full-buffer operation, so the folded content is
-			// still present in what lands on the clipboard.
-			Expect(string(clip)).To(ContainSubstring("HIDDENLINE"))
+			// Copy follows the view: folding is how an operator says a block is not what
+			// they are reading, so it is left out rather than sent as its placeholder. The
+			// prompt above it, which is not folded, still goes.
+			Expect(string(clip)).ToNot(ContainSubstring("HIDDENLINE"))
+			Expect(string(clip)).ToNot(ContainSubstring("to expand"))
+			Expect(string(clip)).To(ContainSubstring("do a thing"))
 
 			v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))
