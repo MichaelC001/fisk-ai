@@ -23,8 +23,27 @@ var _ = Describe("tcellEvents mapping", func() {
 	resp := func(blocks ...llm.ContentBlock) llm.Response { return llm.Response{Content: blocks} }
 
 	Describe("messageLines", func() {
+
+		// Hiding reasoning means the line never reaches the viewer, so there is no folded
+		// marker either: the run looks like one that did not reason. The status bar's
+		// thinking counter is what tells the operator otherwise.
+		It("Should emit no thinking line when it is not asked for", func() {
+			lines, answer := messageLines(resp(thinking("pondering"), text("the answer")), true, false)
+
+			for _, l := range lines {
+				Expect(l.Kind).ToNot(Equal(tui.LineThinking))
+			}
+			Expect(answer).To(ContainSubstring("the answer"))
+		})
+
+		It("Should still carry the answer for a turn that also thought", func() {
+			lines, answer := messageLines(resp(thinking("pondering"), text("done")), true, false)
+
+			Expect(answer).To(Equal("done"))
+			Expect(lines).ToNot(BeEmpty())
+		})
 		It("Should map thinking then prose and set apart a terminal answer", func() {
-			lines, answer := messageLines(resp(thinking("pondering"), text("the answer")), true)
+			lines, answer := messageLines(resp(thinking("pondering"), text("the answer")), true, true)
 			Expect(answer).To(Equal("the answer"))
 			Expect(lines).To(HaveLen(3))
 			Expect(lines[0].Kind).To(Equal(tui.LineThinking))
@@ -36,14 +55,14 @@ var _ = Describe("tcellEvents mapping", func() {
 		})
 
 		It("Should not add the answer delimiter for an intermediate turn", func() {
-			lines, _ := messageLines(resp(text("working on it")), false)
+			lines, _ := messageLines(resp(text("working on it")), false, true)
 			Expect(lines).To(HaveLen(1))
 			Expect(lines[0].Kind).To(Equal(tui.LineNarration))
 			Expect(lines[0].Text).To(Equal("working on it"))
 		})
 
 		It("Should return nothing for a turn with no text", func() {
-			lines, answer := messageLines(resp(), true)
+			lines, answer := messageLines(resp(), true, true)
 			Expect(lines).To(BeEmpty())
 			Expect(answer).To(BeEmpty())
 		})

@@ -140,7 +140,7 @@ var _ = Describe("transcriptLines", func() {
 	}
 
 	It("interleaves each tool call with its result so a multi-call turn reads as call/result pairs", func() {
-		lines := transcriptLines(rs(), true)
+		lines := transcriptLines(rs(), true, true)
 
 		Expect(lines).To(HaveLen(5))
 		Expect(lines[0].Kind).To(Equal(tui.LinePrompt))
@@ -151,7 +151,7 @@ var _ = Describe("transcriptLines", func() {
 	})
 
 	It("shows only the calls, still paired in order, when tool output is withheld", func() {
-		lines := transcriptLines(rs(), false)
+		lines := transcriptLines(rs(), false, true)
 
 		Expect(lines).To(HaveLen(3))
 		Expect(lines[1]).To(Equal(tui.Line{Kind: tui.LineToolCall, Text: "first {}", Short: "first {}"}))
@@ -169,7 +169,7 @@ var _ = Describe("transcriptLines", func() {
 			},
 		}
 
-		lines := transcriptLines(rs, true)
+		lines := transcriptLines(rs, true, true)
 
 		// prompt, tool call, tool result (paired), then the follow-up prompt.
 		Expect(lines).To(HaveLen(4))

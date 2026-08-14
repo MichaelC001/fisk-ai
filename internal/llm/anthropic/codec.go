@@ -69,6 +69,9 @@ func ResponseToNeutral(msg *sdk.Message) (llm.Response, error) {
 			Out:         msg.Usage.OutputTokens,
 			CacheRead:   msg.Usage.CacheReadInputTokens,
 			CacheCreate: msg.Usage.CacheCreationInputTokens,
+			// Part of OutputTokens rather than additional to it, which is the contract
+			// llm.Usage.Thinking states and the reason this is not added to Out here.
+			Thinking: msg.Usage.OutputTokensDetails.ThinkingTokens,
 		},
 	}, nil
 }
@@ -132,6 +135,49 @@ func providerBlockToNeutral(block sdk.ContentBlockParamUnion) (llm.ContentBlock,
 	}
 
 	return llm.ContentBlock{Provider: &llm.ProviderBlock{Kind: disc.Type, Raw: raw}}, nil
+}
+
+// redactedThinkingKind is the discriminator Anthropic gives a thinking block whose
+// reasoning it will not surface. It arrives as a provider block rather than a
+// ThinkingBlock, since the neutral model does not name it, so anything reasoning about
+// what a turn thought has to look for both.
+const redactedThinkingKind = "redacted_thinking"
+
+// isThinking reports whether a block carries reasoning, in either of the two shapes it
+// arrives in.
+func isThinking(block llm.ContentBlock) bool {
+	if block.Thinking != nil {
+		return true
+	}
+
+	return block.Provider != nil && block.Provider.Kind == redactedThinkingKind
+}
+
+// withoutThinking returns m with its reasoning blocks removed, for a call that is not
+// thinking and has no use for the signatures they carry.
+//
+// It returns m untouched when nothing would be removed, and also when everything would
+// be: an assistant turn with no content at all is rejected, so a turn that was nothing
+// but reasoning is better sent as it stands than turned into an invalid one. The
+// content slice is rebuilt rather than filtered in place, since the conversation
+// belongs to the caller and is sent again on the next iteration.
+func withoutThinking(m llm.Message) llm.Message {
+	kept := make([]llm.ContentBlock, 0, len(m.Content))
+	for _, block := range m.Content {
+		if isThinking(block) {
+			continue
+		}
+
+		kept = append(kept, block)
+	}
+
+	if len(kept) == len(m.Content) || len(kept) == 0 {
+		return m
+	}
+
+	m.Content = kept
+
+	return m
 }
 
 // blockToAnthropic maps a single neutral content block back to an Anthropic block.

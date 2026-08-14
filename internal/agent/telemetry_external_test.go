@@ -766,7 +766,7 @@ func TestTelemetry_ChatSpanRecordsTheCall(t *testing.T) {
 	reply := agenttest.TextResponse("done")
 	reply.ID = "msg_01ABC"
 	reply.Model = "claude-sonnet-5-20260101"
-	reply.Usage = llm.Usage{In: 100, Out: 8, CacheRead: 40, CacheCreate: 12}
+	reply.Usage = llm.Usage{In: 100, Out: 8, CacheRead: 40, CacheCreate: 12, Thinking: 5}
 
 	_, err := agent.Run(context.Background(), agent.Options{
 		Config:     cfg,
@@ -811,6 +811,17 @@ func TestTelemetry_ChatSpanRecordsTheCall(t *testing.T) {
 	cacheRead, ok := spanAttr(chat, "gen_ai.usage.cache_read.input_tokens")
 	g.Expect(ok).To(BeTrue())
 	g.Expect(cacheRead.AsInt64()).To(Equal(int64(40)))
+
+	// Reasoning is a share of the output tokens rather than a tier beside them, so it
+	// is reported alongside and never added in. It is on the span because reasoning is
+	// not rendered by default, which leaves a dashboard the only place its cost shows.
+	reasoning, ok := spanAttr(chat, "gen_ai.usage.reasoning.output_tokens")
+	g.Expect(ok).To(BeTrue())
+	g.Expect(reasoning.AsInt64()).To(Equal(int64(5)))
+
+	output, ok := spanAttr(chat, "gen_ai.usage.output_tokens")
+	g.Expect(ok).To(BeTrue())
+	g.Expect(output.AsInt64()).To(Equal(int64(8)))
 }
 
 // TestTelemetry_ChatSpanMarksATruncatedReplyFailed asserts a reply cut off at the

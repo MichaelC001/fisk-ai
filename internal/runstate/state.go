@@ -33,6 +33,7 @@ type Counters struct {
 	OutTokens         int64
 	CacheReadTokens   int64
 	CacheCreateTokens int64
+	ThinkingTokens    int64
 }
 
 // PendingTurn is an assistant turn whose tool calls are not yet all answered:
@@ -178,6 +179,7 @@ func Fold(records []Record) (*RunState, error) {
 			rs.Counters.OutTokens += r.Assistant.OutTokens
 			rs.Counters.CacheReadTokens += r.Assistant.CacheReadTokens
 			rs.Counters.CacheCreateTokens += r.Assistant.CacheCreateTokens
+			rs.Counters.ThinkingTokens += r.Assistant.ThinkingTokens
 
 		case UserProtocol:
 			if r.User == nil {

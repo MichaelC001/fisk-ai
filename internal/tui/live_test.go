@@ -561,8 +561,8 @@ var _ = Describe("Live", func() {
 			done := make(chan error, 1)
 			go func() { done <- l.v.app.Run() }()
 
-			l.AddUsage(100, 40, 0, 0)
-			l.AddUsage(50, 10, 0, 0)
+			l.AddUsage(100, 40, 0, 0, 0)
+			l.AddUsage(50, 10, 0, 0, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
 			text := screenTextOf(l, sim)()
 
@@ -579,11 +579,11 @@ var _ = Describe("Live", func() {
 			done := make(chan error, 1)
 			go func() { done <- l.v.app.Run() }()
 
-			l.AddUsage(20, 5, 0, 0)
+			l.AddUsage(20, 5, 0, 0, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
 			Expect(screenTextOf(l, sim)()).NotTo(ContainSubstring("cached="))
 
-			l.AddUsage(10, 5, 4096, 0)
+			l.AddUsage(10, 5, 4096, 0, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
 			Expect(screenTextOf(l, sim)()).To(ContainSubstring("cached=4096"))
 
@@ -877,8 +877,8 @@ var _ = Describe("Live", func() {
 			done := make(chan error, 1)
 			go func() { done <- l.v.app.Run() }()
 
-			l.SeedUsage(500, 200, 0, 0)
-			l.AddUsage(30, 10, 0, 0)
+			l.SeedUsage(500, 200, 0, 0, 0)
+			l.AddUsage(30, 10, 0, 0, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
 
 			Expect(screenTextOf(l, sim)()).To(ContainSubstring("tokens=530/210"))

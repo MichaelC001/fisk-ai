@@ -76,7 +76,7 @@ var _ = Describe("PrintText", func() {
 		msg := newResponse(textBlock("# Title\n\nhello"))
 
 		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true)
+			PrintText(msg, true, true, true)
 		})
 
 		Expect(stdout).To(ContainSubstring("# Title"))
@@ -88,7 +88,7 @@ var _ = Describe("PrintText", func() {
 		msg := newResponse(textBlock("mid-conversation update"))
 
 		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, false, true)
+			PrintText(msg, false, true, true)
 		})
 
 		Expect(stdout).To(BeEmpty())
@@ -103,7 +103,7 @@ var _ = Describe("PrintText", func() {
 		)
 
 		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true)
+			PrintText(msg, true, true, true)
 		})
 
 		Expect(stderr).To(ContainSubstring("💭 weighing the options"))
@@ -111,11 +111,41 @@ var _ = Describe("PrintText", func() {
 		Expect(stdout).NotTo(ContainSubstring("💭"))
 	})
 
+	// The default for this renderer, which is what a script calls: reasoning is
+	// unbounded prose nobody asked for, and it must leave no trace at all rather than a
+	// marker saying something was withheld.
+	It("Should print nothing about thinking when it is not asked for", func() {
+		msg := newResponse(
+			thinkingBlock("weighing the options"),
+			textBlock("the answer"),
+		)
+
+		stdout, stderr := captureStdoutStderr(func() {
+			PrintText(msg, true, true, false)
+		})
+
+		Expect(stderr).NotTo(ContainSubstring("💭"))
+		Expect(stderr).NotTo(ContainSubstring("weighing"))
+		Expect(stdout).To(ContainSubstring("the answer"))
+	})
+
+	It("Should still print the answer for a turn that was nothing but thinking", func() {
+		msg := newResponse(thinkingBlock("thought about it"), textBlock("done"))
+
+		stdout, stderr := captureStdoutStderr(func() {
+			PrintText(msg, true, true, false)
+		})
+
+		Expect(stderr).NotTo(ContainSubstring("thought about it"))
+		Expect(stderr).NotTo(ContainSubstring("💭"))
+		Expect(stdout).To(ContainSubstring("done"))
+	})
+
 	It("Should strip terminal escapes the model emits so a style cannot bleed past the answer", func() {
 		msg := newResponse(textBlock("safe \x1b[31mred-injection\x1b[0m tail"))
 
 		stdout, _ := captureStdoutStderr(func() {
-			PrintText(msg, true, true)
+			PrintText(msg, true, true, true)
 		})
 
 		Expect(stdout).To(ContainSubstring("safe red-injection tail"))
@@ -129,7 +159,7 @@ var _ = Describe("PrintText", func() {
 		)
 
 		_, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true)
+			PrintText(msg, true, true, true)
 		})
 
 		Expect(stderr).To(ContainSubstring("💭 mulling green over it"))
@@ -143,7 +173,7 @@ var _ = Describe("PrintText", func() {
 		)
 
 		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true)
+			PrintText(msg, true, true, true)
 		})
 
 		Expect(stderr).NotTo(ContainSubstring("💭"))
@@ -158,7 +188,7 @@ var _ = Describe("PrintText", func() {
 		)
 
 		stdout, _ := captureStdoutStderr(func() {
-			PrintText(msg, true, true)
+			PrintText(msg, true, true, true)
 		})
 
 		Expect(stdout).To(ContainSubstring("| a | b |"))
@@ -169,7 +199,7 @@ var _ = Describe("PrintText", func() {
 		msg := newResponse(toolUseBlock("foo"))
 
 		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, false, true)
+			PrintText(msg, false, true, true)
 		})
 
 		Expect(stdout).To(BeEmpty())

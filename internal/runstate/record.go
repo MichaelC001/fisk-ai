@@ -124,6 +124,11 @@ type AssistantRecord struct {
 	// as zero, which is correct (caching was off, so there were none).
 	CacheReadTokens   int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreateTokens int64 `json:"cache_create_tokens,omitempty"`
+	// ThinkingTokens is the part of OutTokens the model spent reasoning, not a
+	// separate cost on top of it. Additive and omitempty for the same reason as the
+	// cache tiers: a journal written before it existed omits it and folds as zero,
+	// which is what a run whose reasoning nobody counted should report.
+	ThinkingTokens int64 `json:"thinking_tokens,omitempty"`
 }
 
 // UserRecord is a free-standing interactive user turn (a chat follow-up). Message

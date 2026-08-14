@@ -62,6 +62,11 @@ type RunStats struct {
 	// CacheReadTokens stuck at zero against a large InTokens.
 	CacheReadTokens   int64
 	CacheCreateTokens int64
+	// ThinkingTokens is the part of OutTokens the model spent reasoning, reported
+	// apart because it is the only thing that separates a model that is not reasoning
+	// from one reasoning where nobody can see it. It is a subset of OutTokens, so a
+	// summary adding the two together reports a cost that was never paid.
+	ThinkingTokens int64
 }
 
 // CountToolKind records one dispatched tool call against its provider kind,
@@ -117,6 +122,12 @@ func (s *RunStats) summaryLine(verbose bool) string {
 		cache += fmt.Sprintf(" cache_write=%d", s.CacheCreateTokens)
 	}
 
+	// Unconditionally, unlike the cache tiers above. Reasoning is not rendered unless
+	// it is asked for, so this is the only place a run says whether any happened, and
+	// omitting it at zero would make "did not reason" and "reasoned invisibly" look the
+	// same. It is a share of the output half of tokens=, not an addition to it.
+	thinking := fmt.Sprintf(" thinking=%d", s.ThinkingTokens)
+
 	trace := ""
 	if s.TraceID != "" {
 		trace = fmt.Sprintf(" trace=%s", s.TraceID)
@@ -128,6 +139,6 @@ func (s *RunStats) summaryLine(verbose bool) string {
 		trace += " content=exported"
 	}
 
-	return fmt.Sprintf("%s: %s%sllm_calls=%d %s tokens=%d/%d%s latency=%s%s",
-		label, session, model, s.LlmCalls, tools, s.InTokens, s.OutTokens, cache, time.Since(s.Start).Round(time.Millisecond), trace)
+	return fmt.Sprintf("%s: %s%sllm_calls=%d %s tokens=%d/%d%s%s latency=%s%s",
+		label, session, model, s.LlmCalls, tools, s.InTokens, s.OutTokens, thinking, cache, time.Since(s.Start).Round(time.Millisecond), trace)
 }

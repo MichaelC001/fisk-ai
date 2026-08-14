@@ -29,6 +29,7 @@ type cliEvents struct {
 	verbose        bool
 	noColor        bool
 	showToolOutput bool
+	showThinking   bool
 }
 
 func (c *cliEvents) Warn(w agent.Warning) {
@@ -181,7 +182,7 @@ func (c *cliEvents) ToolResult(t agent.ToolResultTrace) {
 }
 
 func (c *cliEvents) Message(resp llm.Response, terminal bool) {
-	util.PrintText(resp, terminal, c.noColor)
+	util.PrintText(resp, terminal, c.noColor, c.showThinking)
 }
 
 // SessionRotated reports the previous session's resume command after a context reset

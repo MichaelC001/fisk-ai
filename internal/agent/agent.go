@@ -531,6 +531,7 @@ func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.Toke
 		CacheRead:   res.Stats.CacheReadTokens,
 		CacheCreate: res.Stats.CacheCreateTokens,
 		Uncached:    res.Stats.InTokens,
+		Reasoning:   res.Stats.ThinkingTokens,
 	}
 
 	if seed == nil {
@@ -550,6 +551,7 @@ func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.Toke
 		CacheRead:   session.CacheRead - seed.CacheRead,
 		CacheCreate: session.CacheCreate - seed.CacheCreate,
 		Uncached:    session.Uncached - seed.Input,
+		Reasoning:   session.Reasoning - seed.Reasoning,
 	}
 	out.ToolCalls = res.Stats.ToolCalls - seedCalls
 
@@ -1234,11 +1236,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		system = append(system, note)
 	}
 
-	// Thinking is requested only when enabled; the provider omits it otherwise so the
-	// model and backend use their default behavior. The per-call output cap is constant
-	// across iterations, so resolve it once.
-	thinking := cfg.ThinkingEnabled()
-	maxOutputTokens := resolveMaxOutputTokens(cfg, thinking)
+	// The per-call output cap is constant across iterations, so resolve it once. It is
+	// raised only for a run that will actually think: a run that asked for thinking to
+	// be turned off needs the room no more than one that asked for nothing.
+	thinking := thinkingMode(cfg)
+	maxOutputTokens := resolveMaxOutputTokens(cfg, thinking == llm.ThinkingOn)
 
 	// The feature switches are constant for the run, so they belong here rather than
 	// repeated on every model call, where they would cost export bandwidth per span and
@@ -1246,7 +1248,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// operator allowed: the provider has to support it and the tool count has to cross
 	// the threshold.
 	runSpan.SetMaxTokens(maxOutputTokens)
-	runSpan.SetFeatures(thinking, cfg.PromptCacheEnabled(), toolSearch)
+	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSearch)
 
 	// checkpointing was resolved above the NATS dial (the session store it gates
 	// depends on that connection); interactive was resolved at the top, where the root
@@ -1351,6 +1353,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.OutTokens = rs.Counters.OutTokens
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
 			stats.CacheCreateTokens = rs.Counters.CacheCreateTokens
+			stats.ThinkingTokens = rs.Counters.ThinkingTokens
 
 			return res, nil
 		}
@@ -1479,6 +1482,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.OutTokens = rs.Counters.OutTokens
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
 			stats.CacheCreateTokens = rs.Counters.CacheCreateTokens
+			stats.ThinkingTokens = rs.Counters.ThinkingTokens
 
 			// Snapshot what was just seeded, immediately, so the root span can report
 			// this process's own consumption rather than the session's. From the next
@@ -1490,6 +1494,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Output:      rs.Counters.OutTokens,
 				CacheRead:   rs.Counters.CacheReadTokens,
 				CacheCreate: rs.Counters.CacheCreateTokens,
+				Reasoning:   rs.Counters.ThinkingTokens,
 			}
 			resumeSeedCalls = rs.Counters.ToolCalls
 
@@ -1801,6 +1806,22 @@ func resumeHazards(rs *runstate.RunState) []Warning {
 	return out
 }
 
+// thinkingMode is the configuration's three-state answer in the neutral model's
+// vocabulary. A configuration naming no thinking block asks for nothing, which is not
+// the same as asking for thinking to be off: the first sends no parameter and leaves
+// the model to its own behavior, and the second tells a model that would otherwise
+// reason to stop.
+func thinkingMode(cfg *config.Config) llm.ThinkingMode {
+	switch {
+	case cfg.ThinkingEnabled():
+		return llm.ThinkingOn
+	case cfg.ThinkingDisabled():
+		return llm.ThinkingOff
+	default:
+		return llm.ThinkingUnset
+	}
+}
+
 // computeFingerprint captures the configuration a checkpointed run depends on, so
 // a resume against a changed model, prompt, tool set or budget is caught. The
 // system prompt is hashed, never stored. providerID is the resolved provider's own
@@ -1816,8 +1837,15 @@ func computeFingerprint(cfg *config.Config, providerID string, system []string, 
 		return runstate.Fingerprint{}, fmt.Errorf("hashing tool set: %w", err)
 	}
 
+	// Only whether the run will think is recorded, so the two modes that produce no
+	// thinking share one value. What a resume can be incoherent about is the stored
+	// conversation, and neither saying nothing nor asking for thinking off adds a
+	// thinking block to it; telling them apart here would refuse a resume over a
+	// configuration edit that cannot change what the journal holds. It also keeps "off"
+	// meaning what it meant before the third state existed, so sessions journaled until
+	// now still resume.
 	mode := "off"
-	if cfg.ThinkingEnabled() {
+	if thinkingMode(cfg) == llm.ThinkingOn {
 		mode = "summarized"
 	}
 

@@ -115,8 +115,11 @@ func (p *Provider) Call(ctx context.Context, req llm.Request) (*llm.Response, er
 	msg, err := p.client.Messages.New(callCtx, params)
 	if err != nil {
 		var apiErr *sdk.Error
-		if req.ThinkingEnabled && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
-			return nil, fmt.Errorf("%w; model %q may not support thinking, set llm.thinking.enabled to false", err, req.Model)
+		// Either explicit mode sends a thinking parameter, so either can be what a model
+		// or a proxy rejected. The remedy is to remove the block rather than to set it
+		// false, since false is still a parameter and would be rejected the same way.
+		if req.Thinking != llm.ThinkingUnset && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+			return nil, fmt.Errorf("%w; model %q may not accept a thinking parameter, remove the llm.thinking block to send none", err, req.Model)
 		}
 		return nil, err
 	}
@@ -158,6 +161,21 @@ func (p *Provider) buildParams(req llm.Request) (sdk.MessageNewParams, error) {
 
 	messages := make([]sdk.MessageParam, len(req.Messages))
 	for i, m := range req.Messages {
+		// A request that asks for thinking off does not replay the thinking a previous
+		// run produced. The signature on a stored block is only meaningful to a call
+		// that is thinking, so sending one to a call that is not risks being refused for
+		// blocks the model was told not to produce, which is what would otherwise make
+		// forcing a resume from thinking to not-thinking fail at the API instead of
+		// working.
+		//
+		// Only the explicit off does this. An unset mode leaves the model to its own
+		// behavior, which may well be to think, and stripping there would break the
+		// signature chain within a single run: the model produces thinking alongside a
+		// tool_use, and the next iteration has to send it back.
+		if req.Thinking == llm.ThinkingOff {
+			m = withoutThinking(m)
+		}
+
 		mp, err := MessageToAnthropic(m)
 		if err != nil {
 			return sdk.MessageNewParams{}, fmt.Errorf("message %d: %w", i, err)
@@ -173,14 +191,23 @@ func (p *Provider) buildParams(req llm.Request) (sdk.MessageNewParams, error) {
 		Messages:  messages,
 	}
 
-	// Thinking is requested only when enabled; the zero union omits it so the model
-	// and backend use their default behavior. Summarized display returns readable
-	// reasoning even on models that omit it by default.
-	if req.ThinkingEnabled {
+	// An unset mode leaves the union zero, which omits the field entirely so the model
+	// and backend use their default behavior. The two explicit modes each send a
+	// parameter, which is the whole difference between saying nothing and asking for
+	// nothing: a model that reasons unaided only stops when it is told to.
+	//
+	// Summarized display returns readable reasoning even on models that omit it by
+	// default.
+	switch req.Thinking {
+	case llm.ThinkingOn:
 		params.Thinking = sdk.ThinkingConfigParamUnion{
 			OfAdaptive: &sdk.ThinkingConfigAdaptiveParam{
 				Display: sdk.ThinkingConfigAdaptiveDisplaySummarized,
 			},
+		}
+	case llm.ThinkingOff:
+		params.Thinking = sdk.ThinkingConfigParamUnion{
+			OfDisabled: &sdk.ThinkingConfigDisabledParam{},
 		}
 	}
 

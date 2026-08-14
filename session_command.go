@@ -91,6 +91,7 @@ func registerSessionCommand(cmd *fisk.Application) {
 	show := session.Command("show", "Shows a checkpointed session in detail").Alias("view").Action(sessionShowAction)
 	show.Arg("id", "Session id").Required().StringVar(&sessionArgID)
 	show.Flag("transcript", "Shows the full conversation transcript, opening the interactive viewer on a terminal").UnNegatableBoolVar(&sessionTranscript)
+	show.Flag("thinking", "Include the model's reasoning in the transcript").Envar("THINKING").UnNegatableBoolVar(&showThinking)
 	show.Flag("no-tui", "Disable the full-screen viewer and print the transcript as line output without tool result output").Envar("NO_TUI").UnNegatableBoolVar(&noTUI)
 
 	rm := session.Command("rm", "Removes a checkpointed session").Alias("delete").Action(sessionRmAction)
@@ -223,7 +224,7 @@ func showTranscriptTUI(rs *runstate.RunState) (bool, error) {
 	}
 
 	meta := tui.Meta{Title: rs.RunID, Model: rs.Fingerprint.Model, Version: util.Version(), Query: rs.Prompt, InTokens: rs.Counters.InTokens, OutTokens: rs.Counters.OutTokens}
-	err := tui.ShowTranscript(meta, transcriptLines(rs, true), noColor, true, true)
+	err := tui.ShowTranscript(meta, transcriptLines(rs, true, showThinking), noColor, true, true)
 	if errors.Is(err, tui.ErrNoTTY) {
 		return false, nil
 	}

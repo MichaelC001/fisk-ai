@@ -197,10 +197,11 @@ func (p *Provider) RecordTurn(ctx context.Context, m TurnMetrics) {
 
 // recordChat records the per-call metrics when a chat span ends.
 //
-// gen_ai.token.type carries only the spec's input and output, never the cache tiers.
-// That is what lets the histogram be summed without grouping and still be right: adding
-// a cache_read series would double count, since input already includes it. The cache
-// tiers stay span attributes, where they answer a different question.
+// gen_ai.token.type carries only the spec's input and output, never the cache tiers and
+// never reasoning. That is what lets the histogram be summed without grouping and still
+// be right: a cache_read series would double count against input, and a reasoning series
+// would double count against output, since each is already part of the total it sits
+// under. Both stay span attributes, where they answer a different question.
 func (p *Provider) recordChat(ctx context.Context, i ChatInfo, o ChatOutcome, d time.Duration) {
 	if p == nil || p.instruments == nil {
 		return
