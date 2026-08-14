@@ -97,13 +97,13 @@ func toolCallDisplay(byName map[string]*fisk.FiskCommandTool, use *llm.ToolUseBl
 // dumpTranscript writes the conversation for inspection: the prompt, thinking,
 // assistant narration and tool calls with their inputs. Tool result output is
 // verbose and is included only when toolOutput is set.
-func dumpTranscript(w io.Writer, rs *runstate.RunState, noColor, toolOutput bool) {
+func dumpTranscript(w io.Writer, rs *runstate.RunState, noColor, toolOutput, showThinking bool) {
 	for i, msg := range rs.Messages {
 		switch {
 		case i == 0:
 			fmt.Fprintf(w, "> %s\n", messageText(msg))
 		case msg.Role == llm.RoleAssistant:
-			dumpAssistant(w, msg, noColor)
+			dumpAssistant(w, msg, noColor, showThinking)
 		default:
 			// An interior user message carries a chat follow-up's text and/or the prior
 			// turn's tool results. Show the follow-up as a prompt; the results follow when
@@ -118,17 +118,19 @@ func dumpTranscript(w io.Writer, rs *runstate.RunState, noColor, toolOutput bool
 	}
 
 	if rs.Pending != nil {
-		dumpAssistant(w, rs.Pending.Assistant, noColor)
+		dumpAssistant(w, rs.Pending.Assistant, noColor, showThinking)
 		if toolOutput {
 			dumpToolResults(w, rs.Pending.Results)
 		}
 	}
 }
 
-func dumpAssistant(w io.Writer, msg llm.Message, noColor bool) {
-	for _, block := range msg.Content {
-		if block.Thinking != nil && block.Thinking.Text != "" {
-			fmt.Fprintf(w, "\n[thinking]\n%s\n", util.SanitizeForDisplay(block.Thinking.Text))
+func dumpAssistant(w io.Writer, msg llm.Message, noColor, showThinking bool) {
+	if showThinking {
+		for _, block := range msg.Content {
+			if block.Thinking != nil && block.Thinking.Text != "" {
+				fmt.Fprintf(w, "\n[thinking]\n%s\n", util.SanitizeForDisplay(block.Thinking.Text))
+			}
 		}
 	}
 

@@ -185,7 +185,7 @@ func sessionShowAction(_ *fisk.ParseContext) error {
 	fmt.Println(c.String())
 
 	fmt.Printf("\n--- transcript ---\n\n")
-	dumpTranscript(os.Stdout, rs, noColor, !noTUI)
+	dumpTranscript(os.Stdout, rs, noColor, !noTUI, showThinking)
 
 	return nil
 }

@@ -86,7 +86,7 @@ var _ = Describe("dumpTranscript", func() {
 		}
 
 		var withOutput bytes.Buffer
-		dumpTranscript(&withOutput, rs, true, true)
+		dumpTranscript(&withOutput, rs, true, true, true)
 		full := withOutput.String()
 
 		Expect(full).To(ContainSubstring("> do work"))
@@ -99,7 +99,7 @@ var _ = Describe("dumpTranscript", func() {
 
 		// Without --tool-output the calls show but the results are withheld.
 		var noOutput bytes.Buffer
-		dumpTranscript(&noOutput, rs, true, false)
+		dumpTranscript(&noOutput, rs, true, false, true)
 		brief := noOutput.String()
 
 		Expect(brief).To(ContainSubstring(`-> list {"path":"/etc"}`))
@@ -120,11 +120,31 @@ var _ = Describe("dumpTranscript", func() {
 		}
 
 		var buf bytes.Buffer
-		dumpTranscript(&buf, rs, true, true)
+		dumpTranscript(&buf, rs, true, true, true)
 		out := buf.String()
 
 		Expect(out).To(ContainSubstring("before red after"))
 		Expect(out).NotTo(ContainSubstring("\x1b["))
+	})
+
+	It("Should leave thinking out of the dump unless it is asked for", func() {
+		rs := &runstate.RunState{Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "go"}}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Thinking: &llm.ThinkingBlock{Text: "PONDERING"}},
+				{Text: &llm.TextBlock{Text: "the answer"}},
+			}},
+		}}
+
+		var hidden bytes.Buffer
+		dumpTranscript(&hidden, rs, true, true, false)
+		Expect(hidden.String()).ToNot(ContainSubstring("PONDERING"))
+		Expect(hidden.String()).ToNot(ContainSubstring("[thinking]"))
+		Expect(hidden.String()).To(ContainSubstring("the answer"))
+
+		var shown bytes.Buffer
+		dumpTranscript(&shown, rs, true, true, true)
+		Expect(shown.String()).To(ContainSubstring("PONDERING"))
 	})
 })
 

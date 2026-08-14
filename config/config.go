@@ -403,6 +403,17 @@ type MemoryConfig struct {
 	// this to keep the store's contents out of the prompt. Like no_tui it is a
 	// negative switch.
 	NoIndex bool `json:"no_index,omitempty" yaml:"no_index,omitempty"`
+	// ReadOnly serves memory_list and memory_read and withholds memory_write and
+	// memory_delete, so a run can use what earlier runs saved without adding to it or
+	// removing from it. The store itself is untouched: this decides which tools the
+	// model is given, not what the backend permits, so anything else writing to the
+	// same store still does.
+	//
+	// It is what a fleet of workers sharing one store usually wants. The store is
+	// process-wide and its contents reach the system prompt, so a surface taking
+	// caller-supplied prompt text can otherwise be talked into planting something a
+	// later run reads back as its own note.
+	ReadOnly bool `json:"read_only,omitempty" yaml:"read_only,omitempty"`
 	// Options carries backend-specific settings as a raw block, decoded against a
 	// typed per-backend schema at store construction so an unknown option key fails
 	// as loudly as an unknown top-level key. For the file backend it accepts
@@ -1003,6 +1014,13 @@ func (c *Config) MemoryBackend() string {
 	}
 
 	return c.Harness.Memory.Backend
+}
+
+// MemoryReadOnly reports whether the memory tools should be served without the ones
+// that change the store. It is false when memory is off, where there are no tools to
+// narrow.
+func (c *Config) MemoryReadOnly() bool {
+	return c.MemoryEnabled() && c.Harness.Memory.ReadOnly
 }
 
 // MemoryBackendDeclared returns the memory backend the operator wrote in the file,
