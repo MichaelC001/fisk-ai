@@ -109,7 +109,7 @@ type RunInfo struct {
 	Model string
 }
 
-// TokenUsage is the four token tiers for a run or a call. Input includes the cached
+// TokenUsage is the token tiers for a run or a call. Input includes the cached
 // tiers, per the semantic conventions, which is why Uncached is carried separately:
 // cache reads bill at roughly a tenth of the uncached rate, so a cost calculation
 // needs the tiers apart and a reconciliation against the run summary needs Uncached.
@@ -119,6 +119,11 @@ type TokenUsage struct {
 	CacheRead   int64
 	CacheCreate int64
 	Uncached    int64
+	// Reasoning is the part of Output the model spent thinking, a subset rather than a
+	// sixth tier. It is carried because reasoning is not rendered by default, so a
+	// dashboard is the only place its cost shows, and because a model that reasons for
+	// most of its output tokens is a different cost profile from one that does not.
+	Reasoning int64
 }
 
 // Sub returns the tokens accumulated since other, for pulling one turn's or one call's
@@ -130,6 +135,7 @@ func (u TokenUsage) Sub(other TokenUsage) TokenUsage {
 		CacheRead:   u.CacheRead - other.CacheRead,
 		CacheCreate: u.CacheCreate - other.CacheCreate,
 		Uncached:    u.Uncached - other.Uncached,
+		Reasoning:   u.Reasoning - other.Reasoning,
 	}
 }
 
@@ -290,6 +296,7 @@ func (s *RunSpan) Finish(o RunOutcome) {
 		semconv.GenAIUsageOutputTokens(int(o.Usage.Output)),
 		semconv.GenAIUsageCacheReadInputTokens(int(o.Usage.CacheRead)),
 		semconv.GenAIUsageCacheCreationInputTokens(int(o.Usage.CacheCreate)),
+		semconv.GenAIUsageReasoningOutputTokens(int(o.Usage.Reasoning)),
 		AttrLLMUncachedInputTokens.Int64(o.Usage.Uncached),
 	)
 
@@ -401,6 +408,7 @@ func (s *TurnSpan) Finish(o TurnOutcome) {
 		semconv.GenAIUsageOutputTokens(int(o.Usage.Output)),
 		semconv.GenAIUsageCacheReadInputTokens(int(o.Usage.CacheRead)),
 		semconv.GenAIUsageCacheCreationInputTokens(int(o.Usage.CacheCreate)),
+		semconv.GenAIUsageReasoningOutputTokens(int(o.Usage.Reasoning)),
 		AttrLLMUncachedInputTokens.Int64(o.Usage.Uncached),
 	)
 
@@ -527,6 +535,7 @@ func (s *ChatSpan) Finish(ctx context.Context, i ChatInfo, o ChatOutcome) {
 		semconv.GenAIUsageOutputTokens(int(o.Usage.Output)),
 		semconv.GenAIUsageCacheReadInputTokens(int(o.Usage.CacheRead)),
 		semconv.GenAIUsageCacheCreationInputTokens(int(o.Usage.CacheCreate)),
+		semconv.GenAIUsageReasoningOutputTokens(int(o.Usage.Reasoning)),
 	)
 
 	if o.ResponseID != "" {

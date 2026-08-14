@@ -221,9 +221,15 @@ func printModelSection(c *columns.Document, cfg *config.Config) {
 		c.Item("Model", cfg.LLM.Model)
 		c.Item("Provider", cfg.LLMProvider())
 
-		thinking := "disabled"
-		if cfg.ThinkingEnabled() {
+		// Three states, and the two that are not "enabled" are worth telling apart here:
+		// one sends nothing and leaves the model to itself, the other asks it to stop.
+		// An operator whose model reasons anyway needs to know which one they configured.
+		thinking := "provider default"
+		switch {
+		case cfg.ThinkingEnabled():
 			thinking = "enabled"
+		case cfg.ThinkingDisabled():
+			thinking = "disabled"
 		}
 		c.Item("Thinking", thinking)
 

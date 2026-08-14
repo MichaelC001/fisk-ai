@@ -102,10 +102,10 @@ func (e *tcellEvents) ResumeTranscript(rs *runstate.RunState, _ map[string]*fisk
 	// Seed the live token counter from the restored counters (the resumed RunStats
 	// starts from the same numbers) so the running total and the end-of-run summary
 	// still agree once this session's own usage accumulates on top.
-	e.live.SeedUsage(rs.Counters.InTokens, rs.Counters.OutTokens, rs.Counters.CacheReadTokens, rs.Counters.CacheCreateTokens)
+	e.live.SeedUsage(rs.Counters.InTokens, rs.Counters.OutTokens, rs.Counters.CacheReadTokens, rs.Counters.CacheCreateTokens, rs.Counters.ThinkingTokens)
 
 	lines := []tui.Line{{Kind: tui.LineMeta, Text: "--- resuming ---"}}
-	lines = append(lines, transcriptLines(rs, true)...)
+	lines = append(lines, transcriptLines(rs, true, showThinking)...)
 	lines = append(lines, tui.Line{Kind: tui.LineMeta, Text: "--- continuing ---"})
 
 	e.live.Append(lines...)
@@ -143,14 +143,14 @@ func (e *tcellEvents) Message(resp llm.Response, terminal bool) {
 	// no-ops.
 	e.live.HideSplash()
 
-	lines, answer := messageLines(resp, terminal)
+	lines, answer := messageLines(resp, terminal, showThinking)
 	if terminal && answer != "" {
 		e.answer = answer
 	}
 
 	// Accumulate the live token counter from the same usage the runner sums into
 	// RunStats, so the statusbar number and the end-of-run summary agree.
-	e.live.AddUsage(resp.Usage.In, resp.Usage.Out, resp.Usage.CacheRead, resp.Usage.CacheCreate)
+	e.live.AddUsage(resp.Usage.In, resp.Usage.Out, resp.Usage.CacheRead, resp.Usage.CacheCreate, resp.Usage.Thinking)
 	e.live.Append(lines...)
 }
 
@@ -186,12 +186,14 @@ func toolTraceLine(t agent.ToolTrace, verbose bool) (tui.Line, bool) {
 // its prose. A terminal turn's prose is the final answer, set apart with a delimiter
 // since the viewport has no separate answer channel; its raw text is returned so the
 // caller can re-print it on exit.
-func messageLines(resp llm.Response, terminal bool) ([]tui.Line, string) {
+func messageLines(resp llm.Response, terminal, showThinking bool) ([]tui.Line, string) {
 	var lines []tui.Line
 
-	for _, block := range resp.Content {
-		if block.Thinking != nil && block.Thinking.Text != "" {
-			lines = append(lines, tui.Line{Kind: tui.LineThinking, Text: block.Thinking.Text})
+	if showThinking {
+		for _, block := range resp.Content {
+			if block.Thinking != nil && block.Thinking.Text != "" {
+				lines = append(lines, tui.Line{Kind: tui.LineThinking, Text: block.Thinking.Text})
+			}
 		}
 	}
 

@@ -1380,4 +1380,57 @@ telemetry:
 			Expect(cfg.Telemetry.Endpoint).To(Equal("not-a-url"))
 		})
 	})
+
+	// The block's presence is what carries the third state, so these assert the two
+	// accessors against all three configurations rather than only the two obvious ones.
+	Describe("thinking", func() {
+		It("Should ask for nothing when the block is absent", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig))
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(cfg.LLM.Thinking).To(BeNil())
+			Expect(cfg.ThinkingEnabled()).To(BeFalse())
+			Expect(cfg.ThinkingDisabled()).To(BeFalse())
+		})
+
+		It("Should ask for thinking when the block enables it", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+  thinking:
+    enabled: true
+`))
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(cfg.ThinkingEnabled()).To(BeTrue())
+			Expect(cfg.ThinkingDisabled()).To(BeFalse())
+		})
+
+		// The state this distinction exists for: enabled false is a request to turn
+		// reasoning off, not the silence an absent block leaves behind.
+		It("Should ask for thinking off when the block disables it", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+  thinking:
+    enabled: false
+`))
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(cfg.LLM.Thinking).ToNot(BeNil())
+			Expect(cfg.ThinkingEnabled()).To(BeFalse())
+			Expect(cfg.ThinkingDisabled()).To(BeTrue())
+		})
+
+		It("Should be nil-safe on a zero configuration", func() {
+			cfg := &Config{}
+
+			Expect(cfg.ThinkingEnabled()).To(BeFalse())
+			Expect(cfg.ThinkingDisabled()).To(BeFalse())
+		})
+	})
 })

@@ -40,6 +40,7 @@ var (
 	noTelemetry bool
 
 	showToolOutput bool
+	showThinking   bool
 
 	checkpoint        bool
 	runName           string

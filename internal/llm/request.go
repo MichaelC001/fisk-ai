@@ -4,6 +4,32 @@
 
 package llm
 
+// ThinkingMode says what a request asks of the model's reasoning, which some
+// providers call thinking and others reasoning.
+//
+// It has three values rather than two because saying nothing is not the same as
+// asking for nothing. A model that reasons unaided keeps reasoning when it is asked
+// nothing, so a caller that wants it to stop has to say so, and a caller that wants
+// the provider's own default has to be able to stay silent. A provider with no
+// thinking mechanism ignores all three.
+type ThinkingMode int
+
+const (
+	// ThinkingUnset asks nothing, so the model and the backend use their own
+	// defaults. It is the zero value, which keeps it the behavior of any Request that
+	// does not mention thinking, and it is the only value safe to send to a model that
+	// rejects the parameter outright, since it sends no parameter at all.
+	ThinkingUnset ThinkingMode = iota
+
+	// ThinkingOn asks the model to reason and to expose it.
+	ThinkingOn
+
+	// ThinkingOff asks the model not to reason. It is distinct from ThinkingUnset:
+	// this states a preference where that declines to, so it reaches the provider as a
+	// parameter and can be rejected by a backend that does not accept one.
+	ThinkingOff
+)
+
 // Request is a single provider-neutral model call: the conversation plus the
 // knobs a provider needs to render it to its own wire format. It carries no
 // infrastructure (client, credentials, per-call timeout); those live on the
@@ -34,10 +60,10 @@ type Request struct {
 	// something for it to find.
 	ToolSearch bool
 
-	// ThinkingEnabled requests reasoning output. The neutral model carries only the
-	// toggle, matching the single llm.thinking.enabled config knob; a provider maps it
-	// to its own thinking configuration.
-	ThinkingEnabled bool
+	// Thinking says what this request asks of the model's reasoning. A provider maps
+	// it to its own thinking configuration, or ignores it if it has none. The zero
+	// value asks for nothing, so a caller that does not care never has to set it.
+	Thinking ThinkingMode
 
 	// MaxOutputTokens caps the tokens generated for this one response. It bounds a
 	// single reply, distinct from any cumulative token budget the caller enforces.

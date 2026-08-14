@@ -503,9 +503,10 @@ type LLMConfig struct {
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
 	// Budget bounds LLM usage; optional but recommended for long running agents.
 	Budget LLMBudget `json:"budget" yaml:"budget"`
-	// Thinking configures whether the model exposes its reasoning. Off by default:
-	// when off, no thinking is requested and the model uses its default behavior.
-	Thinking ThinkingConfig `json:"thinking" yaml:"thinking"`
+	// Thinking configures whether the model exposes its reasoning. An absent block
+	// says nothing to the provider and the model uses its own default, which is what
+	// distinguishes it from a block that sets enabled false. See ThinkingConfig.
+	Thinking *ThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty"`
 	// NoPromptCache disables Anthropic prompt caching for this agent. Caching is on by
 	// default (the zero value), mirroring no_tui / no_bell; set it only for a non-Anthropic
 	// endpoint (ANTHROPIC_BASE_URL) whose proxy rejects or ignores cache_control. Disabling
@@ -523,14 +524,25 @@ type LLMConfig struct {
 	NoToolSearch bool `json:"no_tool_search,omitempty" yaml:"no_tool_search,omitempty"`
 }
 
-// ThinkingConfig configures whether the model exposes its reasoning. It is a
-// struct rather than a bare bool so further controls (e.g. effort) can be added
-// later without changing the configuration shape. The setting is provider
-// neutral: the active backend maps it to its own mechanism. Older Anthropic
-// models that predate adaptive thinking (e.g. Sonnet 4.5, Haiku 4.5) reject it,
-// so it is left off by default and opted into per agent.
+// ThinkingConfig configures whether the model exposes its reasoning, which some
+// providers call reasoning rather than thinking. It is a struct rather than a bare
+// bool so further controls (e.g. effort) can be added later without changing the
+// configuration shape. The setting is provider neutral: the active backend maps it
+// to its own mechanism.
+//
+// There are three states, and the block's presence is what separates two of them.
+// No block at all says nothing to the provider, so the model does whatever it does by
+// default. A block with enabled true asks for thinking. A block with enabled false
+// asks for it to be turned off, which matters only for a model that would otherwise
+// reason unaided: for one that does not, it is the same result reached deliberately.
+//
+// Saying nothing is the default because older Anthropic models that predate adaptive
+// thinking (e.g. Sonnet 4.5, Haiku 4.5) reject the parameter, and an endpoint reached
+// through ANTHROPIC_BASE_URL may not implement it at all. Both explicit states send
+// the parameter and so are opted into per agent.
 type ThinkingConfig struct {
-	// Enabled turns model thinking on. Off by default.
+	// Enabled turns model thinking on when true and off when false. It is read only
+	// when the block is present; see ThinkingConfig for what its absence means.
 	Enabled bool `json:"enabled" yaml:"enabled"`
 }
 
@@ -1194,9 +1206,21 @@ func (c *Config) PromptCacheEnabled() bool {
 }
 
 // ThinkingEnabled reports whether the model should be asked to expose its
-// reasoning. Off unless explicitly enabled under llm.thinking.
+// reasoning. It is true only when llm.thinking is present and enables it, so it
+// stays the answer to "will this run think", which is what the output cap and the
+// startup report want.
 func (c *Config) ThinkingEnabled() bool {
-	return c.LLM.Thinking.Enabled
+	return c.LLM.Thinking != nil && c.LLM.Thinking.Enabled
+}
+
+// ThinkingDisabled reports whether the model should be asked to stop reasoning,
+// which is llm.thinking present and enabling nothing.
+//
+// It is not the negation of ThinkingEnabled: both are false when the block is absent,
+// which is the state that sends no thinking parameter at all and leaves the model to
+// its own default. A caller wanting the three states reads both.
+func (c *Config) ThinkingDisabled() bool {
+	return c.LLM.Thinking != nil && !c.LLM.Thinking.Enabled
 }
 
 // ToolSearchEnabled reports whether server-side tool search may be used for this

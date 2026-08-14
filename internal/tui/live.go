@@ -87,7 +87,13 @@ type Live struct {
 	// tracked so a resumed run's counters stay whole but is not shown on the compact bar.
 	cacheReadTokens   int64
 	cacheCreateTokens int64
-	state             runState
+	// thinkingTokens is the part of outTokens the model spent reasoning. It is shown
+	// unconditionally, unlike cached=X, because zero is the answer to a question an
+	// operator cannot otherwise ask: reasoning is not rendered, so a bar that omitted
+	// the counter when it was zero would look identical whether the model was not
+	// reasoning or reasoning where nothing shows it.
+	thinkingTokens int64
+	state          runState
 
 	// spinnerFrame indexes the spinner animation, advanced by the ticker while the run
 	// is working. spinning is the ticker's read of "the run is working" (state ==
@@ -502,12 +508,13 @@ func (l *Live) markEnded(runErr error) {
 // A resumed run seeds it from the restored counters (which the resumed RunStats also
 // starts from) so the live number and the end-of-run summary still agree once this
 // session's own usage accumulates on top.
-func (l *Live) SeedUsage(in, out, cacheRead, cacheCreate int64) {
+func (l *Live) SeedUsage(in, out, cacheRead, cacheCreate, thinking int64) {
 	l.v.app.QueueUpdateDraw(func() {
 		l.inTokens = in
 		l.outTokens = out
 		l.cacheReadTokens = cacheRead
 		l.cacheCreateTokens = cacheCreate
+		l.thinkingTokens = thinking
 		l.refreshStatus()
 	})
 }
@@ -515,12 +522,13 @@ func (l *Live) SeedUsage(in, out, cacheRead, cacheCreate int64) {
 // AddUsage accumulates a message's token usage into the live counter from the run
 // goroutine, marshaling onto the loop. Summing every message's usage matches the
 // end-of-run RunStats total, so the running number and the summary agree.
-func (l *Live) AddUsage(in, out, cacheRead, cacheCreate int64) {
+func (l *Live) AddUsage(in, out, cacheRead, cacheCreate, thinking int64) {
 	l.v.app.QueueUpdateDraw(func() {
 		l.inTokens += in
 		l.outTokens += out
 		l.cacheReadTokens += cacheRead
 		l.cacheCreateTokens += cacheCreate
+		l.thinkingTokens += thinking
 		l.refreshStatus()
 	})
 }
@@ -613,6 +621,10 @@ func (l *Live) liveStatusText() string {
 
 	parts := []string{
 		fmt.Sprintf("tokens=%d/%d", l.inTokens, l.outTokens),
+		// Always, including zero: reasoning is not rendered, so this counter is the only
+		// thing that says whether any happened. It is a share of the output total rather
+		// than an addition to it.
+		fmt.Sprintf("thinking=%d", l.thinkingTokens),
 	}
 	// cached=X appears only once the cache is hit, mirroring the end-of-run summary line,
 	// so an uncached run's bar stays uncluttered while a caching run shows the read total

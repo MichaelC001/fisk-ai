@@ -23,10 +23,17 @@ import (
 // PrintText renders an assistant turn for display, routing by block type rather
 // than by the turn's position in the conversation.
 //
-// Thinking blocks carry the model's reasoning and go to stderr, each line
-// prefixed to set them apart from the answer and the trace lines. Empty thinking
-// blocks, which some models return when the reasoning itself is not surfaced, are
-// skipped so they leave no stray markers.
+// Thinking blocks carry the model's reasoning. They are printed only when
+// showThinking says so, each line prefixed on stderr to set them apart from the
+// answer and the trace lines; empty ones, which some models return when the
+// reasoning itself is not surfaced, are skipped so they leave no stray markers.
+//
+// They are off by default because this renderer is what a script calls: reasoning is
+// unbounded prose the caller did not ask for, and a model that narrates its way
+// through a task can bury the answer in it. Nothing replaces them when they are
+// hidden, deliberately. A progress indicator on a stream something is parsing is
+// worse than a quiet pause, and the token counter that reports reasoning belongs on
+// the run summary, which a script can ignore in one line.
 //
 // Text blocks are the model's prose. They are markdown, so they are rendered with
 // glamour for readability (raw when the destination is piped or redirected). On a
@@ -35,8 +42,11 @@ import (
 // piped result. Either way the turn's text blocks are concatenated and rendered
 // once, so markdown spanning several blocks (a table, a fenced code block) is not
 // split across separate renders.
-func PrintText(resp llm.Response, terminal, noColor bool) {
+func PrintText(resp llm.Response, terminal, noColor, showThinking bool) {
 	for _, block := range resp.Content {
+		if !showThinking {
+			break
+		}
 		if block.Thinking == nil || block.Thinking.Text == "" {
 			continue
 		}

@@ -33,6 +33,17 @@ type Usage struct {
 	Out         int64
 	CacheRead   int64
 	CacheCreate int64
+
+	// Thinking is the tokens the model spent reasoning, which every provider that
+	// reasons reports separately: Anthropic as thinking_tokens, an OpenAI-compatible
+	// backend as reasoning_tokens.
+	//
+	// It is a SUBSET of Out, not an addition to it, so a caller summing the fields
+	// double-counts. It is reported apart because it is the only number that separates
+	// a model that is not reasoning from one that is reasoning where nobody can see it,
+	// which is otherwise a question only a raw HTTP trace can answer. Zero from a
+	// provider that has no reasoning to report.
+	Thinking int64
 }
 
 // Response is a model's reply to a call: the assistant turn's content, why it

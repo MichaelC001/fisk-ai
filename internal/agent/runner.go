@@ -37,7 +37,7 @@ type runner struct {
 	system          []string
 	toolDefs        []llm.ToolDef
 	toolSearch      bool
-	thinking        bool
+	thinking        llm.ThinkingMode
 	maxOutputTokens int64
 	maxIter         int64
 	maxTokens       int64
@@ -340,6 +340,7 @@ func chatOutcome(resp *llm.Response, err error) telemetry.ChatOutcome {
 			CacheRead:   resp.Usage.CacheRead,
 			CacheCreate: resp.Usage.CacheCreate,
 			Uncached:    resp.Usage.In,
+			Reasoning:   resp.Usage.Thinking,
 		},
 		Output: genai.OutputMessages(resp.Content, string(resp.StopReason)),
 	}
@@ -364,6 +365,7 @@ func runStatsUsage(stats *util.RunStats) telemetry.TokenUsage {
 		CacheRead:   stats.CacheReadTokens,
 		CacheCreate: stats.CacheCreateTokens,
 		Uncached:    stats.InTokens,
+		Reasoning:   stats.ThinkingTokens,
 	}
 }
 
@@ -683,7 +685,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			Messages:        r.messages,
 			Tools:           r.toolDefs,
 			ToolSearch:      r.toolSearch,
-			ThinkingEnabled: r.thinking,
+			Thinking:        r.thinking,
 			MaxOutputTokens: r.maxOutputTokens,
 			PromptCache:     r.promptCache,
 			Interactive:     r.interactive,
@@ -742,6 +744,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		r.stats.OutTokens += resp.Usage.Out
 		r.stats.CacheReadTokens += resp.Usage.CacheRead
 		r.stats.CacheCreateTokens += resp.Usage.CacheCreate
+		r.stats.ThinkingTokens += resp.Usage.Thinking
 
 		// Append the assistant turn to the conversation. The neutral blocks preserve
 		// any server-side tool_search blocks intact alongside text and tool_use.
@@ -758,6 +761,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			OutTokens:         resp.Usage.Out,
 			CacheReadTokens:   resp.Usage.CacheRead,
 			CacheCreateTokens: resp.Usage.CacheCreate,
+			ThinkingTokens:    resp.Usage.Thinking,
 		}})
 		if err != nil {
 			return runstate.ReasonError, err

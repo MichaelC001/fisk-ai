@@ -217,7 +217,7 @@ func dumpToolResults(w io.Writer, results []llm.ToolResultBlock) {
 // results) but yields tui.Line values the viewer sanitizes and styles, rather than
 // writing formatted text. Tool calls are shown by name and raw arguments, as they
 // are stored, since the tool registry is not loaded for a read-only view.
-func transcriptLines(rs *runstate.RunState, toolOutput bool) []tui.Line {
+func transcriptLines(rs *runstate.RunState, toolOutput, showThinking bool) []tui.Line {
 	// Pair each tool call with its result by tool_use id so a turn's calls and their
 	// output interleave (call, result, call, result), matching how a live run shows
 	// them, rather than listing every call and then every result. A call and its
@@ -240,7 +240,7 @@ func transcriptLines(rs *runstate.RunState, toolOutput bool) []tui.Line {
 		case i == 0:
 			out = appendLine(out, tui.LinePrompt, messageText(msg))
 		case msg.Role == llm.RoleAssistant:
-			out = append(out, assistantLines(msg, results)...)
+			out = append(out, assistantLines(msg, results, showThinking)...)
 		case msg.Role == llm.RoleUser:
 			// An interior user message is a chat follow-up: show its text as a prompt line.
 			// Any tool_result blocks it also carries are the prior turn's results, already
@@ -251,7 +251,7 @@ func transcriptLines(rs *runstate.RunState, toolOutput bool) []tui.Line {
 	}
 
 	if rs.Pending != nil {
-		out = append(out, assistantLines(rs.Pending.Assistant, results)...)
+		out = append(out, assistantLines(rs.Pending.Assistant, results, showThinking)...)
 	}
 
 	return out
@@ -262,12 +262,14 @@ func transcriptLines(rs *runstate.RunState, toolOutput bool) []tui.Line {
 // tool_use id in results, so a call and its output stay together as they do live. A
 // call with no matching result -- an unanswered tool in a suspended turn -- shows on
 // its own. results is empty when tool output is not being shown, so only calls emit.
-func assistantLines(msg llm.Message, results map[string]tui.Line) []tui.Line {
+func assistantLines(msg llm.Message, results map[string]tui.Line, showThinking bool) []tui.Line {
 	var out []tui.Line
 
-	for _, block := range msg.Content {
-		if block.Thinking != nil && block.Thinking.Text != "" {
-			out = appendLine(out, tui.LineThinking, block.Thinking.Text)
+	if showThinking {
+		for _, block := range msg.Content {
+			if block.Thinking != nil && block.Thinking.Text != "" {
+				out = appendLine(out, tui.LineThinking, block.Thinking.Text)
+			}
 		}
 	}
 

@@ -110,20 +110,50 @@ var _ = Describe("Provider.buildParams", func() {
 	})
 
 	Describe("thinking", func() {
-		It("requests summarized adaptive thinking when enabled", func() {
+		It("requests summarized adaptive thinking when on", func() {
 			req := baseReq()
-			req.ThinkingEnabled = true
+			req.Thinking = llm.ThinkingOn
 
 			params, err := p.buildParams(req)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(params.Thinking.OfAdaptive).NotTo(BeNil())
 			Expect(params.Thinking.OfAdaptive.Display).To(Equal(sdk.ThinkingConfigAdaptiveDisplaySummarized))
+			Expect(params.Thinking.OfDisabled).To(BeNil())
 		})
 
-		It("omits thinking when disabled", func() {
+		// The two states that are easy to conflate. Asking for nothing sends no
+		// parameter at all, so the model does whatever it does; asking for off sends one,
+		// which is the only thing that stops a model that reasons unaided.
+		It("sends nothing at all when the mode is unset", func() {
 			params, err := p.buildParams(baseReq())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(params.Thinking.OfAdaptive).To(BeNil())
+			Expect(params.Thinking.OfDisabled).To(BeNil())
+			Expect(params.Thinking.OfEnabled).To(BeNil())
+		})
+
+		It("sends the disabled parameter when the mode is off", func() {
+			req := baseReq()
+			req.Thinking = llm.ThinkingOff
+
+			params, err := p.buildParams(req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(params.Thinking.OfDisabled).NotTo(BeNil())
+			Expect(params.Thinking.OfAdaptive).To(BeNil())
+		})
+
+		// The wire form is what the distinction actually rests on, and a union that
+		// marshals to nothing is indistinguishable from one that marshals to a type.
+		It("marshals off to an explicit disabled type", func() {
+			req := baseReq()
+			req.Thinking = llm.ThinkingOff
+
+			params, err := p.buildParams(req)
+			Expect(err).NotTo(HaveOccurred())
+
+			body, err := params.Thinking.MarshalJSON()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(ContainSubstring(`"type":"disabled"`))
 		})
 	})
 

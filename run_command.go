@@ -35,6 +35,7 @@ func registerRunCommand(cmd *fisk.Application) {
 	run.Flag("no-color", "Disable markdown rendering of the final answer, emitting raw text").Envar("NO_COLOR").UnNegatableBoolVar(&noColor)
 	run.Flag("verbose", "Shows more verbose output").Envar("VERBOSE").UnNegatableBoolVar(&verbose)
 	run.Flag("tool-output", "Show tool output during the run (expanded in the full-screen UI)").Envar("TOOL_OUTPUT").UnNegatableBoolVar(&showToolOutput)
+	run.Flag("thinking", "Show the model's reasoning during the run, when it produces any").Envar("THINKING").UnNegatableBoolVar(&showThinking)
 	run.Flag("no-tui", "Disable the full-screen terminal UI and use the line-by-line output").Envar("NO_TUI").UnNegatableBoolVar(&noTUI)
 	run.Flag("chat", "Keep the full-screen UI open for interactive follow-ups after each turn (requires the TUI)").UnNegatableBoolVar(&chatMode)
 	run.Flag("trace", "Write a JSON-lines trace of every LLM request and response to a file").PlaceHolder("FILE").StringVar(&traceFile)
@@ -177,7 +178,7 @@ func runAction(_ *fisk.ParseContext) error {
 		defer stopSignals()
 	}
 
-	res, err := agent.Run(runCtx, opts, &cliEvents{verbose: verbose, noColor: noColor, showToolOutput: showToolOutput}, toolkit.NewSurveyPrompter())
+	res, err := agent.Run(runCtx, opts, &cliEvents{verbose: verbose, noColor: noColor, showToolOutput: showToolOutput, showThinking: showThinking}, toolkit.NewSurveyPrompter())
 
 	// A crash already printed its stack through cliEvents.Panicked; return the generic
 	// PanicError for a non-zero exit without a normal-looking stats block that would read
