@@ -139,6 +139,47 @@ var _ = Describe("A2A", func() {
 		})
 	})
 
+	Describe("StopReason.Valid", func() {
+		It("Should name exactly the eight reasons this build carries", func() {
+			for _, reason := range []StopReason{
+				StopEndTurn, StopMaxTokens, StopRefusal, StopCanceled,
+				StopError, StopBudgetExhausted, StopSuspended, StopMaxIterations,
+			} {
+				Expect(reason.Valid()).To(BeTrue(), string(reason))
+			}
+
+			for _, reason := range []StopReason{"", "throttled", "end_trun", "tool_use"} {
+				Expect(reason.Valid()).To(BeFalse(), string(reason))
+			}
+		})
+
+		// The Go list and the schema's are two statements of one vocabulary. Valid is
+		// what a sender checks before building a message, so a reason it accepts has to
+		// be one a receiver takes.
+		It("Should accept nothing the schema refuses", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, reason := range []StopReason{
+				StopEndTurn, StopMaxTokens, StopRefusal, StopCanceled,
+				StopError, StopBudgetExhausted, StopSuspended, StopMaxIterations,
+			} {
+				result := NewResult(reason)
+				fillHeader(&result.Header)
+
+				Expect(reason.Valid()).To(BeTrue(), string(reason))
+				Expect(validator.ValidateMessage(result)).To(Succeed(), string(reason))
+			}
+
+			// The other direction is deliberately not symmetric: the schema takes reasons
+			// Valid refuses, which is the whole of what this item changed.
+			unnamed := NewResult(StopReason("throttled"))
+			fillHeader(&unnamed.Header)
+			Expect(unnamed.StopReason.Valid()).To(BeFalse())
+			Expect(validator.ValidateMessage(unnamed)).To(Succeed())
+		})
+	})
+
 	Describe("DecodeTerminal", func() {
 		encode := func(msg any) []byte {
 			GinkgoHelper()

@@ -29,9 +29,14 @@
 // hands the block on loses less than one that keeps nothing. A block whose type the
 // schema does name is validated as strictly as ever.
 //
-// An unrecognized protocol id or stop reason is still rejected. Neither is content a
-// receiver can hold and pass along: a protocol id decides what the message means, and a
-// stop reason is why a task ended.
+// A stop reason outside the set this build names is carried too, for the same reason
+// stated the other way round: refusing one costs the terminal message that held it,
+// and with it the answer text and the token counts. StopReason.Valid is how a receiver
+// asks whether it recognizes the value.
+//
+// An unrecognized protocol id is still rejected, being the one thing a receiver cannot
+// hold and pass along: it decides what the message means, so a receiver that ignored it
+// would not know what it was ignoring.
 //
 // Property names are reserved to this project. A peer carrying its own data should
 // nest it under a property assigned to it rather than add a top-level key, since two

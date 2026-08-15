@@ -239,6 +239,39 @@ var _ = Describe("TaskStream", func() {
 		Expect(stream.Gaps()).To(Equal(uint64(2)))
 	})
 
+	// The cost this item removed: the reason traveled on the same message as the
+	// answer, so refusing one lost the other.
+	It("Should deliver a terminal result whose stop reason it does not name", func() {
+		transport := &scriptedTransport{script: func(req *Header) [][]byte {
+			ack := NewAck(true)
+			stampReply(&ack.Header, req, "svc")
+			ack.Sequence = 1
+
+			res := NewResult(StopReason("throttled"))
+			res.Text = "as far as I got"
+			res.Usage = &Usage{InputTokens: 10, OutputTokens: 20}
+			stampReply(&res.Header, req, "svc")
+			res.Sequence = 2
+
+			return [][]byte{encodeMessage(ack), encodeMessage(res)}
+		}}
+
+		stream, err := taskClient(transport).Task(ctx, "svc", NewRequest("go"))
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = stream.Next(ctx)
+		Expect(err).ToNot(HaveOccurred())
+
+		msg, err := stream.Next(ctx)
+		Expect(err).ToNot(HaveOccurred())
+
+		res := msg.(*Result)
+		Expect(res.StopReason).To(Equal(StopReason("throttled")))
+		Expect(res.StopReason.Valid()).To(BeFalse())
+		Expect(res.Text).To(Equal("as far as I got"))
+		Expect(res.Usage.OutputTokens).To(Equal(int64(20)))
+	})
+
 	It("Should return a failed task as an ErrorMessage value, not as the error", func() {
 		transport := &scriptedTransport{script: func(req *Header) [][]byte {
 			ack := NewAck(true)
