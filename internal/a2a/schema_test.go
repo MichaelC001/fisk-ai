@@ -127,6 +127,18 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
+		It("Should accept an event carrying a block type it does not name", func() {
+			ev := NewEvent(NewTextBlock("hi"))
+			fillHeader(&ev.Header)
+			body, err := json.Marshal(ev)
+			Expect(err).ToNot(HaveOccurred())
+
+			good := tamper(body, func(m map[string]any) {
+				m["block"] = map[string]any{"type": "citation", "source": "rfc1", "page": 12}
+			})
+			Expect(v.Validate(good)).To(Succeed())
+		})
+
 		It("Should accept the suspended and max_iterations stop reasons", func() {
 			for _, reason := range []StopReason{StopSuspended, StopMaxIterations} {
 				result := NewResult(reason)
@@ -185,16 +197,49 @@ var _ = Describe("Validator", func() {
 			Expect(v.Validate(bad)).To(HaveOccurred())
 		})
 
-		It("Should reject an event whose block fails the oneOf", func() {
+		// Accepting a type the schema does not name must not relax one it does. Each of
+		// these fails its own branch on the malformed field and fails the unknown branch
+		// on the excluded type, so nothing in the oneOf matches.
+		It("Should still reject a malformed block whose type it does name", func() {
 			ev := NewEvent(NewTextBlock("hi"))
 			fillHeader(&ev.Header)
 			body, err := json.Marshal(ev)
 			Expect(err).ToNot(HaveOccurred())
 
-			bad := tamper(body, func(m map[string]any) {
-				m["block"] = map[string]any{"type": "bogus"}
-			})
-			Expect(v.Validate(bad)).To(HaveOccurred())
+			malformed := []map[string]any{
+				{"type": "text"},
+				{"type": "tool_call", "name": "t"},
+				{"type": "tool_result"},
+				{"type": "status", "iteration": "3"},
+				{"type": "agent_call", "id": "a1", "name": "remote"},
+			}
+
+			for _, block := range malformed {
+				bad := tamper(body, func(m map[string]any) {
+					m["block"] = block
+				})
+				Expect(v.Validate(bad)).To(HaveOccurred(), "%v", block)
+			}
+		})
+
+		It("Should reject a block with no usable type discriminator", func() {
+			ev := NewEvent(NewTextBlock("hi"))
+			fillHeader(&ev.Header)
+			body, err := json.Marshal(ev)
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, block := range []map[string]any{
+				{},
+				{"type": nil},
+				{"type": ""},
+				{"type": 7},
+				{"text": "hi"},
+			} {
+				bad := tamper(body, func(m map[string]any) {
+					m["block"] = block
+				})
+				Expect(v.Validate(bad)).To(HaveOccurred(), "%v", block)
+			}
 		})
 	})
 })
