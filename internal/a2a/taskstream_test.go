@@ -278,6 +278,41 @@ var _ = Describe("TaskStream", func() {
 		Expect(err).To(MatchError(context.DeadlineExceeded))
 	})
 
+	// The reason the block item rides beside this one: a reply set is where an event
+	// first reaches an independently versioned peer, and the whole message was the
+	// unit being lost.
+	It("Should deliver an event carrying a block type it does not name", func() {
+		transport := &scriptedTransport{script: func(req *Header) [][]byte {
+			set := replySet(req, "before")
+
+			// A third message hand-built with a block no build here names, numbered after
+			// the event beside it.
+			unknown := []byte(`{"protocol":"` + EventProtocol + `","id":"` + NewID() +
+				`","request":"` + req.Request + `","conversation":"` + req.Conversation +
+				`","sequence":3,"time":"2026-01-01T00:00:00Z","sender":{"name":"svc"},` +
+				`"block":{"type":"citation","source":"rfc1","page":12}}`)
+
+			return [][]byte{set[0], set[1], unknown}
+		}}
+
+		stream, err := taskClient(transport).Task(ctx, "svc", NewRequest("go"))
+		Expect(err).ToNot(HaveOccurred())
+
+		for range 2 {
+			_, err = stream.Next(ctx)
+			Expect(err).ToNot(HaveOccurred())
+		}
+
+		msg, err := stream.Next(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(msg).To(BeAssignableToTypeOf(&Event{}))
+
+		block := msg.(*Event).Block
+		Expect(block.Type()).To(Equal(BlockType("citation")))
+		Expect(block.Content()).To(BeAssignableToTypeOf(UnknownBlock{}))
+		Expect(stream.Gaps()).To(BeZero())
+	})
+
 	It("Should refuse a message that does not belong in a reply set", func() {
 		transport := &scriptedTransport{script: func(req *Header) [][]byte {
 			reply := NewToolReply("ok", false)

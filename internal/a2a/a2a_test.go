@@ -242,14 +242,54 @@ var _ = Describe("A2A", func() {
 			}
 		})
 
-		It("Should reject an unknown block type", func() {
+		It("Should carry a type it does not name rather than failing the message", func() {
 			var got Block
-			err := json.Unmarshal([]byte(`{"type":"bogus"}`), &got)
-			Expect(err).To(MatchError(ErrUnknownBlockType))
+			Expect(json.Unmarshal([]byte(`{"type":"citation","source":"rfc1","page":12}`), &got)).To(Succeed())
+
+			Expect(got.Type()).To(Equal(BlockType("citation")))
+
+			unknown, ok := got.Content().(UnknownBlock)
+			Expect(ok).To(BeTrue(), "an unnamed type decodes to an UnknownBlock")
+			Expect(unknown.Type).To(Equal(BlockType("citation")))
+			Expect(unknown.Raw).To(MatchJSON(`{"type":"citation","source":"rfc1","page":12}`))
 		})
 
-		It("Should fail to marshal an empty block", func() {
+		It("Should re-marshal an unknown block to the same JSON value", func() {
+			var got Block
+			Expect(json.Unmarshal([]byte(`{"type":"citation","source":"rfc1","page":12}`), &got)).To(Succeed())
+
+			// The same value rather than the same bytes: stamping the discriminator
+			// re-encodes the object, which sorts its keys.
+			out, err := json.Marshal(got)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out).To(MatchJSON(`{"type":"citation","source":"rfc1","page":12}`))
+		})
+
+		It("Should keep an unknown block distinguishable from an empty one", func() {
+			var got Block
+			Expect(json.Unmarshal([]byte(`{"type":"citation"}`), &got)).To(Succeed())
+
+			Expect(Block{}.Type()).To(BeEmpty())
+			Expect(Block{}.Content()).To(BeNil())
+
+			Expect(got.Type()).ToNot(BeEmpty())
+			Expect(got.Content()).ToNot(BeNil())
+		})
+
+		It("Should refuse a block carrying no type", func() {
+			// All three leave the probe's type empty, so without their own case each would
+			// decode to an UnknownBlock whose type says nothing.
+			for _, body := range []string{`{}`, `{"type":null}`, `{"type":""}`, `{"source":"rfc1"}`} {
+				var got Block
+				Expect(json.Unmarshal([]byte(body), &got)).To(MatchError(ErrInvalidMessage), body)
+			}
+		})
+
+		It("Should fail to marshal an empty block, and an unknown one holding nothing", func() {
 			_, err := json.Marshal(Block{})
+			Expect(err).To(HaveOccurred())
+
+			_, err = json.Marshal(NewBlock(UnknownBlock{Type: "citation"}))
 			Expect(err).To(HaveOccurred())
 		})
 	})

@@ -205,7 +205,7 @@
       }
     },
     "block": {
-      "description": "One content block. Discriminated by `type`.",
+      "description": "One content block. Discriminated by `type`. A type this receiver does not name is accepted and carried opaquely, so a peer on a newer schema does not lose the message that held it; a block whose type IS named is validated as strictly as ever.",
       "oneOf": [
         {
           "$ref": "#/$defs/thinkingBlock"
@@ -224,8 +224,35 @@
         },
         {
           "$ref": "#/$defs/statusBlock"
+        },
+        {
+          "$ref": "#/$defs/unknownBlock"
         }
       ]
+    },
+    "unknownBlock": {
+      "type": "object",
+      "description": "A block of a type not named above. It excludes the named types by name so that exactly one branch of the oneOf matches: without that a valid text block would match its own branch and this one, and every event would fail.",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "enum": [
+              "thinking",
+              "text",
+              "tool_call",
+              "tool_result",
+              "agent_call",
+              "status"
+            ]
+          },
+          "description": "Each constraint here answers a body that would otherwise pass: `required` because properties says nothing about an absent key, `string` and `minLength` because a number, a null or an empty string all satisfy a string enum's negation."
+        }
+      }
     },
     "thinkingBlock": {
       "type": "object",

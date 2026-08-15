@@ -21,9 +21,17 @@
 // A receiver ignores properties it does not recognize rather than rejecting the
 // message carrying them, so a peer built against an older copy of the schemas
 // interoperates with one that has gained a field. There is no way for a sender to
-// demand the opposite, so an addition must be safe to skip. Closed vocabularies are
-// the exception and are rejected as before: an unrecognized protocol id, block type
-// or stop reason, none of which a receiver could act on by ignoring.
+// demand the opposite, so an addition must be safe to skip.
+//
+// An event block whose type this build does not name is carried opaquely for the same
+// reason, as an UnknownBlock holding the peer's own bytes. A block is advisory and the
+// run journal is the authoritative transcript, so a receiver that keeps the framing and
+// hands the block on loses less than one that keeps nothing. A block whose type the
+// schema does name is validated as strictly as ever.
+//
+// An unrecognized protocol id or stop reason is still rejected. Neither is content a
+// receiver can hold and pass along: a protocol id decides what the message means, and a
+// stop reason is why a task ended.
 //
 // Property names are reserved to this project. A peer carrying its own data should
 // nest it under a property assigned to it rather than add a top-level key, since two
@@ -66,11 +74,8 @@ const (
 var (
 	// ErrUnknownProtocol is returned by Decode for an unrecognized protocol id.
 	ErrUnknownProtocol = errors.New("unknown protocol")
-	// ErrUnknownBlockType is returned when decoding an event block with an
-	// unrecognized type discriminator.
-	ErrUnknownBlockType = errors.New("unknown block type")
 	// ErrInvalidMessage is returned when a message cannot be represented on the
-	// wire, e.g. an event block with no content.
+	// wire, e.g. an event block with no content or no type.
 	ErrInvalidMessage = errors.New("invalid message")
 )
 
