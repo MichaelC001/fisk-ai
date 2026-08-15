@@ -151,8 +151,12 @@ func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 		return err
 	}
 
+	// The caller is zero because a micro request carries no identity this transport can
+	// vouch for: NATS authenticates the connection to the server, not the publisher to
+	// the subscriber, so subject permissions are the whole of the control here. The
+	// request's own Header.Sender is a claim in the body and stays there.
 	handler := micro.HandlerFunc(func(req micro.Request) {
-		h(context.Background(), req.Data(), replier{req: req})
+		h(context.Background(), a2a.Caller{}, req.Data(), replier{req: req})
 	})
 
 	err = svc.AddEndpoint(endpointName(op), handler, micro.WithEndpointSubject(subject))

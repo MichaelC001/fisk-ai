@@ -91,7 +91,7 @@ var _ = Describe("handleTool dispatch", func() {
 
 		// A direct request for it is refused in-band, never run.
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), toolRequestBody("danger"), rep)
+		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("danger"), rep)
 		Expect(rep.responded.Load()).To(BeTrue())
 
 		var reply ToolReply
@@ -154,7 +154,7 @@ var _ = Describe("Integration: a2a intake back-pressure", func() {
 		rep1 := &fakeReplier{}
 		// The first request acquires the only slot and its worker starts; the call
 		// itself returns once the worker is spawned.
-		ft.handlers[OpTool](context.Background(), toolRequestBody("block"), rep1)
+		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep1)
 		Eventually(runLines).Should(Equal(1))
 
 		// The second request must block at intake: with the slot held, its handler
@@ -162,7 +162,7 @@ var _ = Describe("Integration: a2a intake back-pressure", func() {
 		entered := make(chan struct{})
 		rep2 := &fakeReplier{}
 		go func() {
-			ft.handlers[OpTool](context.Background(), toolRequestBody("block"), rep2)
+			ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep2)
 			close(entered)
 		}()
 
