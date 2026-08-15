@@ -71,4 +71,13 @@ type Header struct {
 	// MustUnderstand, when true, requires a receiver that does not understand the
 	// protocol id to fail closed rather than ignore the message.
 	MustUnderstand bool `json:"must_understand,omitempty"`
+	// TraceParent is the W3C trace context of the span that sent this message, empty
+	// when the sender was not tracing. It is what lets a receiver's spans join the
+	// sender's trace rather than starting one of their own.
+	//
+	// It is in the body rather than in transport metadata because a message reaches
+	// bindings that have none: a queued job is a request stored on a work item with no
+	// headers anywhere. It is unauthenticated, exactly like Sender, so the trace it
+	// names is the sender's choice and nothing reads it as evidence of who called.
+	TraceParent string `json:"traceparent,omitempty"`
 }

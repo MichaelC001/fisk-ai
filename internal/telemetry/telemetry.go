@@ -185,7 +185,7 @@ func Setup(ctx context.Context, r Resolved, version string, opts ...Option) (*Pr
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(r.SampleRatio.Value))),
+		sdktrace.WithSampler(sampler(r.SampleRatio.Value)),
 		sdktrace.WithBatcher(&countingSpanExporter{SpanExporter: traceExp, delivery: d}, batchOptions(r)...),
 	)
 
@@ -224,6 +224,24 @@ func Setup(ctx context.Context, r Resolved, version string, opts ...Option) (*Pr
 	}
 
 	return p, nil
+}
+
+// sampler builds the trace sampler for a resolved ratio.
+//
+// A remote parent that says it was sampled is followed, which is what makes a
+// delegation one trace: overriding it with the local ratio would drop spans out of the
+// middle of a trace an operator is following.
+//
+// A remote parent that says it was NOT sampled is not followed, which is the default
+// this overrides. An a2a message carries its sender's trace context in the body and
+// the transport authenticates nobody, so under the default any peer that could reach
+// the subject could switch this process's recording off for a served call and
+// everything under it. The local ratio decides instead, and the trace ids are adopted
+// either way, so linkage is unaffected.
+func sampler(ratio float64) sdktrace.Sampler {
+	ratioBased := sdktrace.TraceIDRatioBased(ratio)
+
+	return sdktrace.ParentBased(ratioBased, sdktrace.WithRemoteParentNotSampled(ratioBased))
 }
 
 // batchOptions builds the batch processor options.

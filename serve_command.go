@@ -159,6 +159,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Conns:            resources.Conns,
 		ConfigFile:       c.configFile,
 		Logger:           log,
+		Telemetry:        tel,
 	}, []serve.ChannelBuilder{ajchannel.Builder()}, []serve.ServiceBuilder{a2asurface.Builder()})
 	if err != nil {
 		return err

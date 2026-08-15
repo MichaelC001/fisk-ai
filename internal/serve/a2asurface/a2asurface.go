@@ -26,6 +26,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
@@ -43,6 +44,7 @@ func Builder() serve.ServiceBuilder {
 				Conns:      opts.Conns,
 				ConfigFile: opts.ConfigFile,
 				Logger:     opts.Logger,
+				Telemetry:  opts.Telemetry,
 			})
 		},
 	}
@@ -62,6 +64,11 @@ type ConfigOptions struct {
 	// Logger receives the a2a server's progress, which is a line per served call. Nil
 	// leaves it to the a2a server's own default.
 	Logger *slog.Logger
+
+	// Telemetry, when non-nil, receives a span per served call and reaches the tools
+	// those calls run. It is the process's provider, borrowed like the connection: the
+	// program that built it flushes it.
+	Telemetry *telemetry.Provider
 }
 
 // Service is the tool-serving surface: an a2a server, the transport it answers on, and
@@ -124,6 +131,7 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Service, error) {
 		Concurrency: cfg.A2AMaxConcurrentTools(),
 		CallTimeout: cfg.A2AToolTimeout(),
 		Logger:      opts.Logger,
+		Telemetry:   opts.Telemetry,
 	})
 	if err != nil {
 		svc.closeQuietly(opts.Logger)

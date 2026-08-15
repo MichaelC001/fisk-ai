@@ -51,7 +51,7 @@ func (c *Client) CanStream() bool { return c.stream != nil }
 // ErrAgentUnavailable is returned when no agent answers.
 func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error) {
 	req := NewDiscoveryRequest()
-	stampRequest(&req.Header, c.sender, agent)
+	stampRequest(ctx, &req.Header, c.sender, agent)
 
 	reply, err := c.roundTrip(ctx, agent, OpDiscovery, req, DiscoveryReplyProtocol)
 	if err != nil {
@@ -71,8 +71,8 @@ func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error)
 // as a Go error; a Go error means the call could not be made or answered.
 //
 // The hop is traced when the caller's context carries a telemetry provider, nesting
-// under whatever span opened it. No traceparent is put on the wire: nothing on the far
-// side consumes one while the serving surfaces are out of scope.
+// under whatever span opened it. The request carries that span's trace context, so the
+// peer's own span for the call joins this trace rather than starting one.
 func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (reply *ToolReply, err error) {
 	ctx, span := telemetry.ProviderFromContext(ctx).StartRemoteAgent(ctx, telemetry.RemoteAgentInfo{
 		Agent: agent,
@@ -85,7 +85,7 @@ func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.
 	defer func() { span.Finish(remoteOutcome(reply, err)) }()
 
 	req := NewToolRequest(tool, normalizeInput(input))
-	stampRequest(&req.Header, c.sender, agent)
+	stampRequest(ctx, &req.Header, c.sender, agent)
 
 	raw, err := c.roundTrip(ctx, agent, OpTool, req, ToolReplyProtocol)
 	if err != nil {

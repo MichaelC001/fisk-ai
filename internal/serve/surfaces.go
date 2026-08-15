@@ -10,6 +10,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/conns"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // ChannelBuilder constructs one configured channel. A program links the builders for
@@ -75,6 +76,11 @@ type BuildOptions struct {
 
 	// Logger receives the surfaces' progress. Nil leaves each to its own default.
 	Logger *slog.Logger
+
+	// Telemetry is the process's provider, or nil when telemetry is off. A surface
+	// that answers calls uses it to open a span per call; the channels do not need it,
+	// since a run is handed one through the server's own options.
+	Telemetry *telemetry.Provider
 }
 
 // Surfaces builds the channels and services a configuration enables, in the order the

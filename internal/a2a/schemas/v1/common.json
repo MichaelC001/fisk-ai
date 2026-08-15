@@ -76,6 +76,10 @@
           "type": "boolean",
           "default": false,
           "description": "If true and the receiver does not understand this protocol id, it must fail closed."
+        },
+        "traceparent": {
+          "type": "string",
+          "description": "W3C trace context of the span that sent this message, so a receiver's spans join the sender's trace. Named here rather than constrained: a version pattern would refuse a valid future W3C version and cost the whole message, where a receiver's propagator already ignores anything it cannot parse. Unauthenticated, like sender."
         }
       }
     },

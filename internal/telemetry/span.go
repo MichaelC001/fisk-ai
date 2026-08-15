@@ -773,6 +773,128 @@ func (s *ToolSpan) Finish(ctx context.Context, o ToolOutcome) {
 	span.End()
 }
 
+// ServedToolInfo describes one tool call this agent answers for a peer.
+type ServedToolInfo struct {
+	// Identity is this agent, which is what gen_ai.agent.name means on every other
+	// span in the process. This is the opposite of a remote-agent span, where the name
+	// would have been the peer's.
+	Identity string
+	// Name is the tool as this agent knows it, empty when the peer named one that does
+	// not exist. Only this reaches the span name.
+	Name string
+	// RequestedName is the peer's raw string, recorded only when Name is empty. It is
+	// unvalidated input from another process, so it goes no further than an attribute.
+	RequestedName string
+	// Request is the correlation tag of the peer's request, so a span is findable from
+	// the log line that names the same call.
+	Request string
+	// Caller is what the transport vouches for about who is calling, and Verified says
+	// whether it vouches for anything at all. They stay apart from Sender for the
+	// reason a2a.Caller exists: a body can claim any sender.
+	Caller         string
+	CallerVerified bool
+	// Sender is the identity the message claims, which is the peer's own assertion and
+	// is not evidence of anything.
+	Sender string
+}
+
+// ServedToolOutcome is what a served call reports once it has finished.
+type ServedToolOutcome struct {
+	// Outcome is one of the closed ToolOutcome* set, shared with a local call so the
+	// two are comparable on one key.
+	Outcome string
+	// Failed reports that the peer was told the call failed. It cannot be inferred
+	// from a Go error: a tool that failed is reported in-band on the reply.
+	Failed bool
+	// ExitCode is the status of the command the call ran, nil when it ran none.
+	ExitCode *int
+	// QueueWait is how long the call waited for a concurrency slot. It is the latency
+	// the peer paid that nothing else reports.
+	QueueWait time.Duration
+}
+
+// ServedToolSpan is one tool call answered for a peer.
+type ServedToolSpan struct {
+	*Span
+}
+
+// StartServedTool starts a span over one tool call this agent answers.
+//
+// It is an execute_tool span with server kind rather than a mirror of
+// StartRemoteAgent, because the two halves of one hop are different operations: the
+// caller invokes an agent, and this runs one tool with no prompt and no loop. A trace
+// reads execute_tool on the caller, then invoke_agent, then this.
+//
+// It records NO metric. The tool duration histogram means tools this agent's model
+// ran, and feeding peer-invoked calls into it would make a percentile over that series
+// describe two populations.
+//
+// The span opens before the concurrency semaphore is acquired, so the wait for a slot
+// is inside it. That wait is the only thing this span shows that nothing else does: the
+// semaphore blocks the transport's serving goroutine, so a saturated server that opened
+// its spans after acquisition would render as a fast server with fewer spans.
+func (p *Provider) StartServedTool(ctx context.Context, i ServedToolInfo) (context.Context, *ServedToolSpan) {
+	if p == nil || p.tracer == nil {
+		return ctx, &ServedToolSpan{}
+	}
+
+	attrs := []attribute.KeyValue{
+		semconv.GenAIOperationNameKey.String(string(genaiconv.OperationNameExecuteTool)),
+		semconv.GenAIToolTypeKey.String(string(ToolTypeFunction)),
+		semconv.GenAIAgentName(i.Identity),
+		AttrServedRequest.String(i.Request),
+		AttrServedCallerVerified.Bool(i.CallerVerified),
+	}
+
+	name := unknownToolSpanName
+	if i.Name != "" {
+		name = string(genaiconv.OperationNameExecuteTool) + " " + i.Name
+		attrs = append(attrs, semconv.GenAIToolName(i.Name))
+	} else if i.RequestedName != "" {
+		attrs = append(attrs, AttrToolRequestedName.String(i.RequestedName))
+	}
+
+	if i.Caller != "" {
+		attrs = append(attrs, AttrServedCaller.String(i.Caller))
+	}
+	if i.Sender != "" {
+		attrs = append(attrs, AttrServedSender.String(i.Sender))
+	}
+
+	ctx, span := p.tracer.Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attrs...),
+	)
+
+	return ctx, &ServedToolSpan{Span: &Span{span: span, started: time.Now(), provider: p}}
+}
+
+// Finish records the outcome and ends the span. It is called after the reply has been
+// sent, since a reply that failed to send is a peer that got nothing, and a green
+// server span under a red caller's span describes the wrong thing.
+func (s *ServedToolSpan) Finish(o ServedToolOutcome) {
+	if s == nil || s.Span == nil || s.Span.span == nil {
+		return
+	}
+
+	span := s.Span.span
+	span.SetAttributes(AttrToolOutcome.String(o.Outcome))
+
+	if o.QueueWait > 0 {
+		span.SetAttributes(AttrServedQueueWaitMS.Int64(o.QueueWait.Milliseconds()))
+	}
+	if o.ExitCode != nil {
+		span.SetAttributes(AttrToolExitCode.Int(*o.ExitCode))
+	}
+
+	if o.Failed {
+		span.SetAttributes(errorType(ClassToolError))
+		span.SetStatus(codes.Error, "")
+	}
+
+	span.End()
+}
+
 // RemoteAgentInfo describes a tool call dispatched to another agent.
 type RemoteAgentInfo struct {
 	// Agent is the peer's name. It is operator configuration, the name of a configured
