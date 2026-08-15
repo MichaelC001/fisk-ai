@@ -6,6 +6,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -139,12 +140,36 @@ var _ = Describe("Validator", func() {
 			Expect(v.Validate(good)).To(Succeed())
 		})
 
-		It("Should accept the suspended and max_iterations stop reasons", func() {
-			for _, reason := range []StopReason{StopSuspended, StopMaxIterations} {
+		It("Should accept every stop reason this build names", func() {
+			for _, reason := range []StopReason{
+				StopEndTurn, StopMaxTokens, StopRefusal, StopCanceled,
+				StopError, StopBudgetExhausted, StopSuspended, StopMaxIterations,
+			} {
 				result := NewResult(reason)
 				fillHeader(&result.Header)
 				Expect(v.ValidateMessage(result)).To(Succeed(), "stop_reason %q should validate", reason)
 			}
+		})
+
+		It("Should accept a stop reason it does not name, on both terminal messages", func() {
+			result := NewResult(StopReason("throttled"))
+			fillHeader(&result.Header)
+			Expect(v.ValidateMessage(result)).To(Succeed())
+
+			failed := NewError("it broke")
+			failed.StopReason = StopReason("throttled")
+			fillHeader(&failed.Header)
+			Expect(v.ValidateMessage(failed)).To(Succeed())
+		})
+
+		It("Should accept an error carrying no stop reason, where a result must have one", func() {
+			failed := NewError("it broke")
+			fillHeader(&failed.Header)
+			Expect(v.ValidateMessage(failed)).To(Succeed())
+
+			result := NewResult("")
+			fillHeader(&result.Header)
+			Expect(v.ValidateMessage(result)).ToNot(Succeed())
 		})
 	})
 
@@ -219,6 +244,23 @@ var _ = Describe("Validator", func() {
 					m["block"] = block
 				})
 				Expect(v.Validate(bad)).To(HaveOccurred(), "%v", block)
+			}
+		})
+
+		It("Should still bound a stop reason it does not name", func() {
+			result := NewResult(StopEndTurn)
+			fillHeader(&result.Header)
+			body, err := json.Marshal(result)
+			Expect(err).ToNot(HaveOccurred())
+
+			// A receiver displays this, so tolerating an unnamed reason must not tolerate
+			// a payload, a newline or a terminal escape in the field.
+			for _, reason := range []any{"", nil, 7, "Throttled", "two words", "a\nb",
+				strings.Repeat("x", 65)} {
+				bad := tamper(body, func(m map[string]any) {
+					m["stop_reason"] = reason
+				})
+				Expect(v.Validate(bad)).To(HaveOccurred(), "%v", reason)
 			}
 		})
 

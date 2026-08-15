@@ -6,6 +6,11 @@ package a2a
 
 // StopReason is the neutral reason a task finished, carried by Result and
 // ErrorMessage.
+//
+// The constants below are what this build names. A received value may be anything
+// the schema allows, since refusing an unrecognized reason would cost the whole
+// terminal message including the answer text, so a receiver asks Valid rather than
+// assuming the value is one of them.
 type StopReason string
 
 const (
@@ -23,6 +28,22 @@ const (
 	// mirrors runstate.ReasonMaxIterations, which the runner already produces.
 	StopMaxIterations StopReason = "max_iterations"
 )
+
+// Valid reports whether r is one of the eight reasons this build names. A sender
+// emits only those; a receiver accepts any reason the schema allows, so false
+// describes a reason from a newer peer rather than a malformed message.
+//
+// It is exported so a sender can check a reason it was handed before building a
+// message with it, which is the same job ValidIdentityName does for an identity.
+func (r StopReason) Valid() bool {
+	switch r {
+	case StopEndTurn, StopMaxTokens, StopRefusal, StopCanceled,
+		StopError, StopBudgetExhausted, StopSuspended, StopMaxIterations:
+		return true
+	default:
+		return false
+	}
+}
 
 // Usage reports what a task consumed: tokens for what it cost, calls for what it
 // did.

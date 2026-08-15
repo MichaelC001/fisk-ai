@@ -40,11 +40,11 @@ var protocolSchemaFile = map[string]string{
 
 // Validator validates message bodies against the embedded v1 JSON schemas.
 //
-// The schemas accept properties they do not name, and an event block whose type
-// they do not name, so a peer on a newer schema does not lose a whole message to
-// one thing this build has never heard of. Everything else is enforced as before:
-// required fields, types, patterns, the protocol const, the closed stop reason
-// vocabulary, and every block whose type the schemas do name.
+// The schemas accept properties they do not name, an event block whose type they do
+// not name, and a stop reason they do not name, so a peer on a newer schema does not
+// lose a whole message to one thing this build has never heard of. Everything else is
+// enforced as before: required fields, types, patterns, the protocol const, and every
+// block whose type the schemas do name.
 type Validator struct {
 	schemas map[string]*jsonschema.Schema
 }
