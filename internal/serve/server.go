@@ -75,8 +75,8 @@ type Options struct {
 
 	// Concurrency is how many runs a channel may have executing at once; <= 0 uses
 	// the default. It is the default rather than the total: a channel that has an
-	// opinion of its own states it and gets that instead, so a process serving two
-	// channels at two runs each is running four.
+	// opinion of its own states it through ConcurrentChannel and gets that instead, so
+	// a process serving two channels at two runs each is running four.
 	//
 	// It is per channel because a channel whose work carries a lease claims that work
 	// before the run starts, and it can only size its claiming to a bound it owns. A
@@ -206,16 +206,6 @@ type Server struct {
 	log  *slog.Logger
 }
 
-// concurrentChannel is the optional interface a channel implements when it knows how
-// many of its runs may be in flight. A channel that claims work before a run starts
-// has to size that claiming to something, and only it knows what, so it states the
-// number rather than being told one and hoping the server agrees.
-//
-// A channel that does not implement it gets Options.Concurrency.
-type concurrentChannel interface {
-	Concurrency() int
-}
-
 // New validates the options and returns a Server. It starts nothing; Serve does the
 // work.
 //
@@ -243,7 +233,7 @@ func New(opts Options) (*Server, error) {
 // concurrencyFor is how many runs a channel may have at once: its own answer when it
 // has one, and the configured default when it does not.
 func (s *Server) concurrencyFor(ch Channel) int {
-	cc, ok := ch.(concurrentChannel)
+	cc, ok := ch.(ConcurrentChannel)
 	if !ok {
 		return s.opts.Concurrency
 	}
@@ -296,8 +286,9 @@ func (s *Server) Serve(ctx context.Context) error {
 // what makes it a drain rather than a stop.
 //
 // It blocks for as long as the work in flight does, so a caller draining from a signal
-// handler runs it on a goroutine of its own. A channel with nothing to drain is left
-// alone, and a server whose channels are all like that returns at once.
+// handler runs it on a goroutine of its own. A channel that does not implement
+// ReleasableChannel has nothing to drain and is left alone, and a server whose channels
+// are all like that returns at once.
 //
 // Signals are not this package's business. A library that called signal.Notify would
 // take SIGTERM from an embedder's supervisor with no way to decline, so the two verbs
@@ -314,9 +305,10 @@ func (s *Server) release(reason string) error {
 	var errs []error
 
 	for _, ch := range s.opts.Channels {
-		// A channel that can be released says so by having a Close; the interface stays
-		// at what every channel can honor and asks nothing of the ones that cannot.
-		closer, ok := ch.(interface{ Close() error })
+		// A channel that can be released says so by implementing ReleasableChannel; the
+		// interface every channel must honor stays at Channel and asks nothing of the
+		// ones holding nothing.
+		closer, ok := ch.(ReleasableChannel)
 		if !ok {
 			continue
 		}

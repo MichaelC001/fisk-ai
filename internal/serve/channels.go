@@ -75,10 +75,10 @@ func Channels(cfg *config.Config, builders []ChannelBuilder, opts BuildOptions) 
 }
 
 // closeChannels releases channels built before one of their siblings failed. A channel
-// with nothing to release does not implement the interface and is skipped.
+// with nothing to release does not implement ReleasableChannel and is skipped.
 func closeChannels(channels []Channel, log *slog.Logger) {
 	for _, ch := range channels {
-		closer, ok := ch.(interface{ Close() error })
+		closer, ok := ch.(ReleasableChannel)
 		if !ok {
 			continue
 		}
