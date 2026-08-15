@@ -595,8 +595,8 @@ type ExposeConfig struct {
 // AgentExpose configures the agent-facing exposure of this agent.
 type AgentExpose struct {
 	// AgentToAgent opts this agent in to serving its tools to other agents over
-	// a2a. It is the switch for the `fisk-ai a2a` command, which refuses to start
-	// unless it is true; an agent that says nothing serves nothing.
+	// a2a. It is the switch for the a2a surface of `fisk-ai serve`, which serves
+	// nothing unless it is true; an agent that says nothing serves nothing.
 	AgentToAgent bool `json:"agent_to_agent" yaml:"agent_to_agent"`
 	// MCP opts this agent in to serving its tools over MCP and carries the listen
 	// port. Its presence is the switch for the `fisk-ai mcp` command, which refuses
@@ -806,11 +806,11 @@ const (
 	// ModeMCP validates a config for serving tools over MCP: only the application
 	// is needed, since there is no prompt or model in that mode.
 	ModeMCP
-	// ModeServer validates a config for the a2a server: it serves the application's
-	// tools to remote agents over NATS, so it needs the application, a valid
-	// identity (it keys the discovery and tool subjects and the queue group), and a
-	// NATS context. Like MCP it uses neither a prompt nor a model.
-	ModeServer
+	// ModeServe validates a config for fisk-ai serve, which hosts the agent behind
+	// whichever surfaces the file enables. It checks what each of those surfaces
+	// needs and nothing else: a worker serving only tools runs no agent loop, so it
+	// needs neither a prompt nor a model, and one taking queued jobs needs both.
+	ModeServe
 )
 
 // NewConfig returns a Config with default budgets applied.
@@ -873,12 +873,10 @@ func Validate(cfg *Config) error {
 
 // ValidateForMode checks that the fields required by mode are set. application_path
 // is optional for ModeAgent and ModeMCP, which can run on built-in and remote tools
-// alone; ModeServer still requires it, since no built-in declares a2a exposure and
-// an application-less a2a server would therefore serve nothing. ModeMCP needs nothing more, since it
-// serves tools and uses neither a prompt nor a model. ModeServer needs a valid
-// identity and a NATS context but, like MCP, no prompt or model. ModeAgent
-// additionally needs a model, and a prompt and identity unless the agent is also
-// exposed over MCP.
+// alone. ModeMCP needs nothing more, since it serves tools and uses neither a prompt
+// nor a model. ModeServe checks each surface the file enables against what that
+// surface needs. ModeAgent additionally needs a model, and a prompt and identity
+// unless the agent is also exposed over MCP.
 func ValidateForMode(cfg *Config, mode Mode) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
@@ -905,19 +903,8 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 		return err
 	}
 
-	if mode == ModeServer {
-		// The a2a server can carry any tool kind, but no built-in declares a2a
-		// exposure today, so an application-less a2a server would start with an empty
-		// tool set. This is an earlier, clearer version of the empty-set error
-		// a2a_command already produces, not a correctness gate: when a built-in first
-		// opts into a2a, delete this and let the downstream check do the work.
-		if cfg.ApplicationPath == "" {
-			return fmt.Errorf("application_path is required for the a2a server: no built-in tool declares a2a exposure, so an a2a server with no wrapped application would have nothing to serve; set application_path to the fisk application whose commands you want to serve")
-		}
-		if cfg.NatsContext == "" {
-			return fmt.Errorf("nats_context is required for the a2a server")
-		}
-		return nil
+	if mode == ModeServe {
+		return validateServe(cfg)
 	}
 
 	if mode == ModeMCP {
@@ -952,6 +939,53 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 
 	if cfg.LLM.Model == "" {
 		return fmt.Errorf("llm.model is required")
+	}
+
+	return nil
+}
+
+// validateServe checks what the surfaces a serve configuration enables need, each
+// error naming the block that asked for the field.
+//
+// A file enabling no surface passes. The command answers that itself with a message
+// naming the blocks that fix it, and a validator getting there first would replace a
+// good message with a worse one.
+func validateServe(cfg *Config) error {
+	// A queued job runs the whole agent loop, so it needs everything a run at a
+	// terminal needs. The identity keys the claim a resumed run writes to its journal
+	// and the queue group the worker joins.
+	if cfg.JobsEnabled() {
+		if cfg.Identity == "" {
+			return fmt.Errorf("identity is required when expose.agent.jobs is set")
+		}
+		if cfg.SystemPrompt == "" {
+			return fmt.Errorf("prompt is required when expose.agent.jobs is set")
+		}
+		if cfg.LLM.Model == "" {
+			return fmt.Errorf("llm.model is required when expose.agent.jobs is set")
+		}
+		if cfg.NatsContext == "" && cfg.Expose.Agent.Jobs.NatsContext == "" {
+			return fmt.Errorf("nats_context is required when expose.agent.jobs is set, either at the top level or under the block")
+		}
+	}
+
+	// Serving tools engages no loop, so it needs neither a prompt nor a model. It does
+	// need something to serve: no built-in declares a2a exposure, so an
+	// application-less surface would start with an empty tool set. That is an earlier,
+	// clearer version of the empty-set error the surface itself produces; when a
+	// built-in first opts into a2a, delete this and let the downstream check do the
+	// work.
+	if cfg.A2AEnabled() {
+		if cfg.ApplicationPath == "" {
+			return fmt.Errorf("application_path is required when expose.agent.agent_to_agent is set: no built-in tool declares a2a exposure, so an agent with no wrapped application would have nothing to serve; set application_path to the fisk application whose commands you want to serve, or remove agent_to_agent")
+		}
+		if cfg.NatsContext == "" {
+			return fmt.Errorf("nats_context is required when expose.agent.agent_to_agent is set: it is the connection the tools are served on")
+		}
+	}
+
+	if len(cfg.RemoteTools) > 0 && cfg.NatsContext == "" {
+		return fmt.Errorf("nats_context is required when remote_tools is set")
 	}
 
 	return nil

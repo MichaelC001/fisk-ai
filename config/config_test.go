@@ -550,16 +550,16 @@ global_flags:
 			Expect(cfg).To(BeNil())
 		})
 
-		It("Should require application_path for the a2a server mode", func() {
+		It("Should require application_path for the a2a surface", func() {
 			cfg, err := ParseConfigForMode([]byte(`
 identity: agent1
 nats_context: ctx
 expose:
   agent:
     agent_to_agent: true
-`), ModeServer)
+`), ModeServe)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("application_path is required for the a2a server"))
+			Expect(err.Error()).To(ContainSubstring("application_path is required when expose.agent.agent_to_agent is set"))
 			Expect(cfg).To(BeNil())
 		})
 
@@ -836,7 +836,7 @@ nats_context: ngs
 expose:
   agent:
     agent_to_agent: true
-`), ModeServer)
+`), ModeServe)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.A2AEnabled()).To(BeTrue())
 			Expect(cfg.MCPEnabled()).To(BeFalse())
@@ -944,12 +944,13 @@ application_path: /usr/bin/nats
 			Expect(Validate(cfg)).To(Succeed())
 		})
 
-		It("Should fail in a2a server mode when application_path is missing", func() {
+		It("Should fail in serve mode when the a2a surface has no application_path", func() {
 			cfg.ApplicationPath = ""
 			cfg.NatsContext = "ctx"
-			err := ValidateForMode(cfg, ModeServer)
+			cfg.Expose = &ExposeConfig{Agent: &AgentExpose{AgentToAgent: true}}
+			err := ValidateForMode(cfg, ModeServe)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("application_path is required for the a2a server"))
+			Expect(err.Error()).To(ContainSubstring("application_path is required when expose.agent.agent_to_agent is set"))
 		})
 
 		It("Should fail when global_flags is set without application_path", func() {

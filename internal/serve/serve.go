@@ -88,6 +88,42 @@ type ReleasableChannel interface {
 	Close() error
 }
 
+// Service is a surface a server hosts that answers its callers directly instead of
+// producing work.
+//
+// A tool call served to a peer runs one tool and returns. No prompt is involved, no
+// run is journaled and nothing reaches the agent loop, so there is no Work to hand
+// over and no Outcome to report. That is the whole of the difference between the two
+// kinds of surface, and the reason a server takes both.
+//
+// A service answers from the moment it is built. Nothing here starts it: the
+// constructor that registers its handlers is what makes it live, which is why New
+// releases the services it was given when it refuses its options rather than leaving
+// them answering in a process that serves nothing.
+//
+// An implementation is called concurrently, by whatever transport it listens on and
+// while the server runs its channels, so its state must be safe for concurrent use.
+type Service interface {
+	// Name identifies the service in logs and on a program's startup banner. It
+	// should be stable and short.
+	Name() string
+
+	// Close stops the service answering.
+	//
+	// It is required rather than optional, which is where this departs from
+	// ReleasableChannel: a channel is pulled from and may hold nothing, while a
+	// service is called and therefore always holds the registration that lets it be
+	// called.
+	//
+	// Drain closes services as well as channels, so a service stops answering when a
+	// worker begins shutting down rather than when it finishes. A surface that shares
+	// a queue group with its siblings sheds to them that way.
+	//
+	// It must tolerate being called more than once. A program that drains on one
+	// signal and stops on the next releases every surface twice.
+	Close() error
+}
+
 // Work is one unit of work a channel supplies: what to do, and how to talk to
 // whoever asked for it.
 //

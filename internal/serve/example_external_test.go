@@ -62,7 +62,7 @@ func ExampleChannel() {
 }
 
 // ExampleNew shows the options a server needs before it will start: at least one
-// channel, and the configuration every run it hosts will use.
+// surface, and the configuration every run it hosts will use.
 func ExampleNew() {
 	_, err := serve.New(serve.Options{
 		Channels: []serve.Channel{&oneShotChannel{}},
@@ -71,6 +71,26 @@ func ExampleNew() {
 	fmt.Println(err)
 
 	// Output: a configuration is required
+}
+
+// exampleService is the whole of what a service must implement. It answers its callers
+// on whatever transport it registered with when it was built, so there is no method
+// here for the server to call: it hosts the service and releases it, and nothing else.
+type exampleService struct{}
+
+func (s *exampleService) Name() string { return "tools" }
+
+func (s *exampleService) Close() error { return nil }
+
+// ExampleService shows a surface that produces no work. A server hosting one and no
+// channel has nothing to pull, so Serve holds itself open until it is drained, stopped
+// or canceled, and Close is what stops the service answering.
+func ExampleService() {
+	var svc serve.Service = &exampleService{}
+
+	fmt.Println(svc.Name(), svc.Close())
+
+	// Output: tools <nil>
 }
 
 // ExampleConcurrentChannel shows a channel stating a bound of its own. A channel that

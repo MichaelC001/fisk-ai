@@ -12,7 +12,10 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // The banner is an operator's only view of what a worker resolved before the log takes
@@ -88,16 +91,86 @@ var _ = Describe("fiskServeCommand", func() {
 		})
 	})
 
+	Describe("a2a bounds", func() {
+		// The a2a surface paces and bounds its calls with numbers of its own, and
+		// reporting the configured value alone would print zero for a worker that in fact
+		// bounds every call at thirty seconds.
+		It("Should report what a served call will actually get", func() {
+			c := &fiskServeCommand{}
+
+			Expect(c.a2aToolTimeout(&config.Config{})).To(Equal(a2a.DefaultCallTimeout))
+			Expect(c.a2aConcurrency(&config.Config{})).To(Equal(a2a.DefaultConcurrency))
+
+			cfg := &config.Config{Expose: &config.ExposeConfig{Agent: &config.AgentExpose{
+				A2A: &config.ExposedA2AConfig{MaxConcurrentTools: 7, ToolTimeoutParsed: 90 * time.Second},
+			}}}
+
+			Expect(c.a2aToolTimeout(cfg)).To(Equal(90 * time.Second))
+			Expect(c.a2aConcurrency(cfg)).To(Equal(7))
+		})
+	})
+
+	Describe("banner", func() {
+		jobsConfig := func() *config.Config {
+			cfg := &config.Config{Identity: "worker", NatsContext: "production"}
+			cfg.LLM.Model = "claude-sonnet-5"
+			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{Jobs: &config.ExposedJobsConfig{}}}
+
+			return cfg
+		}
+
+		// Every one of these describes a run or the queue it comes off, and a worker
+		// serving only tools has neither. Left in, the queue context would name a queue
+		// that is not there and the tool directory one that served calls do not use.
+		It("Should print the loop's lines only when a channel is hosted", func() {
+			c := &fiskServeCommand{}
+			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
+
+			hosted := c.banner(jobsConfig(), []serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "asyncjobs")}, nil, res, &telemetry.Provider{}).String()
+			Expect(hosted).To(ContainSubstring("Model"))
+			Expect(hosted).To(ContainSubstring("Queue Context"))
+			Expect(hosted).To(ContainSubstring("Workers"))
+			Expect(hosted).To(ContainSubstring("asyncjobs"))
+
+			cfg := &config.Config{Identity: "worker", NatsContext: "production"}
+			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{AgentToAgent: true}}
+
+			toolsOnly := c.banner(cfg, nil, []serve.Service{agenttest.NewService(GinkgoTB(), "a2a")}, res, &telemetry.Provider{}).String()
+			Expect(toolsOnly).To(ContainSubstring("a2a"))
+			Expect(toolsOnly).To(ContainSubstring("Agent Context"))
+			Expect(toolsOnly).ToNot(ContainSubstring("Queue Context"))
+			Expect(toolsOnly).ToNot(ContainSubstring("Workers"))
+			Expect(toolsOnly).ToNot(ContainSubstring("Tool Directory"))
+		})
+
+		It("Should name every surface it hosts", func() {
+			c := &fiskServeCommand{}
+			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
+
+			cfg := jobsConfig()
+			cfg.Expose.Agent.AgentToAgent = true
+
+			out := c.banner(cfg,
+				[]serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "asyncjobs")},
+				[]serve.Service{agenttest.NewService(GinkgoTB(), "a2a")},
+				res, &telemetry.Provider{}).String()
+
+			Expect(out).To(ContainSubstring("asyncjobs"))
+			Expect(out).To(ContainSubstring("a2a"))
+		})
+	})
+
 	Describe("noSurfaceError", func() {
 		// A key name on its own is not enough to work out what goes under it, so the
-		// message carries the block that fixes it and the defaults it implies.
-		It("Should name the file and show the block that fixes it", func() {
+		// message carries the blocks that fix it and the defaults they imply.
+		It("Should name the file and show the blocks that fix it", func() {
 			c := &fiskServeCommand{configFile: "worker.yaml"}
 			err := c.noSurfaceError()
 
 			Expect(err).To(MatchError(ContainSubstring("worker.yaml")))
 			Expect(err).To(MatchError(ContainSubstring("expose:")))
 			Expect(err).To(MatchError(ContainSubstring("jobs: {}")))
+			Expect(err).To(MatchError(ContainSubstring("agent_to_agent: true")))
 			Expect(err).To(MatchError(ContainSubstring(config.DefaultJobsQueue)))
 			Expect(err).To(MatchError(ContainSubstring(config.DefaultJobsTaskType)))
 		})

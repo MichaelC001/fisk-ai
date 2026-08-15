@@ -18,7 +18,9 @@ import (
 	"github.com/choria-io/ui/columns"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/serve/a2asurface"
 	ajchannel "github.com/choria-io/fisk-ai/internal/serve/asyncjobs"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/util"
@@ -57,10 +59,15 @@ func registerServeCommand(app *fisk.Application) {
 }
 
 // serveAction hosts the agent behind whichever surfaces the configuration enables.
-// Today that is the queued-jobs intake: it takes a job off a work queue, runs the
-// request its payload carries, and stores the answer on the job's own task. Every run
-// is checkpointed under the task id, so a redelivery continues the run a previous
-// attempt started rather than paying for it again.
+//
+// The queued-jobs intake takes a job off a work queue, runs the request its payload
+// carries, and stores the answer on the job's own task. Every run is checkpointed under
+// the task id, so a redelivery continues the run a previous attempt started rather than
+// paying for it again.
+//
+// The a2a surface serves this agent's tools to other agents. A peer invokes a tool and
+// gets its result; no prompt is involved and the agent loop never runs, so it engages
+// none of the machinery below beyond the connection it answers on.
 //
 // Nothing here creates the storage it uses. The queue, the task store, the session
 // stream and the memory bucket are the operator's to provision, so a cluster nobody
@@ -84,7 +91,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		}
 	}
 
-	cfg, err := config.ParseConfigFile(c.configFile)
+	cfg, err := config.ParseConfigFileForMode(c.configFile, config.ModeServe)
 	if err != nil {
 		return err
 	}
@@ -94,7 +101,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	if !cfg.JobsEnabled() {
+	if !cfg.JobsEnabled() && !cfg.A2AEnabled() {
 		return c.noSurfaceError()
 	}
 
@@ -146,11 +153,13 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// An idle worker therefore exits on the first interrupt, having nothing to wait for.
 	var suspend atomic.Bool
 
-	channels, err := serve.Channels(cfg, []serve.ChannelBuilder{ajchannel.Builder()}, serve.BuildOptions{
+	channels, services, err := serve.Surfaces(cfg, serve.BuildOptions{
 		Workers:          c.workerOverride(),
 		SuspendRequested: suspend.Load,
+		Conns:            resources.Conns,
+		ConfigFile:       c.configFile,
 		Logger:           log,
-	})
+	}, []serve.ChannelBuilder{ajchannel.Builder()}, []serve.ServiceBuilder{a2asurface.Builder()})
 	if err != nil {
 		return err
 	}
@@ -159,6 +168,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// operator wrote once is the number claimed against and the number run with.
 	opts := serve.Options{
 		Channels:   channels,
+		Services:   services,
 		Config:     cfg,
 		ConfigFile: c.configFile,
 		// Where the commands run, so a worker started from somewhere else (a unit file,
@@ -180,10 +190,10 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stop := c.onInterrupt(srv, &suspend, cancel, log)
+	stop := c.onInterrupt(srv, &suspend, cancel, len(channels) > 0, log)
 	defer stop()
 
-	fmt.Fprintln(os.Stderr, c.banner(cfg, channels, resources, tel).String())
+	fmt.Fprintln(os.Stderr, c.banner(cfg, channels, services, resources, tel).String())
 
 	err = srv.Serve(ctx)
 
@@ -201,9 +211,17 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 // onInterrupt wires the two-stage shutdown and returns the function that unwires it.
 // The first interrupt drains, the second cancels; draining waits for the work in
 // flight, so it runs on a goroutine of its own rather than sitting between the two.
-func (c *fiskServeCommand) onInterrupt(srv *serve.Server, suspend *atomic.Bool, cancel context.CancelFunc, log *slog.Logger) func() {
+func (c *fiskServeCommand) onInterrupt(srv *serve.Server, suspend *atomic.Bool, cancel context.CancelFunc, runs bool, log *slog.Logger) func() {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	// What a drain means depends on what is hosted. A worker with no channel has no
+	// work to stop and nothing to resume: its surfaces stop answering and that is the
+	// whole of it.
+	drainNotice := "\ndraining: the surfaces stop answering. Interrupt again to stop now"
+	if runs {
+		drainNotice = "\ndraining: no new work is taken and running work stops where it can resume. Interrupt again to stop now"
+	}
 
 	go func() {
 		_, ok := <-signals
@@ -212,7 +230,7 @@ func (c *fiskServeCommand) onInterrupt(srv *serve.Server, suspend *atomic.Bool, 
 		}
 
 		suspend.Store(true)
-		fmt.Fprintln(os.Stderr, "\ndraining: no new work is taken and running work stops where it can resume. Interrupt again to stop now")
+		fmt.Fprintln(os.Stderr, drainNotice)
 
 		go func() {
 			drainErr := srv.Drain()
@@ -248,7 +266,7 @@ func (c *fiskServeCommand) workerOverride() int {
 	return c.workers
 }
 
-// noSurfaceError names what is missing and shows the block that fixes it. A key name
+// noSurfaceError names what is missing and shows the blocks that fix it. A key name
 // on its own is not enough to work out what goes under it.
 func (c *fiskServeCommand) noSurfaceError() error {
 	return fmt.Errorf(`fisk-ai serve needs a surface to host, and %q enables none. Add a work queue intake:
@@ -257,40 +275,101 @@ expose:
   agent:
     jobs: {}
 
-Every field under it defaults, so an empty block takes work from the %q queue as task type %q`,
+Every field under it defaults, so an empty block takes work from the %q queue as task type %q.
+
+To serve this agent's tools to other agents instead, or as well, set:
+
+expose:
+  agent:
+    agent_to_agent: true`,
 		c.configFile, config.DefaultJobsQueue, config.DefaultJobsTaskType)
 }
 
 // banner describes what the worker resolved, which is an operator's only chance to see
 // the settings that decide whether it works before the log takes over.
-func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, res *serve.Resources, tel *telemetry.Provider) *columns.Document {
+//
+// What it reports depends on which surfaces are hosted. The model, the queue and
+// everything about a run describe the agent loop, and a worker serving only tools runs
+// none, so printing them there would name a queue it does not consume and a tool
+// directory its served calls do not use.
+func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, services []serve.Service, res *serve.Resources, tel *telemetry.Provider) *columns.Document {
 	doc := columns.New()
 	doc.Headingf("Serving {bold}%s{/bold}/{bold}%s{/bold}", cfg.Identity, util.Version())
 
-	names := make([]string, len(channels))
-	for i, ch := range channels {
-		names[i] = ch.Name()
+	names := make([]string, 0, len(channels)+len(services))
+	for _, ch := range channels {
+		names = append(names, ch.Name())
+	}
+	for _, svc := range services {
+		names = append(names, svc.Name())
 	}
 	doc.Values("Surfaces", names)
 
-	doc.Item("Model", cfg.LLM.Model)
+	runs := len(channels) > 0
 
-	// Two contexts, because the queue and the agent's own stores may be on different
-	// clusters. Naming both is the only way an operator sees that the queue they meant
-	// and the store they meant are not where they thought.
-	doc.Item("Queue Context", cfg.JobsNatsContext())
-	if cfg.NatsContext != "" && cfg.NatsContext != cfg.JobsNatsContext() {
+	if runs {
+		doc.Item("Model", cfg.LLM.Model)
+
+		// Two contexts, because the queue and the agent's own stores may be on
+		// different clusters. Naming both is the only way an operator sees that the
+		// queue they meant and the store they meant are not where they thought.
+		doc.Item("Queue Context", cfg.JobsNatsContext())
+	}
+
+	// Named whenever it differs from the queue's, and whenever there is no queue to
+	// differ from, since it is the connection a2a serves on as well as the one the
+	// stores are reached over.
+	if cfg.NatsContext != "" && (!runs || cfg.NatsContext != cfg.JobsNatsContext()) {
 		doc.Item("Agent Context", cfg.NatsContext)
 	}
 
-	doc.Item("Sessions", c.sessionsDescription(res))
-	doc.Item("Knowledge", c.knowledgeDescription(cfg, res))
+	if runs {
+		doc.Item("Sessions", c.sessionsDescription(res))
+		doc.Item("Knowledge", c.knowledgeDescription(cfg, res))
+	}
+
 	doc.Item("Telemetry", c.telemetryDescription(tel))
-	doc.Item("Tool Directory", c.toolDirectory())
-	doc.Item("Tool Timeout", c.toolTimeout(cfg).String())
-	doc.Item("Workers", c.workersDescription(cfg))
+
+	if runs {
+		doc.Item("Tool Directory", c.toolDirectory())
+		doc.Item("Tool Timeout", c.toolTimeout(cfg).String())
+		doc.Item("Workers", c.workersDescription(cfg))
+	}
+
+	c.describeServices(doc, cfg, services)
 
 	return doc
+}
+
+// describeServices adds a section per service that has something to say about itself.
+//
+// The a2a surface bounds and paces its calls with numbers of its own, 30 seconds and 2
+// by default against the loop's five minutes and the worker count, so they are printed
+// under the surface they belong to rather than beside the loop's where an operator
+// would read one pair as the other.
+func (c *fiskServeCommand) describeServices(doc *columns.Document, cfg *config.Config, services []serve.Service) {
+	for _, svc := range services {
+		a2aSvc, ok := svc.(*a2asurface.Service)
+		if !ok {
+			continue
+		}
+
+		doc.Section("Serving tools over a2a", func(d *columns.Document) {
+			for _, line := range a2aSvc.Describe() {
+				d.Item(line.Label, line.Value)
+			}
+
+			d.Item("Concurrency", c.a2aConcurrency(cfg))
+			d.Item("Tool Timeout", c.a2aToolTimeout(cfg).String())
+			d.Values("Exposed", a2aSvc.ExposedTools())
+
+			withheld := a2aSvc.WithheldBuiltins()
+			if len(withheld) > 0 {
+				d.Values("Withheld", withheld)
+				d.Printf("Withheld built-in tools are enabled by this configuration but declare no a2a exposure.")
+			}
+		})
+	}
 }
 
 // sessionsDescription names the session store that was actually built, and the
@@ -365,6 +444,26 @@ func (c *fiskServeCommand) toolTimeout(cfg *config.Config) time.Duration {
 	}
 
 	return serve.DefaultToolTimeout
+}
+
+// a2aToolTimeout is the bound a served call will actually get, and a2aConcurrency how
+// many of them may run at once. Both report the a2a server's own default when the
+// configuration sets neither, since a banner saying a bound is zero when it is thirty
+// seconds is worse than saying nothing.
+func (c *fiskServeCommand) a2aToolTimeout(cfg *config.Config) time.Duration {
+	if cfg.A2AToolTimeout() > 0 {
+		return cfg.A2AToolTimeout()
+	}
+
+	return a2a.DefaultCallTimeout
+}
+
+func (c *fiskServeCommand) a2aConcurrency(cfg *config.Config) int {
+	if cfg.A2AMaxConcurrentTools() > 0 {
+		return cfg.A2AMaxConcurrentTools()
+	}
+
+	return a2a.DefaultConcurrency
 }
 
 // workersDescription reports the effective worker count and where it came from, since

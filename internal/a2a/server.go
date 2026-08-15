@@ -18,13 +18,17 @@ import (
 )
 
 const (
-	// defaultConcurrency bounds how many tool calls run at once on the server.
+	// DefaultConcurrency bounds how many tool calls run at once on the server.
 	// Like the MCP server, an a2a caller has no iteration budget, so without a cap
 	// an open path could spawn unbounded concurrent commands.
-	defaultConcurrency = 2
-	// defaultCallTimeout bounds a single served tool call against a command that
-	// never returns.
-	defaultCallTimeout = 30 * time.Second
+	//
+	// It is exported because a program reporting what its server will do has to be
+	// able to name the value nobody set, and a startup line saying the bound is zero
+	// when it is two is worse than saying nothing.
+	DefaultConcurrency = 2
+	// DefaultCallTimeout bounds a single served tool call against a command that
+	// never returns. It is exported for the same reason as DefaultConcurrency.
+	DefaultCallTimeout = 30 * time.Second
 )
 
 // toolNamePattern is the character set a tool name must match to be exposed. It
@@ -58,10 +62,10 @@ type ServerOptions struct {
 
 func (o *ServerOptions) applyDefaults() {
 	if o.Concurrency <= 0 {
-		o.Concurrency = defaultConcurrency
+		o.Concurrency = DefaultConcurrency
 	}
 	if o.CallTimeout <= 0 {
-		o.CallTimeout = defaultCallTimeout
+		o.CallTimeout = DefaultCallTimeout
 	}
 	if o.LogOutput == nil {
 		o.LogOutput = os.Stderr
