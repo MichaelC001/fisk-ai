@@ -3,7 +3,7 @@ title = "Telemetry"
 description = "Export traces and metrics with OpenTelemetry"
 toc = true
 weight = 27
-pre = "<b>4. </b>"
+pre = "<b>5. </b>"
 +++
 
 Fisk AI exports OpenTelemetry traces and metrics over OTLP/HTTP, following the GenAI semantic conventions. One run is
