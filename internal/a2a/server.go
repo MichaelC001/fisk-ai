@@ -279,7 +279,7 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 			log.Info("Tool call completed", "duration", duration)
 		}
 
-		s.respond(reply, s.toolReply(&tr.Header, resultToToolResult(result, err)))
+		s.publish(reply, s.toolReply(&tr.Header, resultToToolResult(result, err)))
 	}()
 }
 
@@ -311,6 +311,31 @@ func (s *Server) respond(reply Replier, msg any) {
 	}
 
 	err = reply.Respond(data)
+	if err != nil {
+		s.opts.Logger.Warn("Sending reply failed", "error", err)
+	}
+}
+
+// publish sends a reply produced on a worker goroutine, after the handler returned,
+// through the request's stream sink when the transport supplies one. It is the same
+// single message to the same inbox Respond targets, so no peer sees a difference,
+// and it keeps a worker off the reply state the transport's own serving goroutine
+// may be reading. A transport with no sink falls back to Respond, where the reply
+// path is whatever that binding makes it.
+func (s *Server) publish(reply Replier, msg any) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		s.opts.Logger.Warn("Marshaling reply failed", "error", err)
+		_ = reply.Error("500", "marshaling reply")
+		return
+	}
+
+	sink, ok := reply.(StreamReplier)
+	if ok {
+		err = sink.Publish(data, true)
+	} else {
+		err = reply.Respond(data)
+	}
 	if err != nil {
 		s.opts.Logger.Warn("Sending reply failed", "error", err)
 	}

@@ -39,14 +39,17 @@
         },
         "id": {
           "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
           "description": "Unique id of this message."
         },
         "request": {
           "type": "string",
-          "description": "Correlation tag of the originating request; every reply echoes it. On a request it equals id."
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "description": "Correlation tag of the originating request; every reply echoes it. On a request it equals id. A task binding may make it part of the address the process running that task listens on, so the character set is constrained."
         },
         "conversation": {
           "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
           "description": "Stable across multiple requests in a session."
         },
         "parent": {

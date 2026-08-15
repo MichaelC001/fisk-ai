@@ -20,6 +20,7 @@ import (
 // moves bytes.
 type Client struct {
 	transport Transport
+	stream    StreamingTransport
 	sender    string
 	validator *Validator
 }
@@ -27,14 +28,24 @@ type Client struct {
 // NewClient wraps a Transport as a Client. sender is this agent's identity, set as
 // the Header.Sender on outgoing requests. The Transport is borrowed: the caller
 // established it (and the Provider behind it) and closes them.
+//
+// Whether the binding can carry a reply set is decided here, once, so a client built
+// on a transport that cannot knows it before a task is sent rather than one request
+// at a time.
 func NewClient(transport Transport, sender string) (*Client, error) {
 	validator, err := NewValidator()
 	if err != nil {
 		return nil, fmt.Errorf("building message validator: %w", err)
 	}
 
-	return &Client{transport: transport, sender: sender, validator: validator}, nil
+	stream, _ := transport.(StreamingTransport)
+
+	return &Client{transport: transport, stream: stream, sender: sender, validator: validator}, nil
 }
+
+// CanStream reports whether the transport behind this client carries a reply set, so
+// a caller can tell that a task is not available here before building one.
+func (c *Client) CanStream() bool { return c.stream != nil }
 
 // Discover asks the named agent to describe itself and returns its agent card.
 // ErrAgentUnavailable is returned when no agent answers.
@@ -121,14 +132,9 @@ func remoteOutcome(reply *ToolReply, err error) telemetry.RemoteAgentOutcome {
 // id. A missing responder or an elapsed deadline is surfaced by the transport as
 // ErrAgentUnavailable; an unusable reply is ErrToolImport.
 func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req any, wantReply string) (any, error) {
-	data, err := json.Marshal(req)
+	data, err := c.marshalValid(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	err = c.validator.Validate(data)
-	if err != nil {
-		return nil, fmt.Errorf("invalid outgoing request: %w", err)
+		return nil, err
 	}
 
 	reply, err := c.transport.RoundTrip(ctx, agent, op, data)
@@ -146,6 +152,23 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 	}
 
 	return expectProtocol(reply, wantReply)
+}
+
+// marshalValid encodes an outgoing message and holds it to the same schema a
+// receiver will, so a message this agent could not have answered is refused here
+// rather than arriving as a peer's validation failure.
+func (c *Client) marshalValid(msg any) ([]byte, error) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	err = c.validator.Validate(data)
+	if err != nil {
+		return nil, fmt.Errorf("invalid outgoing request: %w", err)
+	}
+
+	return data, nil
 }
 
 // normalizeInput drops an empty or explicit-null tool input. The tool.request

@@ -19,6 +19,14 @@ var (
 	// ErrProtocolMismatch indicates a decoded message did not carry the protocol id
 	// the receiving path is contracted for, or a reply was not the expected type.
 	ErrProtocolMismatch = errors.New("unexpected message protocol")
+	// ErrMessageTooLarge indicates a message a sender assembled is over the size cap
+	// and was refused rather than sent. It is separate from the caps applied to what
+	// arrives, because a sender can act on it: an event carrying a large tool result
+	// can be shortened, where a reply that arrived oversized can only be dropped.
+	ErrMessageTooLarge = errors.New("message exceeds the size limit")
+	// ErrStreamUnsupported indicates a request asked for an event stream on a
+	// transport that carries a single reply.
+	ErrStreamUnsupported = errors.New("transport cannot carry an event stream")
 )
 
 // maxMessageSize bounds a single a2a body on the wire. It is enforced in the

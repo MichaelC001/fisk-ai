@@ -4,17 +4,23 @@
 
 // Package nats is the NATS transport binding for the fisk-ai a2a protocol. It
 // carries the request-reply messages the a2a engine uses to import and export
-// tools between agents: discovery (an agent describes itself) and direct tool
-// invocation. The streaming task flow is not part of this binding yet.
+// tools between agents, discovery (an agent describes itself) and direct tool
+// invocation, and the task flow, where one request produces a reply set the caller
+// reads as it arrives and a cancel reaches the one process running that task.
 //
 // Subjects are routing only. The engine never infers a message's meaning from the
 // subject it arrived on; every message is self-describing through its
 // Header.Protocol id and is dispatched on that. Each subject does, however, carry a
-// single, fixed message type: discovery and tool invocation ride separate subjects
-// so a NATS permission seam can grant discovery without granting tool execution.
+// single, fixed message type: discovery, tool invocation and tasks ride separate
+// subjects so a NATS permission grant can cover one without covering the others.
 // That separation is an artifact of this binding and is not relied on by the
 // protocol layer, which is why wrapping the same bodies in the Choria Protocol
 // later (with its own subject space) needs no change to the engine.
+//
+// A reply set is framed by a header this binding sets on the last message, since
+// every message of a set lands on the same inbox and only the body says which is
+// terminal. Nothing else here reads a body, apart from the request correlation tag a
+// reader needs to tell its own set from another's.
 //
 // The package registers itself as the "nats" a2a transport in init, so a program
 // links it in with a blank import.
@@ -48,6 +54,13 @@ const SubjectPrefix = "choria.fisk-ai"
 // dead or wedged remote from hanging a run indefinitely.
 const defaultRequestTimeout = 30 * time.Second
 
+// streamFinalHeader marks the last message of a reply set. Every message of a set
+// lands on the same reply inbox and only Header.Protocol separates a terminal one
+// from an event, which this binding must not read, so it marks its own framing and
+// the reader stops at the message that says it is last. Without it a reader has no
+// way to end and every task runs to the caller's deadline.
+const streamFinalHeader = "Fisk-AI-Stream-Final"
+
 // microServiceVersion is the SemVer stamped on the micro service registration.
 // This is service metadata only; the agent card carries the agent's real,
 // free-form version, which the engine builds. A fixed value keeps the transport
@@ -64,6 +77,23 @@ func DiscoverySubject(identity string) string {
 // invocation requests on. It carries only tool.request messages.
 func ToolSubject(identity string) string {
 	return fmt.Sprintf("%s.tool.%s", SubjectPrefix, identity)
+}
+
+// TaskSubject is the subject an agent with the given identity answers task requests
+// on. It carries only request messages. A subject of its own is what lets a NATS
+// permission grant tool calls without granting tasks.
+func TaskSubject(identity string) string {
+	return fmt.Sprintf("%s.task.%s", SubjectPrefix, identity)
+}
+
+// CancelSubject is the subject the one process running the named task listens on for
+// cancels addressed to it. The request id is part of the address, so NATS routes a
+// cancel to exactly the worker that can act on it and no sibling hears it at all.
+//
+// Both tokens must pass their own validity rule before this is used to subscribe or
+// to send; a token carrying a '.' or a '>' would shape a different subject.
+func CancelSubject(identity, request string) string {
+	return fmt.Sprintf("%s.cancel.%s.%s", SubjectPrefix, identity, request)
 }
 
 // options is the nats-specific transport options block. It has no fields yet; it
@@ -146,6 +176,11 @@ func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 		return err
 	}
 
+	name, err := endpointName(op)
+	if err != nil {
+		return err
+	}
+
 	svc, err := t.service()
 	if err != nil {
 		return err
@@ -156,12 +191,12 @@ func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 	// the subscriber, so subject permissions are the whole of the control here. The
 	// request's own Header.Sender is a claim in the body and stays there.
 	handler := micro.HandlerFunc(func(req micro.Request) {
-		h(context.Background(), a2a.Caller{}, req.Data(), replier{req: req})
+		h(context.Background(), a2a.Caller{}, req.Data(), replier{nc: t.nc, req: req, reply: req.Reply()})
 	})
 
-	err = svc.AddEndpoint(endpointName(op), handler, micro.WithEndpointSubject(subject))
+	err = svc.AddEndpoint(name, handler, micro.WithEndpointSubject(subject))
 	if err != nil {
-		return fmt.Errorf("registering %s endpoint: %w", endpointName(op), err)
+		return fmt.Errorf("registering %s endpoint: %w", name, err)
 	}
 
 	return nil
@@ -216,26 +251,45 @@ func (t *Transport) subject(identity string, op a2a.RouteHint) (string, error) {
 		return DiscoverySubject(identity), nil
 	case a2a.OpTool:
 		return ToolSubject(identity), nil
+	case a2a.OpTask:
+		return TaskSubject(identity), nil
 	default:
 		return "", fmt.Errorf("unknown a2a route hint %d", op)
 	}
 }
 
-// endpointName is the micro endpoint name for a route hint.
-func endpointName(op a2a.RouteHint) string {
-	if op == a2a.OpTool {
-		return "tool"
+// endpointName is the micro endpoint name for a route hint. It errors on a hint it
+// does not know rather than falling back, because micro does not refuse a duplicate
+// endpoint name: a forgotten case would register a second endpoint under an existing
+// name and corrupt what INFO and STATS report, silently.
+func endpointName(op a2a.RouteHint) (string, error) {
+	switch op {
+	case a2a.OpDiscovery:
+		return "discovery", nil
+	case a2a.OpTool:
+		return "tool", nil
+	case a2a.OpTask:
+		return "task", nil
+	default:
+		return "", fmt.Errorf("unknown a2a route hint %d", op)
 	}
-
-	return "discovery"
 }
 
-// replier adapts a micro.Request's reply side to a2a.Replier. It targets only the
-// reply inbox micro supplied for the request and stays valid after the handler
-// returns, so the engine's worker goroutine can answer.
+// replier adapts a micro.Request's reply side to a2a.Replier and a2a.StreamReplier.
+// It targets only the reply inbox micro supplied for the request and stays valid
+// after the handler returns, so the engine's worker goroutine can answer.
+//
+// Respond stays micro's, so a failure to send the one message it is contracted for
+// still reaches the service's NumErrors and LastError. Publish goes to the captured
+// subject with the borrowed connection, which is what keeps a reply produced after
+// the handler returned off the state micro's own dispatch is reading.
 type replier struct {
-	req micro.Request
+	nc    *nats.Conn
+	req   micro.Request
+	reply string
 }
+
+var _ a2a.StreamReplier = replier{}
 
 func (r replier) Respond(body []byte) error {
 	return r.req.Respond(body)
@@ -243,4 +297,60 @@ func (r replier) Respond(body []byte) error {
 
 func (r replier) Error(code, description string) error {
 	return r.req.Error(code, description, nil)
+}
+
+func (r replier) Publish(body []byte, final bool) error {
+	return publishReply(r.nc, r.reply, body, final)
+}
+
+// msgReplier is the reply side of a plain subscription, which the cancel watch is:
+// there is no micro request to answer through, so every reply is a publish to the
+// subject the message named.
+type msgReplier struct {
+	nc    *nats.Conn
+	reply string
+}
+
+var _ a2a.StreamReplier = msgReplier{}
+
+func (r msgReplier) Respond(body []byte) error {
+	return publishReply(r.nc, r.reply, body, false)
+}
+
+// Error answers with micro's own error headers and an empty body, so a caller reads
+// a refusal from a plain subscription the same way it reads one from an endpoint.
+func (r msgReplier) Error(code, description string) error {
+	if r.reply == "" {
+		return fmt.Errorf("the request carried no reply subject")
+	}
+
+	msg := nats.NewMsg(r.reply)
+	msg.Header.Set(micro.ErrorHeader, description)
+	msg.Header.Set(micro.ErrorCodeHeader, code)
+
+	return r.nc.PublishMsg(msg)
+}
+
+func (r msgReplier) Publish(body []byte, final bool) error {
+	return publishReply(r.nc, r.reply, body, final)
+}
+
+// publishReply sends one message of a reply set to the inbox the request supplied,
+// marking the last one so the reader knows where the set ends.
+//
+// A request that carried no reply subject cannot be streamed to, so this refuses
+// rather than publishing into an empty subject: a caller that published without an
+// inbox is told at the first message instead of receiving silence.
+func publishReply(nc *nats.Conn, reply string, body []byte, final bool) error {
+	if reply == "" {
+		return fmt.Errorf("the request carried no reply subject to stream to")
+	}
+
+	msg := nats.NewMsg(reply)
+	msg.Data = body
+	if final {
+		msg.Header.Set(streamFinalHeader, "true")
+	}
+
+	return nc.PublishMsg(msg)
 }

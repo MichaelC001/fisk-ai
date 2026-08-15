@@ -19,6 +19,10 @@ const (
 	OpDiscovery RouteHint = iota
 	// OpTool is the path an agent answers direct tool invocation requests on.
 	OpTool
+	// OpTask is the path an agent answers task requests on. One request there
+	// produces a reply set rather than a reply, so a binding carries it only when it
+	// is also a StreamingTransport.
+	OpTask
 )
 
 // Transport is the pluggable binding the a2a engine rides on. One implementation
@@ -41,6 +45,53 @@ type Transport interface {
 	Describe(identity string) []DescLine
 	// Close releases the transport's own resources (e.g. its service registration).
 	// It does not close the shared conns.Provider, which the caller owns.
+	Close() error
+}
+
+// StreamingTransport is a Transport that can carry a multi-message reply set in
+// both directions. A binding implements it when its substrate can do so; the server
+// and the client each assert for it once, when the transport is built, so whether
+// tasks can be served is known at startup rather than per request.
+//
+// Cancel is here rather than on an interface of its own because a task is what has a
+// cancel: a binding that can carry a reply set is the binding that can run a task
+// long enough for one to arrive.
+type StreamingTransport interface {
+	Transport
+
+	// Stream sends body and returns a Reader over the reply set it produces.
+	Stream(ctx context.Context, agent string, op RouteHint, body []byte) (Reader, error)
+
+	// WatchCancel routes cancels addressed to the named request to h, and only to
+	// this process, until the returned watch is released. It is the running task's
+	// own subscription rather than a path of the service, so it is opened when the
+	// task is accepted and released on every ending. request must be a
+	// ValidRequestID, since a binding may make it part of an address.
+	WatchCancel(request string, h Handler) (CancelWatch, error)
+
+	// SendCancel delivers body as a cancel for request on agent and returns the raw
+	// reply, which the engine validates. It reports ErrAgentUnavailable when nothing
+	// answers, which is how a caller tells a delivered cancel from a task that is not
+	// running there.
+	SendCancel(ctx context.Context, agent, request string, body []byte) ([]byte, error)
+}
+
+// CancelWatch is one running task's claim on the cancels addressed to it.
+type CancelWatch interface {
+	// Close stops routing cancels for that request. It is called on every ending of
+	// the task, so a second call is harmless.
+	Close() error
+}
+
+// Reader yields the raw messages of one reply set in arrival order. The engine
+// validates each body; the Reader decides only which messages belong to the set and
+// where it ends.
+type Reader interface {
+	// Next returns the next message body, or io.EOF once the terminal message has
+	// been returned.
+	Next(ctx context.Context) ([]byte, error)
+	// Close releases the reader. It tells the producer nothing: a run keeps
+	// publishing until it ends, and Cancel is how a caller says it has stopped caring.
 	Close() error
 }
 
@@ -85,6 +136,19 @@ type Replier interface {
 	// Error reports a transport-level handler failure with a code and description,
 	// distinct from an in-band application error carried in a normal reply body.
 	Error(code, description string) error
+}
+
+// StreamReplier is the reply side of a request on a StreamingTransport. Every
+// Replier such a transport supplies implements it, so a handler reaches it by type
+// assertion on the Replier it was given.
+type StreamReplier interface {
+	Replier
+
+	// Publish sends one message of the reply set, marking whether it is the last, to
+	// the same inbox Respond targets. It may be called many times. Respond stays what
+	// it was and carries the ack, so Replier's single-shot contract describes the one
+	// message it now sends.
+	Publish(body []byte, final bool) error
 }
 
 // DescLine is one {label, value} row describing how an identity is reached, for

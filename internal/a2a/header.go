@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// identityNamePattern is what the v1 schema allows an Identity's Name and Instance to
-// be. It is the schema's rule expressed in Go, so the two move together.
-var identityNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// schemaNamePattern is what the v1 schema allows an Identity's Name and Instance to
+// be, and what it allows the ID, Request and Conversation tags to be. It is the
+// schema's rule expressed in Go, so the two move together.
+var schemaNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // Identity names an agent. Name is the logical identity (it maps to the agent's
 // configured identity) and Instance optionally identifies one running instance
@@ -28,7 +29,18 @@ type Identity struct {
 // with it. Without that the mistake surfaces at the receiver as a message that failed
 // schema validation, which names neither the field nor the rule.
 func ValidIdentityName(name string) bool {
-	return identityNamePattern.MatchString(name)
+	return schemaNamePattern.MatchString(name)
+}
+
+// ValidRequestID reports whether id is one the v1 schema accepts for a message's ID,
+// Request or Conversation tag: letters, digits, '-' and '_', and not empty.
+//
+// It is the same character set as ValidIdentityName and is stated separately because
+// the two answer different questions. A request id correlates a reply set, and on the
+// task path it also becomes part of the address the process running that task
+// listens on, so a caller choosing those bytes freely would shape a subscription.
+func ValidRequestID(id string) bool {
+	return schemaNamePattern.MatchString(id)
 }
 
 // Header carries the framing fields shared by every message. It is embedded into
