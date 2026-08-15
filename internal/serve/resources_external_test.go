@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package serve
+package serve_test
 
 import (
 	"path/filepath"
@@ -13,6 +13,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
 var _ = Describe("NewResources", func() {
@@ -23,14 +24,14 @@ var _ = Describe("NewResources", func() {
 	})
 
 	It("Should require a configuration", func() {
-		_, err := NewResources(nil, ResourceOptions{})
+		_, err := serve.NewResources(nil, serve.ResourceOptions{})
 		Expect(err).To(MatchError(ContainSubstring("a configuration is required")))
 	})
 
 	// The file backends reach nothing, so a laptop deployment builds its whole resource
 	// set without a broker. Dialing here would make a working configuration fail.
 	It("Should build the provider and session store without dialing for a file-backed configuration", func() {
-		res, err := NewResources(cfg, ResourceOptions{ConfigFile: "agent.yaml"})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
@@ -41,7 +42,7 @@ var _ = Describe("NewResources", func() {
 	})
 
 	It("Should leave the memory store nil when memory is disabled", func() {
-		res, err := NewResources(cfg, ResourceOptions{})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
@@ -51,7 +52,7 @@ var _ = Describe("NewResources", func() {
 	It("Should build the memory store when memory is enabled", func() {
 		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
 
-		res, err := NewResources(cfg, ResourceOptions{StoreDir: GinkgoT().TempDir()})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{StoreDir: GinkgoT().TempDir()})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
@@ -59,7 +60,7 @@ var _ = Describe("NewResources", func() {
 	})
 
 	It("Should leave the knowledge store nil when knowledge is disabled", func() {
-		res, err := NewResources(cfg, ResourceOptions{})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
@@ -74,7 +75,7 @@ var _ = Describe("NewResources", func() {
 		dir := GinkgoT().TempDir()
 		cfg.Harness.RAG = &config.RAGConfig{Enabled: true, Directory: filepath.Join(dir, "knowledge")}
 
-		res, err := NewResources(cfg, ResourceOptions{})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
@@ -88,7 +89,7 @@ var _ = Describe("NewResources", func() {
 		cfg.Harness.Sessions = &config.SessionConfig{Backend: "jetstream"}
 		cfg.NatsContext = ""
 
-		_, err := NewResources(cfg, ResourceOptions{ConfigFile: "agent.yaml"})
+		_, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).To(MatchError(ContainSubstring(`nats_context is required in "agent.yaml"`)))
 	})
 
@@ -97,7 +98,7 @@ var _ = Describe("NewResources", func() {
 	It("Should release what it built when a later resource fails", func() {
 		cfg.Harness.Sessions = &config.SessionConfig{Backend: "nonesuch"}
 
-		res, err := NewResources(cfg, ResourceOptions{ConfigFile: "agent.yaml"})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).To(MatchError(ContainSubstring("building the session store")))
 		Expect(res).To(BeNil())
 	})
@@ -108,7 +109,7 @@ var _ = Describe("NewResources", func() {
 	It("Should leave a supplied connection open on Close", func() {
 		supplied := conns.New()
 
-		res, err := NewResources(cfg, ResourceOptions{Conns: supplied})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{Conns: supplied})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(res.Conns).To(BeIdenticalTo(supplied))
 
@@ -117,7 +118,7 @@ var _ = Describe("NewResources", func() {
 	})
 
 	It("Should be safe to Close twice", func() {
-		res, err := NewResources(cfg, ResourceOptions{})
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(res.Close()).To(Succeed())
@@ -130,14 +131,14 @@ var _ = Describe("Resources.ApplyTo", func() {
 		cfg := servedConfig()
 		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
 
-		res, err := NewResources(cfg, ResourceOptions{
+		res, err := serve.NewResources(cfg, serve.ResourceOptions{
 			Conns:    conns.New(),
 			StoreDir: GinkgoT().TempDir(),
 		})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
-		var opts Options
+		var opts serve.Options
 		res.ApplyTo(&opts)
 
 		Expect(opts.Provider).To(BeIdenticalTo(res.Provider))
@@ -153,21 +154,21 @@ var _ = Describe("Resources.ApplyTo", func() {
 	// It is a setter rather than a merge, which a caller keeping one of their own has to
 	// know: assigning after this keeps theirs, assigning before loses it.
 	It("Should overwrite a field the caller already set", func() {
-		res, err := NewResources(servedConfig(), ResourceOptions{})
+		res, err := serve.NewResources(servedConfig(), serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
-		opts := Options{SessionStore: nil}
+		opts := serve.Options{SessionStore: nil}
 		res.ApplyTo(&opts)
 
 		Expect(opts.SessionStore).To(BeIdenticalTo(res.SessionStore))
 	})
 
 	It("Should do nothing for a nil set or nil options", func() {
-		var res *Resources
-		Expect(func() { res.ApplyTo(&Options{}) }).ToNot(Panic())
+		var res *serve.Resources
+		Expect(func() { res.ApplyTo(&serve.Options{}) }).ToNot(Panic())
 
-		built, err := NewResources(servedConfig(), ResourceOptions{})
+		built, err := serve.NewResources(servedConfig(), serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(built.Close()).To(Succeed()) })
 
