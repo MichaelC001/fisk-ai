@@ -162,6 +162,10 @@ type runner struct {
 	// completingPending is true while that restored batch is running, so those tool
 	// spans can be marked as belonging to a resume.
 	completingPending bool
+	// deferred collects the calls this run left waiting on an answer, so Result can
+	// report them. A resume seeds it from the journal before running anything, so a
+	// run that inherits a deferral reports it as readily as one that made it.
+	deferred []DeferredCall
 	// suspendRequested reports that a graceful suspend was asked for; it is polled
 	// at the loop boundary, never mid-tool. Nil when suspension is not wired.
 	suspendRequested func() bool
@@ -538,6 +542,24 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	return reason, err
 }
 
+// terminalFor is the reason a run ends on err. An operator who was asked something
+// and did not answer suspends the run rather than failing it: nothing was decided,
+// the journal is intact, and the question can be put again on the next resume. Every
+// other error ends the run in error, including a context that expired anywhere but a
+// prompt.
+//
+// The distinction is what the operator sees. A suspended run prints where to resume
+// and exits zero; an errored one prints neither, so treating an interrupt at an
+// approval prompt as a failure would leave a resumable session with nothing naming
+// it.
+func terminalFor(err error) runstate.TerminalReason {
+	if errors.Is(err, toolkit.ErrPromptAborted) {
+		return runstate.ReasonSuspended
+	}
+
+	return runstate.ReasonError
+}
+
 // continuable reports whether a loop outcome is a boundary the operator can steer
 // from with a follow-up. A completed turn is the normal case; a turn that hit the
 // iteration cap is recoverable (interactive mode extends the budget on the next prompt),
@@ -658,9 +680,14 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 	// conversation reaches a coherent boundary. Its already-run tools are reused
 	// from the journal; only the unanswered ones execute.
 	if r.pending != nil {
-		err := r.completePending(ctx)
+		deferred, err := r.completePending(ctx)
 		if err != nil {
-			return runstate.ReasonError, err
+			return terminalFor(err), err
+		}
+		if deferred {
+			// Still waiting on somebody. Nothing was committed and no model call is
+			// made, so a resume before the answer arrives costs a load and two records.
+			return runstate.ReasonSuspended, nil
 		}
 		r.pending = nil
 	}
@@ -831,10 +858,23 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 		if len(toolUses) > 0 {
 			results := make([]llm.ContentBlock, 0, len(toolUses))
+			deferred := false
 			for _, use := range toolUses {
 				result, remote, herr := r.executeTool(ctx, use)
 				if herr != nil {
-					return runstate.ReasonError, herr
+					// A tool answering later is not a failure. The rest of the batch still
+					// runs, because those results are journaled and then never re-run, so
+					// running them now costs nothing a resume would not cost anyway.
+					was, jerr := r.journalDeferral(use, herr)
+					if jerr != nil {
+						return runstate.ReasonError, jerr
+					}
+					if was {
+						deferred = true
+						continue
+					}
+
+					return terminalFor(herr), herr
 				}
 				err = r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
 					ToolUseID: use.ID,
@@ -846,6 +886,15 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 				}
 				results = append(results, llm.ContentBlock{ToolResult: &result})
 			}
+
+			// The turn cannot be committed while a tool_use has no result, so nothing is
+			// appended to the conversation and the run ends at a resumable boundary. The
+			// journaled assistant turn and whichever results did land are what the next
+			// resume folds.
+			if deferred {
+				return runstate.ReasonSuspended, nil
+			}
+
 			r.messages = append(r.messages, llm.Message{Role: llm.RoleUser, Content: results})
 		}
 	}
@@ -856,7 +905,17 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 // completePending runs the not-yet-answered tools of a restored in-flight turn,
 // reusing the results already journaled for the answered ones, then commits the
 // assistant turn and its full result set to the conversation.
-func (r *runner) completePending(ctx context.Context) error {
+//
+// A call the journal marks deferred is skipped rather than re-run, which is the
+// whole difference between a call a crash interrupted and one somebody is still
+// working on. One of the calls that does run may defer in its turn, which is the
+// case the fold has never seen and which is journaled here exactly as the live batch
+// journals it, so a third delivery does not run it a third time.
+//
+// The first return reports that a deferral is still outstanding. Nothing is committed
+// then: a turn cannot be handed to the model while a tool_use has no result, so the
+// caller ends the run at a resumable boundary instead.
+func (r *runner) completePending(ctx context.Context) (bool, error) {
 	p := r.pending
 
 	// These tools run before the iteration loop, so their spans have no model call
@@ -872,6 +931,20 @@ func (r *runner) completePending(ctx context.Context) error {
 		results = append(results, llm.ContentBlock{ToolResult: &res})
 	}
 
+	// A deferral inherited from the journal is reported alongside anything this
+	// process defers, so Result names what the run is waiting on however many resumes
+	// ago the call was made.
+	open := p.OpenDeferrals()
+	for _, d := range open {
+		r.deferred = append(r.deferred, DeferredCall{
+			ToolUseID: d.ToolUseID,
+			ToolName:  d.ToolName,
+			Note:      d.Note,
+			Handle:    d.Handle,
+		})
+	}
+	deferred := len(open) > 0
+
 	for _, block := range p.Assistant.Content {
 		if block.ToolUse == nil {
 			continue
@@ -880,10 +953,22 @@ func (r *runner) completePending(ctx context.Context) error {
 		if p.Answered[id] {
 			continue
 		}
+		if _, waiting := p.Deferred[id]; waiting {
+			continue
+		}
 
 		result, remote, herr := r.executeTool(ctx, *block.ToolUse)
 		if herr != nil {
-			return herr
+			was, jerr := r.journalDeferral(*block.ToolUse, herr)
+			if jerr != nil {
+				return false, jerr
+			}
+			if was {
+				deferred = true
+				continue
+			}
+
+			return false, herr
 		}
 		err := r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
 			ToolUseID: id,
@@ -891,14 +976,52 @@ func (r *runner) completePending(ctx context.Context) error {
 			Remote:    remote,
 		}})
 		if err != nil {
-			return err
+			return false, err
 		}
 		results = append(results, llm.ContentBlock{ToolResult: &result})
 	}
 
+	if deferred {
+		return true, nil
+	}
+
 	r.messages = append(r.messages, p.Assistant, llm.Message{Role: llm.RoleUser, Content: results})
 
-	return nil
+	return false, nil
+}
+
+// journalDeferral records a tool call that will answer later and reports whether the
+// error was one. Any other error is left to the caller, which ends the run on it.
+//
+// The record is what a resume reads to leave the call alone: without it a tool_use
+// with no result is indistinguishable from one a crash interrupted, and the tool
+// would be dispatched again for work it has already started.
+func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) {
+	d, ok := toolkit.IsDeferred(err)
+	if !ok {
+		return false, nil
+	}
+
+	r.deferred = append(r.deferred, DeferredCall{
+		ToolUseID: use.ID,
+		ToolName:  use.Name,
+		Note:      d.Note,
+		Handle:    d.Handle,
+	})
+
+	jerr := r.emit(runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
+		ToolUseID: use.ID,
+		ToolName:  use.Name,
+		Note:      d.Note,
+		Handle:    d.Handle,
+	}})
+	if jerr != nil {
+		return true, jerr
+	}
+
+	r.events.Warn(Warning{Kind: WarnToolDeferred, Name: use.Name, Err: err})
+
+	return true, nil
 }
 
 // executeTool dispatches a single tool call. It looks the tool up once in the
@@ -908,8 +1031,9 @@ func (r *runner) completePending(ctx context.Context) error {
 // of any kind executes the same way. Around that pipeline it fires the PreToolUse and
 // PostToolUse hooks, which may deny the call, rewrite the tool and its arguments, or
 // replace the output. The second return reports whether the call was dispatched to a
-// remote agent, for the journal and stats; the third is non-nil only when a hook aborted
-// the run, which the caller surfaces on the ReasonError path.
+// remote agent, for the journal and stats; the third is non-nil when a hook aborted
+// the run, which the caller surfaces on the ReasonError path, and when the tool will
+// answer later, which the caller tells apart with toolkit.IsDeferred and suspends on.
 // The returns are named so the deferred span finish can read what the model was
 // actually told, from one place rather than from each of the eight ways this ends.
 func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result llm.ToolResultBlock, remote bool, herr error) {
@@ -1088,9 +1212,18 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		// a four-minute tool call look like a four-minute tool.
 		toolSpan.ConfirmRequested()
 		askedAt := time.Now()
-		allowed, reason := r.approveEffective(ctx, tool, effTool, effName, effInput, effInfo)
+		allowed, reason, aerr := r.approveEffective(ctx, tool, effTool, effName, effInput, effInfo)
 		outcome.ConfirmWait = time.Since(askedAt)
 		toolSpan.ConfirmAnswered()
+
+		// Nobody answered, so nothing is told to the model and nothing is journaled: a
+		// refusal recorded here would be replayed as the operator's own on every later
+		// resume. The run ends instead, leaving the call unanswered and the session
+		// resumable, so the question can be put again.
+		if aerr != nil {
+			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
+			return llm.ToolResultBlock{}, false, aerr
+		}
 
 		if !allowed {
 			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
@@ -1123,8 +1256,16 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// expired one there would end the span badly and abort the whole run on a hook that
 	// objects. Nothing after ExecuteUse uses execCtx.
 	execCtx, cancelExec := r.toolContext(ctx, effInfo)
-	result, exec := toolkit.ExecuteUse(effTool, execCtx, effUse, deps)
+	result, exec, deferErr := toolkit.ExecuteUse(effTool, execCtx, effUse, deps)
 	timedOut := cancelExec()
+
+	// A tool answering later has no result to trace, hand to a hook or journal, so the
+	// call ends here and the caller suspends the run. PostToolUse does not fire: there
+	// is nothing for it to observe and nothing for it to replace.
+	if deferErr != nil {
+		outcome.Outcome = telemetry.ToolOutcomeDeferred
+		return llm.ToolResultBlock{}, remote, deferErr
+	}
 
 	// A call the bound stopped is already an error result carrying whatever the tool
 	// said about its context ending. Replacing the text here, before PostToolUse, keeps
@@ -1281,7 +1422,7 @@ func confirmGated(tool toolkit.Tool, tags []string) bool {
 // tool's describe line and the original tool's gating tag, so an original gate is enforced
 // rather than silently dropped. The line is sanitized upstream because its argument values
 // come from the model and must not be able to spoof the operator's terminal.
-func (r *runner) approveEffective(ctx context.Context, orig, eff toolkit.Tool, effName string, effInput json.RawMessage, effInfo toolkit.CallInfo) (bool, string) {
+func (r *runner) approveEffective(ctx context.Context, orig, eff toolkit.Tool, effName string, effInput json.RawMessage, effInfo toolkit.CallInfo) (bool, string, error) {
 	commandPath := effName
 	display := effInfo.Display
 	var tag string

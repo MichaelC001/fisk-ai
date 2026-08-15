@@ -292,7 +292,7 @@ var _ = Describe("Built-in tools", func() {
 	})
 
 	Describe("ExecuteBuiltinUse", func() {
-		resultBlock := func(block llm.ToolResultBlock, _ *toolkit.CommandExec) (text string, isError bool) {
+		resultBlock := func(block llm.ToolResultBlock, _ *toolkit.CommandExec, _ error) (text string, isError bool) {
 			return block.Content, block.IsError
 		}
 

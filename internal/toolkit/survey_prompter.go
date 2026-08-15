@@ -6,21 +6,28 @@ package toolkit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/AlecAivazis/survey/v2/terminal"
 	"golang.org/x/term"
 )
 
 // surveyPrompter is the line-oriented Prompter used by the default CLI. It wraps
 // AlecAivazis/survey, rendering prompts and traces on stderr so stdout stays clean
 // for a piped final answer. survey turns an interrupt (Ctrl-C) or a closed input
-// into an error, which the caller treats as a denial; it cannot be canceled
-// mid-prompt through ctx, so the caller performs the authoritative context and
-// no-terminal deny checks before a prompt is ever shown, and a full-screen
-// Prompter (which can select on ctx) is used when one owns the screen.
+// into an error, which is reported as ErrPromptAborted so the caller does not record
+// it as a decline; it cannot be canceled mid-prompt through ctx, so the caller
+// performs the authoritative context and no-terminal deny checks before a prompt is
+// ever shown, and a full-screen Prompter (which can select on ctx) is used when one
+// owns the screen.
+//
+// survey holds the terminal in raw mode while a prompt is up, so an interrupt there
+// is delivered to survey rather than as a signal: the process never sees SIGINT and
+// this error is the only evidence the operator meant to stop.
 type surveyPrompter struct {
 	// out is where prompt headers and command traces are written: os.Stderr in a
 	// real run, redirected in tests to keep their output quiet. The interactive
@@ -64,7 +71,7 @@ func (p *surveyPrompter) ApproveCommand(_ context.Context, req GateRequest) (Con
 		survey.WithStdio(os.Stdin, os.Stderr, os.Stderr),
 	)
 	if err != nil {
-		return ConfirmNo, err
+		return ConfirmNo, promptError(err)
 	}
 
 	switch idx {
@@ -91,7 +98,7 @@ func (p *surveyPrompter) Confirm(_ context.Context, question string) (bool, erro
 		survey.WithStdio(os.Stdin, os.Stderr, os.Stderr),
 	)
 	if err != nil {
-		return false, err
+		return false, promptError(err)
 	}
 
 	return confirmed, nil
@@ -110,7 +117,7 @@ func (p *surveyPrompter) Select(_ context.Context, question string, options []st
 		survey.WithStdio(os.Stdin, os.Stderr, os.Stderr),
 	)
 	if err != nil {
-		return -1, err
+		return -1, promptError(err)
 	}
 
 	return idx, nil
@@ -128,10 +135,25 @@ func (p *surveyPrompter) Input(_ context.Context, question, def string) (string,
 		survey.WithStdio(os.Stdin, os.Stderr, os.Stderr),
 	)
 	if err != nil {
-		return "", err
+		return "", promptError(err)
 	}
 
 	return answer, nil
+}
+
+// promptError classifies what survey reported. An interrupt or a closed input is an
+// operator who did not answer, which the caller must not record as a decision; any
+// other failure is a prompt that could not be put, which is a denial like any other.
+func promptError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, terminal.InterruptErr) || errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: %w", ErrPromptAborted, err)
+	}
+
+	return err
 }
 
 // printGateHeader writes the confirm-gate approval header and command trace: a

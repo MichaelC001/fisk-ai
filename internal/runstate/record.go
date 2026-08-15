@@ -54,6 +54,11 @@ const (
 	// ToolResultProtocol records the result of a single tool invocation, written
 	// as the tool completes so a crash loses at most one tool.
 	ToolResultProtocol Protocol = protocolNamespace + ".tool_result"
+	// DeferredProtocol records that a tool call will be answered later. It is what
+	// separates a call nobody has finished from one a crash interrupted: the second
+	// is re-run on resume and the first must never be, because the tool already did
+	// whatever it started.
+	DeferredProtocol Protocol = protocolNamespace + ".deferred"
 	// TerminalProtocol records why the run ended (or that it was suspended).
 	TerminalProtocol Protocol = protocolNamespace + ".terminal"
 	// ClaimProtocol records that a worker took the run over on resume. It is
@@ -73,6 +78,7 @@ type Record struct {
 	Assistant  *AssistantRecord  `json:"assistant,omitempty"`
 	User       *UserRecord       `json:"user,omitempty"`
 	ToolResult *ToolResultRecord `json:"tool_result,omitempty"`
+	Deferred   *DeferredRecord   `json:"deferred,omitempty"`
 	Terminal   *TerminalRecord   `json:"terminal,omitempty"`
 	Claim      *ClaimRecord      `json:"claim,omitempty"`
 }
@@ -147,6 +153,20 @@ type ToolResultRecord struct {
 	ToolUseID string              `json:"tool_use_id"`
 	Result    llm.ToolResultBlock `json:"result"`
 	Remote    bool                `json:"remote,omitempty"`
+}
+
+// DeferredRecord marks a tool call whose answer arrives later, keyed by the
+// tool_use id it will eventually answer. A ToolResultRecord carrying the same id,
+// appended whenever the answer exists, is what completes it; the call itself is
+// never dispatched again.
+//
+// Note and Handle are the tool's own words and are display text: sanitize them
+// before rendering, as with anything read back from a journal.
+type DeferredRecord struct {
+	ToolUseID string `json:"tool_use_id"`
+	ToolName  string `json:"tool_name"`
+	Note      string `json:"note,omitempty"`
+	Handle    string `json:"handle,omitempty"`
 }
 
 // TerminalReason explains why a run stopped.

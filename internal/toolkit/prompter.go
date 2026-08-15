@@ -48,10 +48,14 @@ type GateRequest struct {
 //
 // A Prompter never owns the default-deny outcome. The caller decides what an
 // error, a missing terminal, or a canceled context mean, and every method here
-// reports an error the caller is free to treat as a denial. A Prompter is created
-// per run and used only from the single agent goroutine; like ConfirmGate it must
-// never be wired into the concurrent MCP path, which reaches its client through
-// elicitation instead.
+// reports an error the caller is free to treat as a denial. ErrPromptAborted is the
+// exception it must not: that error says the operator never answered, and recording
+// a decision from it would journal an answer nobody gave. Every implementation
+// reports its own interrupt, closed input and cancellation as that error.
+//
+// A Prompter is created per run and used only from the single agent goroutine; like
+// ConfirmGate it must never be wired into the concurrent MCP path, which reaches its
+// client through elicitation instead.
 type Prompter interface {
 	// CanPrompt reports whether an operator is reachable through this prompter, so
 	// every site that decides whether a run may ask a human (the confirm-gate
@@ -68,27 +72,43 @@ type Prompter interface {
 	// ApproveCommand renders the approval request for a confirm-gated command (the
 	// header naming the command and its gating tag, and the sanitized command line)
 	// and returns the operator's three-way choice. An interrupt, EOF, closed input,
-	// or canceled ctx is returned as an error; the caller treats any error as a
+	// or canceled ctx is returned as an error wrapping ErrPromptAborted, which the
+	// caller must not record as a decline; any other error the caller treats as a
 	// denial.
 	ApproveCommand(ctx context.Context, req GateRequest) (ConfirmChoice, error)
 
-	// Confirm puts a yes/no question to the operator and returns their answer. It
-	// returns false with an error on an interrupt, EOF, or canceled ctx.
+	// Confirm puts a yes/no question to the operator and returns their answer. An
+	// interrupt, EOF, or canceled ctx returns false with an error wrapping
+	// ErrPromptAborted.
 	Confirm(ctx context.Context, question string) (bool, error)
 
 	// Select asks the operator to choose one of options and returns its index, or a
-	// negative index with an error when no choice was made.
+	// negative index with an error when no choice was made. An interrupt, EOF, or
+	// canceled ctx returns an error wrapping ErrPromptAborted.
 	Select(ctx context.Context, question string, options []string) (int, error)
 
 	// Input asks the operator for a free-text value, pre-filled with def, and returns
-	// what they entered (which may be empty). It returns an error on an interrupt,
-	// EOF, or canceled ctx.
+	// what they entered (which may be empty). An interrupt, EOF, or canceled ctx
+	// returns an error wrapping ErrPromptAborted.
 	Input(ctx context.Context, question, def string) (string, error)
 }
 
 // errNoOperator is the denial every DefaultDenyPrompter method returns: there is
 // no operator on this path to answer.
 var errNoOperator = errors.New("no operator is available to answer on this path")
+
+// ErrPromptAborted reports that a question reached an operator who never answered
+// it: they interrupted, closed the input, or the context ended while the prompt was
+// up. It is not a decline, and a caller that records decisions must not record one.
+//
+// The distinction has to be made by the Prompter, because only it can tell an
+// operator choosing "no" from an operator walking away, and the difference is
+// durable: on a checkpointed run a decline is journaled and replayed on every later
+// resume, so treating an interrupt as one puts an answer in the record that nobody
+// gave.
+//
+// Wrap it with %w when the underlying cause is worth carrying.
+var ErrPromptAborted = errors.New("the operator did not answer the prompt")
 
 // denyPrompter is a Prompter with no operator behind it: every method fails closed,
 // returning both a denial value and an error. It backs the MCP builtin dispatch,

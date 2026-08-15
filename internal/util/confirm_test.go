@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	. "github.com/onsi/ginkgo/v2"
@@ -37,12 +38,13 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeTrue())
 			Expect(reason).To(BeEmpty())
 
 			// A second call prompts again because "once" is not remembered.
-			allowed, _ = gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm BILLING", "ai:confirm")
+			allowed, _, _ = gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm BILLING", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 			Expect(calls).To(Equal(2))
 		})
@@ -55,17 +57,17 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, _ := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, _, _ := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 
 			// A later call with different arguments is allowed without re-prompting; the
 			// gate emits no trace of its own, the caller renders the command's line.
-			allowed, _ = gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm EVERYTHING", "ai:confirm")
+			allowed, _, _ = gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm EVERYTHING", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 			Expect(calls).To(Equal(1))
 
 			// A different tool is still asked about.
-			allowed, _ = gate.Approve(context.Background(), "server_run", "server run", "server run", "ai:confirm")
+			allowed, _, _ = gate.Approve(context.Background(), "server_run", "server run", "server run", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 			Expect(calls).To(Equal(2))
 		})
@@ -74,7 +76,7 @@ var _ = Describe("ConfirmGate", func() {
 			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) { return toolkit.ConfirmOnce, nil }
 			gate := newGate()
 
-			allowed, _ := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "impact:rw")
+			allowed, _, _ := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "impact:rw")
 			Expect(allowed).To(BeTrue())
 			Expect(prompter.lastGateReq).To(Equal(toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS", Tag: "impact:rw"}))
 		})
@@ -87,7 +89,8 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(ContainSubstring("declined"))
 			Expect(reason).To(ContainSubstring("do not retry"))
@@ -97,15 +100,33 @@ var _ = Describe("ConfirmGate", func() {
 			Expect(calls).To(Equal(2))
 		})
 
-		It("Should deny by default when the prompt errors (interrupt, EOF)", func() {
+		// A prompt that could not be rendered is not an operator who walked away, so it
+		// stays a denial: the command is gated and nothing established that it may run.
+		It("Should deny by default when the prompt fails for any other reason", func() {
 			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
-				return toolkit.ConfirmNo, errors.New("interrupt")
+				return toolkit.ConfirmNo, errors.New("the terminal went away")
 			}
 			gate := newGate()
 
-			allowed, reason := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
-			Expect(reason).To(ContainSubstring("interrupt"))
+			Expect(reason).To(ContainSubstring("the terminal went away"))
+		})
+
+		// The operator was asked and did not answer. Recording a denial here would put a
+		// decision in the journal that nobody made, and every later resume would replay
+		// it as theirs.
+		It("Should report an aborted prompt as an error rather than a denial", func() {
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+				return toolkit.ConfirmNo, fmt.Errorf("%w: interrupt", toolkit.ErrPromptAborted)
+			}
+			gate := newGate()
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(allowed).To(BeFalse())
+			Expect(reason).To(BeEmpty())
 		})
 
 		It("Should deny with the no-terminal reason when no operator is reachable", func() {
@@ -116,12 +137,15 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(Equal(NoTerminalReason))
 		})
 
-		It("Should deny without prompting when the run was already canceled", func() {
+		// A run whose context is over is not asked and is not answered either. It used to
+		// manufacture a refusal, which on a checkpointed run outlived the process.
+		It("Should report an already-canceled run as an error without prompting", func() {
 			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
 				Fail("must not prompt once the run is canceled")
 				return toolkit.ConfirmNo, nil
@@ -131,10 +155,11 @@ var _ = Describe("ConfirmGate", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 
-			allowed, reason := gate.Approve(ctx, "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(ctx, "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(aerr).To(MatchError(context.Canceled))
 			Expect(allowed).To(BeFalse())
-			Expect(reason).To(ContainSubstring("before the operator could approve"))
-			Expect(reason).To(ContainSubstring("do not retry"))
+			Expect(reason).To(BeEmpty())
 		})
 	})
 

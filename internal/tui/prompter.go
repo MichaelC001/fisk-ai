@@ -24,12 +24,20 @@ const promptPage = "prompt"
 // answering (Esc). The caller treats it, like any prompt error, as a denial.
 var errPromptCanceled = errors.New("the operator dismissed the prompt")
 
+// aborted reports a prompt the context ended under as toolkit.ErrPromptAborted. The
+// operator was asked and never answered, so the caller must not record a decision
+// from it; on a checkpointed run one would be replayed on every later resume.
+func aborted(ctx context.Context) error {
+	return fmt.Errorf("%w: %w", toolkit.ErrPromptAborted, ctx.Err())
+}
+
 // tcellPrompter implements util.Prompter with native tview widgets, driven from the
 // run goroutine. Each method marshals its widget onto the tview loop and blocks
 // until the operator answers or ctx is canceled; the caller (the confirm gate and
-// the human-in-the-loop builtins) treats any error or a cancel as an authoritative
-// denial, so a Ctrl-C or a torn-down loop resolves to deny. It never owns the deny
-// default itself.
+// the human-in-the-loop builtins) treats an answer of no, and any error other than
+// toolkit.ErrPromptAborted, as an authoritative denial. A torn-down loop or a
+// canceled run reports the abort instead, since nobody answered. It never owns the
+// deny default itself.
 type tcellPrompter struct {
 	live *Live
 }
@@ -71,7 +79,7 @@ func (p *tcellPrompter) ApproveCommand(ctx context.Context, req toolkit.GateRequ
 	select {
 	case <-ctx.Done():
 		p.dismiss()
-		return toolkit.ConfirmNo, ctx.Err()
+		return toolkit.ConfirmNo, aborted(ctx)
 	case r := <-result:
 		return r, nil
 	}
@@ -91,7 +99,7 @@ func (p *tcellPrompter) Confirm(ctx context.Context, question string) (bool, err
 	select {
 	case <-ctx.Done():
 		p.dismiss()
-		return false, ctx.Err()
+		return false, aborted(ctx)
 	case r := <-result:
 		return r, nil
 	}
@@ -129,7 +137,7 @@ func (p *tcellPrompter) Select(ctx context.Context, question string, options []s
 	select {
 	case <-ctx.Done():
 		p.dismiss()
-		return -1, ctx.Err()
+		return -1, aborted(ctx)
 	case r := <-result:
 		return r.idx, r.err
 	}
@@ -164,7 +172,7 @@ func (p *tcellPrompter) Input(ctx context.Context, question, def string) (string
 	select {
 	case <-ctx.Done():
 		p.dismiss()
-		return "", ctx.Err()
+		return "", aborted(ctx)
 	case r := <-result:
 		return r.text, r.err
 	}

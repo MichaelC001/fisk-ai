@@ -255,4 +255,13 @@ type Outcome struct {
 	// Crashed reports a bug in this software rather than an outcome of the work, so a
 	// caller can escalate it instead of recording it as a result.
 	Crashed bool
+
+	// Deferred lists the tool calls the run is waiting on an answer for. It is what
+	// separates a suspend nobody asked for from a drain: a channel draining sees a
+	// suspend with nothing here, while a run that called a tool answering later
+	// suspends naming the call.
+	//
+	// The work is not finished and not failed. It resumes under the same session once
+	// every one of these is answered, which is what a channel decides how to arrange.
+	Deferred []agent.DeferredCall
 }

@@ -159,6 +159,12 @@ const (
 	// attached, nothing else: a bound the operator never set firing silently is the
 	// case this exists for.
 	WarnToolTimeout
+	// WarnToolDeferred: tool Name will answer later, with Err carrying what it is
+	// waiting on. The call produced no result, the run ends at a resumable boundary,
+	// and the tool is never dispatched for it again. It is an advisory because a run
+	// ending with work outstanding looks like a run that stopped early, and only this
+	// says which tool is holding it.
+	WarnToolDeferred
 )
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;

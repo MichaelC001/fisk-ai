@@ -498,6 +498,13 @@ func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeou
 		// is denied rather than left waiting.
 		result, err := t.Execute(callCtx, req.Params.Arguments, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
 		if err != nil {
+			// A tool answering later has nowhere to answer to on this path: there is no
+			// session to resume and the client is waiting on this reply. It is refused as
+			// a call this surface cannot carry rather than reported as a tool failure.
+			if errors.Is(err, toolkit.ErrDeferredResult) {
+				return errorResult(toolkit.ServedDeferralRefusal), nil
+			}
+
 			return errorResult(err.Error()), nil
 		}
 		if result == nil {

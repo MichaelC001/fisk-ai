@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/session.deferred.json",
+  "title": "fisk-ai session store v1 deferred call record",
+  "allOf": [
+    {
+      "$ref": "session.common.json#/$defs/envelope"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.session.deferred"
+    },
+    "deferred": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_use_id",
+        "tool_name"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "description": "The tool_use id whose answer arrives later. A tool_result record carrying the same id later answers it; until one does, the call is never re-run."
+        },
+        "tool_name": {
+          "type": "string",
+          "description": "The tool that deferred, as it was dispatched."
+        },
+        "note": {
+          "type": "string",
+          "description": "What the call is waiting on, in the tool's own words. Display text: sanitize before rendering."
+        },
+        "handle": {
+          "type": "string",
+          "description": "The tool's own identifier for the outstanding work. Never interpreted here."
+        }
+      }
+    }
+  },
+  "required": [
+    "deferred"
+  ],
+  "unevaluatedProperties": false
+}
