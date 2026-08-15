@@ -201,7 +201,7 @@ func (s *Server) selectExposed(tools []toolkit.Tool) []toolkit.Tool {
 
 // handleDiscovery answers a discovery request with the agent card. The discovery
 // path carries only discovery requests, so any other message is rejected.
-func (s *Server) handleDiscovery(_ context.Context, body []byte, reply Replier) {
+func (s *Server) handleDiscovery(_ context.Context, _ Caller, body []byte, reply Replier) {
 	msg, err := s.inbound(body, DiscoveryRequestProtocol)
 	if err != nil {
 		_ = reply.Error("400", err.Error())
@@ -222,7 +222,7 @@ func (s *Server) handleDiscovery(_ context.Context, body []byte, reply Replier) 
 // rejected. The concurrency semaphore is acquired synchronously here, on the
 // transport's serving goroutine, before a worker is spawned, so intake is back-
 // pressured: a full server does not enter another request until a slot frees.
-func (s *Server) handleTool(ctx context.Context, body []byte, reply Replier) {
+func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, reply Replier) {
 	msg, err := s.inbound(body, ToolRequestProtocol)
 	if err != nil {
 		_ = reply.Error("400", err.Error())
@@ -230,11 +230,16 @@ func (s *Server) handleTool(ctx context.Context, body []byte, reply Replier) {
 	}
 	tr := msg.(*ToolRequest)
 
+	// Two names for who is calling, kept apart. The sender is the body's own claim and
+	// is worth logging because it is what a caller meant to say; the caller is what the
+	// transport will vouch for. Merging them would let an unverified claim be read as an
+	// established identity.
 	sender := senderName(&tr.Header)
+	log := s.opts.Logger.With("sender", sender, "caller", caller.Name, "caller_verified", caller.Verified)
 
 	tool, ok := s.byName[tr.Name]
 	if !ok {
-		s.opts.Logger.Warn("Rejecting unknown tool call", "tool", tr.Name, "sender", sender)
+		log.Warn("Rejecting unknown tool call", "tool", tr.Name)
 		s.respond(reply, s.toolReply(&tr.Header, &ToolResult{IsError: true, Output: fmt.Sprintf("tool %q is not available", tr.Name)}))
 		return
 	}
@@ -249,7 +254,7 @@ func (s *Server) handleTool(ctx context.Context, body []byte, reply Replier) {
 		runCtx, cancel := context.WithTimeout(ctx, s.opts.CallTimeout)
 		defer cancel()
 
-		log := s.opts.Logger.With("tool", tool.Name(), "command", commandOf(tool), "sender", sender)
+		log := log.With("tool", tool.Name(), "command", commandOf(tool))
 		log.Info("Running tool call")
 
 		start := time.Now()

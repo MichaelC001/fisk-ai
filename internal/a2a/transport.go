@@ -44,11 +44,34 @@ type Transport interface {
 	Close() error
 }
 
+// Caller is what the transport knows about who sent a request.
+//
+// It is supplied by the transport rather than read out of the message body, for the
+// same reason Replier targets only the inbox the transport supplied: a body can claim
+// any sender, so a claim in one is evidence of nothing. Header.Sender remains that
+// claim and is not merged into this.
+//
+// It is per request, not per transport. A binding that can authenticate some requests
+// and not others reports each one as it is, so a transport is not one or the other for
+// its lifetime.
+type Caller struct {
+	// Name is the transport's term for the principal, empty when it knows none.
+	Name string
+
+	// Verified reports whether the transport authenticated Name. A false value means
+	// the transport is vouching for nothing, whether or not Name is set, so anything
+	// deciding on identity must read this and not Name alone.
+	Verified bool
+}
+
 // Handler processes one inbound message body and answers through reply. It is
 // invoked synchronously on the transport's serving goroutine; the engine may
 // acquire a semaphore and spawn a worker inside it. reply stays valid for use from
 // that worker after Handler returns.
-type Handler func(ctx context.Context, body []byte, reply Replier)
+//
+// caller is what the transport knows about who sent this request, which for a binding
+// that authenticates nobody is the zero value.
+type Handler func(ctx context.Context, caller Caller, body []byte, reply Replier)
 
 // Replier is the reply side of one inbound request, the transport-neutral form of
 // a NATS micro request's reply. It targets only the reply inbox the transport
