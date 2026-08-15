@@ -107,6 +107,38 @@ var _ = Describe("A2A", func() {
 		})
 	})
 
+	Describe("ValidRequestID", func() {
+		It("Should accept what the schema accepts and refuse what it does not", func() {
+			for _, id := range []string{"2abc", "task-1", "task_1", NewID()} {
+				Expect(ValidRequestID(id)).To(BeTrue(), id)
+			}
+
+			for _, id := range []string{"", "task.other", "task>", "task*", "task with space", "sl/ash"} {
+				Expect(ValidRequestID(id)).To(BeFalse(), id)
+			}
+		})
+
+		// The task path makes the request id part of the address the process running
+		// that task listens on, so a caller choosing those bytes freely would shape a
+		// subscription. The Go rule and the schema's have to be the same rule.
+		It("Should agree with the schema it states", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, id := range []string{"task.other", "task>", "with space"} {
+				req := NewRequest("go")
+				fillHeader(&req.Header)
+				req.Request = id
+
+				body, err := json.Marshal(req)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(ValidRequestID(id)).To(BeFalse(), id)
+				Expect(validator.Validate(body)).ToNot(Succeed(), id)
+			}
+		})
+	})
+
 	Describe("DecodeTerminal", func() {
 		encode := func(msg any) []byte {
 			GinkgoHelper()

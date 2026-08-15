@@ -1,0 +1,151 @@
+//  Copyright (c) 2026, R.I. Pienaar and the Choria Project contributors
+//
+//  SPDX-License-Identifier: Apache-2.0
+
+package a2a
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// ReplyStream numbers and sends the messages of one task's reply set.
+//
+// It stamps Header.Sequence gap-free and monotonic from 1 across everything it
+// sends, the ack included. The ack is sequence 1 and goes through Respond, and every
+// message after it is published, so Replier's single-shot contract describes the one
+// message it still sends. The numbering is per direction and per reply set: a cancel
+// traveling the other way carries the same Header.Request and is stamped by the
+// request path, which sets 0.
+//
+// The ack is sent at admission, on the intake goroutine, and the stream is then
+// handed to the run, so it is owned by one goroutine at a time and is not safe for
+// concurrent use. It is not used after a terminal message.
+type ReplyStream struct {
+	reply  StreamReplier
+	req    Header
+	sender string
+	seq    uint64
+}
+
+// NewReplyStream numbers a reply set answering req, sending through reply and
+// stamping sender as the message sender. It is a value the caller owns rather than
+// registered anywhere, so a run that ends takes its stream with it.
+func NewReplyStream(reply StreamReplier, req *Header, sender string) *ReplyStream {
+	return &ReplyStream{reply: reply, req: *req, sender: sender}
+}
+
+// Ack accepts or refuses the request and carries the reason a refusal gives. It is
+// sequence 1 and is sent synchronously, while the handler is still on the serving
+// goroutine, so the accept is what the transport measures and no reply is written
+// from a worker the transport may be reading. It is refused after anything else has
+// been sent, since it is the single message Respond is contracted for.
+func (s *ReplyStream) Ack(accepted bool, reason string) error {
+	if s.seq != 0 {
+		return fmt.Errorf("%w: the ack is the first message of a reply set", ErrInvalidMessage)
+	}
+
+	ack := NewAck(accepted)
+	ack.Reason = reason
+
+	data, err := s.encode(&ack.Header, ack)
+	if err != nil {
+		return err
+	}
+
+	err = s.reply.Respond(data)
+	if err != nil {
+		return fmt.Errorf("sending the ack: %w", err)
+	}
+
+	s.seq++
+
+	return nil
+}
+
+// Event publishes one content block of the run as it is produced.
+func (s *ReplyStream) Event(block Block) error {
+	ev := NewEvent(block)
+
+	return s.send(&ev.Header, ev, false)
+}
+
+// Result publishes the terminal success message and ends the set. A failure to send
+// it is returned rather than logged, since a caller left without a terminal message
+// holds a stream that never ends.
+func (s *ReplyStream) Result(res *Result) error {
+	res.Protocol = ResultProtocol
+
+	return s.send(&res.Header, res, true)
+}
+
+// Error publishes the terminal failure message and ends the set. It carries the same
+// obligation as Result: the caller is waiting for one of the two.
+func (s *ReplyStream) Error(msg *ErrorMessage) error {
+	msg.Protocol = ErrorProtocol
+
+	return s.send(&msg.Header, msg, true)
+}
+
+// Sequence reports the number stamped on the last message sent, which is how many
+// messages of the set have gone out. It is 0 before the ack.
+func (s *ReplyStream) Sequence() uint64 { return s.seq }
+
+// send stamps, encodes and publishes one message, advancing the counter only once it
+// has gone out. A message the sink refused was never sent, so reusing its number
+// keeps the set gap-free and stops a gap describing a message the sender chose not
+// to send.
+func (s *ReplyStream) send(hdr *Header, msg any, final bool) error {
+	data, err := s.encode(hdr, msg)
+	if err != nil {
+		return err
+	}
+
+	err = s.reply.Publish(data, final)
+	if err != nil {
+		return fmt.Errorf("publishing %s: %w", hdr.Protocol, err)
+	}
+
+	s.seq++
+
+	return nil
+}
+
+// encode stamps a message header so it echoes the request, numbers it with the
+// sequence it would occupy, and marshals it. The encoded body is checked against the
+// size cap before it reaches the sink, since an event carrying a large tool result
+// can exceed both it and the transport's own payload limit.
+func (s *ReplyStream) encode(hdr *Header, msg any) ([]byte, error) {
+	stampReply(hdr, &s.req, s.sender)
+	hdr.Sequence = s.seq + 1
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling %s: %w", hdr.Protocol, err)
+	}
+
+	if len(data) > maxMessageSize {
+		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit", ErrMessageTooLarge, hdr.Protocol, len(data), maxMessageSize)
+	}
+
+	return data, nil
+}
+
+// AcceptStream reports whether a task's events may be streamed to its caller over
+// transport, and refuses a request asking for what the transport cannot carry.
+//
+// The refusal is narrow because Request.Stream is a *bool: a request that explicitly
+// asks to stream is refused, and one that says nothing is answered terminal-only,
+// which is what a caller who did not ask for a stream gets anyway.
+func AcceptStream(transport Transport, req *Request) (bool, error) {
+	_, streams := transport.(StreamingTransport)
+
+	switch {
+	case streams:
+		return req.WantsStream(), nil
+	case req.Stream != nil && *req.Stream:
+		return false, fmt.Errorf("%w: this transport carries a single reply, not a reply set", ErrStreamUnsupported)
+	default:
+		return false, nil
+	}
+}
