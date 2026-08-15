@@ -27,6 +27,11 @@ const maxTraceRunes = 500
 // result, so the model sees every tool kind the same way. tc gives the handler the
 // per-run operator Prompter and working directory; a handler that needs neither
 // ignores it.
+//
+// A handler whose answer arrives later returns an empty string and the error from
+// toolkit.DeferResult, which is the one error that is not a failure: the run ends at
+// a resumable boundary and the result is supplied to its journal when it exists. The
+// handler is never called again for that call.
 type Handler func(ctx context.Context, input json.RawMessage, tc *CallContext) (string, error)
 
 // ConfirmSpec gates a function tool behind operator confirmation. Its presence on a

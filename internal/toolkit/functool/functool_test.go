@@ -207,7 +207,7 @@ var _ = Describe("ExecuteUse", func() {
 
 	It("Should return a normal result carrying the handler output", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler})
-		res, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
+		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
 		Expect(res.ToolUseID).To(Equal("u1"))
 		Expect(res.Content).To(Equal("ok"))
 		Expect(res.IsError).To(BeFalse())
@@ -218,7 +218,7 @@ var _ = Describe("ExecuteUse", func() {
 			return "", errors.New("boom")
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
+		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
 		Expect(res.Content).To(Equal("boom"))
 		Expect(res.IsError).To(BeTrue())
 	})
@@ -228,7 +228,7 @@ var _ = Describe("ExecuteUse", func() {
 			return tc.WorkDir(), nil
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{WorkDir: "/run/42"})
+		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{WorkDir: "/run/42"})
 		Expect(res.Content).To(Equal("/run/42"))
 	})
 
@@ -241,7 +241,7 @@ var _ = Describe("ExecuteUse", func() {
 			return "no-operator", nil
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
+		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
 		Expect(res.Content).To(Equal("no-operator"))
 	})
 })

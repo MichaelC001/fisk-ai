@@ -344,6 +344,11 @@ const (
 	ToolOutcomeMissingArguments = "missing_arguments"
 	// ToolOutcomeConfirmDenied is a call the operator refused at the gate.
 	ToolOutcomeConfirmDenied = "confirm_denied"
+	// ToolOutcomeDeferred is a call that started work whose answer arrives later. It
+	// is not a success and not a failure: nothing was returned to the model, the run
+	// suspended, and the result is supplied to the journal when it exists. A deferred
+	// call is answered exactly once and never runs again.
+	ToolOutcomeDeferred = "deferred"
 )
 
 // The gen_ai.tool.type values this repository uses. The conventions define the

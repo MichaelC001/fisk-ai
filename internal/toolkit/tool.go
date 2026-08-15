@@ -97,6 +97,11 @@ type Tool interface {
 	// Execute runs the tool for raw input and returns its surface-neutral outcome.
 	// A returned error is a harness failure (the tool could not run); an outcome the
 	// caller should reason about, including a non-zero exit, is a normal result.
+	//
+	// ErrDeferredResult is the one error that is neither: it reports that the tool
+	// started work whose answer arrives later, and a caller that cannot carry a
+	// deferred answer must refuse the call rather than report the tool as failed.
+	// See DeferResult.
 	Execute(ctx context.Context, input json.RawMessage, deps ExecDeps) (*Outcome, error)
 	// MCPExposable reports whether the tool may ever be served over MCP. It is the
 	// capability ceiling only: an operator's allowlist narrows it further and can
@@ -133,16 +138,25 @@ func Tools[T Tool](in []T) []Tool {
 // code back would have to parse its own output to find it. It is a COPY rather than the
 // tool's own pointer, because it exists to be observed and observation must not hand out
 // a handle on state the tool owns.
-func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps) (llm.ToolResultBlock, *CommandExec) {
+//
+// The third return is non-nil only for a deferral (see DeferResult): the tool has no
+// result now and there is no result block to return, so the caller decides whether it
+// can carry a deferred answer. Every other failure is still reported as an error result
+// with a nil error, because the model is what should reason about it.
+func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps) (llm.ToolResultBlock, *CommandExec, error) {
 	out, err := t.Execute(ctx, use.Input, deps)
 	if err != nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: err.Error(), IsError: true}, nil
+		if _, deferred := IsDeferred(err); deferred {
+			return llm.ToolResultBlock{}, nil, err
+		}
+
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: err.Error(), IsError: true}, nil, nil
 	}
 
 	// An in-process tool's output is already the JSON the model asked for; only a
 	// command's is wrapped, so the model sees the exit code and truncation flag.
 	if out.Exec == nil {
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: out.Output}, nil
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: out.Output}, nil, nil
 	}
 
 	exec := *out.Exec
@@ -152,10 +166,10 @@ func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps
 	if err != nil {
 		// The command ran, so its exit code is real and travels even though the envelope
 		// around its output could not be built.
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("marshaling tool result: %v", err), IsError: true}, &exec
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("marshaling tool result: %v", err), IsError: true}, &exec, nil
 	}
 
-	return llm.ToolResultBlock{ToolUseID: use.ID, Content: string(data)}, &exec
+	return llm.ToolResultBlock{ToolUseID: use.ID, Content: string(data)}, &exec, nil
 }
 
 // Confirmable is implemented by the tool kinds that can require operator

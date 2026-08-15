@@ -33,6 +33,7 @@ var protocolSchemaFile = map[Protocol]string{
 	AssistantProtocol:  "session.assistant.json",
 	UserProtocol:       "session.user.json",
 	ToolResultProtocol: "session.tool_result.json",
+	DeferredProtocol:   "session.deferred.json",
 	TerminalProtocol:   "session.terminal.json",
 	ClaimProtocol:      "session.claim.json",
 }

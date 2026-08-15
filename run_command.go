@@ -190,6 +190,13 @@ func runAction(_ *fisk.ParseContext) error {
 
 	if res != nil {
 		if res.Reason == runstate.ReasonSuspended {
+			// A run waiting on an answer and a run an operator drained both suspend, and
+			// only this says which: without it an operator resuming the first gets the
+			// same suspended line again and nothing telling them why.
+			for _, d := range res.Deferred {
+				fmt.Fprintf(os.Stderr, "\nwaiting on %s (%s): %s\n", d.ToolName, d.ToolUseID, util.SanitizeForTerminal(d.Note, 200))
+				fmt.Fprintf(os.Stderr, "answer it with: fisk-ai session answer %s %s\n", res.SessionID, d.ToolUseID)
+			}
 			fmt.Fprintf(os.Stderr, "\nsuspended; resume with: fisk-ai run --resume %s\n", res.SessionID)
 		}
 		if res.Stats != nil {

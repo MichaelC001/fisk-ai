@@ -708,7 +708,9 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			Expect(r.completePending(context.Background())).To(Succeed())
+			deferred, err := r.completePending(context.Background())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(deferred).To(BeFalse())
 			Expect(resumeJ.Close()).To(Succeed())
 
 			// The hooks re-fire only for the unanswered tool; the answered one reuses its
@@ -1153,7 +1155,9 @@ var _ = Describe("runner", func() {
 			}
 
 			before := len(r.messages)
-			Expect(r.completePending(context.Background())).To(Succeed())
+			deferred, err := r.completePending(context.Background())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(deferred).To(BeFalse())
 
 			// The assistant turn plus a single user results message are committed.
 			Expect(r.messages).To(HaveLen(before + 2))

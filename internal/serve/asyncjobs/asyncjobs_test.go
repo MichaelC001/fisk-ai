@@ -19,6 +19,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/util"
@@ -236,6 +237,32 @@ var _ = Describe("Dispositions", func() {
 		_, err = ch.disposition(req, serve.Outcome{Crashed: true, Err: fmt.Errorf("boom")}, ch.log)
 		Expect(errors.Is(err, asyncjobs.ErrTerminateTask)).To(BeTrue())
 		Expect(err).To(MatchError(ContainSubstring("crashed")))
+	})
+
+	// Redelivering achieves nothing while a tool is waiting on an answer that may be
+	// days away: every attempt would resume, find it still absent, suspend again and
+	// spend a delivery. Terminating gives the lease back; RetryTaskByID is what brings
+	// the job back once the answer is supplied.
+	It("Should terminate a run waiting on a deferred tool result", func() {
+		_, err := ch.disposition(req, serve.Outcome{
+			SessionID: "job1",
+			Reason:    runstate.ReasonSuspended,
+			Deferred: []agent.DeferredCall{
+				{ToolUseID: "tu_1", ToolName: "change_request", Note: "waiting on approval"},
+				{ToolUseID: "tu_2", ToolName: "change_request"},
+			},
+		}, ch.log)
+
+		Expect(errors.Is(err, asyncjobs.ErrTerminateTask)).To(BeTrue())
+
+		// The ids reach Task.LastErr, which is all a queue operator has to find what
+		// session answer needs.
+		Expect(err).To(MatchError(ContainSubstring("job1")))
+		Expect(err).To(MatchError(ContainSubstring("tu_1,tu_2")))
+
+		// The tool's own words are not stored: they are tool-supplied text and only the
+		// ids are needed to answer the call.
+		Expect(err).ToNot(MatchError(ContainSubstring("waiting on approval")))
 	})
 
 	// Nothing was answered in any of these, so the job goes back to the queue rather

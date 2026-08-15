@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -196,6 +197,11 @@ func (c *Channel) renew(ctx context.Context, task *asyncjobs.Task, log *slog.Log
 // The load-bearing choice is the last one: a run that failed is a completed job whose
 // answer is that it failed. It is also the only mapping this vocabulary can express,
 // since an Outcome cannot separate a transient provider outage from a final refusal.
+//
+// A suspend is two different endings and the deferred calls are what tell them apart.
+// A drain returns the item so a sibling takes it; a run waiting on an answer that is
+// days away terminates instead, because redelivering only spends the retry budget
+// resuming into the same wait.
 func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Logger) (any, error) {
 	switch {
 	case out.Rejected:
@@ -211,6 +217,22 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 	case out.Abandoned:
 		log.Info("Returning a job that was taken but never started")
 		return nil, fmt.Errorf("the work was taken but never started")
+
+	case len(out.Deferred) > 0:
+		// A tool will answer later, so redelivering achieves nothing: every attempt
+		// would resume, find the answer still absent, suspend again, and spend a
+		// delivery. Terminating gives the lease back and frees the worker.
+		//
+		// It does not strand the work. The task id is the session id, so supplying the
+		// answer against that session and calling Client.RetryTaskByID re-enqueues this
+		// same task as a fresh work item, which resumes the journal the answer landed in.
+		// Nothing here does that: the ids are named in the error so they reach LastErr,
+		// which is all a queue operator has to find them by.
+		ids := deferredIDs(out.Deferred)
+		log.Info("Terminating a job whose tool will answer later", "session", out.SessionID, "deferred", ids)
+
+		return nil, fmt.Errorf("%w: the run is waiting on a deferred tool result; answer session %s tool_use %s, then retry this task",
+			asyncjobs.ErrTerminateTask, out.SessionID, ids)
 
 	case out.Reason == runstate.ReasonSuspended:
 		log.Info("Returning a suspended job", "session", out.SessionID)
@@ -291,6 +313,19 @@ func (c *Channel) stampReply(h *a2a.Header, req *a2a.Request) {
 // stopReason maps a run's terminal reason onto the protocol's neutral vocabulary. A
 // reason with no counterpart is reported as an error, which is what a caller that
 // cannot interpret it should treat it as.
+// deferredIDs renders the tool_use ids a run is waiting on, for the terminating
+// error a queue operator reads off the task. The note and handle are deliberately
+// left out: they are tool-supplied text and this string is stored, so only the ids
+// the answer is supplied against travel here.
+func deferredIDs(calls []agent.DeferredCall) string {
+	ids := make([]string, len(calls))
+	for i, c := range calls {
+		ids[i] = c.ToolUseID
+	}
+
+	return strings.Join(ids, ",")
+}
+
 func stopReason(r runstate.TerminalReason) a2a.StopReason {
 	switch r {
 	case runstate.ReasonCompleted:

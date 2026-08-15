@@ -7,6 +7,7 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -367,6 +368,12 @@ func commandOf(t toolkit.Tool) string {
 // dereference would take the process down; it is reported as an error instead.
 func resultToToolResult(result *toolkit.Outcome, err error) *ToolResult {
 	switch {
+	// A tool that answers later cannot be served: the answer would arrive against a
+	// session this path does not have, long after the peer stopped waiting. The
+	// caller is told the surface cannot carry the call rather than being handed the
+	// tool's own account of what it is waiting for, which would read as a promise.
+	case err != nil && errors.Is(err, toolkit.ErrDeferredResult):
+		return &ToolResult{IsError: true, Output: toolkit.ServedDeferralRefusal}
 	case err != nil:
 		return &ToolResult{IsError: true, Output: err.Error()}
 	case result == nil:

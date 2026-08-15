@@ -7,6 +7,7 @@ package util
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -69,38 +70,53 @@ func NewConfirmGate(prompter toolkit.Prompter) *ConfirmGate {
 // with a reason when it may not: the operator declined, or no interactive
 // terminal was attached to ask one. A false result is authoritative; the reason
 // is surfaced to the model via ConfirmDeniedResult.
-func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, display, tag string) (bool, string) {
+//
+// A non-nil error means nobody answered, and it is never a denial. The run ends on
+// it and no decision is recorded, because an operator who interrupted at the prompt
+// or a context that ended under it did not decline: on a checkpointed run a denial
+// is journaled and replayed on every later resume, so manufacturing one from an
+// interrupt puts an answer in the record that nobody gave. The caller must not send
+// a result to the model on this path.
+func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, display, tag string) (bool, string, error) {
 	if g.allow[toolName] {
-		return true, ""
+		return true, "", nil
 	}
 
 	// Default-deny lives here at the caller, not in the prompter: with no operator
-	// reachable there is no one to ask, and a run canceled before the operator could
-	// answer must resolve to a denial rather than block or run. Both are checked before
-	// any prompt is shown so the prompter is never reached in a state where its answer
-	// could not be trusted. Whether an operator is reachable is the prompter's own
-	// report, so a non-terminal channel that can still ask a human is honored rather
-	// than declined for lacking a TTY.
+	// reachable there is no one to ask. It is checked before any prompt is shown so the
+	// prompter is never reached in a state where its answer could not be trusted.
+	// Whether an operator is reachable is the prompter's own report, so a non-terminal
+	// channel that can still ask a human is honored rather than declined for lacking a
+	// TTY.
 	if !g.prompter.CanPrompt() {
-		return false, NoTerminalReason
+		return false, NoTerminalReason, nil
 	}
+
+	// A run whose context is already over is not asked, and is not answered either.
+	// This used to manufacture a refusal, which is the durable false record the error
+	// return exists to stop.
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Sprintf("the run ended before the operator could approve this command: %v; this decision is final, do not retry", err)
+		return false, "", fmt.Errorf("%w: %w", toolkit.ErrPromptAborted, err)
 	}
 
 	choice, err := g.prompter.ApproveCommand(ctx, toolkit.GateRequest{Command: commandPath, Display: display, Tag: tag})
-	if err != nil {
-		return false, fmt.Sprintf("the operator did not permit this command: %v; this decision is final, do not retry", err)
+	switch {
+	case errors.Is(err, toolkit.ErrPromptAborted):
+		return false, "", err
+	case err != nil:
+		// A prompt that could not be put is not an operator walking away, so it stays a
+		// denial: the command is gated and nothing established that it may run.
+		return false, fmt.Sprintf("the operator did not permit this command: %v; this decision is final, do not retry", err), nil
 	}
 
 	switch choice {
 	case toolkit.ConfirmAlways:
 		g.allow[toolName] = true
-		return true, ""
+		return true, "", nil
 	case toolkit.ConfirmOnce:
-		return true, ""
+		return true, "", nil
 	default:
-		return false, "the operator declined to permit this command; this decision is final, do not retry"
+		return false, "the operator declined to permit this command; this decision is final, do not retry", nil
 	}
 }
 

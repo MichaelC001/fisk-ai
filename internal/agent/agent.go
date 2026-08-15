@@ -379,6 +379,25 @@ type Result struct {
 	// treating it as one: a run that exhausted its budget or was truncated at the
 	// output cap still reports the text it had reached.
 	Text string
+
+	// Deferred lists the tool calls the run is waiting on an answer for, and is empty
+	// for a run that stopped for any other reason. It is what tells a caller a suspend
+	// it did not ask for from one it did: a drain suspends with nothing here, while a
+	// run that called a tool answering later suspends naming the call.
+	//
+	// The run is resumable and will not proceed until every one of these is answered,
+	// which runstate.SupplyToolResult is how to do.
+	Deferred []DeferredCall
+}
+
+// DeferredCall is one tool call whose answer arrives later. ToolUseID is the key the
+// answer is supplied against; Note and Handle are the tool's own account of what it
+// is waiting on and are display text, so sanitize them before rendering.
+type DeferredCall struct {
+	ToolUseID string
+	ToolName  string
+	Note      string
+	Handle    string
 }
 
 // PanicError is the error Run returns when it recovered a panic on its run goroutine.
@@ -1667,6 +1686,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	reason, err := r.run(ctx)
 	res.Reason = reason
 	res.Text = r.finalText
+	res.Deferred = r.deferred
 	// A context reset may have rotated to a fresh session mid-run, so report the session the
 	// run ended on (the one an operator resumes) rather than the one it started with.
 	res.SessionID = r.sessionID

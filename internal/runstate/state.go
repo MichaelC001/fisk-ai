@@ -7,6 +7,8 @@ package runstate
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
@@ -48,6 +50,28 @@ type PendingTurn struct {
 	Results []llm.ToolResultBlock
 	// Answered marks which tool_use ids already have a result.
 	Answered map[string]bool
+	// Deferred holds the calls whose answer arrives later, keyed by tool_use id. A
+	// deferred call is unanswered and must not be re-run: the tool already started
+	// the work, so running it again would start it twice. An id present here and in
+	// Answered has had its answer supplied, and Answered is what decides.
+	Deferred map[string]DeferredRecord
+}
+
+// OpenDeferrals returns the deferred calls that have no result yet, in tool_use id
+// order. It is empty for a turn that is merely mid-batch, so a caller uses it to
+// tell a run waiting on somebody from one a crash interrupted.
+func (p *PendingTurn) OpenDeferrals() []DeferredRecord {
+	var out []DeferredRecord
+	for id, d := range p.Deferred {
+		if p.Answered[id] {
+			continue
+		}
+		out = append(out, d)
+	}
+
+	slices.SortFunc(out, func(a, b DeferredRecord) int { return strings.Compare(a.ToolUseID, b.ToolUseID) })
+
+	return out
 }
 
 // RunState is the folded, resumable state of a run. It is deliberately free of
@@ -122,10 +146,11 @@ func Fold(records []Record) (*RunState, error) {
 	// already stores the neutral model, so the folded RunState carries it verbatim
 	// with no conversion.
 	var (
-		cur        *AssistantRecord
-		curMsg     llm.Message
-		curResults []llm.ToolResultBlock
-		curAnswer  map[string]bool
+		cur         *AssistantRecord
+		curMsg      llm.Message
+		curResults  []llm.ToolResultBlock
+		curAnswer   map[string]bool
+		curDeferred map[string]DeferredRecord
 	)
 
 	// lastIter/lastStop track the resume position (NextIteration) and the final stop
@@ -171,6 +196,7 @@ func Fold(records []Record) (*RunState, error) {
 			curMsg = r.Assistant.Message
 			curResults = nil
 			curAnswer = map[string]bool{}
+			curDeferred = map[string]DeferredRecord{}
 			lastIter = r.Assistant.Iteration
 			lastStop = r.Assistant.StopReason
 			sawAssistant = true
@@ -195,6 +221,7 @@ func Fold(records []Record) (*RunState, error) {
 				cur = nil
 				curResults = nil
 				curAnswer = nil
+				curDeferred = nil
 			}
 			appendOrMergeUser(rs, r.User.Message)
 
@@ -211,6 +238,18 @@ func Fold(records []Record) (*RunState, error) {
 			if r.ToolResult.Remote {
 				rs.Counters.RemoteToolCalls++
 			}
+
+		case DeferredProtocol:
+			if r.Deferred == nil {
+				return nil, fmt.Errorf("%w: deferred record with no payload at seq %d", ErrCorrupt, r.Seq)
+			}
+			if cur == nil {
+				return nil, fmt.Errorf("%w: deferred before any assistant at seq %d", ErrCorrupt, r.Seq)
+			}
+			// The call stays unanswered, which is what keeps the turn pending until the
+			// result arrives. Nothing is counted: a deferred call has produced no result,
+			// and counting it here would double when the answer lands as a tool_result.
+			curDeferred[r.Deferred.ToolUseID] = *r.Deferred
 
 		case TerminalProtocol:
 			if r.Terminal == nil {
@@ -251,6 +290,7 @@ func Fold(records []Record) (*RunState, error) {
 				StopReason: cur.StopReason,
 				Results:    curResults,
 				Answered:   curAnswer,
+				Deferred:   curDeferred,
 			}
 		}
 	}
