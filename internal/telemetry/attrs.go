@@ -156,6 +156,22 @@ const (
 	// ordinary result, so flagging it would count every routine "grep matched nothing"
 	// as a failure. Span attribute only, never a metric label.
 	AttrToolExitCode = attribute.Key("fisk.tool.exit_code")
+	// AttrServedRequest is the correlation tag of the request a served call answers, so
+	// an operator moves between a span and the log line naming the same call.
+	AttrServedRequest = attribute.Key("fisk.served.request")
+	// AttrServedCaller is what the transport vouches for about who called, and
+	// AttrServedCallerVerified says whether it vouches for anything. Anything deciding
+	// on identity reads the second and not the first.
+	AttrServedCaller         = attribute.Key("fisk.served.caller")
+	AttrServedCallerVerified = attribute.Key("fisk.served.caller_verified")
+	// AttrServedSender is the identity the message claims. It is the peer's own
+	// assertion and is kept apart from the caller for that reason. It is peer
+	// controlled, so it is a span attribute and never a metric label.
+	AttrServedSender = attribute.Key("fisk.served.sender")
+	// AttrServedQueueWaitMS is how long a served call waited for a concurrency slot.
+	// The wait blocks the transport's serving goroutine, so it is latency the peer paid
+	// and no other span reports.
+	AttrServedQueueWaitMS = attribute.Key("fisk.served.queue_wait_ms")
 	// AttrToolResumed marks a tool from a batch a resume completed. Those run before
 	// the iteration loop, so they produce tool spans with no preceding model call in
 	// the same trace; without the marker that shape reads as tools running unprompted.

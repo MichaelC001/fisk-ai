@@ -128,6 +128,24 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
+		// The schema names traceparent and checks nothing about its shape: a version
+		// pattern would refuse a valid future W3C version and cost the whole message,
+		// where a receiver's propagator ignores anything it cannot parse.
+		It("Should accept a traceparent whatever it says, and a message with none", func() {
+			for _, tp := range []string{
+				"",
+				"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+				"01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-future",
+				"nonsense",
+			} {
+				req := NewToolRequest("ping", nil)
+				fillHeader(&req.Header)
+				req.TraceParent = tp
+
+				Expect(v.ValidateMessage(req)).To(Succeed(), tp)
+			}
+		})
+
 		It("Should accept an event carrying a block type it does not name", func() {
 			ev := NewEvent(NewTextBlock("hi"))
 			fillHeader(&ev.Header)

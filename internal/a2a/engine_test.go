@@ -5,6 +5,7 @@
 package a2a
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -38,7 +39,7 @@ func toolsFor(app *fisk.Application) []toolkit.Tool {
 var _ = Describe("expectProtocol", func() {
 	It("Should return the decoded message when the protocol matches", func() {
 		req := NewToolRequest("ping", nil)
-		stampRequest(&req.Header, "me", "you")
+		stampRequest(context.Background(), &req.Header, "me", "you")
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -49,7 +50,7 @@ var _ = Describe("expectProtocol", func() {
 
 	It("Should reject a message whose protocol is not the one the path carries", func() {
 		req := NewDiscoveryRequest()
-		stampRequest(&req.Header, "me", "you")
+		stampRequest(context.Background(), &req.Header, "me", "you")
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 

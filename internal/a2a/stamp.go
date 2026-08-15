@@ -5,7 +5,10 @@
 package a2a
 
 import (
+	"context"
 	"time"
+
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // stampRequest fills in the framing fields of a standalone request header. The
@@ -15,7 +18,11 @@ import (
 // session, so id, request and conversation are all the same fresh id, and
 // sequence is unused (the transport reply inbox handles correlation), matching the
 // transport notes for direct tool calls.
-func stampRequest(h *Header, sender string, recipient string) {
+//
+// The trace context of whatever span ctx carries is stamped alongside the rest, so a
+// receiver's spans join this one's trace. It is empty when nothing is tracing, which
+// is what leaves the field off the wire.
+func stampRequest(ctx context.Context, h *Header, sender string, recipient string) {
 	id := NewID()
 
 	h.ID = id
@@ -24,6 +31,7 @@ func stampRequest(h *Header, sender string, recipient string) {
 	h.Sequence = 0
 	h.Time = time.Now().UTC()
 	h.Sender = Identity{Name: sender}
+	h.TraceParent = telemetry.TraceContextFrom(ctx).TraceParent
 	if recipient != "" {
 		h.Recipient = &Identity{Name: recipient}
 	}

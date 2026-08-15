@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
@@ -59,6 +60,15 @@ type ServerOptions struct {
 	// Logger receives structured progress; nil builds a text logger over
 	// LogOutput.
 	Logger *slog.Logger
+	// Telemetry, when non-nil, receives a span per served call and is put on the
+	// context a tool runs under, so a served tool that opens spans of its own is not
+	// silent.
+	//
+	// It is a field here where the client reads its Provider off the caller's context,
+	// and the asymmetry is forced rather than chosen: a handler's context comes from
+	// the transport, which supplies a background context carrying nothing. Removing it
+	// would mean widening Handler so a constructor-supplied context reaches a call.
+	Telemetry *telemetry.Provider
 }
 
 func (o *ServerOptions) applyDefaults() {
@@ -243,20 +253,47 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 	log := s.opts.Logger.With("sender", sender, "caller", caller.Name, "caller_verified", caller.Verified)
 
 	tool, ok := s.byName[tr.Name]
+
+	// The caller's trace is joined before the span opens, so a served call sits under
+	// the invocation that made it. The name is supplied only when it resolved: a name
+	// that did not is peer-controlled input and goes no further than an attribute.
+	info := telemetry.ServedToolInfo{
+		Identity:       s.identity,
+		Request:        tr.Header.Request,
+		Caller:         caller.Name,
+		CallerVerified: caller.Verified,
+		Sender:         tr.Header.Sender.Name,
+	}
+	if ok {
+		info.Name = tool.Name()
+	} else {
+		info.RequestedName = tr.Name
+	}
+
+	ctx = telemetry.ContextWithRemoteTrace(ctx, telemetry.TraceContext{TraceParent: tr.Header.TraceParent})
+	ctx, span := s.opts.Telemetry.StartServedTool(ctx, info)
+
 	if !ok {
 		log.Warn("Rejecting unknown tool call", "tool", tr.Name)
 		s.respond(reply, s.toolReply(&tr.Header, &ToolResult{IsError: true, Output: fmt.Sprintf("tool %q is not available", tr.Name)}))
+		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeUnknownTool, Failed: true})
 		return
 	}
 
 	// Bound concurrency before spawning so the number of commands running at once
 	// stays capped; this blocks the serving goroutine when every slot is in use,
-	// which back-pressures inbound requests at intake, not just at execution.
+	// which back-pressures inbound requests at intake, not just at execution. The span
+	// is already open, so the wait for a slot is inside it and is reported separately.
+	queued := time.Now()
 	s.sem <- struct{}{}
+	queueWait := time.Since(queued)
+
 	go func() {
 		defer func() { <-s.sem }()
 
-		runCtx, cancel := context.WithTimeout(ctx, s.opts.CallTimeout)
+		// The Provider travels on the context the tool runs under, so a served tool that
+		// opens spans of its own nests them under this call rather than dropping them.
+		runCtx, cancel := context.WithTimeout(telemetry.ContextWithProvider(ctx, s.opts.Telemetry), s.opts.CallTimeout)
 		defer cancel()
 
 		log := log.With("tool", tool.Name(), "command", commandOf(tool))
@@ -279,8 +316,34 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 			log.Info("Tool call completed", "duration", duration)
 		}
 
-		s.publish(reply, s.toolReply(&tr.Header, resultToToolResult(result, err)))
+		out := resultToToolResult(result, err)
+		s.publish(reply, s.toolReply(&tr.Header, out))
+
+		// Ended after the reply rather than after the tool: a reply that failed to send
+		// is a peer that got nothing, and a green span here under a red one on the
+		// caller would describe the wrong thing.
+		span.Finish(servedOutcome(out, queueWait))
 	}()
+}
+
+// servedOutcome maps a served call's reply onto the span outcome, using the same
+// vocabulary a local tool call reports so the two are comparable on one key.
+func servedOutcome(out *ToolResult, queueWait time.Duration) telemetry.ServedToolOutcome {
+	o := telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeExecuted, QueueWait: queueWait}
+
+	if out.IsError {
+		o.Outcome = telemetry.ToolOutcomeError
+		o.Failed = true
+	}
+	// Set whenever a command ran, including a zero exit, for the reason the local tool
+	// span sets it: reporting only failures makes a successful command look like a
+	// built-in that never ran one.
+	if out.Exec != nil {
+		code := out.Exec.ExitCode
+		o.ExitCode = &code
+	}
+
+	return o
 }
 
 // inbound size-caps, validates and decodes a request body and confirms it is the

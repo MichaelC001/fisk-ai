@@ -69,7 +69,7 @@ func toolRequestBody(name string) []byte {
 	GinkgoHelper()
 
 	req := NewToolRequest(name, nil)
-	stampRequest(&req.Header, "caller", "svc")
+	stampRequest(context.Background(), &req.Header, "caller", "svc")
 	data, err := json.Marshal(req)
 	Expect(err).NotTo(HaveOccurred())
 
