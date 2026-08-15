@@ -6,23 +6,15 @@ package serve
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/choria-io/fisk"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/agent"
-	"github.com/choria-io/fisk-ai/internal/agenttest"
-	"github.com/choria-io/fisk-ai/internal/llm"
-	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
 func TestServe(t *testing.T) {
@@ -30,480 +22,121 @@ func TestServe(t *testing.T) {
 	RunSpecs(t, "Serve")
 }
 
-// servedApp is the wrapped application the served runs introspect. It carries one
-// command so a run has a tool to call.
-func servedApp() *fisk.Application {
-	app := fisk.New("app", "an app")
-	do := app.Command("do", "do a thing")
-	do.Arg("subject", "the subject").Required().String()
+// servedConfig is a parsed configuration for a served agent.
+//
+// It is built here rather than with agenttest.Config because agenttest implements
+// serve.Channel, so a test inside this package importing it would be an import cycle.
+// What is left in this package are the specs reaching unexported methods, and none of
+// them run an agent, so a configuration naming no application is enough.
+func servedConfig() *config.Config {
+	cfg := &config.Config{Identity: "agent"}
+	cfg.LLM.Model = "test-model"
+	cfg.LLM.Budget.MaxIterations = 20
 
-	return app
-}
-
-// scriptedChannel hands out a fixed list of work and collects the outcomes, so a test
-// can assert what the server did without standing anything up. It reports
-// ErrChannelDone once the list is spent, which is what makes Serve return.
-type scriptedChannel struct {
-	name string
-	work []*Work
-
-	mu       sync.Mutex
-	next     int
-	outcomes []Outcome
-}
-
-func newScriptedChannel(name string, work ...*Work) *scriptedChannel {
-	return &scriptedChannel{name: name, work: work}
-}
-
-func (c *scriptedChannel) Name() string { return c.name }
-
-func (c *scriptedChannel) Next(_ context.Context) (*Work, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.next >= len(c.work) {
-		return nil, ErrChannelDone
-	}
-
-	w := c.work[c.next]
-	c.next++
-	if w.Done == nil {
-		w.Done = c.record
-	}
-
-	return w, nil
-}
-
-func (c *scriptedChannel) record(_ context.Context, out Outcome) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.outcomes = append(c.outcomes, out)
-
-	return nil
-}
-
-func (c *scriptedChannel) Outcomes() []Outcome {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]Outcome(nil), c.outcomes...)
+	return cfg
 }
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-var _ = Describe("Server", func() {
-	var (
-		ctx    context.Context
-		cancel context.CancelFunc
-	)
+// idleChannel offers no work at all, which is all a spec reaching an unexported method
+// on a constructed Server needs a channel for.
+type idleChannel struct {
+	name string
+}
 
-	BeforeEach(func() {
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		DeferCleanup(cancel)
-	})
+func (c *idleChannel) Name() string { return c.name }
 
-	Describe("New", func() {
-		It("Should require a channel and a configuration", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+func (c *idleChannel) Next(context.Context) (*Work, error) { return nil, ErrChannelDone }
 
-			_, err := New(Options{Config: agenttest.Config(GinkgoTB(), app)})
-			Expect(err).To(MatchError(ContainSubstring("at least one channel")))
+// boundedChannel states a concurrency of its own, which is what a channel claiming
+// work before a run starts has to do.
+type boundedChannel struct {
+	idleChannel
 
-			_, err = New(Options{Channels: []Channel{newScriptedChannel("c")}})
-			Expect(err).To(MatchError(ContainSubstring("configuration is required")))
+	concurrency int
+}
+
+func (c *boundedChannel) Concurrency() int { return c.concurrency }
+
+var _ = Describe("Budget clamping", func() {
+	It("Should lower a configured limit but never raise it", func() {
+		cfg := servedConfig()
+		cfg.LLM.Budget.MaxIterations = 10
+
+		srv, err := New(Options{
+			Channels: []Channel{&idleChannel{name: "c"}},
+			Config:   cfg,
+			Logger:   quietLogger(),
 		})
+		Expect(err).ToNot(HaveOccurred())
 
-		It("Should reject a channel with no name", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+		By("lowering a limit the work asks to lower")
+		Expect(srv.clampedConfig(Budget{MaxIterations: 3}).LLM.Budget.MaxIterations).To(BeNumerically("==", 3))
 
-			_, err := New(Options{
-				Channels: []Channel{newScriptedChannel("")},
-				Config:   agenttest.Config(GinkgoTB(), app),
-			})
-			Expect(err).To(MatchError(ContainSubstring("has no name")))
-		})
+		By("ignoring a limit above the configured ceiling")
+		Expect(srv.clampedConfig(Budget{MaxIterations: 99}).LLM.Budget.MaxIterations).To(BeNumerically("==", 10))
 
-		It("Should reject a work directory that is not an absolute path", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
+		By("leaving the configuration alone when nothing is asked")
+		Expect(srv.clampedConfig(Budget{})).To(BeIdenticalTo(srv.opts.Config))
 
-			_, err := New(Options{
-				Channels: []Channel{newScriptedChannel("c")},
-				Config:   agenttest.Config(GinkgoTB(), app),
-				WorkDir:  "relative",
-			})
-			Expect(err).To(MatchError(ContainSubstring("not an absolute path")))
-		})
-
-		// A refused set of options leaves the caller holding no Server, so nothing they
-		// have can release the channels they handed over. Several of them own a
-		// connection, so leaving them open leaks it somewhere unreachable.
-		It("Should release the channels when it refuses the options", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := &closableChannel{scriptedChannel: newScriptedChannel("c")}
-
-			_, err := New(Options{
-				Channels: []Channel{ch},
-				Config:   agenttest.Config(GinkgoTB(), app),
-				WorkDir:  "relative",
-			})
-			Expect(err).To(HaveOccurred())
-			Expect(ch.closed).To(Equal(1))
-		})
-
-		// The channel that cannot be released is the ordinary case, and a nil one is
-		// what the validation is refusing, so neither may take the teardown down with it.
-		It("Should survive releasing a nil channel and one with no Close", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := &closableChannel{scriptedChannel: newScriptedChannel("c")}
-
-			_, err := New(Options{
-				Channels: []Channel{ch, newScriptedChannel("plain"), nil},
-				Config:   agenttest.Config(GinkgoTB(), app),
-			})
-			Expect(err).To(MatchError(ContainSubstring("is nil")))
-			Expect(ch.closed).To(Equal(1))
-		})
-
-		It("Should not release the channels of a server it returned", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := &closableChannel{scriptedChannel: newScriptedChannel("c")}
-
-			srv, err := New(Options{
-				Channels: []Channel{ch},
-				Config:   agenttest.Config(GinkgoTB(), app),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(ch.closed).To(Equal(0))
-
-			Expect(srv.Stop()).To(Succeed())
-			Expect(ch.closed).To(Equal(1))
-		})
-	})
-
-	Describe("Serving work", func() {
-		It("Should run the work and report the answer", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := newScriptedChannel("jobs", &Work{ID: "job-1", Prompt: "go"})
-
-			srv, err := New(Options{
-				Channels: []Channel{ch},
-				Config:   agenttest.Config(GinkgoTB(), app),
-				Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("all done")),
-				Logger:   quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(srv.Serve(ctx)).To(Succeed())
-
-			outcomes := ch.Outcomes()
-			Expect(outcomes).To(HaveLen(1))
-			Expect(outcomes[0].ID).To(Equal("job-1"))
-			Expect(outcomes[0].Err).ToNot(HaveOccurred())
-			Expect(outcomes[0].Reason).To(Equal(runstate.ReasonCompleted))
-			Expect(outcomes[0].Text).To(Equal("all done"))
-			Expect(outcomes[0].Stats).ToNot(BeNil())
-			Expect(outcomes[0].Crashed).To(BeFalse())
-		})
-
-		It("Should mint an id for work that carries none", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := newScriptedChannel("jobs", &Work{Prompt: "go"})
-
-			srv, err := New(Options{
-				Channels: []Channel{ch},
-				Config:   agenttest.Config(GinkgoTB(), app),
-				Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("ok")),
-				Logger:   quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(srv.Serve(ctx)).To(Succeed())
-
-			Expect(ch.Outcomes()[0].ID).ToNot(BeEmpty())
-		})
-
-		It("Should report a failed run without treating it as a crash", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := newScriptedChannel("jobs", &Work{ID: "job-1", Prompt: "go"})
-
-			srv, err := New(Options{
-				Channels: []Channel{ch},
-				Config:   agenttest.Config(GinkgoTB(), app, agenttest.WithMaxIterations(1)),
-				Provider: agenttest.NewScriptedProvider(GinkgoTB(), &llm.Response{
-					StopReason: llm.StopToolUse,
-					Content: []llm.ContentBlock{
-						{Text: &llm.TextBlock{Text: "still working"}},
-						{ToolUse: &llm.ToolUseBlock{ID: "c1", Name: "do", Input: json.RawMessage(`{"subject":"x"}`)}},
-					},
-				}),
-				Logger: quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(srv.Serve(ctx)).To(Succeed())
-
-			out := ch.Outcomes()[0]
-			Expect(out.Err).To(MatchError(ContainSubstring("max iterations")))
-			Expect(out.Reason).To(Equal(runstate.ReasonMaxIterations))
-			Expect(out.Crashed).To(BeFalse())
-			Expect(out.Text).To(Equal("still working"), "the last thing said survives a non-terminal ending")
-		})
-
-		It("Should serve every channel it is given", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			a := newScriptedChannel("a", &Work{ID: "a-1", Prompt: "go"})
-			b := newScriptedChannel("b", &Work{ID: "b-1", Prompt: "go"})
-
-			srv, err := New(Options{
-				Channels: []Channel{a, b},
-				Config:   agenttest.Config(GinkgoTB(), app),
-				Provider: agenttest.NewScriptedProvider(GinkgoTB(),
-					agenttest.TextResponse("one"), agenttest.TextResponse("two")),
-				Logger: quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(srv.Serve(ctx)).To(Succeed())
-
-			Expect(a.Outcomes()).To(HaveLen(1))
-			Expect(b.Outcomes()).To(HaveLen(1))
-		})
-
-		It("Should discard work that has no way to report an outcome", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			ch := &noDoneChannel{}
-
-			srv, err := New(Options{
-				Channels: []Channel{ch},
-				Config:   agenttest.Config(GinkgoTB(), app),
-				Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("ok")),
-				Logger:   quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(srv.Serve(ctx)).To(Succeed())
-
-			Expect(ch.calls).To(Equal(2), "the work is dropped and the channel is asked again")
-		})
-	})
-
-	Describe("Admission", func() {
-		It("Should bound how many runs execute at once", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-
-			work := make([]*Work, 6)
-			for i := range work {
-				work[i] = &Work{ID: fmt.Sprintf("job-%d", i), Prompt: "go"}
-			}
-			ch := newScriptedChannel("jobs", work...)
-
-			var mu sync.Mutex
-			var live, peak int
-
-			responses := make([]*llm.Response, len(work))
-			for i := range responses {
-				responses[i] = agenttest.TextResponse("ok")
-			}
-
-			srv, err := New(Options{
-				Channels:    []Channel{ch},
-				Config:      agenttest.Config(GinkgoTB(), app),
-				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), responses...),
-				Concurrency: 2,
-				Logger:      quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-
-			// A run is live from the moment it reports Starting, which the agent emits
-			// once before its loop, until its outcome is reported.
-			for _, w := range work {
-				done := ch.record
-				w.Done = func(ctx context.Context, out Outcome) error {
-					mu.Lock()
-					live--
-					mu.Unlock()
-
-					return done(ctx, out)
-				}
-				w.Events = newStartProbe(func() {
-					mu.Lock()
-					live++
-					if live > peak {
-						peak = live
-					}
-					mu.Unlock()
-
-					// Hold the run open briefly so a bound higher than the real
-					// concurrency would show up as an overlap rather than being
-					// hidden by runs finishing before their siblings begin.
-					time.Sleep(20 * time.Millisecond)
-				})
-			}
-
-			Expect(srv.Serve(ctx)).To(Succeed())
-			Expect(ch.Outcomes()).To(HaveLen(len(work)))
-
-			mu.Lock()
-			defer mu.Unlock()
-			Expect(peak).To(BeNumerically("<=", 2))
-
-			for _, out := range ch.Outcomes() {
-				Expect(out.Crashed).To(BeFalse(), "a crashed run would still be counted, hiding a broken bound")
-			}
-		})
-
-		It("Should report work taken but never started when the server stops", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-
-			started := make(chan struct{})
-			release := make(chan struct{})
-
-			// The first run parks inside Starting, so it holds the only slot until the
-			// test lets go. The puller then has the second piece of work in hand and is
-			// waiting for a slot that cannot free, which is the state a shutdown has to
-			// report rather than silently drop.
-			first := &Work{ID: "first", Prompt: "go", Events: newStartProbe(func() {
-				close(started)
-				<-release
-			})}
-			second := &Work{ID: "second", Prompt: "go"}
-			ch := newScriptedChannel("jobs", first, second)
-
-			srv, err := New(Options{
-				Channels:    []Channel{ch},
-				Config:      agenttest.Config(GinkgoTB(), app),
-				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("ok")),
-				Concurrency: 1,
-				Logger:      quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-
-			runCtx, stop := context.WithCancel(ctx)
-			served := make(chan error, 1)
-			go func() { served <- srv.Serve(runCtx) }()
-
-			Eventually(started).Should(BeClosed())
-			stop()
-
-			Eventually(ch.Outcomes).Should(ContainElement(And(
-				HaveField("ID", Equal("second")),
-				HaveField("Abandoned", BeTrue()),
-				HaveField("Reason", BeEmpty()),
-				HaveField("Stats", BeNil()),
-			)), "nothing ran for it, so a retry elsewhere is safe")
-
-			close(release)
-			Eventually(served).Should(Receive(BeNil()))
-		})
-	})
-
-	Describe("Budget clamping", func() {
-		It("Should lower a configured limit but never raise it", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-
-			srv, err := New(Options{
-				Channels: []Channel{newScriptedChannel("c")},
-				Config:   agenttest.Config(GinkgoTB(), app, agenttest.WithMaxIterations(10)),
-				Logger:   quietLogger(),
-			})
-			Expect(err).ToNot(HaveOccurred())
-
-			By("lowering a limit the work asks to lower")
-			Expect(srv.clampedConfig(Budget{MaxIterations: 3}).LLM.Budget.MaxIterations).To(BeNumerically("==", 3))
-
-			By("ignoring a limit above the configured ceiling")
-			Expect(srv.clampedConfig(Budget{MaxIterations: 99}).LLM.Budget.MaxIterations).To(BeNumerically("==", 10))
-
-			By("leaving the configuration alone when nothing is asked")
-			Expect(srv.clampedConfig(Budget{})).To(BeIdenticalTo(srv.opts.Config))
-
-			By("never mutating the shared configuration")
-			Expect(srv.opts.Config.LLM.Budget.MaxIterations).To(BeNumerically("==", 10))
-		})
-	})
-
-	Describe("Tool timeout", func() {
-		newServer := func(cfg *config.Config, opts ...func(*Options)) *Server {
-			o := Options{
-				Channels: []Channel{newScriptedChannel("c")},
-				Config:   cfg,
-				Logger:   quietLogger(),
-			}
-			for _, opt := range opts {
-				opt(&o)
-			}
-
-			srv, err := New(o)
-			Expect(err).ToNot(HaveOccurred())
-
-			return srv
-		}
-
-		It("Should bound a hosted run by default, unlike a run at a terminal", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			srv := newServer(agenttest.Config(GinkgoTB(), app))
-
-			Expect(srv.opts.ToolTimeout).To(Equal(DefaultToolTimeout))
-			Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(DefaultToolTimeout))
-
-			By("never mutating the shared configuration")
-			Expect(srv.opts.Config.ToolTimeout()).To(Equal(time.Duration(0)))
-		})
-
-		It("Should leave a configured timeout alone even when it is longer", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			cfg := agenttest.Config(GinkgoTB(), app, agenttest.WithToolTimeout(time.Hour))
-			srv := newServer(cfg)
-
-			Expect(srv.withToolTimeout(cfg)).To(BeIdenticalTo(cfg), "nothing to fill in, so nothing to copy")
-			Expect(srv.withToolTimeout(cfg).ToolTimeout()).To(Equal(time.Hour))
-		})
-
-		It("Should honor an embedder's own default over the package one", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			srv := newServer(agenttest.Config(GinkgoTB(), app), func(o *Options) { o.ToolTimeout = 90 * time.Second })
-
-			Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(90 * time.Second))
-		})
-
-		It("Should apply both the clamp and the fill to one piece of work", func() {
-			app := agenttest.NewFakeApp(GinkgoTB(), servedApp())
-			srv := newServer(agenttest.Config(GinkgoTB(), app, agenttest.WithMaxIterations(10)))
-
-			cfg := srv.withToolTimeout(srv.clampedConfig(Budget{MaxIterations: 3}))
-			Expect(cfg.LLM.Budget.MaxIterations).To(BeNumerically("==", 3))
-			Expect(cfg.ToolTimeout()).To(Equal(DefaultToolTimeout))
-		})
+		By("never mutating the shared configuration")
+		Expect(srv.opts.Config.LLM.Budget.MaxIterations).To(BeNumerically("==", 10))
 	})
 })
 
-// startProbe is an events sink that only cares that a run began, so a test can see
-// when one is live. It embeds a real recorder rather than a nil interface, or every
-// other method would panic into the run's barrier and turn each run into a crash the
-// test never notices.
-type startProbe struct {
-	agent.Events
-	onStart func()
-}
+var _ = Describe("Tool timeout", func() {
+	newServer := func(cfg *config.Config, opts ...func(*Options)) *Server {
+		GinkgoHelper()
 
-func newStartProbe(onStart func()) *startProbe {
-	return &startProbe{Events: agenttest.NewRecordingEvents(), onStart: onStart}
-}
+		o := Options{
+			Channels: []Channel{&idleChannel{name: "c"}},
+			Config:   cfg,
+			Logger:   quietLogger(),
+		}
+		for _, opt := range opts {
+			opt(&o)
+		}
 
-func (p *startProbe) Starting(agent.RunInfo) { p.onStart() }
+		srv, err := New(o)
+		Expect(err).ToNot(HaveOccurred())
 
-// noDoneChannel supplies one piece of work with no Done callback, then reports it is
-// finished, so a test can prove the server drops it rather than running it.
-type noDoneChannel struct {
-	calls int
-}
-
-func (c *noDoneChannel) Name() string { return "no-done" }
-
-func (c *noDoneChannel) Next(_ context.Context) (*Work, error) {
-	c.calls++
-	if c.calls == 1 {
-		return &Work{ID: "orphan", Prompt: "go"}, nil
+		return srv
 	}
 
-	return nil, ErrChannelDone
-}
+	It("Should bound a hosted run by default, unlike a run at a terminal", func() {
+		srv := newServer(servedConfig())
+
+		Expect(srv.opts.ToolTimeout).To(Equal(DefaultToolTimeout))
+		Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(DefaultToolTimeout))
+
+		By("never mutating the shared configuration")
+		Expect(srv.opts.Config.ToolTimeout()).To(Equal(time.Duration(0)))
+	})
+
+	It("Should leave a configured timeout alone even when it is longer", func() {
+		cfg := servedConfig()
+		cfg.Harness.ToolTimeoutParsed = time.Hour
+		srv := newServer(cfg)
+
+		Expect(srv.withToolTimeout(cfg)).To(BeIdenticalTo(cfg), "nothing to fill in, so nothing to copy")
+		Expect(srv.withToolTimeout(cfg).ToolTimeout()).To(Equal(time.Hour))
+	})
+
+	It("Should honor an embedder's own default over the package one", func() {
+		srv := newServer(servedConfig(), func(o *Options) { o.ToolTimeout = 90 * time.Second })
+
+		Expect(srv.withToolTimeout(srv.opts.Config).ToolTimeout()).To(Equal(90 * time.Second))
+	})
+
+	It("Should apply both the clamp and the fill to one piece of work", func() {
+		cfg := servedConfig()
+		cfg.LLM.Budget.MaxIterations = 10
+		srv := newServer(cfg)
+
+		clamped := srv.withToolTimeout(srv.clampedConfig(Budget{MaxIterations: 3}))
+		Expect(clamped.LLM.Budget.MaxIterations).To(BeNumerically("==", 3))
+		Expect(clamped.ToolTimeout()).To(Equal(DefaultToolTimeout))
+	})
+})

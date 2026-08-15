@@ -171,6 +171,14 @@ func (o *Options) validate() error {
 	return nil
 }
 
+// A queue claims work before a run starts and holds a connection, so it is both of the
+// optional shapes a channel can have. Declaring them is what makes a change to either
+// contract a compile error here rather than a channel the server silently stops asking.
+var (
+	_ serve.ConcurrentChannel = (*Channel)(nil)
+	_ serve.ReleasableChannel = (*Channel)(nil)
+)
+
 // Channel is a serve.Channel over a Choria asyncjobs work queue.
 type Channel struct {
 	name        string

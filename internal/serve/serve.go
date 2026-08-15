@@ -51,6 +51,43 @@ type Channel interface {
 	Next(ctx context.Context) (*Work, error)
 }
 
+// ConcurrentChannel is the optional interface a channel implements when it knows how
+// many of its runs may be in flight. A channel that claims work before a run starts has
+// to size that claiming to something, and only it knows what, so it states the number
+// rather than being told one and hoping the server agrees.
+//
+// A channel that does not implement it, or that answers with zero or less, gets
+// Options.Concurrency.
+type ConcurrentChannel interface {
+	Channel
+
+	// Concurrency is how many runs of this channel's work may execute at once.
+	Concurrency() int
+}
+
+// ReleasableChannel is the optional interface a channel implements when it holds
+// something that has to be given back, which is most of them: a connection, a
+// subscription, a client with goroutines behind it. A channel holding nothing does not
+// implement it and is skipped wherever channels are released.
+//
+// Close means stop producing work, not stop working. A blocked Next returns
+// ErrChannelDone and no further work is handed over, but runs already in flight are the
+// server's to wait for rather than the channel's, and Serve does not return until they
+// have ended and reported.
+//
+// It must tolerate being called more than once. A program draining on one signal and
+// stopping on the next releases every channel twice, and New releases them itself when
+// it refuses its options, so the second call has to be harmless rather than an error.
+//
+// The method set is io.Closer's, so an existing io.Closer satisfies this without
+// changing. It is named here because what closing means is the part an implementer
+// needs and the stdlib interface cannot say.
+type ReleasableChannel interface {
+	Channel
+
+	Close() error
+}
+
 // Work is one unit of work a channel supplies: what to do, and how to talk to
 // whoever asked for it.
 //
