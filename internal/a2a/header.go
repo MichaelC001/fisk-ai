@@ -4,7 +4,14 @@
 
 package a2a
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
+
+// identityNamePattern is what the v1 schema allows an Identity's Name and Instance to
+// be. It is the schema's rule expressed in Go, so the two move together.
+var identityNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // Identity names an agent. Name is the logical identity (it maps to the agent's
 // configured identity) and Instance optionally identifies one running instance
@@ -12,6 +19,16 @@ import "time"
 type Identity struct {
 	Name     string `json:"name"`
 	Instance string `json:"instance,omitempty"`
+}
+
+// ValidIdentityName reports whether a name is one the v1 schema accepts for an
+// Identity: letters, digits, '-' and '_', and not empty.
+//
+// It is exported so a sender can check a name it was given before building a message
+// with it. Without that the mistake surfaces at the receiver as a message that failed
+// schema validation, which names neither the field nor the rule.
+func ValidIdentityName(name string) bool {
+	return identityNamePattern.MatchString(name)
 }
 
 // Header carries the framing fields shared by every message. It is embedded into
