@@ -60,13 +60,24 @@ const DefaultToolTimeout = 5 * time.Minute
 // agents in one process. They are passed to every run rather than rebuilt per run,
 // and their contracts are the ones documented there.
 type Options struct {
-	// Channels supply the work. At least one is required; each gets its own puller.
+	// Channels supply the work. Each gets its own puller. At least one channel or one
+	// service is required.
 	//
 	// The Server releases them: Drain and Stop close the ones that can be closed, and
 	// New closes them itself if it refuses these options. Handing them over is therefore
 	// handing over their lifecycle, which is what a channel holding a connection needs
 	// from a constructor that may fail.
 	Channels []Channel
+
+	// Services are the surfaces that answer their callers directly rather than
+	// producing work. They are already answering when they arrive here, so they are
+	// released on the same terms as the channels and for a stronger reason: a service
+	// left open by a constructor that failed is a live surface in a process that serves
+	// nothing.
+	//
+	// A server with services and no channels has nothing to pull, so Serve holds itself
+	// open until it is drained, stopped or canceled.
+	Services []Service
 
 	// Config is the parsed agent configuration every run uses. Required.
 	Config *config.Config
@@ -167,8 +178,8 @@ func (o *Options) applyDefaults() {
 }
 
 func (o *Options) validate() error {
-	if len(o.Channels) == 0 {
-		return fmt.Errorf("at least one channel is required")
+	if len(o.Channels) == 0 && len(o.Services) == 0 {
+		return fmt.Errorf("at least one channel or service is required")
 	}
 	if o.Config == nil {
 		return fmt.Errorf("a configuration is required")
@@ -180,6 +191,15 @@ func (o *Options) validate() error {
 		}
 		if ch.Name() == "" {
 			return fmt.Errorf("channel %d has no name", i)
+		}
+	}
+
+	for i, svc := range o.Services {
+		if svc == nil {
+			return fmt.Errorf("service %d is nil", i)
+		}
+		if svc.Name() == "" {
+			return fmt.Errorf("service %d has no name", i)
 		}
 	}
 
@@ -200,33 +220,40 @@ func (o *Options) validate() error {
 }
 
 // Server takes work from its channels and runs it, each channel bounded by its own
-// concurrency.
+// concurrency, and hosts its services for as long as it serves.
 type Server struct {
 	opts Options
 	log  *slog.Logger
+
+	// released is closed by the first release, so a server holding itself open for its
+	// services stops holding when it is drained or stopped. The Once is what makes the
+	// ordinary drain-then-stop sequence two calls and one close.
+	released    chan struct{}
+	releaseOnce sync.Once
 }
 
 // New validates the options and returns a Server. It starts nothing; Serve does the
 // work.
 //
-// A Server owns releasing its channels, through Drain and Stop. New therefore releases
+// A Server owns releasing its surfaces, through Drain and Stop. New therefore releases
 // them itself when it refuses the options, since a caller holding an error holds no
-// Server and has nothing to release them with: several of them own a connection, and
-// there is no third outcome where the caller is expected to clean up after a
-// constructor that failed. Either this returns a Server that will release them, or it
-// returns an error having released them.
+// Server and has nothing to release them with: several channels own a connection and
+// every service is already answering, and there is no third outcome where the caller is
+// expected to clean up after a constructor that failed. Either this returns a Server
+// that will release them, or it returns an error having released them.
 func New(opts Options) (*Server, error) {
 	opts.applyDefaults()
 
 	err := opts.validate()
 	if err != nil {
-		closeChannels(opts.Channels, opts.Logger)
+		releaseSurfaces(opts.Channels, opts.Services, opts.Logger)
 		return nil, err
 	}
 
 	return &Server{
-		opts: opts,
-		log:  opts.Logger,
+		opts:     opts,
+		log:      opts.Logger,
+		released: make(chan struct{}),
 	}, nil
 }
 
@@ -252,10 +279,33 @@ func (s *Server) concurrencyFor(ch Channel) int {
 // Waiting matters: the shared stores, the provider and the telemetry provider belong
 // to the caller and are closed once Serve returns, so returning while a run is still
 // using one would pull it out from under that run.
+//
+// A server with services and no channels has no puller to wait for. It holds itself
+// open instead, until it is drained, stopped or canceled, since its services answer
+// for as long as they are registered and returning here would have the caller release
+// them from under their callers.
+//
+// A server that has a channel is bounded by its channels either way. One that ends,
+// including one that ends because whatever produces its work failed, ends Serve and
+// leaves the program to report it, which is what lets a supervisor restart a worker
+// whose queue died rather than leaving it alive and taking nothing.
 func (s *Server) Serve(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	s.log.Info("Serving", "channels", len(s.opts.Channels))
+	s.log.Info("Serving", "channels", len(s.opts.Channels), "services", len(s.opts.Services))
+
+	for _, svc := range s.opts.Services {
+		s.log.Info("Serving service", "service", svc.Name())
+	}
+
+	if len(s.opts.Channels) == 0 {
+		wg.Go(func() {
+			select {
+			case <-ctx.Done():
+			case <-s.released:
+			}
+		})
+	}
 
 	// One counter covers both the pullers and the runs they spawn. A puller only
 	// adds while it is itself counted, so waiting here cannot miss a run that was
@@ -280,7 +330,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	return nil
 }
 
-// Drain asks the channels to stop producing work and waits for what is already in
+// Drain asks the surfaces to stop taking callers and waits for what is already in
 // flight, so Serve ends by itself with nothing canceled and every run stopped at a
 // point it can be resumed from. It is called while Serve is still running, which is
 // what makes it a drain rather than a stop.
@@ -290,18 +340,30 @@ func (s *Server) Serve(ctx context.Context) error {
 // ReleasableChannel has nothing to drain and is left alone, and a server whose channels
 // are all like that returns at once.
 //
+// The services are closed here rather than at the end, so a surface answering callers
+// directly stops when the worker starts shutting down instead of when it finishes. What
+// is not covered is a call already in flight: a service answers on goroutines of its
+// own that nothing here can see, so closing it stops the next caller rather than the
+// current one.
+//
 // Signals are not this package's business. A library that called signal.Notify would
 // take SIGTERM from an embedder's supervisor with no way to decline, so the two verbs
 // are offered and the program decides which signal means which.
 func (s *Server) Drain() error {
-	return s.release("Draining channel")
+	return s.release("Draining surface")
 }
 
-// release closes every channel that can be, saying which phase it is doing it for. A
-// channel's Close is idempotent, so the second call in a drain-then-stop sequence does
+// release closes every surface that can be, saying which phase it is doing it for. A
+// surface's Close is idempotent, so the second call in a drain-then-stop sequence does
 // nothing; it is logged differently rather than twice so the output does not read as
 // two drains.
+//
+// Closing the hold is the first thing it does and happens once however often this is
+// called, so a server waiting on its services stops waiting whichever verb the program
+// reached for.
 func (s *Server) release(reason string) error {
+	s.releaseOnce.Do(func() { close(s.released) })
+
 	var errs []error
 
 	for _, ch := range s.opts.Channels {
@@ -321,17 +383,26 @@ func (s *Server) release(reason string) error {
 		}
 	}
 
+	for _, svc := range s.opts.Services {
+		s.log.Debug(reason, "service", svc.Name())
+
+		err := svc.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("releasing %s: %w", svc.Name(), err))
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
-// Stop releases the channels after Serve has returned. It is the same call as Drain
+// Stop releases the surfaces after Serve has returned. It is the same call as Drain
 // and differs only in when it is made: before, the runs in flight are waited for;
-// after, there are none left to wait for and it is releasing what the channels hold.
+// after, there are none left to wait for and it is releasing what the surfaces hold.
 //
 // Calling it after a Drain is safe and is how a program that drains on one signal and
 // stops on the next ends up releasing everything exactly once.
 func (s *Server) Stop() error {
-	return s.release("Releasing channel")
+	return s.release("Releasing surface")
 }
 
 // pull takes work from one channel until it is finished or the context ends, bounded

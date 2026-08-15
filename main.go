@@ -73,7 +73,6 @@ func main() {
 	registerInfoAction(cmd)
 	registerRAGCommand(cmd)
 	registerMcpAction(cmd)
-	registerA2AAction(cmd)
 	registerServeCommand(cmd)
 	registerDiscoverAction(cmd)
 

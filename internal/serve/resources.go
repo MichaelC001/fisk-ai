@@ -134,10 +134,11 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 
 	needsNats := runstate.NeedsNats(cfg.SessionBackend()) ||
 		memory.NeedsNats(cfg) ||
-		len(cfg.RemoteTools) > 0
+		len(cfg.RemoteTools) > 0 ||
+		cfg.A2AEnabled()
 
 	if needsNats && opts.Conns == nil && cfg.NatsContext == "" {
-		return nil, fmt.Errorf("nats_context is required in %q: the session store, memory store or remote tools this configuration selects are reached over NATS", opts.ConfigFile)
+		return nil, fmt.Errorf("nats_context is required in %q: the session store, memory store, remote tools or served tools this configuration selects are reached over NATS", opts.ConfigFile)
 	}
 
 	// The provider is built first because it contacts nothing: a provider this build
