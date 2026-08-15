@@ -6,6 +6,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -72,6 +73,93 @@ var _ = Describe("A2A", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(decoded).To(BeAssignableToTypeOf(tc.want))
 			}
+		})
+	})
+
+	Describe("ValidIdentityName", func() {
+		It("Should accept what the schema accepts and refuse what it does not", func() {
+			for _, name := range []string{"agent", "agent-1", "agent_1", "AGENT9"} {
+				Expect(ValidIdentityName(name)).To(BeTrue(), name)
+			}
+
+			for _, name := range []string{"", "svc.example", "with space", "sl/ash"} {
+				Expect(ValidIdentityName(name)).To(BeFalse(), name)
+			}
+		})
+
+		// The point of exporting it: a sender checks a name before building a message,
+		// rather than the receiver reporting only that the message failed validation.
+		It("Should agree with the schema it states", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			req := NewRequest("go")
+			req.ID = NewID()
+			req.Request = req.ID
+			req.Conversation = req.ID
+			req.Sender = Identity{Name: "svc.example"}
+
+			body, err := json.Marshal(req)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(ValidIdentityName(req.Sender.Name)).To(BeFalse())
+			Expect(validator.Validate(body)).ToNot(Succeed())
+		})
+	})
+
+	Describe("DecodeTerminal", func() {
+		encode := func(msg any) []byte {
+			GinkgoHelper()
+
+			body, err := json.Marshal(msg)
+			Expect(err).ToNot(HaveOccurred())
+
+			return body
+		}
+
+		It("Should return the result of a task that answered", func() {
+			msg := NewResult(StopEndTurn)
+			msg.Text = "all done"
+
+			res, err := DecodeTerminal(encode(msg))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.Text).To(Equal("all done"))
+			Expect(res.StopReason).To(Equal(StopEndTurn))
+		})
+
+		// The failure is the error rather than a second return value, so the ordinary
+		// path is a nil check and a caller separates the two kinds of failure with
+		// errors.As.
+		It("Should return a failure as the error it already implements", func() {
+			msg := NewError("the run failed")
+			msg.StopReason = StopBudgetExhausted
+			msg.Code = "budget"
+
+			res, err := DecodeTerminal(encode(msg))
+			Expect(res).To(BeNil())
+			Expect(err).To(MatchError("the run failed"))
+
+			var failed *ErrorMessage
+			Expect(errors.As(err, &failed)).To(BeTrue())
+			Expect(failed.StopReason).To(Equal(StopBudgetExhausted))
+			Expect(failed.Code).To(Equal("budget"))
+		})
+
+		// A message that decodes but does not end a task is a different problem from a
+		// task that failed, so it must not arrive as an *ErrorMessage.
+		It("Should refuse a message that does not end a task", func() {
+			res, err := DecodeTerminal(encode(NewRequest("go")))
+			Expect(res).To(BeNil())
+			Expect(err).To(MatchError(ErrProtocolMismatch))
+			Expect(err).To(MatchError(ContainSubstring(RequestProtocol)))
+
+			var failed *ErrorMessage
+			Expect(errors.As(err, &failed)).To(BeFalse(), "a caller must not read this as a run that failed")
+		})
+
+		It("Should pass an undecodable body's error through", func() {
+			_, err := DecodeTerminal([]byte(`{"protocol":"io.choria.fisk-ai.v1.bogus"}`))
+			Expect(err).To(MatchError(ErrUnknownProtocol))
 		})
 	})
 

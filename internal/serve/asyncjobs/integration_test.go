@@ -107,8 +107,12 @@ func taskState(client *asyncjobs.Client, id string) func() asyncjobs.TaskState {
 	}
 }
 
-// answerOf decodes what the worker stored on the task, proving the answer is a v1
-// message a caller can read with no code of ours in the path.
+// answerOf decodes what the worker stored on the task, independently of ParseAnswer.
+//
+// The specs below assert what the worker produced, so they must not read it through the
+// helper a caller would use: a bug there that happened to mirror one in the worker would
+// cancel out and leave them passing. The round trip that does exercise ParseAnswer is
+// the one spec whose subject it is.
 func answerOf(task *asyncjobs.Task) any {
 	GinkgoHelper()
 
@@ -327,6 +331,28 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
 			Expect(res.Request).To(Equal(req.Request), "the answer correlates to the request that asked")
 			Expect(res.Sender.Name).To(Equal("worker"))
+		})
+
+		// NewJob and ParseAnswer are the whole of a caller's path, so what is worth proving
+		// is the round trip rather than either end alone: the worker accepts a payload
+		// nothing here hand-assembled, and the answer it stored reads back.
+		It("Should round trip a job built and read with the helpers", func() {
+			client := newQueue(nc, 30*time.Second, 5)
+			startWorker(nc, workerOpts{
+				provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("all done")),
+			})
+
+			task, err := NewJob(Job{ID: "job1", Prompt: "go", Caller: "caller"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(client.EnqueueTask(context.Background(), task)).To(Succeed())
+
+			Eventually(taskState(client, "job1"), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
+
+			res, err := ParseAnswer(loadTask(client, "job1"))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.Text).To(Equal("all done"))
+			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.Request).To(Equal(requestOf(task).Request), "the answer correlates to the request the helper built")
 		})
 
 		// A run that failed is a completed job whose answer is that it failed, so it is

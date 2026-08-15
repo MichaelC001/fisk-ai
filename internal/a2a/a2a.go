@@ -120,6 +120,48 @@ func Decode(data []byte) (any, error) {
 	}
 }
 
+// DecodeTerminal decodes the message that ends a task, which is one of two protocols: a
+// Result when the task produced an answer, and an ErrorMessage when it failed.
+//
+// The failure is returned as the error, since ErrorMessage implements it. That makes the
+// ordinary path a nil check and puts the two kinds of failure in one place, so a caller
+// separates them with errors.As:
+//
+//	res, err := a2a.DecodeTerminal(data)
+//	var failed *a2a.ErrorMessage
+//	if errors.As(err, &failed) {
+//		// the task ran and failed; failed.StopReason says how
+//	}
+//
+// An error that is not an *ErrorMessage means the bytes could not be read as a terminal
+// message at all, which is a different problem from a task that failed.
+func DecodeTerminal(data []byte) (*Result, error) {
+	msg, err := Decode(data)
+	if err != nil {
+		return nil, err
+	}
+
+	switch m := msg.(type) {
+	case *Result:
+		return m, nil
+	case *ErrorMessage:
+		return nil, m
+	default:
+		return nil, fmt.Errorf("%w: %q is not a terminal message", ErrProtocolMismatch, headerProtocol(msg))
+	}
+}
+
+// headerProtocol reports the protocol id of a decoded message, for naming the one that
+// arrived where a terminal message was expected.
+func headerProtocol(msg any) string {
+	hdr := headerOf(msg)
+	if hdr == nil {
+		return ""
+	}
+
+	return hdr.Protocol
+}
+
 func decodeInto[T any](data []byte, msg *T) (*T, error) {
 	err := json.Unmarshal(data, msg)
 	if err != nil {
