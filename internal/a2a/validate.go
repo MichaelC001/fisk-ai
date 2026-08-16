@@ -29,20 +29,24 @@ var (
 	ErrStreamUnsupported = errors.New("transport cannot carry an event stream")
 )
 
-// maxMessageSize bounds a single a2a body on the wire. It is enforced in the
+// MaxMessageSize bounds a single a2a body on the wire. It is enforced in the
 // engine on both inbound handler bodies and round-trip replies, before any decode
 // or allocation. It is kept under the NATS default 1 MiB max payload with room for
 // transport framing, and caps both a discovery reply (a large command tree with
 // per-tool schemas) and a tool reply.
-const maxMessageSize = 768 * 1024
+//
+// It is exported because a channel admitting messages over this protocol applies the
+// same cap to what it takes in, and a second number written somewhere else is one
+// that can drift from what this engine will send.
+const MaxMessageSize = 768 * 1024
 
-// expectProtocol decodes a raw body, confirms its protocol id is the one the
+// ExpectProtocol decodes a raw body, confirms its protocol id is the one the
 // receiving path is contracted to carry, and returns the decoded message. A
 // mismatch (a tool request arriving where a discovery request is expected, a
 // malformed body) is reported as an error so the caller can fail closed rather
 // than guess; this is the per-path type contract, not an inference of meaning from
 // the transport.
-func expectProtocol(data []byte, want string) (any, error) {
+func ExpectProtocol(data []byte, want string) (any, error) {
 	msg, err := Decode(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrProtocolMismatch, err)

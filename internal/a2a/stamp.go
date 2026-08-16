@@ -37,11 +37,14 @@ func stampRequest(ctx context.Context, h *Header, sender string, recipient strin
 	}
 }
 
-// stampReply fills in the framing fields of a reply header so it echoes the
+// StampReply fills in the framing fields of a reply header so it echoes the
 // request it answers. The request and conversation tags are copied from the
 // inbound request, the sender becomes this agent's identity, and the recipient
 // becomes the original sender.
-func stampReply(h *Header, req *Header, sender string) {
+//
+// Sequence is left at zero, which is what a single reply carries. A message
+// belonging to a reply set is numbered by the ReplyStream that sends it.
+func StampReply(h *Header, req *Header, sender string) {
 	h.ID = NewID()
 	h.Request = req.Request
 	h.Conversation = req.Conversation

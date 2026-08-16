@@ -485,7 +485,7 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 			// What this asserts is that the replayed answer carries the first run's
 			// accounting rather than an empty one. How stats become a Usage is the
 			// mapping's own business and is covered where it lives.
-			Expect(answer.Usage).To(Equal(usageOf(res.Stats)), "the usage is what the work cost the first time")
+			Expect(answer.Usage).To(Equal(a2a.UsageFrom(res.Stats)), "the usage is what the work cost the first time")
 			Expect(answer.Usage.LLMCalls).To(BeNumerically(">", 0), "the run it is reporting did happen")
 
 			Expect(provider.Requests()).To(BeEmpty(), "the answer was never paid for twice")

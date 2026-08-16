@@ -142,8 +142,8 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 		return nil, err
 	}
 
-	if len(reply) > maxMessageSize {
-		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrToolImport, maxMessageSize)
+	if len(reply) > MaxMessageSize {
+		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrToolImport, MaxMessageSize)
 	}
 
 	err = c.validator.Validate(reply)
@@ -151,7 +151,7 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 		return nil, fmt.Errorf("%w: invalid reply: %w", ErrToolImport, err)
 	}
 
-	return expectProtocol(reply, wantReply)
+	return ExpectProtocol(reply, wantReply)
 }
 
 // marshalValid encodes an outgoing message and holds it to the same schema a

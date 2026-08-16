@@ -36,14 +36,14 @@ func toolsFor(app *fisk.Application) []toolkit.Tool {
 	return toolkit.Tools(tools)
 }
 
-var _ = Describe("expectProtocol", func() {
+var _ = Describe("ExpectProtocol", func() {
 	It("Should return the decoded message when the protocol matches", func() {
 		req := NewToolRequest("ping", nil)
 		stampRequest(context.Background(), &req.Header, "me", "you")
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 
-		msg, err := expectProtocol(data, ToolRequestProtocol)
+		msg, err := ExpectProtocol(data, ToolRequestProtocol)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(msg).To(BeAssignableToTypeOf(&ToolRequest{}))
 	})
@@ -54,12 +54,12 @@ var _ = Describe("expectProtocol", func() {
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = expectProtocol(data, ToolRequestProtocol)
+		_, err = ExpectProtocol(data, ToolRequestProtocol)
 		Expect(err).To(MatchError(ErrProtocolMismatch))
 	})
 
 	It("Should reject an undecodable body", func() {
-		_, err := expectProtocol([]byte(`{"protocol":"nope"}`), ToolRequestProtocol)
+		_, err := ExpectProtocol([]byte(`{"protocol":"nope"}`), ToolRequestProtocol)
 		Expect(err).To(MatchError(ErrProtocolMismatch))
 	})
 })

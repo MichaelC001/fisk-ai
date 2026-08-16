@@ -13,40 +13,42 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
-// ChannelBuilder constructs one configured channel. A program links the builders for
-// the surfaces it wants and passes them to Surfaces, which decides from the
-// configuration which of them to call.
+// Surface is a calling surface a server hosts. Every Channel and every Service is one,
+// and a builder returns them under this name so a single configuration block can
+// produce both.
 //
-// It exists so this package never imports the packages that implement channels. A
+// A returned value must implement Channel or Service. Surfaces sorts each one into the
+// list it belongs in, taking Channel first: Service asks only for Name and Close, so a
+// channel that can be released satisfies it too, and asking both questions would host
+// one value twice.
+type Surface interface {
+	// Name identifies the surface in logs, metrics and on a program's startup banner.
+	Name() string
+}
+
+// SurfaceBuilder constructs the surfaces one configuration block asks for. A program
+// links the builders for the surfaces it wants and passes them to Surfaces, which
+// decides from the configuration which of them to call.
+//
+// It exists so this package never imports the packages that implement surfaces. A
 // channel is a Go interface rather than a name in a configuration file, so an embedder
 // adds one by writing a builder or by putting a value straight on Options.Channels, and
 // neither route goes through a registry here.
-type ChannelBuilder struct {
-	// Name identifies the surface in diagnostics, not the channel it builds; the
-	// channel names itself.
+type SurfaceBuilder struct {
+	// Name identifies the builder in diagnostics, not the surfaces it builds; each
+	// surface names itself.
 	Name string
 
-	// Enabled reports whether this configuration asks for the surface. Presence of a
-	// configuration block is what enables a surface, as it already is for serving.
+	// Enabled reports whether this configuration asks for these surfaces. Presence of
+	// a configuration block enables a surface, as it already does for serving. A nil
+	// Enabled never builds, which lets a program link a builder it has not configured
+	// a switch for.
 	Enabled func(*config.Config) bool
 
-	// Build constructs the channel. It is called only when Enabled said so.
-	Build func(*config.Config, BuildOptions) (Channel, error)
-}
-
-// ServiceBuilder constructs one configured service. It is ChannelBuilder for a surface
-// that produces no work, and is linked, enabled and called the same way.
-type ServiceBuilder struct {
-	// Name identifies the surface in diagnostics, not the service it builds; the
-	// service names itself.
-	Name string
-
-	// Enabled reports whether this configuration asks for the surface.
-	Enabled func(*config.Config) bool
-
-	// Build constructs the service. It is called only when Enabled said so, and what
-	// it returns is already answering.
-	Build func(*config.Config, BuildOptions) (Service, error)
+	// Build constructs the surfaces, in the order they are to be hosted. It is called
+	// only when Enabled said so. Returning none is allowed and hosts nothing; a
+	// service it returns is already answering by the time it arrives here.
+	Build func(*config.Config, BuildOptions) ([]Surface, error)
 }
 
 // BuildOptions are what a surface needs that no configuration can state: what the
@@ -83,16 +85,17 @@ type BuildOptions struct {
 	Telemetry *telemetry.Provider
 }
 
-// Surfaces builds the channels and services a configuration enables, in the order the
-// builders were given, channels first. It returns empty slices when nothing is
-// enabled, which the caller reports rather than serving nothing.
+// Surfaces builds the surfaces a configuration enables, in the order the builders were
+// given, and sorts them into the channels and the services a Server takes. It returns
+// empty slices when nothing is enabled, which the caller reports rather than serving
+// nothing.
 //
-// A surface that fails to build takes the ones already built down with it. Both kinds
-// are built here rather than in a call each because the release is what needs them
-// together: a channel set built by one call and a service that failed in a second
+// A surface that fails to build takes the ones already built down with it. Everything
+// is built through one call rather than a call per kind because releasing them needs
+// them together: a channel set built by one call and a service that failed in a second
 // would leave a queue channel holding a NATS connection it dialed itself, with no
 // handle left anywhere to release it.
-func Surfaces(cfg *config.Config, opts BuildOptions, channels []ChannelBuilder, services []ServiceBuilder) ([]Channel, []Service, error) {
+func Surfaces(cfg *config.Config, opts BuildOptions, builders []SurfaceBuilder) ([]Channel, []Service, error) {
 	var (
 		builtChannels []Channel
 		builtServices []Service
@@ -104,30 +107,26 @@ func Surfaces(cfg *config.Config, opts BuildOptions, channels []ChannelBuilder, 
 		return nil, nil, err
 	}
 
-	for _, b := range channels {
+	for _, b := range builders {
 		if b.Enabled == nil || !b.Enabled(cfg) {
 			continue
 		}
 
-		ch, err := b.Build(cfg, opts)
+		built, err := b.Build(cfg, opts)
 		if err != nil {
-			return fail(fmt.Errorf("building the %s channel: %w", b.Name, err))
+			return fail(fmt.Errorf("building the %s surface: %w", b.Name, err))
 		}
 
-		builtChannels = append(builtChannels, ch)
-	}
-
-	for _, b := range services {
-		if b.Enabled == nil || !b.Enabled(cfg) {
-			continue
+		for _, s := range built {
+			switch surface := s.(type) {
+			case Channel:
+				builtChannels = append(builtChannels, surface)
+			case Service:
+				builtServices = append(builtServices, surface)
+			default:
+				return fail(fmt.Errorf("the %s surface built %T, which is neither a Channel nor a Service", b.Name, s))
+			}
 		}
-
-		svc, err := b.Build(cfg, opts)
-		if err != nil {
-			return fail(fmt.Errorf("building the %s service: %w", b.Name, err))
-		}
-
-		builtServices = append(builtServices, svc)
 	}
 
 	return builtChannels, builtServices, nil

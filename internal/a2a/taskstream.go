@@ -39,8 +39,8 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 		return nil, err
 	}
 
-	if len(body) > maxMessageSize {
-		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, maxMessageSize)
+	if len(body) > MaxMessageSize {
+		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
 	}
 
 	err = t.validator.Validate(body)
@@ -152,8 +152,8 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 		return nil, err
 	}
 
-	if len(reply) > maxMessageSize {
-		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, maxMessageSize)
+	if len(reply) > MaxMessageSize {
+		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
 	}
 
 	err = c.validator.Validate(reply)
@@ -161,7 +161,7 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 		return nil, fmt.Errorf("invalid cancel reply: %w", err)
 	}
 
-	decoded, err := expectProtocol(reply, AckProtocol)
+	decoded, err := ExpectProtocol(reply, AckProtocol)
 	if err != nil {
 		return nil, err
 	}

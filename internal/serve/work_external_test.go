@@ -295,4 +295,62 @@ var _ = Describe("Work", func() {
 			Expect(out.Text).To(Equal("one"))
 		})
 	})
+
+	Describe("RunContext", func() {
+		It("Should run the work on the context the channel derived", func() {
+			type key struct{}
+
+			var (
+				calls  int
+				parent context.Context
+			)
+
+			out := serveOne(&serve.Work{
+				ID:     "job-1",
+				Prompt: "go",
+				RunContext: func(ctx context.Context) (context.Context, context.CancelFunc) {
+					calls++
+					parent = ctx
+
+					return context.WithCancel(context.WithValue(ctx, key{}, "carried"))
+				},
+			}, serve.Options{Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("one"))})
+
+			Expect(out.Err).ToNot(HaveOccurred())
+			Expect(calls).To(Equal(1), "asked once, immediately before the run")
+			Expect(parent).ToNot(BeNil(), "derived from the server's own context")
+		})
+
+		// A channel keeps the cancel it returned, so a caller withdrawing stops that run
+		// and nothing else.
+		It("Should end the run when the channel cancels it", func() {
+			out := serveOne(&serve.Work{
+				ID:     "job-1",
+				Prompt: "go",
+				RunContext: func(ctx context.Context) (context.Context, context.CancelFunc) {
+					runCtx, cancel := context.WithCancel(ctx)
+					cancel()
+
+					return runCtx, cancel
+				},
+			}, serve.Options{Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("one"))})
+
+			Expect(out.Err).To(HaveOccurred())
+			Expect(out.Text).To(BeEmpty())
+		})
+
+		// A channel's mistake here must not take a worker down: a nil context leaves the
+		// run on the server's own and a nil cancel is not called.
+		It("Should tolerate a hook that answers with nothing usable", func() {
+			out := serveOne(&serve.Work{
+				ID:         "job-1",
+				Prompt:     "go",
+				RunContext: func(context.Context) (context.Context, context.CancelFunc) { return nil, nil },
+			}, serve.Options{Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("one"))})
+
+			Expect(out.Err).ToNot(HaveOccurred())
+			Expect(out.Text).To(Equal("one"))
+			Expect(out.Crashed).To(BeFalse())
+		})
+	})
 })

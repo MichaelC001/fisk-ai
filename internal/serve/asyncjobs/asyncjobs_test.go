@@ -287,57 +287,7 @@ var _ = Describe("Dispositions", func() {
 	})
 })
 
-var _ = Describe("Usage", func() {
-	It("Should report nothing for a run that never started", func() {
-		Expect(usageOf(nil)).To(BeNil())
-	})
-
-	// The input total is assembled rather than copied: RunStats keeps the uncached
-	// remainder in InTokens and the cached input beside it, so a caller handed InTokens
-	// alone would be told a fraction of what the task was billed for.
-	It("Should report total input, with the cache split kept alongside it", func() {
-		usage := usageOf(&util.RunStats{
-			InTokens:          10,
-			OutTokens:         5,
-			CacheReadTokens:   900,
-			CacheCreateTokens: 90,
-		})
-
-		Expect(usage.InputTokens).To(Equal(int64(1000)), "everything the task consumed, cached or not")
-		Expect(usage.OutputTokens).To(Equal(int64(5)))
-		Expect(usage.CacheReadTokens).To(Equal(int64(900)))
-		Expect(usage.CacheCreateTokens).To(Equal(int64(90)))
-	})
-
-	It("Should report what the run did as well as what it cost", func() {
-		usage := usageOf(&util.RunStats{LlmCalls: 27, ToolCalls: 27})
-
-		Expect(usage.LLMCalls).To(Equal(int64(27)))
-		Expect(usage.ToolCalls).To(Equal(int64(27)))
-	})
-
-	It("Should produce a usage the v1 schema accepts", func() {
-		validator, err := a2a.NewValidator()
-		Expect(err).ToNot(HaveOccurred())
-
-		res := a2a.NewResult(a2a.StopEndTurn)
-		stampHeader(&res.Header)
-		res.Usage = usageOf(&util.RunStats{InTokens: 1, OutTokens: 2, CacheReadTokens: 3, LlmCalls: 4, ToolCalls: 5})
-
-		Expect(validator.ValidateMessage(res)).To(Succeed())
-	})
-})
-
 var _ = Describe("Translation", func() {
-	It("Should map every terminal reason onto the protocol vocabulary", func() {
-		Expect(stopReason(runstate.ReasonCompleted)).To(Equal(a2a.StopEndTurn))
-		Expect(stopReason(runstate.ReasonBudget)).To(Equal(a2a.StopBudgetExhausted))
-		Expect(stopReason(runstate.ReasonMaxIterations)).To(Equal(a2a.StopMaxIterations))
-		Expect(stopReason(runstate.ReasonSuspended)).To(Equal(a2a.StopSuspended))
-		Expect(stopReason(runstate.ReasonError)).To(Equal(a2a.StopError))
-		Expect(stopReason("something later")).To(Equal(a2a.StopError))
-	})
-
 	It("Should carry only the budget limits Work has a home for", func() {
 		Expect(budgetOf(newRequest("go"))).To(Equal(serve.Budget{}))
 

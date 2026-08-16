@@ -501,10 +501,15 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 		prompter = toolkit.DefaultDenyPrompter()
 	}
 
-	log.Info("Running", "caller", work.Caller.Name, "resume", work.Checkpoint.ResumeID)
+	log.Info("Running", "caller", work.Caller.Name, "caller_verified", work.Caller.Verified, "resume", work.Checkpoint.ResumeID)
+
+	runCtx, cancel := s.runContext(ctx, work)
+	if cancel != nil {
+		defer cancel()
+	}
 
 	start := time.Now()
-	res, err := agent.Run(ctx, s.runOptions(work), events, prompter)
+	res, err := agent.Run(runCtx, s.runOptions(work), events, prompter)
 	duration := time.Since(start)
 
 	if res != nil {
@@ -527,6 +532,25 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 	default:
 		log.Info("Run completed", "duration", duration, "reason", out.Reason)
 	}
+}
+
+// runContext derives the context one run executes under, asking the channel when it
+// supplied a hook and leaving the work on the server's context when it did not.
+//
+// A channel that answers with nothing usable is corrected rather than obeyed: a nil
+// context would panic the run and a nil cancel would panic the defer that calls it,
+// and neither is worth a stranded piece of work and a dead worker.
+func (s *Server) runContext(ctx context.Context, work *Work) (context.Context, context.CancelFunc) {
+	if work.RunContext == nil {
+		return ctx, nil
+	}
+
+	runCtx, cancel := work.RunContext(ctx)
+	if runCtx == nil {
+		runCtx = ctx
+	}
+
+	return runCtx, cancel
 }
 
 // runOptions assembles the agent options for one piece of work: the channel's

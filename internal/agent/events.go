@@ -5,6 +5,8 @@
 package agent
 
 import (
+	"encoding/json"
+
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
@@ -202,9 +204,18 @@ type RunInfo struct {
 // a row and falls back to DisplayShort otherwise, while a plain stream that cannot
 // measure a screen uses DisplayShort. Both are empty for non-command tools.
 type ToolTrace struct {
+	// ID is the model's tool_use id for this call, which ToolResultTrace.CallID
+	// echoes. A surface rendering calls and results as separate items needs it to
+	// pair them, since a turn may carry several calls and a call may produce no
+	// result at all.
+	ID           string
 	Name         string
 	Display      string
 	DisplayShort string
+	// Input is the raw JSON arguments the model supplied, exactly as they were
+	// dispatched. It is untrusted and unsanitized, like Output on the result, and is
+	// what a surface shows when Display is empty because the tool runs no command.
+	Input json.RawMessage
 	// Present is the visibility axis: how a renderer shows and suppresses the call.
 	// A renderer keys its suppression off this, never off ProviderKind, so a built-in
 	// self-renders (the human-in-the-loop tools) or is traced (memory and knowledge)
@@ -223,6 +234,11 @@ type ToolTrace struct {
 // unless verbose). Output is the raw result text, untrusted and unsanitized; IsError
 // reports whether the tool reported a failure.
 type ToolResultTrace struct {
+	// CallID is the tool_use id of the ToolTrace this answers. Not every call
+	// produces a result: a denied confirmation, a call missing required arguments,
+	// a tool that answers later and an aborted run all end without one, so a
+	// surface pairing the two must tolerate a call that is never answered.
+	CallID  string
 	Present toolkit.Presentation
 	// ProviderKind mirrors the ToolTrace it answers, so the result's kind= log token
 	// matches the call's.

@@ -226,7 +226,7 @@ func (s *Server) handleDiscovery(_ context.Context, _ Caller, body []byte, reply
 
 	out := &DiscoveryReply{AgentCard: s.card}
 	out.Protocol = DiscoveryReplyProtocol
-	stampReply(&out.Header, &dr.Header, s.identity)
+	StampReply(&out.Header, &dr.Header, s.identity)
 
 	s.respond(reply, out)
 }
@@ -350,8 +350,8 @@ func servedOutcome(out *ToolResult, queueWait time.Duration) telemetry.ServedToo
 // protocol the receiving path is contracted to carry. The size cap runs first,
 // before any decode or allocation.
 func (s *Server) inbound(body []byte, want string) (any, error) {
-	if len(body) > maxMessageSize {
-		return nil, fmt.Errorf("request exceeds %d bytes", maxMessageSize)
+	if len(body) > MaxMessageSize {
+		return nil, fmt.Errorf("request exceeds %d bytes", MaxMessageSize)
 	}
 
 	err := s.validator.Validate(body)
@@ -359,7 +359,7 @@ func (s *Server) inbound(body []byte, want string) (any, error) {
 		return nil, fmt.Errorf("invalid request: %w", err)
 	}
 
-	return expectProtocol(body, want)
+	return ExpectProtocol(body, want)
 }
 
 // respond marshals a reply and sends it through the request's Replier. The reply
@@ -408,7 +408,7 @@ func (s *Server) publish(reply Replier, msg any) {
 func (s *Server) toolReply(reqHdr *Header, result *ToolResult) *ToolReply {
 	reply := &ToolReply{ToolResult: *result}
 	reply.Protocol = ToolReplyProtocol
-	stampReply(&reply.Header, reqHdr, s.identity)
+	StampReply(&reply.Header, reqHdr, s.identity)
 
 	return reply
 }
