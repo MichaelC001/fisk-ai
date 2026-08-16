@@ -28,8 +28,8 @@ const (
 // Transport is the pluggable binding the a2a engine rides on. One implementation
 // exists per wire binding (NATS today, Choria services later); it is selected from
 // the registry by name and constructed from a shared conns.Provider. The engine
-// owns all message validation and back-pressure; a Transport only moves bytes and
-// keeps the routing paths separate.
+// owns all message validation and the concurrency bound; a Transport only moves bytes
+// and keeps the routing paths separate.
 type Transport interface {
 	// RoundTrip sends body to agent on the op path and returns the raw reply. It
 	// returns ErrAgentUnavailable when no agent answers or the deadline elapses. The
@@ -37,8 +37,10 @@ type Transport interface {
 	RoundTrip(ctx context.Context, agent string, op RouteHint, body []byte) ([]byte, error)
 	// Serve registers h as the handler for inbound messages on the op path for this
 	// transport's own identity. The transport must invoke h synchronously on its
-	// per-path serving goroutine so the engine's semaphore, acquired inside h, back-
-	// pressures intake. It may be called once per op.
+	// per-path serving goroutine: h answers on the Replier it is given, which is
+	// single-shot and valid only for that call, and h never blocks on work of its own,
+	// so a busy engine refuses rather than holding the path. It may be called once per
+	// op.
 	Serve(op RouteHint, h Handler) error
 	// Describe returns transport-neutral {label, value} lines describing how the
 	// named identity is reached, for display by the CLI (e.g. the NATS subjects).
@@ -48,19 +50,29 @@ type Transport interface {
 	Close() error
 }
 
-// StreamingTransport is a Transport that can carry a multi-message reply set in
-// both directions. A binding implements it when its substrate can do so; the server
-// and the client each assert for it once, when the transport is built, so whether
-// tasks can be served is known at startup rather than per request.
+// ReplySetTransport is a Transport that can answer one request with several
+// messages. A binding implements it when its substrate can do so; the server and the
+// client each assert for it once, when the transport is built, so whether a tool call
+// can say it is still working is known at startup rather than per request.
+//
+// It is separate from StreamingTransport because a tool call needs a reply set and
+// nothing else: it has no cancel, and a binding that serves tools should not have to
+// implement one.
+type ReplySetTransport interface {
+	Transport
+
+	// Stream sends body and returns a Reader over the reply set it produces.
+	Stream(ctx context.Context, agent string, op RouteHint, body []byte) (Reader, error)
+}
+
+// StreamingTransport is a ReplySetTransport that can also carry a task: the reply set
+// in one direction and a cancel addressed to a running task in the other.
 //
 // Cancel is here rather than on an interface of its own because a task is what has a
 // cancel: a binding that can carry a reply set is the binding that can run a task
 // long enough for one to arrive.
 type StreamingTransport interface {
-	Transport
-
-	// Stream sends body and returns a Reader over the reply set it produces.
-	Stream(ctx context.Context, agent string, op RouteHint, body []byte) (Reader, error)
+	ReplySetTransport
 
 	// WatchCancel routes cancels addressed to the named request to h, and only to
 	// this process, until the returned watch is released. It is the running task's

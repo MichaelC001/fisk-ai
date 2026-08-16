@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
@@ -20,27 +21,59 @@ import (
 // moves bytes.
 type Client struct {
 	transport Transport
+	replySet  ReplySetTransport
 	stream    StreamingTransport
 	sender    string
 	validator *Validator
+	idle      time.Duration
+}
+
+// ClientOption adjusts a Client at construction.
+type ClientOption func(*Client)
+
+// WithIdleTimeout sets how long the client waits for the next message of a reply set
+// before treating the peer as gone. A value below three keepalive intervals is raised
+// to it, since a wait shorter than the interval a peer speaks at would fail every call
+// that is merely slow. Unset uses DefaultIdleTimeout.
+func WithIdleTimeout(d time.Duration) ClientOption {
+	return func(c *Client) {
+		if d <= 0 {
+			return
+		}
+		c.idle = max(d, minIdleTimeout)
+	}
 }
 
 // NewClient wraps a Transport as a Client. sender is this agent's identity, set as
 // the Header.Sender on outgoing requests. The Transport is borrowed: the caller
 // established it (and the Provider behind it) and closes them.
 //
-// Whether the binding can carry a reply set is decided here, once, so a client built
-// on a transport that cannot knows it before a task is sent rather than one request
+// What the binding can carry is decided here, once, so a client built on a transport
+// that cannot carry a reply set knows it before a call is sent rather than one request
 // at a time.
-func NewClient(transport Transport, sender string) (*Client, error) {
+func NewClient(transport Transport, sender string, opts ...ClientOption) (*Client, error) {
 	validator, err := NewValidator()
 	if err != nil {
 		return nil, fmt.Errorf("building message validator: %w", err)
 	}
 
+	replySet, _ := transport.(ReplySetTransport)
 	stream, _ := transport.(StreamingTransport)
 
-	return &Client{transport: transport, stream: stream, sender: sender, validator: validator}, nil
+	c := &Client{
+		transport: transport,
+		replySet:  replySet,
+		stream:    stream,
+		sender:    sender,
+		validator: validator,
+		idle:      DefaultIdleTimeout,
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c, nil
 }
 
 // CanStream reports whether the transport behind this client carries a reply set, so
@@ -84,20 +117,26 @@ func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.
 	// local one that wraps it.
 	defer func() { span.Finish(remoteOutcome(reply, err)) }()
 
+	if c.replySet == nil {
+		return nil, fmt.Errorf("%w: a tool call is answered as a reply set", ErrStreamUnsupported)
+	}
+
 	req := NewToolRequest(tool, normalizeInput(input))
 	stampRequest(ctx, &req.Header, c.sender, agent)
 
-	raw, err := c.roundTrip(ctx, agent, OpTool, req, ToolReplyProtocol)
+	data, err := c.marshalValid(req)
 	if err != nil {
 		return nil, err
 	}
 
-	tr, ok := raw.(*ToolReply)
-	if !ok {
-		return nil, fmt.Errorf("%w: tool reply had unexpected type %T", ErrProtocolMismatch, raw)
+	reader, err := c.replySet.Stream(ctx, agent, OpTool, data)
+	if err != nil {
+		return nil, err
 	}
 
-	return tr, nil
+	set := &toolSet{reader: reader, validator: c.validator, idle: c.idle}
+
+	return set.reply(ctx)
 }
 
 // remoteOutcome classifies how a remote invocation ended, for the span.
@@ -108,6 +147,12 @@ func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.
 // fragments.
 func remoteOutcome(reply *ToolReply, err error) telemetry.RemoteAgentOutcome {
 	switch {
+	case err == nil && reply != nil && reply.Code == CodeCapacity:
+		// Answered and refused, with no tool run. Tested before IsError, which a
+		// refusal also sets: filing it as a tool failure would put a busy peer in the
+		// series an operator reads to find broken tools.
+		return telemetry.RemoteAgentOutcome{Failed: true, Class: telemetry.ClassRemoteCapacity}
+
 	case err == nil && reply != nil && reply.IsError:
 		// The call was made and answered; the tool itself failed on the far side.
 		return telemetry.RemoteAgentOutcome{Failed: true, Class: telemetry.ClassToolError}

@@ -7,6 +7,7 @@ package a2a
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -24,6 +25,21 @@ type TransportConfig struct {
 	Identity string
 	Timeout  time.Duration
 	Options  json.RawMessage
+
+	// Logger receives what the binding notices about its own health. Nil discards it,
+	// since a library that reached for a default logger would write to an embedder's
+	// stderr uninvited.
+	Logger *slog.Logger
+
+	// OnFault reports that the transport has stopped serving for a reason nobody asked
+	// for: a substrate that dropped the registration, a subscription that overflowed.
+	// It is not called for a stop the program asked for by closing the transport.
+	//
+	// A served surface cannot recover from this on its own, so the callback exists to
+	// let whoever hosts it decide: a worker whose identity is registered nowhere is
+	// answering nothing while still running. It may be called more than once and is
+	// called from the binding's own goroutine, so an implementation must not block.
+	OnFault func(error)
 }
 
 // Factory constructs a Transport from the shared connection Provider and the

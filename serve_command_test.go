@@ -99,7 +99,7 @@ var _ = Describe("fiskServeCommand", func() {
 			c := &fiskServeCommand{}
 
 			Expect(c.a2aToolTimeout(&config.Config{})).To(Equal(a2a.DefaultCallTimeout))
-			Expect(c.a2aConcurrency(&config.Config{})).To(Equal(a2a.DefaultConcurrency))
+			Expect(c.a2aConcurrency(&config.Config{})).To(Equal(a2a.DefaultConcurrency()))
 
 			cfg := &config.Config{Expose: &config.ExposeConfig{Agent: &config.AgentExpose{
 				A2A: &config.ExposedA2AConfig{MaxConcurrentTools: 7, ToolTimeoutParsed: 90 * time.Second},

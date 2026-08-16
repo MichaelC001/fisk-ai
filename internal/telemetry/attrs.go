@@ -168,10 +168,6 @@ const (
 	// assertion and is kept apart from the caller for that reason. It is peer
 	// controlled, so it is a span attribute and never a metric label.
 	AttrServedSender = attribute.Key("fisk.served.sender")
-	// AttrServedQueueWaitMS is how long a served call waited for a concurrency slot.
-	// The wait blocks the transport's serving goroutine, so it is latency the peer paid
-	// and no other span reports.
-	AttrServedQueueWaitMS = attribute.Key("fisk.served.queue_wait_ms")
 	// AttrToolResumed marks a tool from a batch a resume completed. Those run before
 	// the iteration loop, so they produce tool spans with no preceding model call in
 	// the same trace; without the marker that shape reads as tools running unprompted.
@@ -353,6 +349,11 @@ const (
 	ToolOutcomeError = "error"
 	// ToolOutcomeUnknownTool is a call naming a tool that does not exist.
 	ToolOutcomeUnknownTool = "unknown_tool"
+	// ToolOutcomeCapacity is a served call refused because the agent answering it was
+	// already running as many as it will run at once. Nothing was started, so it is
+	// neither an execution nor a failure of one; the peer was told to look elsewhere
+	// or come back. It is served-only, like ToolOutcomeUnknownTool.
+	ToolOutcomeCapacity = "capacity"
 	// ToolOutcomePolicyDenied is a call a hook refused.
 	ToolOutcomePolicyDenied = "policy_denied"
 	// ToolOutcomeMissingArguments is a call rejected before running because the model
@@ -542,6 +543,11 @@ var (
 	ClassInvalidQuery = ErrorClass{"invalid_query"}
 	// ClassRemoteUnavailable is a remote agent that could not be reached.
 	ClassRemoteUnavailable = ErrorClass{"remote_unavailable"}
+	// ClassRemoteCapacity is a remote agent that answered and refused, being already
+	// running as many tool calls as it will run at once. It is kept apart from
+	// ClassRemoteUnavailable because the peer is up and from ClassToolError because
+	// no tool ran, and those are three different things to do about it.
+	ClassRemoteCapacity = ErrorClass{"remote_capacity"}
 	// ClassOther is the spec's catch-all for an error that fits no other class. It
 	// is the value to reach for rather than inventing a new one at a call site.
 	ClassOther = ErrorClass{"_OTHER"}

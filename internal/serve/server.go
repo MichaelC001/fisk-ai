@@ -103,10 +103,10 @@ type Options struct {
 	// channel asks for, which is a caller this server does not control, while both of
 	// these come from whoever started it.
 	//
-	// A run at a terminal is unbounded by default because an operator can interrupt a
-	// command that will never answer. Nobody can interrupt one here, so this is set
-	// rather than left off. See config.Config.ToolTimeout for what the bound can and
-	// cannot stop.
+	// A configuration read from a file arrives with the harness default already filled,
+	// so this covers a Config built in process, which never runs prepare. The two
+	// values agree, so which one a run gets is not something an operator can observe.
+	// See config.Config.ToolTimeout for what the bound can and cannot stop.
 	ToolTimeout time.Duration
 
 	// WorkDir is the directory command tools run in. It must be an absolute path that
@@ -298,6 +298,17 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.log.Info("Serving service", "service", svc.Name())
 	}
 
+	// A fault is watched beside the channels rather than among them: it ends a server
+	// with channels as well as one without, since a channel blocked in Next has no
+	// reason to return and the drain is what makes it. It is deliberately not part of
+	// the wait group, whose members are what Serve waits for; this watcher is what
+	// Serve releases when it is done.
+	faulted := make(chan error, 1)
+	watching := make(chan struct{})
+	defer close(watching)
+
+	go s.watchFaults(ctx, faulted, watching)
+
 	if len(s.opts.Channels) == 0 {
 		wg.Go(func() {
 			select {
@@ -327,7 +338,73 @@ func (s *Server) Serve(ctx context.Context) error {
 	wg.Wait()
 	s.log.Info("Stopped serving")
 
+	select {
+	case err := <-faulted:
+		return err
+	default:
+	}
+
 	return nil
+}
+
+// watchFaults ends the server when a surface reports that it has stopped working.
+//
+// The drain is what ends the channels: a channel blocked in Next returns
+// ErrChannelDone once it is released, and the runs in flight finish rather than being
+// abandoned, since a surface that cannot be called no longer affects work that is
+// already running.
+//
+// It returns when Serve does, however Serve ended, so neither it nor the readers it
+// starts outlive the server they watch.
+func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-chan struct{}) {
+	sources := make([]<-chan error, 0, len(s.opts.Channels)+len(s.opts.Services))
+
+	for _, ch := range s.opts.Channels {
+		f, ok := ch.(FaultingSurface)
+		if ok {
+			sources = append(sources, f.Faults())
+		}
+	}
+	for _, svc := range s.opts.Services {
+		f, ok := svc.(FaultingSurface)
+		if ok {
+			sources = append(sources, f.Faults())
+		}
+	}
+
+	if len(sources) == 0 {
+		return
+	}
+
+	// One goroutine per source rather than reflect.Select: the count is the number of
+	// surfaces a process hosts, and the first fault is the one that ends the server.
+	first := make(chan error, len(sources))
+	for _, src := range sources {
+		go func() {
+			select {
+			case err, ok := <-src:
+				if ok && err != nil {
+					first <- err
+				}
+			case <-done:
+			}
+		}()
+	}
+
+	select {
+	case err := <-first:
+		s.log.Error("A surface stopped working; draining", "error", err)
+		faulted <- err
+
+		derr := s.Drain()
+		if derr != nil {
+			s.log.Error("Draining after a surface fault failed", "error", derr)
+		}
+
+	case <-ctx.Done():
+	case <-s.released:
+	case <-done:
+	}
 }
 
 // Drain asks the surfaces to stop taking callers and waits for what is already in

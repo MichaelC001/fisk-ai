@@ -72,7 +72,18 @@ func (t *Transport) Stream(ctx context.Context, agent string, op a2a.RouteHint, 
 
 	// Flushed so a connection that cannot carry the request reports it here, rather
 	// than as a reader that waits for a reply set nobody was asked to produce.
-	err = t.nc.FlushWithContext(ctx)
+	//
+	// The flush is bounded by this transport's own timeout when the caller's context
+	// carries no deadline, as a round trip is: a reply set may legitimately run for
+	// hours, so a caller is not obliged to bound the reply set to send the request.
+	flushCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		flushCtx, cancel = context.WithTimeout(ctx, t.timeout)
+		defer cancel()
+	}
+
+	err = t.nc.FlushWithContext(flushCtx)
 	if err != nil {
 		_ = sub.Unsubscribe()
 		return nil, fmt.Errorf("publishing to %q: %w", subject, err)

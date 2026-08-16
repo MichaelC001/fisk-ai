@@ -26,6 +26,7 @@ type Service struct {
 
 	mu     sync.Mutex
 	closes int
+	faults chan error
 }
 
 // NewService builds a service that is answering.
@@ -35,8 +36,15 @@ type Service struct {
 func NewService(tb testing.TB, name string) *Service {
 	tb.Helper()
 
-	return &Service{name: name}
+	return &Service{name: name, faults: make(chan error, 1)}
 }
+
+// Faults implements serve.FaultingSurface, so a spec can make a hosted service report
+// that it has stopped answering and assert what the server does about it.
+func (s *Service) Faults() <-chan error { return s.faults }
+
+// Fault reports that this service has stopped answering for a reason nobody asked for.
+func (s *Service) Fault(err error) { s.faults <- err }
 
 // Name identifies the service.
 func (s *Service) Name() string { return s.name }

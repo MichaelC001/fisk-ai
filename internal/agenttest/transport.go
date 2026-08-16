@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -33,10 +34,11 @@ type FakeTransport struct {
 	serveCalls int
 }
 
-// FakeTransport implements a2a.Transport; the assertion is the separate-package
-// interface audit, failing to compile if the seam stops being implementable from
-// outside its own package.
-var _ a2a.Transport = (*FakeTransport)(nil)
+// FakeTransport implements a2a.ReplySetTransport; the assertion is the
+// separate-package interface audit, failing to compile if the interface stops being
+// implementable from outside its own package. A tool call needs the reply set, since
+// that is how a served call says it is still working.
+var _ a2a.ReplySetTransport = (*FakeTransport)(nil)
 
 // NewFakeTransport returns a transport that answers discovery with card. Tool calls
 // answer with a success reply carrying "ok"; use SetToolReply to change it.
@@ -89,14 +91,67 @@ func (t *FakeTransport) RoundTrip(_ context.Context, agent string, op a2a.RouteH
 		reply.AgentCard = t.card
 		t.stamp(&reply.Header, &reqHdr, agent)
 		return json.Marshal(reply)
-	case a2a.OpTool:
-		reply := a2a.NewToolReply(t.toolOutput, t.toolIsErr)
-		t.stamp(&reply.Header, &reqHdr, agent)
-		return json.Marshal(reply)
 	default:
 		return nil, fmt.Errorf("agenttest: FakeTransport got unexpected op %v", op)
 	}
 }
+
+// Stream implements a2a.ReplySetTransport by answering a tool call the way a binding
+// does: an ack, then the terminal tool reply. A real peer sends keepalives between the
+// two while its tool runs; a fake answers at once and has none to send.
+func (t *FakeTransport) Stream(_ context.Context, agent string, op a2a.RouteHint, body []byte) (a2a.Reader, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.roundTrips++
+
+	if op != a2a.OpTool {
+		return nil, fmt.Errorf("agenttest: FakeTransport got unexpected streaming op %v", op)
+	}
+
+	var reqHdr a2a.Header
+	err := json.Unmarshal(body, &reqHdr)
+	if err != nil {
+		return nil, fmt.Errorf("agenttest: FakeTransport could not decode request header: %w", err)
+	}
+
+	ack := a2a.NewAck(true)
+	t.stamp(&ack.Header, &reqHdr, agent)
+	ack.Sequence = 1
+
+	reply := a2a.NewToolReply(t.toolOutput, t.toolIsErr)
+	t.stamp(&reply.Header, &reqHdr, agent)
+	reply.Sequence = 2
+
+	set := make([][]byte, 0, 2)
+	for _, msg := range []any{ack, reply} {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("agenttest: FakeTransport could not encode a reply: %w", err)
+		}
+		set = append(set, data)
+	}
+
+	return &fakeReader{msgs: set}, nil
+}
+
+// fakeReader yields a prepared reply set in order.
+type fakeReader struct {
+	msgs [][]byte
+	next int
+}
+
+func (r *fakeReader) Next(context.Context) ([]byte, error) {
+	if r.next >= len(r.msgs) {
+		return nil, io.EOF
+	}
+
+	msg := r.msgs[r.next]
+	r.next++
+
+	return msg, nil
+}
+
+func (r *fakeReader) Close() error { return nil }
 
 // Serve implements a2a.Transport. The fake is a client transport only; Run never
 // serves through the injected transport, so a call here is recorded for a test to

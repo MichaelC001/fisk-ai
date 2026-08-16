@@ -64,6 +64,11 @@ func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteI
 			return "", fmt.Errorf("calling tool %q on agent %q: %w", remoteName, agent, err)
 		}
 
+		// A refusal carrying a code arrives here too, and stops here on purpose: the
+		// code is what the invocation span was classified on, and the message names the
+		// tool, the agent and the limit, so the model reads the server's own sentence
+		// rather than a rewrite of it. Carrying the code further would mean threading it
+		// through functool and toolkit, which nothing above can act on today.
 		if reply.IsError {
 			return "", errors.New(reply.Output)
 		}

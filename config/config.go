@@ -37,6 +37,19 @@ const (
 	defaultLLMCallTimeout   = 120 * time.Second
 )
 
+// defaultToolTimeout bounds one tool call in the agent loop when harness.tool_timeout
+// says nothing. It is the value internal/serve applies to a run it hosts, so one
+// configuration bounds a command the same way at a terminal and on a worker. It is a
+// bound on a command that will never answer rather than on a slow one, which is why it
+// is minutes; an operator with a command that legitimately runs longer sets 0s.
+const defaultToolTimeout = 5 * time.Minute
+
+// defaultA2ARequestTimeout bounds a request this agent sends to a peer when
+// expose.agent.a2a.request_timeout is unset. It is above the default a peer bounds a
+// served call with, so a caller normally receives the callee's in-band error rather
+// than giving up first.
+const defaultA2ARequestTimeout = 120 * time.Second
+
 // Config is the top-level agent configuration.
 type Config struct {
 	// Identity is the name used in discovery; it doubles as a queue group so
@@ -194,10 +207,13 @@ type HarnessConfig struct {
 	ConfirmTags []string `json:"confirm_tags,omitempty" yaml:"confirm_tags,omitempty"`
 	// ToolTimeoutString bounds a single tool call in the agent loop as a duration
 	// string (e.g. 5m, or 1d for the day, week, month and year units fisk parses on
-	// top of Go's). Unset, or 0s, leaves tool execution unbounded, which is the
-	// terminal's behavior: an operator watching a run can interrupt a command that will
-	// never answer. A hosted worker has nobody to interrupt it, so internal/serve fills
-	// in a default of its own when this is unset.
+	// top of Go's). Unset takes the default; 0s leaves tool execution unbounded, for an
+	// operator whose commands legitimately run longer than any bound worth setting.
+	//
+	// The default is the same at a terminal and on a hosted worker. A terminal run used
+	// to be unbounded on the grounds that an operator is watching and can interrupt a
+	// command that will never answer, which left the same configuration bounded in one
+	// place and not the other, and left no way to ask for a bound or refuse one.
 	//
 	// It bounds the agent loop only, as every harness setting does.
 	// expose.agent.mcp.tool_timeout and expose.agent.a2a.tool_timeout are separate
@@ -599,9 +615,10 @@ type AgentExpose struct {
 	// to start unless it is set.
 	MCP *ExposedMCPConfig `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	// A2A opts this agent in to answering other agents over a2a and says what it
-	// answers: serve_tools for tool requests, a tasks block for prompts. Its presence
+	// answers: serve_tools for tool requests, a prompts block for prompts. Its presence
 	// is the switch for the a2a surfaces of `fisk-ai serve`, and a block asking for
-	// neither is refused rather than starting a worker that registers nothing.
+	// neither surface is refused unless it carries request_timeout, which bounds the
+	// calls this agent makes and which an agent that answers nothing still has.
 	//
 	// Both use one transport under one identity, since discovery, tools and tasks are
 	// paths of a single micro service, so the tuning below belongs to the block rather
@@ -680,9 +697,10 @@ type ExposedMCPConfig struct {
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 }
 
-// ExposedA2AConfig says what this agent answers over a2a and bounds the answering.
-// Its knobs are separate from the MCP block's because the two servers bound different
-// trust boundaries (NATS peers vs anything reaching a TCP port).
+// ExposedA2AConfig says what this agent answers over a2a and bounds the answering, and
+// carries the bound on the requests it sends, both directions belonging to the one a2a
+// binding. Its knobs are separate from the MCP block's because the two servers bound
+// different trust boundaries (NATS peers vs anything reaching a TCP port).
 type ExposedA2AConfig struct {
 	// ServeTools answers tool requests from peers, which serves the agent card on the
 	// discovery path and runs one tool per call on the tool path. No prompt is
@@ -710,6 +728,32 @@ type ExposedA2AConfig struct {
 	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
 	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
+	// RequestTimeoutString bounds a request this agent sends to a peer, as a duration
+	// string (e.g. 30s), where tool_timeout bounds a call this agent answers. An agent
+	// that exposes neither surface still sets it, since importing remote tools and
+	// calling them are requests it makes.
+	//
+	// It is how long to wait for the next message before treating the peer as gone,
+	// rather than how long the call may take. A peer answers a tool call as a set of
+	// messages and says it is still working while it runs, so a call that keeps
+	// reporting is waited for, and harness.tool_timeout bounds the call.
+	// For the card fetch that imports remote tools, one message is the whole answer, so
+	// the two readings are the same number.
+	//
+	// Unset uses the default. 0s and a negative are refused: zero means unbounded on
+	// harness.tool_timeout and cannot mean that here, since a transport reads a
+	// non-positive bound as its own default rather than as no bound at all. A value
+	// below three times a peer's keepalive interval is raised to it by the client,
+	// since waiting less than a peer speaks would fail every call that is merely slow.
+	//
+	// A transport an embedder supplies through agent.Options.A2ATransport or
+	// serve.Options.A2ATransport carries the bound it was built with, which no
+	// configuration here reaches.
+	RequestTimeoutString string `json:"request_timeout,omitempty" yaml:"request_timeout,omitempty"`
+	// RequestTimeoutParsed is the parsed form of RequestTimeoutString, filled by
+	// prepare(). Read it through Config.A2ARequestTimeout, which supplies the default
+	// for an unset key and for a configuration with no a2a block at all.
+	RequestTimeoutParsed time.Duration `json:"-" yaml:"-"`
 }
 
 // DefaultPromptsWorkers is how many prompts from peers one worker answers at once when
@@ -1009,8 +1053,14 @@ func validateServe(cfg *Config) error {
 
 	// An a2a block that asks for neither surface would register nothing, so it is
 	// refused here rather than starting a worker that answers no path at all.
+	//
+	// request_timeout is the exception, since it bounds what this agent asks of peers
+	// rather than what it answers: an agent that imports remote tools and exposes
+	// nothing has no surface to enable and still has a wait to set.
 	if cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.A2A != nil && !cfg.A2AEnabled() {
-		return fmt.Errorf("expose.agent.a2a enables nothing: set serve_tools: true to answer tool requests, or add a prompts block to answer prompts")
+		if cfg.Expose.Agent.A2A.RequestTimeoutString == "" {
+			return fmt.Errorf("expose.agent.a2a enables nothing: set serve_tools: true to answer tool requests, add a prompts block to answer prompts, or set request_timeout alone to bound the requests this agent sends")
+		}
 	}
 
 	// Both surfaces answer over one connection, so the context is required once for
@@ -1423,6 +1473,24 @@ func (c *Config) A2AToolTimeout() time.Duration {
 	return c.Expose.Agent.A2A.ToolTimeoutParsed
 }
 
+// A2ARequestTimeout returns how long this agent waits on a request it sends to a peer,
+// from expose.agent.a2a.request_timeout.
+//
+// It never returns zero, and does not fall back to the block being present: an agent
+// that imports remote tools exposes nothing and so has no a2a block to read, while a
+// transport handed a non-positive bound applies one of its own, shorter than this
+// default. Both cases are the same answer, which is the default.
+func (c *Config) A2ARequestTimeout() time.Duration {
+	if c.Expose == nil || c.Expose.Agent == nil || c.Expose.Agent.A2A == nil {
+		return defaultA2ARequestTimeout
+	}
+	if c.Expose.Agent.A2A.RequestTimeoutParsed <= 0 {
+		return defaultA2ARequestTimeout
+	}
+
+	return c.Expose.Agent.A2A.RequestTimeoutParsed
+}
+
 // MCPInstructions returns the optional instructions configured under
 // expose.agent.mcp, or "" if none is set. The MCP server sends them to clients
 // at connection time only when non-empty.
@@ -1638,12 +1706,21 @@ func (c *Config) prepare() error {
 			return err
 		}
 		c.Expose.Agent.A2A.ToolTimeoutParsed = d
+
+		rd, err := prepareRequestTimeout(c.Expose.Agent.A2A.RequestTimeoutString)
+		if err != nil {
+			return err
+		}
+		c.Expose.Agent.A2A.RequestTimeoutParsed = rd
 	}
 
-	// 0s parses to zero and so reads as unset, which is unbounded on the run path and
-	// the server default on a hosted worker. A negative is rejected rather than
-	// silently producing an already-expired context that fails every tool call.
-	if c.Harness.ToolTimeoutString != "" {
+	// An unset key takes the default; an explicit 0s parses to zero and is how an
+	// operator asks for no bound at all. The two used to be the same value, which left
+	// no way to ask for either. A negative is rejected rather than silently producing an
+	// already-expired context that fails every tool call.
+	if c.Harness.ToolTimeoutString == "" {
+		c.Harness.ToolTimeoutParsed = defaultToolTimeout
+	} else {
 		d, err := fisk.ParseDuration(c.Harness.ToolTimeoutString)
 		if err != nil {
 			return fmt.Errorf("invalid harness.tool_timeout %q: %w", c.Harness.ToolTimeoutString, err)
@@ -1847,6 +1924,29 @@ func prepareServerToolLimits(path string, maxConcurrent int, timeout string) (ti
 	}
 	if d < 0 {
 		return 0, fmt.Errorf("invalid %s.tool_timeout %q: must not be negative", path, timeout)
+	}
+
+	return d, nil
+}
+
+// prepareRequestTimeout parses the bound on a request this agent sends to a peer. An
+// unset key leaves zero, which Config.A2ARequestTimeout reads as the default.
+//
+// Zero is refused along with a negative, unlike harness.tool_timeout where it means
+// unbounded: a transport reads a non-positive bound as its own default, so 0s here
+// would shorten the wait rather than remove it, which is the opposite of what an
+// operator writing it means.
+func prepareRequestTimeout(timeout string) (time.Duration, error) {
+	if timeout == "" {
+		return 0, nil
+	}
+
+	d, err := fisk.ParseDuration(timeout)
+	if err != nil {
+		return 0, fmt.Errorf("invalid expose.agent.a2a.request_timeout %q: %w", timeout, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid expose.agent.a2a.request_timeout %q: must be greater than zero", timeout)
 	}
 
 	return d, nil
