@@ -153,6 +153,10 @@ func (c *Channel) Close() error {
 	return c.closeErr
 }
 
+// Faults reports that this identity has stopped answering for a reason nobody asked
+// for, which for this channel means no further prompt can arrive.
+func (c *Channel) Faults() <-chan error { return c.held.faults }
+
 // nopWriter discards a log a caller did not ask for. A channel with no logger still
 // logs, since every line it writes is about work it has accepted from the network.
 type nopWriter struct{}

@@ -87,12 +87,20 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Surface, err
 		return nil, fmt.Errorf("expose.agent.a2a needs a NATS connection, which nats_context is what supplies")
 	}
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), opts.Conns, a2a.TransportConfig{Identity: cfg.Identity})
+	// The fault channel is built before the transport, since the transport reports
+	// through it and may do so before this function returns.
+	held := &sharedTransport{faults: make(chan error, 1)}
+
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), opts.Conns, a2a.TransportConfig{
+		Identity: cfg.Identity,
+		Logger:   opts.Logger,
+		OnFault:  held.fault,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	held := &sharedTransport{transport: transport}
+	held.transport = transport
 
 	var built []serve.Surface
 
@@ -134,12 +142,25 @@ type sharedTransport struct {
 	transport a2a.Transport
 	once      sync.Once
 	err       error
+
+	// faults carries the transport's report that it has stopped serving. It is
+	// buffered by one and sent to once, since the first fault is what ends the worker
+	// and the transport may report the same stop through more than one handler.
+	faults    chan error
+	faultOnce sync.Once
 }
 
 func (s *sharedTransport) Close() error {
 	s.once.Do(func() { s.err = s.transport.Close() })
 
 	return s.err
+}
+
+// fault records that this identity has stopped answering. It is called from the
+// binding's own goroutine, so it must not block: the channel is buffered and written
+// once.
+func (s *sharedTransport) fault(err error) {
+	s.faultOnce.Do(func() { s.faults <- err })
 }
 
 // closeQuietly gives the transport back when a surface failed to build, reporting a

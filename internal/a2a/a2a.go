@@ -76,6 +76,15 @@ const (
 	DiscoveryReplyProtocol   = ProtocolNamespace + ".discovery.reply"
 )
 
+// Codes a message carries to say why something did not happen, for a receiver to
+// switch on where the accompanying prose is for a person or a model.
+const (
+	// CodeCapacity is a call refused because the answering agent is already running
+	// as many as it will run at once. Nothing was started, and the same call may
+	// succeed against a peer with a free slot or against this one later.
+	CodeCapacity = "capacity"
+)
+
 var (
 	// ErrUnknownProtocol is returned by Decode for an unrecognized protocol id.
 	ErrUnknownProtocol = errors.New("unknown protocol")

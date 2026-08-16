@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"runtime"
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/telemetry"
@@ -20,18 +21,44 @@ import (
 )
 
 const (
-	// DefaultConcurrency bounds how many tool calls run at once on the server.
-	// Like the MCP server, an a2a caller has no iteration budget, so without a cap
-	// an open path could spawn unbounded concurrent commands.
-	//
-	// It is exported because a program reporting what its server will do has to be
-	// able to name the value nobody set, and a startup line saying the bound is zero
-	// when it is two is worse than saying nothing.
-	DefaultConcurrency = 2
 	// DefaultCallTimeout bounds a single served tool call against a command that
-	// never returns. It is exported for the same reason as DefaultConcurrency.
+	// never returns. It is exported because a program reporting what its server will
+	// do has to be able to name the value nobody set, and a startup line saying the
+	// bound is zero when it is thirty seconds is worse than saying nothing.
 	DefaultCallTimeout = 30 * time.Second
+
+	// KeepaliveInterval is how often a running tool call tells its caller it is still
+	// working. It is protocol timing rather than policy, so it is a constant: three
+	// keepalives fit inside the default served-call bound, and a caller waiting on
+	// silence has a signal long before the shortest bound worth configuring.
+	KeepaliveInterval = 10 * time.Second
+
+	// PhaseRunningTool is the phase a served tool call's keepalive carries. A tool
+	// call has one phase, since nothing between the request and the reply is visible
+	// to the server beyond the tool still running.
+	PhaseRunningTool = "running-tool"
+
+	// maxDefaultConcurrency caps what DefaultConcurrency derives from the machine. A
+	// served call is a command this agent runs for a peer, so the bound is how much
+	// unauthenticated work the host accepts rather than how much of it a CPU can do,
+	// and a large build host should not become a wide command runner for peers.
+	maxDefaultConcurrency = 8
+	// minDefaultConcurrency keeps a single-core machine able to answer more than one
+	// call at a time, since a served call spends most of its life waiting on a child
+	// process rather than on a CPU.
+	minDefaultConcurrency = 2
 )
+
+// DefaultConcurrency bounds how many tool calls run at once when a configuration sets
+// none. A caller has no iteration budget, so without a cap an open path could spawn
+// unbounded concurrent commands.
+//
+// It scales with the machine and, on Go 1.25, with the cgroup, so a worker sized for
+// the box it runs on needs no configuration. It is exported for the reason
+// DefaultCallTimeout is: a program has to be able to report the value nobody set.
+func DefaultConcurrency() int {
+	return max(minDefaultConcurrency, min(runtime.GOMAXPROCS(0), maxDefaultConcurrency))
+}
 
 // toolNamePattern is the character set a tool name must match to be exposed. It
 // mirrors the MCP server's rule: a name outside this set cannot be imported by a
@@ -54,6 +81,11 @@ type ServerOptions struct {
 	Concurrency int
 	// CallTimeout bounds a single tool call; <= 0 uses the default.
 	CallTimeout time.Duration
+	// KeepaliveInterval is how often a running tool call tells its caller it is still
+	// working; <= 0 uses KeepaliveInterval. It is here rather than in a configuration
+	// because it is protocol timing an operator has nothing to decide with, and a test
+	// that would otherwise wait a real interval needs it short.
+	KeepaliveInterval time.Duration
 	// LogOutput is the sink for the default Logger; nil means os.Stderr. It is
 	// ignored when Logger is supplied.
 	LogOutput io.Writer
@@ -73,10 +105,13 @@ type ServerOptions struct {
 
 func (o *ServerOptions) applyDefaults() {
 	if o.Concurrency <= 0 {
-		o.Concurrency = DefaultConcurrency
+		o.Concurrency = DefaultConcurrency()
 	}
 	if o.CallTimeout <= 0 {
 		o.CallTimeout = DefaultCallTimeout
+	}
+	if o.KeepaliveInterval <= 0 {
+		o.KeepaliveInterval = KeepaliveInterval
 	}
 	if o.LogOutput == nil {
 		o.LogOutput = os.Stderr
@@ -89,8 +124,8 @@ func (o *ServerOptions) applyDefaults() {
 // Server exposes a set of local tools to remote agents over a Transport: it
 // answers discovery with an agent card and runs tools on request. It is the
 // producer side of the protocol. It owns all message validation and the
-// concurrency back-pressure; the Transport only carries bytes and keeps the
-// discovery and tool paths separate.
+// concurrency bound, refusing a call it has no slot for; the Transport only carries
+// bytes and keeps the discovery and tool paths separate.
 type Server struct {
 	opts      ServerOptions
 	identity  string
@@ -113,6 +148,14 @@ type Server struct {
 // behind it.
 func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*Server, error) {
 	opts.applyDefaults()
+
+	// A tool call is answered as a reply set, so a binding that cannot carry one cannot
+	// serve tools at all. It is refused here rather than per call, so a program learns
+	// it at startup rather than from the first peer.
+	_, streams := transport.(ReplySetTransport)
+	if !streams {
+		return nil, fmt.Errorf("%w: serving tools needs a transport that carries a reply set", ErrStreamUnsupported)
+	}
 
 	validator, err := NewValidator()
 	if err != nil {
@@ -231,12 +274,17 @@ func (s *Server) handleDiscovery(_ context.Context, _ Caller, body []byte, reply
 	s.respond(reply, out)
 }
 
-// handleTool runs the requested tool and answers with a tool reply. A failed or
-// denied call is reported in-band on the reply (IsError set), never as a transport
-// error. The tool path carries only tool requests, so any other message is
-// rejected. The concurrency semaphore is acquired synchronously here, on the
-// transport's serving goroutine, before a worker is spawned, so intake is back-
-// pressured: a full server does not enter another request until a slot frees.
+// handleTool runs the requested tool and answers with a tool reply. A failed, denied
+// or refused call is reported in-band on the reply (IsError set), never as a transport
+// error. The tool path carries only tool requests, so any other message is rejected.
+//
+// A call arriving with every slot in use is refused rather than queued. The acquire
+// runs on the transport's serving goroutine, so waiting for a slot would stop this
+// path reading its subject: requests would pile up in the transport's own buffers
+// where nothing measures them, and past those buffers' limits a binding may take the
+// whole service off the air. A caller is waiting on the other end, so being told at
+// once that this agent is at capacity is worth more than a place in a queue it cannot
+// see.
 func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, reply Replier) {
 	msg, err := s.inbound(body, ToolRequestProtocol)
 	if err != nil {
@@ -273,20 +321,46 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 	ctx = telemetry.ContextWithRemoteTrace(ctx, telemetry.TraceContext{TraceParent: tr.Header.TraceParent})
 	ctx, span := s.opts.Telemetry.StartServedTool(ctx, info)
 
+	// Every answer travels as a reply set, refusals included, so a caller reads one
+	// shape whatever happened. The stream is built before the first decision because
+	// each of them answers through it.
+	sr, streams := reply.(StreamReplier)
+	if !streams {
+		log.Error("Refusing tool call: this transport cannot carry a reply set", "tool", tr.Name)
+		_ = reply.Error("500", "this agent's transport cannot carry a tool reply set")
+		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeError, Failed: true})
+		return
+	}
+	stream := NewReplyStream(sr, &tr.Header, s.identity)
+
 	if !ok {
 		log.Warn("Rejecting unknown tool call", "tool", tr.Name)
-		s.respond(reply, s.toolReply(&tr.Header, &ToolResult{IsError: true, Output: fmt.Sprintf("tool %q is not available", tr.Name)}))
+		s.refuse(stream, log, fmt.Sprintf("tool %q is not available", tr.Name), "")
 		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeUnknownTool, Failed: true})
 		return
 	}
 
-	// Bound concurrency before spawning so the number of commands running at once
-	// stays capped; this blocks the serving goroutine when every slot is in use,
-	// which back-pressures inbound requests at intake, not just at execution. The span
-	// is already open, so the wait for a slot is inside it and is reported separately.
-	queued := time.Now()
-	s.sem <- struct{}{}
-	queueWait := time.Since(queued)
+	// Refused after the tool is resolved, so an unknown tool is still named as one
+	// rather than reported as capacity, which would tell a caller to retry a call that
+	// can never succeed.
+	select {
+	case s.sem <- struct{}{}:
+	default:
+		log.Warn("Refusing tool call: every slot is in use", "tool", tool.Name(), "concurrency", s.opts.Concurrency)
+		s.refuse(stream, log, capacityMessage(tool.Name(), s.identity, s.opts.Concurrency), CodeCapacity)
+		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeCapacity, Failed: true})
+		return
+	}
+
+	// Accepted on the serving goroutine, so the caller knows it has a worker before
+	// anything long starts and can tell this from a peer that never received it.
+	err = stream.Ack(true, "")
+	if err != nil {
+		<-s.sem
+		log.Error("Acknowledging the tool call failed", "tool", tool.Name(), "error", err)
+		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeError, Failed: true})
+		return
+	}
 
 	go func() {
 		defer func() { <-s.sem }()
@@ -300,36 +374,114 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 		log.Info("Running tool call")
 
 		start := time.Now()
+		// The tool runs on a goroutine of its own so this one owns the stream: every
+		// message of the set is sent from here, which is what keeps the sequence
+		// gap-free without a lock.
+		//
 		// The served tool runs in the process working directory; a per-call scratch
 		// directory for served tools is future server work, not this run path. There
 		// is no operator behind a served call, so the deny prompter refuses any
 		// question a tool asks rather than blocking the call forever.
-		result, err := tool.Execute(runCtx, tr.Input, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
+		done := make(chan toolOutcome, 1)
+		go func() {
+			result, err := tool.Execute(runCtx, tr.Input, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
+			done <- toolOutcome{result: result, err: err}
+		}()
+
+		res := s.awaitTool(done, stream, log)
 		duration := time.Since(start)
 
 		switch {
-		case err != nil:
-			log.Error("Tool call failed", "duration", duration, "error", err)
-		case result != nil && result.Exec != nil:
-			log.Info("Tool call completed", "duration", duration, "exit_code", result.Exec.ExitCode, "truncated", result.Exec.Truncated)
+		case res.err != nil:
+			log.Error("Tool call failed", "duration", duration, "error", res.err)
+		case res.result != nil && res.result.Exec != nil:
+			log.Info("Tool call completed", "duration", duration, "exit_code", res.result.Exec.ExitCode, "truncated", res.result.Exec.Truncated)
 		default:
 			log.Info("Tool call completed", "duration", duration)
 		}
 
-		out := resultToToolResult(result, err)
-		s.publish(reply, s.toolReply(&tr.Header, out))
+		out := resultToToolResult(res.result, res.err)
+		err := stream.ToolReply(&ToolReply{ToolResult: *out})
+		if err != nil {
+			log.Error("Sending the tool reply failed", "error", err)
+		}
 
 		// Ended after the reply rather than after the tool: a reply that failed to send
 		// is a peer that got nothing, and a green span here under a red one on the
 		// caller would describe the wrong thing.
-		span.Finish(servedOutcome(out, queueWait))
+		span.Finish(servedOutcome(out))
 	}()
+}
+
+// refuse answers a call that never reaches a tool: the ack says no and the terminal
+// reply carries what a caller acts on. Both are needed because the ack ends nothing,
+// and the code is on the reply because an ack has no room for one.
+func (s *Server) refuse(stream *ReplyStream, log *slog.Logger, reason, code string) {
+	err := stream.Ack(false, reason)
+	if err != nil {
+		log.Error("Refusing the tool call failed", "error", err)
+		return
+	}
+
+	err = stream.ToolReply(&ToolReply{ToolResult: ToolResult{IsError: true, Output: reason}, Code: code})
+	if err != nil {
+		log.Error("Refusing the tool call failed", "error", err)
+	}
+}
+
+// toolOutcome is what a served tool returned, carried from the goroutine that ran it
+// to the one that owns the reply set.
+type toolOutcome struct {
+	result *toolkit.Outcome
+	err    error
+}
+
+// awaitTool waits for the tool to finish, publishing a keepalive on the reply set
+// every KeepaliveInterval so a caller can tell a call that is running from a peer that
+// is gone. It runs on the goroutine that owns the stream, which is what keeps the
+// set's numbering gap-free without a lock.
+//
+// A keepalive that fails to send stops the keepalives rather than repeating the
+// failure every interval. Nothing else changes: the tool runs to completion and the
+// terminal reply is still attempted, since a caller that is gone costs a publish into
+// an inbox nobody reads while a command stopped halfway costs whatever it was doing.
+func (s *Server) awaitTool(done <-chan toolOutcome, stream *ReplyStream, log *slog.Logger) toolOutcome {
+	ticker := time.NewTicker(s.opts.KeepaliveInterval)
+	defer ticker.Stop()
+
+	alive := true
+
+	for {
+		select {
+		case res := <-done:
+			return res
+
+		case <-ticker.C:
+			if !alive {
+				continue
+			}
+
+			err := stream.Event(NewBlock(StatusBlock{Phase: PhaseRunningTool}))
+			if err != nil {
+				log.Warn("Sending a keepalive failed; the call continues", "error", err)
+				alive = false
+			}
+		}
+	}
+}
+
+// capacityMessage is what a refused caller's model is told. It states that nothing ran
+// and names the limit, and it offers no advice about retrying: nothing here counts
+// repeats, there is no backoff anywhere on this path, and a peer that is saturated is
+// the last thing a run should call again immediately.
+func capacityMessage(tool, identity string, concurrency int) string {
+	return fmt.Sprintf("tool %q on agent %q did not run: the agent is already running its maximum of %d concurrent tool calls", tool, identity, concurrency)
 }
 
 // servedOutcome maps a served call's reply onto the span outcome, using the same
 // vocabulary a local tool call reports so the two are comparable on one key.
-func servedOutcome(out *ToolResult, queueWait time.Duration) telemetry.ServedToolOutcome {
-	o := telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeExecuted, QueueWait: queueWait}
+func servedOutcome(out *ToolResult) telemetry.ServedToolOutcome {
+	o := telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeExecuted}
 
 	if out.IsError {
 		o.Outcome = telemetry.ToolOutcomeError
@@ -377,40 +529,6 @@ func (s *Server) respond(reply Replier, msg any) {
 	if err != nil {
 		s.opts.Logger.Warn("Sending reply failed", "error", err)
 	}
-}
-
-// publish sends a reply produced on a worker goroutine, after the handler returned,
-// through the request's stream sink when the transport supplies one. It is the same
-// single message to the same inbox Respond targets, so no peer sees a difference,
-// and it keeps a worker off the reply state the transport's own serving goroutine
-// may be reading. A transport with no sink falls back to Respond, where the reply
-// path is whatever that binding makes it.
-func (s *Server) publish(reply Replier, msg any) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		s.opts.Logger.Warn("Marshaling reply failed", "error", err)
-		_ = reply.Error("500", "marshaling reply")
-		return
-	}
-
-	sink, ok := reply.(StreamReplier)
-	if ok {
-		err = sink.Publish(data, true)
-	} else {
-		err = reply.Respond(data)
-	}
-	if err != nil {
-		s.opts.Logger.Warn("Sending reply failed", "error", err)
-	}
-}
-
-// toolReply builds a ToolReply for the given request header and result.
-func (s *Server) toolReply(reqHdr *Header, result *ToolResult) *ToolReply {
-	reply := &ToolReply{ToolResult: *result}
-	reply.Protocol = ToolReplyProtocol
-	StampReply(&reply.Header, reqHdr, s.identity)
-
-	return reply
 }
 
 // buildCard assembles an agent card from the exposed tools.

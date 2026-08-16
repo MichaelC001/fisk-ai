@@ -327,7 +327,7 @@ harness:
 			Expect(cfg.ToolTimeout()).To(Equal(5 * time.Minute))
 		})
 
-		It("Should leave the harness tool timeout at zero when unset or explicitly zero", func() {
+		It("Should default the harness tool timeout when unset, and take 0s as unbounded", func() {
 			base := `
 identity: agent1
 application_path: /usr/bin/nats
@@ -337,10 +337,9 @@ llm:
 `
 			cfg, err := ParseConfig([]byte(base))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.ToolTimeout()).To(Equal(time.Duration(0)))
+			Expect(cfg.ToolTimeout()).To(Equal(5 * time.Minute))
 
-			// 0s reads as unset, so it asks a host for its default rather than for no
-			// bound at all.
+			// 0s is how an operator asks for no bound, which unset used to mean too.
 			cfg, err = ParseConfig([]byte(base + "harness:\n  tool_timeout: 0s\n"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.ToolTimeout()).To(Equal(time.Duration(0)))
@@ -366,10 +365,12 @@ expose:
     a2a:
       serve_tools: true
       tool_timeout: 1d
+      request_timeout: 1h
 `))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.ToolTimeout()).To(Equal(24 * time.Hour))
 			Expect(cfg.A2AToolTimeout()).To(Equal(24 * time.Hour))
+			Expect(cfg.A2ARequestTimeout()).To(Equal(time.Hour))
 			Expect(cfg.LLM.Budget.CallTimeoutParsed).To(Equal(2 * time.Minute))
 			Expect(cfg.Harness.RAG.Embeddings.TimeoutParsed).To(Equal(time.Hour))
 		})
@@ -455,6 +456,86 @@ expose:
       tool_timeout: not-a-duration
 `))
 			Expect(err).To(MatchError(ContainSubstring("invalid expose.agent.a2a.tool_timeout")))
+		})
+
+		It("Should parse the a2a request timeout and default it when unset", func() {
+			base := `
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+nats_context: peers
+llm:
+  model: claude-sonnet-4-6
+`
+			cfg, err := ParseConfig([]byte(base))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.A2ARequestTimeout()).To(Equal(120 * time.Second))
+
+			cfg, err = ParseConfig([]byte(base + "expose:\n  agent:\n    a2a:\n      serve_tools: true\n      request_timeout: 45s\n"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.A2ARequestTimeout()).To(Equal(45 * time.Second))
+		})
+
+		It("Should accept an a2a block carrying only a request timeout, since a caller exposes nothing", func() {
+			cfg, err := ParseConfigForMode([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+nats_context: peers
+llm:
+  model: claude-sonnet-4-6
+remote_tools:
+  - name: dbagent
+expose:
+  agent:
+    a2a:
+      request_timeout: 30s
+`), ModeServe)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.A2ARequestTimeout()).To(Equal(30 * time.Second))
+			Expect(cfg.A2AEnabled()).To(BeFalse())
+		})
+
+		It("Should reject an a2a block that sets neither a surface nor a request timeout", func() {
+			_, err := ParseConfigForMode([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+nats_context: peers
+llm:
+  model: claude-sonnet-4-6
+expose:
+  agent:
+    a2a:
+      tool_timeout: 30s
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("expose.agent.a2a enables nothing")))
+		})
+
+		It("Should reject an unparsable, zero or negative a2a request timeout", func() {
+			base := `
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+nats_context: peers
+llm:
+  model: claude-sonnet-4-6
+expose:
+  agent:
+    a2a:
+      serve_tools: true
+      request_timeout: `
+
+			_, err := ParseConfig([]byte(base + "soon\n"))
+			Expect(err).To(MatchError(ContainSubstring(`invalid expose.agent.a2a.request_timeout "soon"`)))
+
+			// 0s reads as unbounded on harness.tool_timeout and cannot mean that here: a
+			// transport handed zero applies a shorter bound of its own.
+			_, err = ParseConfig([]byte(base + "0s\n"))
+			Expect(err).To(MatchError(ContainSubstring("must be greater than zero")))
+
+			_, err = ParseConfig([]byte(base + "-5s\n"))
+			Expect(err).To(MatchError(ContainSubstring("must be greater than zero")))
 		})
 
 		It("Should return an error for an invalid llm call_timeout", func() {

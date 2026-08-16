@@ -6,6 +6,7 @@ package serve_test
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -57,6 +58,25 @@ var _ = Describe("Hosting a service", func() {
 		Eventually(served).Should(Receive(BeNil()))
 		Expect(svc.Closes()).To(Equal(1))
 		Expect(ctx.Err()).ToNot(HaveOccurred(), "the drain ended it rather than the context")
+	})
+
+	// A surface that has stopped answering cannot be restarted from here, and a worker
+	// whose surfaces are gone keeps running while doing nothing, so the fault ends the
+	// server and the error is what makes a supervisor restart the process.
+	It("Should end Serve with the error when a hosted surface reports a fault", func() {
+		svc := agenttest.NewService(GinkgoTB(), "a2a")
+		srv := newServer(nil, []serve.Service{svc})
+
+		served := make(chan error, 1)
+		go func() { served <- srv.Serve(ctx) }()
+
+		Consistently(served, 100*time.Millisecond).ShouldNot(Receive())
+
+		svc.Fault(errors.New("the a2a service stopped"))
+
+		Eventually(served).Should(Receive(MatchError(ContainSubstring("the a2a service stopped"))))
+		Expect(svc.Closes()).To(Equal(1), "the fault drains the surfaces on its way out")
+		Expect(ctx.Err()).ToNot(HaveOccurred(), "the fault ended it rather than the context")
 	})
 
 	It("Should end a held Serve when its context is canceled", func() {

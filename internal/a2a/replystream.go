@@ -87,6 +87,16 @@ func (s *ReplyStream) Error(msg *ErrorMessage) error {
 	return s.send(&msg.Header, msg, true)
 }
 
+// ToolReply publishes the terminal answer to a tool call and ends the set. A tool
+// call's reply set ends with the tool's own outcome rather than with a Result, which
+// belongs to a run: the two sets share an ack and their events and differ in what
+// closes them.
+func (s *ReplyStream) ToolReply(reply *ToolReply) error {
+	reply.Protocol = ToolReplyProtocol
+
+	return s.send(&reply.Header, reply, true)
+}
+
 // Sequence reports the number stamped on the last message sent, which is how many
 // messages of the set have gone out. It is 0 before the ack.
 func (s *ReplyStream) Sequence() uint64 { return s.seq }

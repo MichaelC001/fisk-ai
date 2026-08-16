@@ -495,7 +495,7 @@ func (c *fiskServeCommand) a2aConcurrency(cfg *config.Config) int {
 		return cfg.A2AMaxConcurrentTools()
 	}
 
-	return a2a.DefaultConcurrency
+	return a2a.DefaultConcurrency()
 }
 
 // workersDescription reports the effective worker count and where it came from, since

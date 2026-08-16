@@ -32,6 +32,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -110,6 +112,12 @@ type Transport struct {
 	identity string
 	timeout  time.Duration
 	svc      micro.Service
+	log      *slog.Logger
+	onFault  func(error)
+	// stopping records that this process asked the service to stop, so the done
+	// handler micro pushes from Stop is not reported as a fault. Every drain calls
+	// Close, so without it a clean shutdown would look like the failure this reports.
+	stopping atomic.Bool
 }
 
 // newTransport is the registered factory. It borrows the Provider's NATS
@@ -136,7 +144,29 @@ func newTransport(p *conns.Provider, cfg a2a.TransportConfig) (a2a.Transport, er
 		timeout = defaultRequestTimeout
 	}
 
-	return &Transport{nc: nc, identity: cfg.Identity, timeout: timeout}, nil
+	log := cfg.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+
+	return &Transport{nc: nc, identity: cfg.Identity, timeout: timeout, log: log, onFault: cfg.OnFault}, nil
+}
+
+// fault reports that this transport has stopped serving for a reason nobody asked
+// for. It logs whatever happens and calls back only when the stop was not this
+// process's own doing, since micro pushes its done handler from Stop and every drain
+// calls Stop.
+func (t *Transport) fault(err error) {
+	if t.stopping.Load() {
+		t.log.Debug("The a2a micro service stopped", "identity", t.identity)
+		return
+	}
+
+	t.log.Error("The a2a micro service stopped answering", "identity", t.identity, "error", err)
+
+	if t.onFault != nil {
+		t.onFault(err)
+	}
 }
 
 // RoundTrip publishes body on the subject for op against agent and returns the raw
@@ -168,8 +198,11 @@ func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHin
 
 // Serve registers h as a micro endpoint on the subject for op under this
 // transport's own identity. micro invokes the endpoint synchronously on its
-// per-subscription goroutine, so when h blocks (the engine acquiring its
-// semaphore) intake is back-pressured. The micro service is created on first use.
+// per-subscription goroutine, so h must answer and return rather than wait: a
+// handler that blocks stops this subject being read, messages accumulate in the
+// client's pending buffer, and past its limits micro stops the whole service, taking
+// every path of this identity off the air. The engine refuses a call it has no slot
+// for rather than holding the goroutine. The micro service is created on first use.
 func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 	subject, err := t.subject(t.identity, op)
 	if err != nil {
@@ -213,7 +246,12 @@ func (t *Transport) Describe(identity string) []a2a.DescLine {
 
 // Close stops the micro service and its subscriptions. It leaves the borrowed NATS
 // connection open; the Provider that established it owns its lifecycle.
+//
+// The stop is recorded before it is asked for, since micro pushes its done handler
+// from Stop and this is the one stop that is not a fault.
 func (t *Transport) Close() error {
+	t.stopping.Store(true)
+
 	if t.svc != nil {
 		return t.svc.Stop()
 	}
@@ -229,11 +267,22 @@ func (t *Transport) service() (micro.Service, error) {
 		return t.svc, nil
 	}
 
+	// micro stops the whole service on any async error on one of its endpoint
+	// subscriptions, a subscription that overflowed included, and it stops it on a
+	// closed connection. Both handlers are wired because neither is recoverable here:
+	// the service is gone by the time they run, and re-registering into the same
+	// condition would loop.
 	svc, err := micro.AddService(t.nc, micro.Config{
 		Name:        t.identity,
 		Version:     microServiceVersion,
 		Description: "fisk-ai a2a tool server",
 		QueueGroup:  t.identity,
+		ErrorHandler: func(_ micro.Service, e *micro.NATSError) {
+			t.fault(fmt.Errorf("a2a service error on %q: %s", e.Subject, e.Description))
+		},
+		DoneHandler: func(micro.Service) {
+			t.fault(fmt.Errorf("the a2a service stopped"))
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("registering a2a service: %w", err)

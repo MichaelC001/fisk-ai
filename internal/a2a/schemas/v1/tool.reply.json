@@ -15,6 +15,10 @@
       "type": "boolean",
       "description": "Harness failure (tool did not run cleanly), distinct from a non-zero exit in exec."
     },
+    "code": {
+      "type": "string",
+      "description": "Optional machine-readable reason the call did not run, e.g. capacity when the answering agent is already running as many tool calls as it will run at once. Absent for a call that ran."
+    },
     "output": {
       "type": "string"
     },

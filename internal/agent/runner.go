@@ -42,9 +42,9 @@ type runner struct {
 	maxIter         int64
 	maxTokens       int64
 
-	// toolTimeout bounds one tool call, zero leaving tool execution unbounded. It is
-	// resolved once here rather than read through cfg per call, as the budgets above
-	// are.
+	// toolTimeout bounds one tool call, zero leaving tool execution unbounded, which a
+	// configuration asks for with an explicit 0s. It is resolved once here rather than
+	// read through cfg per call, as the budgets above are.
 	toolTimeout time.Duration
 
 	// tools is the single dispatch registry: every model-facing tool, whatever its
@@ -1347,9 +1347,9 @@ func (r *runner) checkStillHeld() error {
 // kills the child and its process group; an in-process tool stops when its handler
 // says so.
 //
-// Two calls run on the run's own context instead. One with no bound configured, which
-// is the terminal's default, and one a person paces, where the bound would cancel the
-// operator's question rather than a runaway.
+// Two calls run on the run's own context instead. One whose configuration set 0s, which
+// is how an operator asks for no bound, and one a person paces, where the bound would
+// cancel the operator's question rather than a runaway.
 func (r *runner) toolContext(ctx context.Context, info toolkit.CallInfo) (context.Context, func() bool) {
 	if r.toolTimeout <= 0 || info.OperatorPaced {
 		return ctx, func() bool { return false }

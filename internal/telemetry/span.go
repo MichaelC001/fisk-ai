@@ -808,9 +808,6 @@ type ServedToolOutcome struct {
 	Failed bool
 	// ExitCode is the status of the command the call ran, nil when it ran none.
 	ExitCode *int
-	// QueueWait is how long the call waited for a concurrency slot. It is the latency
-	// the peer paid that nothing else reports.
-	QueueWait time.Duration
 }
 
 // ServedToolSpan is one tool call answered for a peer.
@@ -829,10 +826,10 @@ type ServedToolSpan struct {
 // ran, and feeding peer-invoked calls into it would make a percentile over that series
 // describe two populations.
 //
-// The span opens before the concurrency semaphore is acquired, so the wait for a slot
-// is inside it. That wait is the only thing this span shows that nothing else does: the
-// semaphore blocks the transport's serving goroutine, so a saturated server that opened
-// its spans after acquisition would render as a fast server with fewer spans.
+// The span opens before the server decides whether it has a slot, so a call refused for
+// capacity is a span of its own rather than a request that left no trace. A saturated
+// server therefore renders as a server answering, with its outcomes saying what it
+// answered.
 func (p *Provider) StartServedTool(ctx context.Context, i ServedToolInfo) (context.Context, *ServedToolSpan) {
 	if p == nil || p.tracer == nil {
 		return ctx, &ServedToolSpan{}
@@ -880,9 +877,6 @@ func (s *ServedToolSpan) Finish(o ServedToolOutcome) {
 	span := s.Span.span
 	span.SetAttributes(AttrToolOutcome.String(o.Outcome))
 
-	if o.QueueWait > 0 {
-		span.SetAttributes(AttrServedQueueWaitMS.Int64(o.QueueWait.Milliseconds()))
-	}
 	if o.ExitCode != nil {
 		span.SetAttributes(AttrToolExitCode.Int(*o.ExitCode))
 	}

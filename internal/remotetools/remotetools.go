@@ -96,12 +96,12 @@ func DiscoverForInfo(cfg *config.Config, taken map[string]bool) ([]HostImport, e
 	}
 	defer provider.Close()
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), provider, a2a.TransportConfig{Identity: cfg.Identity, Timeout: cfg.LLM.Budget.CallTimeoutParsed})
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), provider, a2a.TransportConfig{Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := a2a.NewClient(transport, cfg.Identity)
+	client, err := a2a.NewClient(transport, cfg.Identity, a2a.WithIdleTimeout(cfg.A2ARequestTimeout()))
 	if err != nil {
 		return nil, err
 	}

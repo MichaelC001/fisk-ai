@@ -89,6 +89,11 @@ func (s *Service) Name() string { return "a2a" }
 // started keeps running with nowhere to reply to.
 func (s *Service) Close() error { return s.held.Close() }
 
+// Faults reports that this identity has stopped answering for a reason nobody asked
+// for. Both surfaces share one transport, so both report the same stop and whichever
+// the server reads first ends it.
+func (s *Service) Faults() <-chan error { return s.held.faults }
+
 // ExposedTools are the tools this surface serves, in card order.
 func (s *Service) ExposedTools() []string { return s.exposed }
 

@@ -124,6 +124,23 @@ type Service interface {
 	Close() error
 }
 
+// FaultingSurface is the optional interface a surface implements when it can stop
+// working for a reason nobody asked for and nothing here can see: a registration the
+// substrate dropped, a subscription that overflowed, a listener that died.
+//
+// Serve ends when a fault arrives, draining what is in flight first and returning the
+// error, so the program exits non-zero and a supervisor restarts it. That is the only
+// answer available: a surface that has stopped answering cannot be restarted from
+// here, and a worker whose surfaces are gone keeps running while doing nothing.
+//
+// A surface that cannot fail this way does not implement it, as a channel holding
+// nothing does not implement ReleasableChannel.
+type FaultingSurface interface {
+	// Faults yields at most one fault per surface lifetime; a nil channel never
+	// yields. It is read once, when Serve starts, and never closed by the reader.
+	Faults() <-chan error
+}
+
 // Work is one unit of work a channel supplies: what to do, and how to talk to
 // whoever asked for it.
 //

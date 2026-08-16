@@ -141,11 +141,20 @@ func NewToolRequest(name string, input json.RawMessage) *ToolRequest {
 }
 
 // ToolReply is the result of a ToolRequest. It carries the shared ToolResult
-// outcome, the same shape as a streamed ToolResultBlock. A failed or denied call
-// is reported in-band with IsError true and an explanatory Output.
+// outcome, the same shape as a streamed ToolResultBlock. A failed, denied or refused
+// call is reported in-band with IsError true and an explanatory Output.
 type ToolReply struct {
 	Header
 	ToolResult
+
+	// Code says why a call did not run, and is empty for one that did. A caller
+	// switches on it where Output is prose for a model, so a refusal it can act on
+	// does not depend on matching text.
+	//
+	// It is here rather than on the embedded ToolResult, which a streamed
+	// ToolResultBlock also carries: the conditions it names belong to a directly
+	// answered call, and a block in a task stream has no way to produce one.
+	Code string `json:"code,omitempty"`
 }
 
 // NewToolReply builds a ToolReply with the protocol id set.

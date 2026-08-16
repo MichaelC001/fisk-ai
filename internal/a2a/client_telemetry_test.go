@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -47,6 +48,63 @@ func (t *stubTransport) RoundTrip(_ context.Context, _ string, _ RouteHint, body
 
 	return json.Marshal(reply)
 }
+
+// Stream answers a tool call as a peer does, with an ack and then the reply. A failing
+// stub fails when the set is opened, which is where a transport reports that it could
+// not reach the peer at all.
+func (t *stubTransport) Stream(_ context.Context, _ string, _ RouteHint, body []byte) (Reader, error) {
+	if t.err != nil {
+		return nil, t.err
+	}
+
+	var req ToolRequest
+	err := json.Unmarshal(body, &req)
+	if err != nil {
+		return nil, err
+	}
+
+	ack := NewAck(true)
+	StampReply(&ack.Header, &req.Header, "peer")
+	ack.Sequence = 1
+
+	reply := NewToolReply(t.output, t.isError)
+	StampReply(&reply.Header, &req.Header, "peer")
+	reply.Sequence = 2
+
+	set := make([][]byte, 0, 2)
+	for _, msg := range []any{ack, reply} {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		set = append(set, data)
+	}
+
+	return &stubReader{msgs: set}, nil
+}
+
+// stubReader yields a prepared reply set, and reports the caller's context when it is
+// done rather than when it is exhausted: a canceled call must surface as the cancel.
+type stubReader struct {
+	msgs [][]byte
+	next int
+}
+
+func (r *stubReader) Next(ctx context.Context) ([]byte, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if r.next >= len(r.msgs) {
+		return nil, io.EOF
+	}
+
+	msg := r.msgs[r.next]
+	r.next++
+
+	return msg, nil
+}
+
+func (r *stubReader) Close() error { return nil }
 
 // recordingTelemetry returns a Provider writing every ended span into the exporter.
 func recordingTelemetry() (*telemetry.Provider, *tracetest.InMemoryExporter) {
