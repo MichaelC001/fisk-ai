@@ -142,9 +142,14 @@ func (t *Transport) SendCancel(ctx context.Context, agent, request string, body 
 
 	msg, err := t.nc.RequestWithContext(ctx, subject, body)
 	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("%w: no reply on %q: %w", a2a.ErrAgentUnavailable, subject, err)
+		switch {
+		case errors.Is(err, nats.ErrNoResponders):
+			return nil, fmt.Errorf("%w: no subscription interest on %q, so that task is not running there", a2a.ErrAgentUnavailable, subject)
+
+		case errors.Is(err, context.DeadlineExceeded):
+			return nil, fmt.Errorf("%w: the cancel on %q was not answered", a2a.ErrAgentUnavailable, subject)
 		}
+
 		return nil, fmt.Errorf("requesting %q: %w", subject, err)
 	}
 

@@ -102,6 +102,11 @@ type RunState struct {
 	// detect a resume at a paused-turn boundary whose server-side state may have
 	// expired.
 	LastStopReason string
+	// Approvals holds the tools the operator granted a standing approval, in journal
+	// order. A resume seeds the confirm gate from it so an approval already given is
+	// not asked for again. It grants nothing on its own: the gate honors one only
+	// where an operator is reachable to have been asked in the first place.
+	Approvals []string
 	// Terminal is set when a Terminal record was journaled.
 	Terminal *TerminalRecord
 }
@@ -251,6 +256,15 @@ func Fold(records []Record) (*RunState, error) {
 			// and counting it here would double when the answer lands as a tool_result.
 			curDeferred[r.Deferred.ToolUseID] = *r.Deferred
 
+		case DecisionProtocol:
+			if r.Decision == nil {
+				return nil, fmt.Errorf("%w: decision record with no payload at seq %d", ErrCorrupt, r.Seq)
+			}
+			// Inert against the turn for the same reason a claim is: a grant is recorded
+			// after the result of the call that triggered it, so it lands inside a batch
+			// whenever the operator approves one call of several.
+			rs.Approvals = append(rs.Approvals, r.Decision.Tool)
+
 		case TerminalProtocol:
 			if r.Terminal == nil {
 				return nil, fmt.Errorf("%w: terminal record with no payload at seq %d", ErrCorrupt, r.Seq)
@@ -269,6 +283,15 @@ func Fold(records []Record) (*RunState, error) {
 			// nothing releases a claim, so its presence is not evidence a run is held.
 
 		default:
+			// A record the writer marked skippable is passed over, which is how a journal
+			// written by a newer build folds here: the writer declared that a reader
+			// without the record behaves more conservatively. Everything else is corrupt,
+			// since a damaged protocol id on a record this build does need would otherwise
+			// drop a turn or make a completed run resumable.
+			if r.Optional {
+				continue
+			}
+
 			return nil, fmt.Errorf("%w: unknown record protocol %q at seq %d", ErrCorrupt, r.Protocol, r.Seq)
 		}
 	}

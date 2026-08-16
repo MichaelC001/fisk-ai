@@ -1980,6 +1980,12 @@ func (b *LLMBudget) prepare() error {
 	if err != nil {
 		return fmt.Errorf("invalid llm call_timeout %q: %w", b.CallTimeoutString, err)
 	}
+	// Zero and a negative both reach the provider as a deadline already in the past, so
+	// every model call fails with a context error and nothing says why. Neither can mean
+	// unbounded here: the value is the timeout on an HTTP client that has to have one.
+	if d <= 0 {
+		return fmt.Errorf("invalid llm call_timeout %q: must be greater than zero", b.CallTimeoutString)
+	}
 	b.CallTimeoutParsed = d
 
 	return nil

@@ -24,9 +24,10 @@ var _ = Describe("ConfirmGate", func() {
 		prompter = &fakePrompter{canPrompt: true}
 	})
 
-	// newGate builds a gate wired to the spec's fakePrompter.
+	// newGate builds a gate wired to the spec's fakePrompter, keeping its grants in
+	// memory as an un-checkpointed run does.
 	newGate := func() *ConfirmGate {
-		return NewConfirmGate(prompter)
+		return NewConfirmGate(prompter, nil)
 	}
 
 	Describe("Approve", func() {
@@ -160,6 +161,90 @@ var _ = Describe("ConfirmGate", func() {
 			Expect(aerr).To(MatchError(context.Canceled))
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(BeEmpty())
+		})
+	})
+
+	Describe("Standing approvals", func() {
+		It("Should honor a grant the source already holds without prompting", func() {
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+				Fail("must not prompt for a tool that carries a standing approval")
+				return toolkit.ConfirmNo, nil
+			}
+			src := &fakeApprovals{granted: map[string]bool{"stream_rm": true}}
+			gate := NewConfirmGate(prompter, src)
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
+			Expect(allowed).To(BeTrue())
+			Expect(reason).To(BeEmpty())
+			Expect(src.recorded).To(BeEmpty())
+		})
+
+		It("Should record a grant only for an always answer", func() {
+			choice := toolkit.ConfirmOnce
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) { return choice, nil }
+			src := &fakeApprovals{}
+			gate := NewConfirmGate(prompter, src)
+
+			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(src.recorded).To(BeEmpty())
+
+			choice = toolkit.ConfirmNo
+			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(src.recorded).To(BeEmpty())
+
+			choice = toolkit.ConfirmAlways
+			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(src.recorded).To(Equal([]string{"stream_rm"}))
+		})
+
+		It("Should record nothing when the operator never answered", func() {
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+				return toolkit.ConfirmAlways, fmt.Errorf("%w: interrupt", toolkit.ErrPromptAborted)
+			}
+			src := &fakeApprovals{}
+			gate := NewConfirmGate(prompter, src)
+
+			_, _, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(src.recorded).To(BeEmpty())
+		})
+
+		It("Should end the run when the grant cannot be recorded", func() {
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) { return toolkit.ConfirmAlways, nil }
+			src := &fakeApprovals{grantErr: errors.New("journal is gone")}
+			gate := NewConfirmGate(prompter, src)
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).To(MatchError(src.grantErr))
+			Expect(allowed).To(BeFalse())
+			Expect(reason).To(BeEmpty())
+		})
+
+		// A grant can outlive the process that recorded it, so it is consulted below the
+		// two checks that establish somebody is there to be asked. Honoring one first
+		// would run a gated command on a resume with no operator present.
+		It("Should not honor a grant with no operator reachable", func() {
+			prompter.canPrompt = false
+			src := &fakeApprovals{granted: map[string]bool{"stream_rm": true}}
+			gate := NewConfirmGate(prompter, src)
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
+			Expect(allowed).To(BeFalse())
+			Expect(reason).To(Equal(NoTerminalReason))
+		})
+
+		It("Should not honor a grant once the run is canceled", func() {
+			src := &fakeApprovals{granted: map[string]bool{"stream_rm": true}}
+			gate := NewConfirmGate(prompter, src)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			allowed, _, aerr := gate.Approve(ctx, "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(allowed).To(BeFalse())
 		})
 	})
 

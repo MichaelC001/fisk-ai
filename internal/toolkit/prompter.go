@@ -10,9 +10,10 @@ import (
 )
 
 // ConfirmChoice is the operator's three-way answer to a confirm-gate approval:
-// decline, allow once, or allow for the rest of the session. It is deliberately
-// distinct from the boolean answer of ask_human_confirm; the session-allow choice
-// carries a policy consequence a yes/no answer does not.
+// decline, allow once, or allow for the rest of the conversation. It is
+// deliberately distinct from the boolean answer of ask_human_confirm; the standing
+// choice carries a policy consequence a yes/no answer does not, and on a
+// checkpointed run it outlives the process that recorded it.
 type ConfirmChoice int
 
 const (
@@ -20,7 +21,8 @@ const (
 	ConfirmNo ConfirmChoice = iota
 	// ConfirmOnce runs the command this time only.
 	ConfirmOnce
-	// ConfirmAlways runs the command and stops asking for that tool this session.
+	// ConfirmAlways runs the command and stops asking for that tool for the rest of
+	// the conversation, which on a checkpointed run covers every later resume of it.
 	ConfirmAlways
 )
 
@@ -30,7 +32,7 @@ const (
 // rendering layer uses.
 type GateRequest struct {
 	// Command is the human-readable command path, e.g. "stream rm", used in the
-	// prompt wording and as the subject of a session-wide allow.
+	// prompt wording and as the subject of a standing allow.
 	Command string
 	// Display is the sanitized full command line shown to the operator so they see
 	// exactly what they are approving.

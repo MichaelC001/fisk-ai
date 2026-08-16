@@ -156,6 +156,10 @@ type runner struct {
 	// leaves the attributes absent rather than blank.
 	memoryTools map[string]bool
 	memory      telemetry.MemoryInfo
+	// approvals holds the confirm gate's standing grants. The runner journals the
+	// ones the operator gives once the call that triggered them is answered, and
+	// clears them at a context reset.
+	approvals *journalApprovals
 	// pending is an in-flight tool batch restored on resume: its unanswered tools
 	// are run before the loop proceeds.
 	pending *runstate.PendingTurn
@@ -221,6 +225,22 @@ func (r *runner) emit(rec runstate.Record) error {
 	}
 
 	return nil
+}
+
+// journalGrants writes the standing approvals the operator gave during a tool call,
+// and is called once that call has been answered or has deferred. Recording them
+// then rather than at the moment of approval is what stops a grant outliving the
+// call it was given for: a crash in between loses it, and the resume asks again for
+// the command it is about to re-run.
+//
+// A runner assembled without an approval source journals nothing, which is the shape
+// the package's own tests build.
+func (r *runner) journalGrants() error {
+	if r.approvals == nil {
+		return nil
+	}
+
+	return r.approvals.flush()
 }
 
 // recordAppend reports one append's duration, classifying a failure as a store error
@@ -602,16 +622,23 @@ func (r *runner) appendUserPrompt(text string) {
 }
 
 // resetContext clears the conversation for a fresh start within the same run, keeping the
-// system prompt, tools and the session's confirm-gate approvals. The iteration budget is
+// system prompt and tools. The iteration budget is
 // re-baselined to the current position so the cleared context gets a full turn's allowance
 // from the next prompt rather than inheriting the budget the prior turns already spent.
 // It is only reached for a non-checkpointed run; a journaled session is cleared by
 // rotateSession instead, which the run loop defers until the next real prompt so the new
 // session's meta never carries an empty prompt.
+//
+// The confirm gate's standing approvals go with the conversation. A grant is scoped to
+// the conversation the operator gave it in, and the cleared context is a new one, so
+// /clear costs one re-approval and means the same thing whether or not the run journals.
 func (r *runner) resetContext() {
 	r.messages = nil
 	r.contentFrom = 0
 	r.maxIter = r.iter
+	if r.approvals != nil {
+		r.approvals.clear()
+	}
 }
 
 // rotateSession starts a fresh checkpoint session for a context reset and swaps the runner
@@ -647,6 +674,12 @@ func (r *runner) rotateSession(prompt string) error {
 	r.maxIter = 0
 	r.messages = []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: prompt}}}}}
 	r.contentFrom = 0
+	// The new journal is a new conversation, separately resumable, and a grant belongs
+	// to the one it was given in. Carrying them over would record a single in-the-moment
+	// decision durably into two conversations, and into a third at the next reset.
+	if r.approvals != nil {
+		r.approvals.clear()
+	}
 
 	r.events.SessionRotated(prevID)
 
@@ -884,6 +917,10 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 				if err != nil {
 					return runstate.ReasonError, err
 				}
+				err = r.journalGrants()
+				if err != nil {
+					return runstate.ReasonError, err
+				}
 				results = append(results, llm.ContentBlock{ToolResult: &result})
 			}
 
@@ -978,6 +1015,10 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		err = r.journalGrants()
+		if err != nil {
+			return false, err
+		}
 		results = append(results, llm.ContentBlock{ToolResult: &result})
 	}
 
@@ -1015,6 +1056,14 @@ func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) 
 		Note:      d.Note,
 		Handle:    d.Handle,
 	}})
+	if jerr != nil {
+		return true, jerr
+	}
+
+	// A deferred call is answered as far as an approval is concerned: the tool took the
+	// work, and the resume never dispatches it again, so a grant held for a result that
+	// is not coming would be lost with nobody left to re-ask.
+	jerr = r.journalGrants()
 	if jerr != nil {
 		return true, jerr
 	}

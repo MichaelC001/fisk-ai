@@ -31,10 +31,10 @@ var _ = Describe("surveyPrompter", func() {
 	})
 
 	Describe("printAlwaysNote", func() {
-		It("Should confirm the tool will not be asked about again this session", func() {
+		It("Should confirm the tool will not be asked about again in this conversation", func() {
 			var buf bytes.Buffer
 			printAlwaysNote(&buf, "stream rm")
-			Expect(buf.String()).To(Equal("confirmation: will not ask again for \"stream rm\" this session\n"))
+			Expect(buf.String()).To(Equal("confirmation: will not ask again for \"stream rm\" in this conversation\n"))
 		})
 	})
 })

@@ -167,6 +167,12 @@ const (
 	// ending with work outstanding looks like a run that stopped early, and only this
 	// says which tool is holding it.
 	WarnToolDeferred
+	// WarnApprovalsDropped: Count standing confirm-gate approvals were not restored,
+	// because --force resumed the session across a changed configuration. An approval
+	// is keyed on a tool name, and the tool it names may not be the tool the operator
+	// approved, so the run asks again. Told at the resume rather than at the next
+	// prompt, where it would look like the gate forgetting.
+	WarnApprovalsDropped
 )
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;
@@ -196,6 +202,10 @@ type RunInfo struct {
 	// NoApplication is true when the run wraps no application (application_path is
 	// unset), so it runs on built-in and remote tools alone.
 	NoApplication bool
+	// StandingApprovals names the tools a resumed session carries a confirm-gate
+	// approval for, which the operator granted in an earlier sitting and will not be
+	// asked about again. Empty on a fresh run and on a resume that restored none.
+	StandingApprovals []string
 }
 
 // ToolTrace describes one tool invocation for display. Display is the full,

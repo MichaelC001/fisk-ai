@@ -53,7 +53,7 @@ var _ = Describe("runner tool accounting", func() {
 			events:      &captureEvents{},
 			tools:       tools,
 			prompter:    toolkit.DefaultDenyPrompter(),
-			gate:        util.NewConfirmGate(toolkit.DefaultDenyPrompter()),
+			gate:        util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 			toolWorkDir: "/run/work",
 		}
 	}

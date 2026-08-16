@@ -159,6 +159,47 @@ var _ = Describe("runstate", func() {
 			Expect(err).To(MatchError(ErrCorrupt))
 		})
 
+		It("folds decision records into the approvals in journal order", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
+				{Seq: 4, Protocol: DecisionProtocol, Optional: true, Decision: &DecisionRecord{Tool: "stream_rm"}},
+				{Seq: 5, Protocol: DecisionProtocol, Optional: true, Decision: &DecisionRecord{Tool: "server_run"}},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Approvals).To(Equal([]string{"stream_rm", "server_run"}))
+			// A grant lands after the result of the call that triggered it, so it must
+			// leave the turn it sits inside exactly as it found it.
+			Expect(rs.Pending).To(BeNil())
+			Expect(rs.Messages).To(HaveLen(3))
+			Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
+		})
+
+		It("rejects a decision record with no payload", func() {
+			_, err := Fold([]Record{meta(), {Seq: 2, Protocol: DecisionProtocol, Optional: true}})
+			Expect(err).To(MatchError(ErrCorrupt))
+		})
+
+		// A newer build's record kind reaches this one as an unknown protocol. Skipping
+		// is the writer's declaration that a reader without it is more conservative, not
+		// this reader's guess.
+		It("skips an unrecognized protocol only when it is marked optional", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "done")},
+				{Seq: 3, Protocol: Protocol("io.choria.fisk-ai.v1.session.from_the_future"), Optional: true},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Messages).To(HaveLen(2))
+
+			recs[2].Optional = false
+			_, err = Fold(recs)
+			Expect(err).To(MatchError(ErrCorrupt))
+		})
+
 		It("commits a complete turn and derives counters", func() {
 			recs := []Record{
 				meta(),

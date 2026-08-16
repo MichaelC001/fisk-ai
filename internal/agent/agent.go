@@ -354,9 +354,9 @@ type Options struct {
 
 // Continuation is the operator's decision at an interactive turn boundary. Continue
 // false ends the session. Reset clears the conversation context before the next turn,
-// keeping the system prompt, tools and the session's confirm-gate approvals; with an
-// empty Text it reopens the input for a fresh prompt without running a turn. Text is
-// the next user prompt when the turn proceeds.
+// keeping the system prompt and tools and dropping the confirm-gate approvals with the
+// conversation they were given in; with an empty Text it reopens the input for a fresh
+// prompt without running a turn. Text is the next user prompt when the turn proceeds.
 type Continuation struct {
 	Text     string
 	Reset    bool
@@ -1035,12 +1035,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// The confirm gate enforces confirmation tags: a tool carrying ai:confirm (always
 	// on) or any tag listed in confirm_tags must be approved by the operator before
-	// each run, with an "allow for the session" answer remembered for the rest of the
-	// run. It is independent of human_in_the_loop. With no terminal there is no
-	// operator to ask, so a gated tool can never be approved and will always be
-	// declined; warn loudly, naming the count, since otherwise those commands would
-	// silently fail mid-run.
-	gate := util.NewConfirmGate(prompter)
+	// each run, with an "allow for the conversation" answer remembered for the rest of
+	// it: for the rest of the process on a run that does not journal, and across every
+	// later resume on one that does. It is independent of human_in_the_loop. With no
+	// terminal there is no operator to ask, so a gated tool can never be approved and
+	// will always be declined; warn loudly, naming the count, since otherwise those
+	// commands would silently fail mid-run.
+	//
+	// The source is built here with the gate and given its journal appender once the
+	// runner exists, which is also where a resume seeds the grants it inherited.
+	approvals := newJournalApprovals()
+	gate := util.NewConfirmGate(prompter, approvals)
 	confirmTags := cfg.ConfirmTags()
 	confirmTools := 0
 	for _, t := range tools {
@@ -1523,9 +1528,22 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// never persisted.
 			system = append(system, resumeReminder)
 
+			// Standing approvals restore with the conversation, unless --force carried the
+			// resume across a changed configuration: a grant is keyed on a tool name alone,
+			// so a tool set that moved under it may have changed the very command the
+			// operator approved.
+			forced := !rs.Fingerprint.Equal(fp)
+			if !forced {
+				approvals.seed(rs.Approvals)
+				info.StandingApprovals = rs.Approvals
+			}
+
 			info.SessionID = sessionID
 			info.Resumed = true
 			events.Starting(info)
+			if forced && len(rs.Approvals) > 0 {
+				events.Warn(Warning{Kind: WarnApprovalsDropped, Count: len(rs.Approvals)})
+			}
 			for _, w := range resumeHazards(rs) {
 				events.Warn(w)
 			}
@@ -1642,6 +1660,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		tools:           allTools,
 		confirmTags:     confirmTags,
 		gate:            gate,
+		approvals:       approvals,
 		verbose:         opts.Verbose,
 		promptCache:     cfg.PromptCacheEnabled(),
 		interactive:     interactive,
@@ -1667,6 +1686,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		resumeAtInputBoundary: resumeAtInputBoundary,
 	}
 	activeRunner = r
+	// The gate was built before the journal was opened, so its approval source gets the
+	// runner's own appender here, once there is a runner to append through.
+	approvals.emit = r.emit
 	if checkpointing {
 		r.suspendRequested = opts.SuspendRequested
 	}

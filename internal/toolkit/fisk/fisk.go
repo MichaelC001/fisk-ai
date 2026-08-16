@@ -30,8 +30,9 @@ import (
 //
 // A command tagged confirmTag requires the operator's explicit permission before it
 // runs: the agent prompts at the terminal, showing the command and its arguments, and
-// only runs it on an affirmative answer; an "allow for the session" answer is
-// remembered in-process for that tool for the rest of the run (see ConfirmGate).
+// only runs it on an affirmative answer; an "allow for the conversation" answer is
+// remembered for that tool for the rest of the conversation, which on a checkpointed
+// run covers every later resume of it (see ConfirmGate).
 // Operators gate further commands by listing additional tags under confirm_tags,
 // which NeedsConfirm treats the same way.
 //

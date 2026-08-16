@@ -84,7 +84,7 @@ func (t *toolSet) next(ctx context.Context) (any, error) {
 		// here, so they are told apart by whose context ended: only the read context
 		// expiring means the peer went quiet.
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return nil, fmt.Errorf("%w: no message for %s", ErrAgentUnavailable, t.idle)
+			return nil, fmt.Errorf("%w: the peer sent nothing for %s while the call was running", ErrAgentUnavailable, t.idle)
 		}
 
 		return nil, err
