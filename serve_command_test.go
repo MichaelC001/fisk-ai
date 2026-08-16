@@ -129,11 +129,11 @@ var _ = Describe("fiskServeCommand", func() {
 			hosted := c.banner(jobsConfig(), []serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "asyncjobs")}, nil, res, &telemetry.Provider{}).String()
 			Expect(hosted).To(ContainSubstring("Model"))
 			Expect(hosted).To(ContainSubstring("Queue Context"))
-			Expect(hosted).To(ContainSubstring("Workers"))
+			Expect(hosted).To(ContainSubstring("Queue Workers"))
 			Expect(hosted).To(ContainSubstring("asyncjobs"))
 
 			cfg := &config.Config{Identity: "worker", NatsContext: "production"}
-			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{AgentToAgent: true}}
+			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{A2A: &config.ExposedA2AConfig{ServeTools: true}}}
 
 			toolsOnly := c.banner(cfg, nil, []serve.Service{agenttest.NewService(GinkgoTB(), "a2a")}, res, &telemetry.Provider{}).String()
 			Expect(toolsOnly).To(ContainSubstring("a2a"))
@@ -148,7 +148,7 @@ var _ = Describe("fiskServeCommand", func() {
 			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
 
 			cfg := jobsConfig()
-			cfg.Expose.Agent.AgentToAgent = true
+			cfg.Expose.Agent.A2A = &config.ExposedA2AConfig{ServeTools: true}
 
 			out := c.banner(cfg,
 				[]serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "asyncjobs")},
@@ -170,7 +170,8 @@ var _ = Describe("fiskServeCommand", func() {
 			Expect(err).To(MatchError(ContainSubstring("worker.yaml")))
 			Expect(err).To(MatchError(ContainSubstring("expose:")))
 			Expect(err).To(MatchError(ContainSubstring("jobs: {}")))
-			Expect(err).To(MatchError(ContainSubstring("agent_to_agent: true")))
+			Expect(err).To(MatchError(ContainSubstring("serve_tools: true")))
+			Expect(err).To(MatchError(ContainSubstring("prompts: {}")))
 			Expect(err).To(MatchError(ContainSubstring(config.DefaultJobsQueue)))
 			Expect(err).To(MatchError(ContainSubstring(config.DefaultJobsTaskType)))
 		})

@@ -1475,9 +1475,11 @@ func describeCall(tool toolkit.Tool, input json.RawMessage) toolkit.CallInfo {
 // the short one only when the full line would overflow.
 func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit.ExecDeps, bool) {
 	r.events.ToolCall(ToolTrace{
+		ID:           use.ID,
 		Name:         use.Name,
 		Display:      info.Display,
 		DisplayShort: info.DisplayShort,
+		Input:        use.Input,
 		Agent:        info.Agent,
 		Present:      info.Present,
 		ProviderKind: info.Kind,
@@ -1504,5 +1506,5 @@ func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit
 // call), its provider kind for the log token, its text content, and whether the tool
 // reported a failure.
 func toolResultTrace(present toolkit.Presentation, provider toolkit.Kind, result llm.ToolResultBlock) ToolResultTrace {
-	return ToolResultTrace{Present: present, ProviderKind: provider, IsError: result.IsError, Output: result.Content}
+	return ToolResultTrace{CallID: result.ToolUseID, Present: present, ProviderKind: provider, IsError: result.IsError, Output: result.Content}
 }

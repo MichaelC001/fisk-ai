@@ -37,7 +37,7 @@ var _ = Describe("Remote tools and server mode", func() {
 		Context("serve mode", func() {
 			served := func() *Config {
 				cfg := base()
-				cfg.Expose = &ExposeConfig{Agent: &AgentExpose{AgentToAgent: true}}
+				cfg.Expose = &ExposeConfig{Agent: &AgentExpose{A2A: &ExposedA2AConfig{ServeTools: true}}}
 
 				return cfg
 			}
@@ -50,7 +50,7 @@ var _ = Describe("Remote tools and server mode", func() {
 				cfg := served()
 				cfg.NatsContext = ""
 				err := ValidateForMode(cfg, ModeServe)
-				Expect(err).To(MatchError(ContainSubstring("nats_context is required when expose.agent.agent_to_agent is set")))
+				Expect(err).To(MatchError(ContainSubstring("nats_context is required when expose.agent.a2a is set")))
 			})
 		})
 

@@ -140,7 +140,7 @@ var _ = Describe("ReplyStream", func() {
 	It("Should refuse an oversized event without advancing the sequence", func() {
 		Expect(stream.Ack(true, "")).To(Succeed())
 
-		err := stream.Event(NewTextBlock(strings.Repeat("x", maxMessageSize)))
+		err := stream.Event(NewTextBlock(strings.Repeat("x", MaxMessageSize)))
 		Expect(err).To(MatchError(ErrMessageTooLarge))
 		Expect(sink.sent).To(HaveLen(1))
 

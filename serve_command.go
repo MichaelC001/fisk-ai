@@ -160,7 +160,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		ConfigFile:       c.configFile,
 		Logger:           log,
 		Telemetry:        tel,
-	}, []serve.ChannelBuilder{ajchannel.Builder()}, []serve.ServiceBuilder{a2asurface.Builder()})
+	}, []serve.SurfaceBuilder{ajchannel.Builder(), a2asurface.Builder()})
 	if err != nil {
 		return err
 	}
@@ -278,11 +278,16 @@ expose:
 
 Every field under it defaults, so an empty block takes work from the %q queue as task type %q.
 
-To serve this agent's tools to other agents instead, or as well, set:
+To answer other agents instead, or as well, add an a2a block saying what it answers:
 
 expose:
   agent:
-    agent_to_agent: true`,
+    a2a:
+      serve_tools: true
+      prompts: {}
+
+serve_tools answers tool calls from peers, and a prompts block answers prompts by running
+the agent loop over them; either alone is enough`,
 		c.configFile, config.DefaultJobsQueue, config.DefaultJobsTaskType)
 }
 
@@ -307,20 +312,24 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	doc.Values("Surfaces", names)
 
 	runs := len(channels) > 0
+	queued := cfg.JobsEnabled()
 
 	if runs {
 		doc.Item("Model", cfg.LLM.Model)
+	}
 
-		// Two contexts, because the queue and the agent's own stores may be on
-		// different clusters. Naming both is the only way an operator sees that the
-		// queue they meant and the store they meant are not where they thought.
+	// The queue's context belongs to the queue: it may be a different cluster from the
+	// one the stores and the a2a surfaces use, and naming both is the only way an
+	// operator sees that the queue they meant and the store they meant are not where
+	// they thought. A worker with no queue has one context and prints it once.
+	if queued {
 		doc.Item("Queue Context", cfg.JobsNatsContext())
 	}
 
 	// Named whenever it differs from the queue's, and whenever there is no queue to
-	// differ from, since it is the connection a2a serves on as well as the one the
-	// stores are reached over.
-	if cfg.NatsContext != "" && (!runs || cfg.NatsContext != cfg.JobsNatsContext()) {
+	// differ from, since it is the connection the a2a surfaces answer on as well as the
+	// one the stores are reached over.
+	if cfg.NatsContext != "" && (!queued || cfg.NatsContext != cfg.JobsNatsContext()) {
 		doc.Item("Agent Context", cfg.NatsContext)
 	}
 
@@ -334,21 +343,43 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	if runs {
 		doc.Item("Tool Directory", c.toolDirectory())
 		doc.Item("Tool Timeout", c.toolTimeout(cfg).String())
-		doc.Item("Workers", c.workersDescription(cfg))
 	}
 
-	c.describeServices(doc, cfg, services)
+	// The worker count belongs to the intake that claims work against it. A process
+	// hosting both runs the two numbers side by side, so one line called Workers would
+	// name whichever intake was asked first.
+	if queued {
+		doc.Item("Queue Workers", c.workersDescription(cfg))
+	}
+
+	c.describeSurfaces(doc, cfg, channels, services)
 
 	return doc
 }
 
-// describeServices adds a section per service that has something to say about itself.
+// describeSurfaces adds a section per surface that has something to say about itself.
 //
-// The a2a surface bounds and paces its calls with numbers of its own, 30 seconds and 2
-// by default against the loop's five minutes and the worker count, so they are printed
-// under the surface they belong to rather than beside the loop's where an operator
-// would read one pair as the other.
-func (c *fiskServeCommand) describeServices(doc *columns.Document, cfg *config.Config, services []serve.Service) {
+// Each a2a surface bounds and paces its work with numbers of its own, against the
+// loop's five minutes and the queue's worker count, so they are printed under the
+// surface they belong to rather than beside the loop's where an operator would read one
+// pair as the other.
+func (c *fiskServeCommand) describeSurfaces(doc *columns.Document, cfg *config.Config, channels []serve.Channel, services []serve.Service) {
+	for _, ch := range channels {
+		prompts, ok := ch.(*a2asurface.Channel)
+		if !ok {
+			continue
+		}
+
+		doc.Section("Answering prompts over a2a", func(d *columns.Document) {
+			for _, line := range prompts.Describe() {
+				d.Item(line.Label, line.Value)
+			}
+
+			d.Item("Workers", fmt.Sprintf("%d", cfg.A2APromptsWorkers()))
+			d.Printf("Answering a prompt runs the agent loop and reaches every tool the top-level include and exclude selected.")
+		})
+	}
+
 	for _, svc := range services {
 		a2aSvc, ok := svc.(*a2asurface.Service)
 		if !ok {

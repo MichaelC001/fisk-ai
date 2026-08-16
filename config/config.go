@@ -594,17 +594,18 @@ type ExposeConfig struct {
 
 // AgentExpose configures the agent-facing exposure of this agent.
 type AgentExpose struct {
-	// AgentToAgent opts this agent in to serving its tools to other agents over
-	// a2a. It is the switch for the a2a surface of `fisk-ai serve`, which serves
-	// nothing unless it is true; an agent that says nothing serves nothing.
-	AgentToAgent bool `json:"agent_to_agent" yaml:"agent_to_agent"`
 	// MCP opts this agent in to serving its tools over MCP and carries the listen
 	// port. Its presence is the switch for the `fisk-ai mcp` command, which refuses
 	// to start unless it is set.
 	MCP *ExposedMCPConfig `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	// A2A carries the a2a server's per-server tuning (concurrency, tool timeout). It is
-	// optional and independent of the agent_to_agent switch above; agent_to_agent alone
-	// still serves with defaults.
+	// A2A opts this agent in to answering other agents over a2a and says what it
+	// answers: serve_tools for tool requests, a tasks block for prompts. Its presence
+	// is the switch for the a2a surfaces of `fisk-ai serve`, and a block asking for
+	// neither is refused rather than starting a worker that registers nothing.
+	//
+	// Both use one transport under one identity, since discovery, tools and tasks are
+	// paths of a single micro service, so the tuning below belongs to the block rather
+	// than to either surface.
 	A2A *ExposedA2AConfig `json:"a2a,omitempty" yaml:"a2a,omitempty"`
 	// Jobs opts this agent in to taking whole units of work off a Choria asyncjobs work
 	// queue. Its presence is the switch for the queued-jobs intake of `fisk-ai serve`,
@@ -679,12 +680,26 @@ type ExposedMCPConfig struct {
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 }
 
-// ExposedA2AConfig carries the a2a server's per-server tuning. It is a sibling of the
-// agent_to_agent switch (which stays a bare bool) rather than folded into it, so an
-// agent opts in with agent_to_agent: true and tunes with an a2a: block. Its knobs are
-// separate from the MCP block's because the two servers bound different trust
-// boundaries (NATS peers vs anything reaching a TCP port).
+// ExposedA2AConfig says what this agent answers over a2a and bounds the answering.
+// Its knobs are separate from the MCP block's because the two servers bound different
+// trust boundaries (NATS peers vs anything reaching a TCP port).
 type ExposedA2AConfig struct {
+	// ServeTools answers tool requests from peers, which serves the agent card on the
+	// discovery path and runs one tool per call on the tool path. No prompt is
+	// involved and the agent loop never runs, so the caller reaches the tools an
+	// operator chose to expose and nothing else. MaxConcurrentTools and
+	// ToolTimeoutString below bound those calls.
+	ServeTools bool `json:"serve_tools,omitempty" yaml:"serve_tools,omitempty"`
+	// Prompts answers prompts from peers, which runs the agent loop over each one and
+	// streams what it produces back to the caller. Its presence enables the surface
+	// and an empty block is a working configuration.
+	//
+	// It differs in kind from ServeTools above, and the difference matters. That
+	// serves this agent's tools to a caller that drives them; this hands the agent a
+	// whole unit of work. So Tools on the block above does NOT narrow it: such a run
+	// reaches every tool the top-level include/exclude selected, exactly as a queued
+	// job does.
+	Prompts *ExposedPromptsConfig `json:"prompts,omitempty" yaml:"prompts,omitempty"`
 	// MaxConcurrentTools bounds how many tool calls the a2a server runs at once, since
 	// an a2a caller has no iteration budget. Unset (or 0) uses the server default;
 	// config-only, no flag or envar override.
@@ -695,6 +710,28 @@ type ExposedA2AConfig struct {
 	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
 	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
+}
+
+// DefaultPromptsWorkers is how many prompts from peers one worker answers at once when
+// none is set. It is one because a run is expensive and a worker quietly running several
+// multiplies spend without anyone having asked for it.
+const DefaultPromptsWorkers = 1
+
+// ExposedPromptsConfig configures the prompt-answering surface: how many prompts from
+// peers this process runs at once.
+//
+// What is deliberately not here is as much of the shape as what is. The transport, the
+// identity and the tool bounds belong to the a2a block around it; the session store is
+// harness.sessions and the per-tool bound is harness.tool_timeout, both shared with
+// every other surface.
+type ExposedPromptsConfig struct {
+	// Workers is how many prompts this process answers at once, and the number
+	// admission refuses a caller above: a peer that arrives when every worker is busy
+	// is told so on the spot rather than left watching a stream that has not started.
+	//
+	// The --workers flag does not reach it. That flag sizes the queue intake, and one
+	// flag setting two numbers could not be reported honestly on a startup banner.
+	Workers int `json:"workers,omitempty" yaml:"workers,omitempty"`
 }
 
 // Defaults for the queued-jobs intake. The queue and task type default to the values
@@ -917,12 +954,13 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	}
 
 	// An MCP-only agent needs neither: it serves tools and runs no agent loop. A jobs
-	// intake runs the whole loop, so it needs both, and the waiver must not extend to a
-	// config that carries an mcp block as well. Without this a config with both parses
-	// clean and fails later inside the channel, naming no key in the file.
+	// intake and a prompt surface each run the whole loop, so they need both, and the
+	// waiver must not extend to a config that carries an mcp block as well. Without
+	// this a config with both parses clean and fails later inside the channel, naming
+	// no key in the file.
 	mcpOnly := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.MCP != nil
 	jobs := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.Jobs != nil
-	if !mcpOnly || jobs {
+	if !mcpOnly || jobs || cfg.A2APromptsEnabled() {
 		if cfg.Identity == "" {
 			return fmt.Errorf("identity is required unless exposed over MCP")
 		}
@@ -969,18 +1007,40 @@ func validateServe(cfg *Config) error {
 		}
 	}
 
+	// An a2a block that asks for neither surface would register nothing, so it is
+	// refused here rather than starting a worker that answers no path at all.
+	if cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.A2A != nil && !cfg.A2AEnabled() {
+		return fmt.Errorf("expose.agent.a2a enables nothing: set serve_tools: true to answer tool requests, or add a prompts block to answer prompts")
+	}
+
+	// Both surfaces answer over one connection, so the context is required once for
+	// whichever of them is on.
+	if cfg.A2AEnabled() && cfg.NatsContext == "" {
+		return fmt.Errorf("nats_context is required when expose.agent.a2a is set: it is the connection this agent answers on")
+	}
+
 	// Serving tools engages no loop, so it needs neither a prompt nor a model. It does
 	// need something to serve: no built-in declares a2a exposure, so an
 	// application-less surface would start with an empty tool set. That is an earlier,
 	// clearer version of the empty-set error the surface itself produces; when a
 	// built-in first opts into a2a, delete this and let the downstream check do the
 	// work.
-	if cfg.A2AEnabled() {
-		if cfg.ApplicationPath == "" {
-			return fmt.Errorf("application_path is required when expose.agent.agent_to_agent is set: no built-in tool declares a2a exposure, so an agent with no wrapped application would have nothing to serve; set application_path to the fisk application whose commands you want to serve, or remove agent_to_agent")
+	if cfg.A2AServeToolsEnabled() && cfg.ApplicationPath == "" {
+		return fmt.Errorf("application_path is required when expose.agent.a2a.serve_tools is set: no built-in tool declares a2a exposure, so an agent with no wrapped application would have nothing to serve; set application_path to the fisk application whose commands you want to serve, or remove serve_tools")
+	}
+
+	// Answering a prompt runs the whole agent loop, so it needs what a queued job
+	// needs. The identity keys the subjects peers reach this worker on as well as the
+	// claim a resumed run writes to its journal.
+	if cfg.A2APromptsEnabled() {
+		if cfg.Identity == "" {
+			return fmt.Errorf("identity is required when expose.agent.a2a.prompts is set")
 		}
-		if cfg.NatsContext == "" {
-			return fmt.Errorf("nats_context is required when expose.agent.agent_to_agent is set: it is the connection the tools are served on")
+		if cfg.SystemPrompt == "" {
+			return fmt.Errorf("prompt is required when expose.agent.a2a.prompts is set")
+		}
+		if cfg.LLM.Model == "" {
+			return fmt.Errorf("llm.model is required when expose.agent.a2a.prompts is set")
 		}
 	}
 
@@ -1386,11 +1446,49 @@ func (c *Config) ConfirmOverMCPMode() string {
 	return c.Expose.Agent.MCP.ConfirmOverMCP
 }
 
-// A2AEnabled reports whether this agent opts in to serving its tools to other
-// agents over a2a, set under expose.agent.agent_to_agent. Serving is off unless
-// explicitly enabled, so a config that says nothing exposes nothing.
+// A2AEnabled reports whether this agent answers other agents over a2a in any way,
+// which is expose.agent.a2a asking for at least one of its surfaces. Answering is off
+// unless explicitly enabled, so a config that says nothing exposes nothing.
+//
+// It answers for the transport rather than for either surface: one connection, one
+// identity and one micro service carry both, so a caller deciding whether to dial asks
+// this and a caller deciding what to register asks the two below.
 func (c *Config) A2AEnabled() bool {
-	return c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.AgentToAgent
+	return c.A2AServeToolsEnabled() || c.A2APromptsEnabled()
+}
+
+// A2AServeToolsEnabled reports whether peers may invoke this agent's tools directly,
+// set under expose.agent.a2a.serve_tools.
+func (c *Config) A2AServeToolsEnabled() bool {
+	if c.Expose == nil || c.Expose.Agent == nil || c.Expose.Agent.A2A == nil {
+		return false
+	}
+
+	return c.Expose.Agent.A2A.ServeTools
+}
+
+// A2APromptsEnabled reports whether peers may send this agent prompts to run, which is
+// the presence of expose.agent.a2a.prompts. Every field under it defaults, so an empty
+// block enables the surface.
+func (c *Config) A2APromptsEnabled() bool {
+	if c.Expose == nil || c.Expose.Agent == nil || c.Expose.Agent.A2A == nil {
+		return false
+	}
+
+	return c.Expose.Agent.A2A.Prompts != nil
+}
+
+// A2APromptsWorkers returns how many prompts from peers this process answers at once, or
+// the default when unset. It is zero when the surface is not configured.
+func (c *Config) A2APromptsWorkers() int {
+	if !c.A2APromptsEnabled() {
+		return 0
+	}
+	if c.Expose.Agent.A2A.Prompts.Workers <= 0 {
+		return DefaultPromptsWorkers
+	}
+
+	return c.Expose.Agent.A2A.Prompts.Workers
 }
 
 // A2ATransportName is the a2a transport binding in use. It is fixed to NATS until

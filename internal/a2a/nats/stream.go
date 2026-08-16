@@ -23,6 +23,17 @@ import (
 // it here.
 var _ a2a.StreamingTransport = (*Transport)(nil)
 
+// DescribeTasks names the subject a task request arrives on and the pattern a cancel
+// is addressed under, for the banner of a worker that serves tasks. The cancel line
+// is a pattern rather than a subject because the request id is part of the address,
+// and it is what an operator writes a publish permission against.
+func (t *Transport) DescribeTasks(identity string) []a2a.DescLine {
+	return []a2a.DescLine{
+		{Label: "Requests", Value: TaskSubject(identity)},
+		{Label: "Cancels", Value: CancelSubject(identity, "*")},
+	}
+}
+
 // Stream publishes body on the subject for op against agent, naming an inbox of its
 // own, and returns a Reader over the messages that arrive there.
 //

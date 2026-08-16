@@ -190,6 +190,21 @@ type Work struct {
 	// while it blocks. Nil is one shot.
 	Continue func(context.Context) agent.Continuation
 
+	// RunContext derives the context this work's run executes under from the server's
+	// own. A channel supplies it to stop one run without stopping the server, or to
+	// carry a caller's trace onto the run. Nil runs the work on the server's context.
+	//
+	// The server calls it once, on its own goroutine, immediately before the run and
+	// after the run's slot was acquired, so a channel learns from it that its work is
+	// about to start. Work that is taken and never started reports Abandoned without
+	// it being called. The returned cancel is called once the run has ended, and a
+	// channel that kept the cancel may call it earlier, which is how a caller's cancel
+	// reaches a run.
+	//
+	// A nil context leaves the run on the server's own and a nil cancel is not called,
+	// so a channel's mistake here does not take a worker down.
+	RunContext func(context.Context) (context.Context, context.CancelFunc)
+
 	// Done reports the outcome exactly once, on a context that is not the run's so a
 	// canceled or timed-out run still records what happened. A non-nil error is
 	// logged; the server has nowhere else to take it. Required.
@@ -210,8 +225,15 @@ type Budget struct {
 // and logged rather than enforced: nothing here authorizes on it, and a channel that
 // cannot identify its caller leaves it zero.
 type Caller struct {
-	// Name is the channel's own term for the caller. It is not verified.
+	// Name is the channel's own term for the caller, empty when it knows none.
 	Name string
+
+	// Verified reports whether the channel authenticated Name. A false value means
+	// nothing is being vouched for, whether or not Name is set, so anything reading
+	// this for a decision must read it and not Name alone. A channel over a transport
+	// that authenticates nobody leaves it false and still fills Name with the claim
+	// the caller made, which is worth recording and worth nothing as evidence.
+	Verified bool
 }
 
 // Outcome is what a run produced, in terms a channel can record without inspecting

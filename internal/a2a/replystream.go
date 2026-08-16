@@ -116,7 +116,7 @@ func (s *ReplyStream) send(hdr *Header, msg any, final bool) error {
 // size cap before it reaches the sink, since an event carrying a large tool result
 // can exceed both it and the transport's own payload limit.
 func (s *ReplyStream) encode(hdr *Header, msg any) ([]byte, error) {
-	stampReply(hdr, &s.req, s.sender)
+	StampReply(hdr, &s.req, s.sender)
 	hdr.Sequence = s.seq + 1
 
 	data, err := json.Marshal(msg)
@@ -124,8 +124,8 @@ func (s *ReplyStream) encode(hdr *Header, msg any) ([]byte, error) {
 		return nil, fmt.Errorf("marshaling %s: %w", hdr.Protocol, err)
 	}
 
-	if len(data) > maxMessageSize {
-		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit", ErrMessageTooLarge, hdr.Protocol, len(data), maxMessageSize)
+	if len(data) > MaxMessageSize {
+		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit", ErrMessageTooLarge, hdr.Protocol, len(data), MaxMessageSize)
 	}
 
 	return data, nil

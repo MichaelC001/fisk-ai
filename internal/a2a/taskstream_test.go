@@ -34,9 +34,10 @@ type scriptedTransport struct {
 func (t *scriptedTransport) RoundTrip(context.Context, string, RouteHint, []byte) ([]byte, error) {
 	return nil, nil
 }
-func (t *scriptedTransport) Serve(RouteHint, Handler) error { return nil }
-func (t *scriptedTransport) Describe(string) []DescLine     { return nil }
-func (t *scriptedTransport) Close() error                   { return nil }
+func (t *scriptedTransport) Serve(RouteHint, Handler) error  { return nil }
+func (t *scriptedTransport) Describe(string) []DescLine      { return nil }
+func (t *scriptedTransport) DescribeTasks(string) []DescLine { return nil }
+func (t *scriptedTransport) Close() error                    { return nil }
 
 func (t *scriptedTransport) Stream(_ context.Context, _ string, _ RouteHint, body []byte) (Reader, error) {
 	var hdr Header
@@ -74,7 +75,7 @@ func (t *scriptedTransport) SendCancel(_ context.Context, _, _ string, body []by
 	}
 
 	ack := NewAck(true)
-	stampReply(&ack.Header, &hdr, "svc")
+	StampReply(&ack.Header, &hdr, "svc")
 	ack.Sequence = 1
 
 	return encodeMessage(ack), nil
@@ -129,7 +130,7 @@ func replySet(req *Header, texts ...string) [][]byte {
 	seq := uint64(0)
 
 	stamp := func(hdr *Header) {
-		stampReply(hdr, req, "svc")
+		StampReply(hdr, req, "svc")
 		seq++
 		hdr.Sequence = seq
 	}
@@ -244,13 +245,13 @@ var _ = Describe("TaskStream", func() {
 	It("Should deliver a terminal result whose stop reason it does not name", func() {
 		transport := &scriptedTransport{script: func(req *Header) [][]byte {
 			ack := NewAck(true)
-			stampReply(&ack.Header, req, "svc")
+			StampReply(&ack.Header, req, "svc")
 			ack.Sequence = 1
 
 			res := NewResult(StopReason("throttled"))
 			res.Text = "as far as I got"
 			res.Usage = &Usage{InputTokens: 10, OutputTokens: 20}
-			stampReply(&res.Header, req, "svc")
+			StampReply(&res.Header, req, "svc")
 			res.Sequence = 2
 
 			return [][]byte{encodeMessage(ack), encodeMessage(res)}
@@ -275,12 +276,12 @@ var _ = Describe("TaskStream", func() {
 	It("Should return a failed task as an ErrorMessage value, not as the error", func() {
 		transport := &scriptedTransport{script: func(req *Header) [][]byte {
 			ack := NewAck(true)
-			stampReply(&ack.Header, req, "svc")
+			StampReply(&ack.Header, req, "svc")
 			ack.Sequence = 1
 
 			failed := NewError("the tool could not run")
 			failed.StopReason = StopError
-			stampReply(&failed.Header, req, "svc")
+			StampReply(&failed.Header, req, "svc")
 			failed.Sequence = 2
 
 			return [][]byte{encodeMessage(ack), encodeMessage(failed)}
@@ -349,7 +350,7 @@ var _ = Describe("TaskStream", func() {
 	It("Should refuse a message that does not belong in a reply set", func() {
 		transport := &scriptedTransport{script: func(req *Header) [][]byte {
 			reply := NewToolReply("ok", false)
-			stampReply(&reply.Header, req, "svc")
+			StampReply(&reply.Header, req, "svc")
 			reply.Sequence = 1
 
 			return [][]byte{encodeMessage(reply)}
@@ -413,7 +414,7 @@ var _ = Describe("Client.Cancel", func() {
 	It("Should refuse a reply that is not an ack", func() {
 		transport := &scriptedTransport{cancelReply: func(req *Header) []byte {
 			res := NewResult(StopCanceled)
-			stampReply(&res.Header, req, "svc")
+			StampReply(&res.Header, req, "svc")
 			res.Sequence = 1
 
 			return encodeMessage(res)

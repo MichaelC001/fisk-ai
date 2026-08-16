@@ -2,22 +2,23 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-// Package a2asurface serves an agent's tools to other agents over a2a, as a surface a
-// serve.Server hosts rather than as a command of its own.
+// Package a2asurface answers other agents over a2a, as surfaces a serve.Server hosts
+// rather than as a command of its own.
 //
-// A peer discovers a card and invokes a tool. No prompt is involved and no agent loop
-// runs, which is what makes this cheaper than handing that peer a task and gives it a
-// different security posture: the caller reaches the tools an operator chose to expose
-// and nothing else.
+// Two kinds of caller arrive on one transport. A peer that invokes a tool discovers a
+// card and calls it directly: no prompt is involved and no agent loop runs, which makes
+// it cheaper than handing that peer a prompt and gives it a different security posture,
+// since the caller reaches the tools an operator chose to expose and nothing else. A
+// peer that sends a prompt gets an agent run: it is acked, the events of the run stream
+// back as the loop produces them, and a result or an error closes it.
 //
-// The synchronous task surface, where a prompt travels over a2a and the loop does run,
-// belongs in this package when it lands. It is a serve.Channel rather than a
-// serve.Service, and the two share one transport under one identity, since discovery,
-// tools and tasks are route hints on one micro service.
+// The two share one transport and one identity, since discovery, tools and tasks are
+// paths of a single micro service. Builder opens that transport once and returns
+// whichever surfaces the configuration asks for; the first of them to close stops the
+// service answering, so one identity leaves its queue group once.
 package a2asurface
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -27,19 +28,16 @@ import (
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
-// Builder describes this surface to serve.Surfaces, so a program that wants to serve
-// tools links it in and a program that does not never references this package at all.
-func Builder() serve.ServiceBuilder {
-	return serve.ServiceBuilder{
+// Builder describes these surfaces to serve.Surfaces, so a program that wants to
+// answer peers links it in and a program that does not never references this package
+// at all.
+func Builder() serve.SurfaceBuilder {
+	return serve.SurfaceBuilder{
 		Name:    "a2a",
 		Enabled: func(cfg *config.Config) bool { return cfg.A2AEnabled() },
-		Build: func(cfg *config.Config, opts serve.BuildOptions) (serve.Service, error) {
+		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Surface, error) {
 			return NewFromConfig(cfg, ConfigOptions{
 				Conns:      opts.Conns,
 				ConfigFile: opts.ConfigFile,
@@ -61,8 +59,8 @@ type ConfigOptions struct {
 	// the file to edit.
 	ConfigFile string
 
-	// Logger receives the a2a server's progress, which is a line per served call. Nil
-	// leaves it to the a2a server's own default.
+	// Logger receives the surfaces' progress, which is a line per served call and per
+	// prompt. Nil leaves it to each server's own default.
 	Logger *slog.Logger
 
 	// Telemetry, when non-nil, receives a span per served call and reaches the tools
@@ -71,44 +69,22 @@ type ConfigOptions struct {
 	Telemetry *telemetry.Provider
 }
 
-// Service is the tool-serving surface: an a2a server, the transport it answers on, and
-// what a program needs to describe it at startup.
-type Service struct {
-	srv       *a2a.Server
-	transport a2a.Transport
-	exposed   []string
-	withheld  []string
-	describe  []a2a.DescLine
-	closeOnce sync.Once
-	closeErr  error
-}
-
-// NewFromConfig builds the tool-serving surface described by
-// expose.agent.agent_to_agent.
+// NewFromConfig builds the surfaces expose.agent.a2a asks for: the tool service under
+// serve_tools, the prompt channel under prompts, and both when the block carries both.
 //
-// It refuses a configuration that does not enable serving, since building a surface
-// nobody asked for would expose an application's commands to the network on the
-// strength of a linked builder. It owns the transport it opens and stops it on Close.
+// It refuses a configuration that enables neither, since building a surface nobody
+// asked for would put an application's commands on the network on the strength of a
+// linked builder. It owns the transport it opens, and hands it to the surfaces it
+// returns, whose first close stops it.
 //
-// The tool set is loaded before anything is registered, so a configuration whose
-// filters leave nothing is refused rather than served as an agent with no tools.
-func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Service, error) {
+// The surfaces are returned in the order a server hosts them, the channel first, so a
+// worker's banner reads in the order work arrives.
+func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Surface, error) {
 	if !cfg.A2AEnabled() {
-		return nil, fmt.Errorf("expose.agent.agent_to_agent is not enabled")
+		return nil, fmt.Errorf("expose.agent.a2a enables neither serve_tools nor prompts")
 	}
 	if opts.Conns == nil {
-		return nil, fmt.Errorf("expose.agent.agent_to_agent needs a NATS connection, which nats_context is what supplies")
-	}
-
-	// Loaded on a background context: the process installs its signal handling after
-	// the surfaces are built, so a context passed in here is one nothing would cancel.
-	// Introspecting the application carries a bound of its own.
-	tools, err := fisktool.ServedTools(context.Background(), cfg)
-	if err != nil {
-		return nil, err
-	}
-	if len(tools) == 0 {
-		return nil, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
+		return nil, fmt.Errorf("expose.agent.a2a needs a NATS connection, which nats_context is what supplies")
 	}
 
 	transport, err := a2a.NewTransport(cfg.A2ATransport(), opts.Conns, a2a.TransportConfig{Identity: cfg.Identity})
@@ -116,70 +92,61 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Service, error) {
 		return nil, err
 	}
 
-	svc := &Service{
-		transport: transport,
-		withheld:  builtin.WithheldFromA2A(cfg),
-		describe:  transport.Describe(cfg.Identity),
+	held := &sharedTransport{transport: transport}
+
+	var built []serve.Surface
+
+	if cfg.A2APromptsEnabled() {
+		ch, err := newChannel(cfg, held, opts)
+		if err != nil {
+			held.closeQuietly(opts.Logger)
+			return nil, err
+		}
+
+		built = append(built, ch)
 	}
 
-	// From here the transport is registered, so every failure gives it back rather than
-	// leaving a micro service behind for a surface the caller never received.
-	svc.srv, err = a2a.NewServer(transport, toolkit.Tools(tools), a2a.ServerOptions{
-		Identity:    cfg.Identity,
-		Version:     util.Version(),
-		ConfirmTags: cfg.ConfirmTags(),
-		Concurrency: cfg.A2AMaxConcurrentTools(),
-		CallTimeout: cfg.A2AToolTimeout(),
-		Logger:      opts.Logger,
-		Telemetry:   opts.Telemetry,
-	})
-	if err != nil {
-		svc.closeQuietly(opts.Logger)
-		return nil, err
+	if cfg.A2AServeToolsEnabled() {
+		svc, err := newService(cfg, held, opts)
+		if err != nil {
+			held.closeQuietly(opts.Logger)
+			return nil, err
+		}
+
+		built = append(built, svc)
 	}
 
-	svc.exposed = svc.srv.ExposedTools()
-	if len(svc.exposed) == 0 {
-		svc.closeQuietly(opts.Logger)
-		return nil, fmt.Errorf("no tools available to serve over a2a; all were filtered or confirmation-gated")
-	}
-
-	return svc, nil
+	return built, nil
 }
 
-// Name identifies the surface. There is one a2a surface per identity and the identity
-// is what a program has already named by the time it prints this, so nothing qualifies
-// it further.
-func (s *Service) Name() string { return "a2a" }
-
-// Close stops answering, which stops the micro service and takes this identity out of
-// its queue group, so a peer calling during a drain is routed to a sibling rather than
-// left waiting.
+// sharedTransport is the one transport both surfaces answer on, closed once however
+// many of them ask.
 //
-// A call already in flight is not covered. The a2a server answers on a goroutine of its
-// own, bounded by expose.agent.a2a.tool_timeout and nothing else, so a command it
-// started keeps running with nowhere to reply to.
-func (s *Service) Close() error {
-	s.closeOnce.Do(func() { s.closeErr = s.srv.Stop() })
-
-	return s.closeErr
+// Closing it stops the micro service, which takes this identity out of its queue group
+// for every path at once. A drain wants exactly that, and the second surface's close
+// reports the first one's answer rather than a failure, so a clean shutdown prints no
+// error for having released one thing twice.
+//
+// A prompt already accepted is unaffected: its reply inbox and its cancel subscription
+// belong to the NATS connection rather than to the service registration, so it goes on
+// streaming and still sends its terminal message.
+type sharedTransport struct {
+	transport a2a.Transport
+	once      sync.Once
+	err       error
 }
 
-// ExposedTools are the tools this surface serves, in card order.
-func (s *Service) ExposedTools() []string { return s.exposed }
+func (s *sharedTransport) Close() error {
+	s.once.Do(func() { s.err = s.transport.Close() })
 
-// WithheldBuiltins names the built-in tools this configuration enables that are not
-// served, which is all of them: no built-in declares a2a exposure. An operator who
-// enabled some would otherwise see a served set that silently excludes them.
-func (s *Service) WithheldBuiltins() []string { return s.withheld }
+	return s.err
+}
 
-// Describe returns the subjects this surface is reached on, for display.
-func (s *Service) Describe() []a2a.DescLine { return s.describe }
-
-// closeQuietly gives the transport back on a construction failure, reporting a second
-// failure to the log: the error that caused the teardown is the one the caller needs.
-func (s *Service) closeQuietly(log *slog.Logger) {
-	err := s.transport.Close()
+// closeQuietly gives the transport back when a surface failed to build, reporting a
+// second failure to the log: the error that caused the teardown is the one the caller
+// needs.
+func (s *sharedTransport) closeQuietly(log *slog.Logger) {
+	err := s.Close()
 	if err != nil && log != nil {
 		log.Error("Releasing the a2a transport failed", "error", err)
 	}

@@ -43,7 +43,7 @@ func (t *stubTransport) RoundTrip(_ context.Context, _ string, _ RouteHint, body
 	}
 
 	reply := NewToolReply(t.output, t.isError)
-	stampReply(&reply.Header, &req.Header, "peer")
+	StampReply(&reply.Header, &req.Header, "peer")
 
 	return json.Marshal(reply)
 }

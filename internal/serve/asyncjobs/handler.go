@@ -18,7 +18,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // handle is the engine's handler for one job, and the whole of the push-to-pull
@@ -133,17 +132,12 @@ func (c *Channel) intake(task *asyncjobs.Task, log *slog.Logger) (*a2a.Request, 
 		return nil, fmt.Errorf("the payload is not a valid v1 message")
 	}
 
-	msg, err := a2a.Decode(task.Payload)
+	msg, err := a2a.ExpectProtocol(task.Payload, a2a.RequestProtocol)
 	if err != nil {
-		log.Error("A job payload could not be decoded", "error", err)
-		return nil, fmt.Errorf("the payload could not be decoded")
-	}
-
-	req, ok := msg.(*a2a.Request)
-	if !ok {
-		log.Error("A job payload is not a request", "protocol", a2a.RequestProtocol)
+		log.Error("A job payload is not a request", "error", err)
 		return nil, fmt.Errorf("the payload is not a %s message", a2a.RequestProtocol)
 	}
+	req := msg.(*a2a.Request)
 
 	if req.Prompt == "" {
 		return nil, fmt.Errorf("the request carries no prompt")
@@ -252,14 +246,14 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 		return nil, fmt.Errorf("the run reached no outcome: %w", err)
 	}
 
-	reason := stopReason(out.Reason)
+	reason := a2a.StopReasonFor(out.Reason)
 
 	if out.Err != nil {
 		log.Info("Storing the answer of a run that failed", "reason", out.Reason, "stop_reason", reason, "session", out.SessionID)
 
 		msg := a2a.NewError(out.Err.Error())
 		msg.StopReason = reason
-		c.stampReply(&msg.Header, req)
+		a2a.StampReply(&msg.Header, &req.Header, c.identity)
 
 		return msg, nil
 	}
@@ -268,51 +262,12 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 
 	msg := a2a.NewResult(reason)
 	msg.Text = out.Text
-	msg.Usage = usageOf(out.Stats)
-	c.stampReply(&msg.Header, req)
+	msg.Usage = a2a.UsageFrom(out.Stats)
+	a2a.StampReply(&msg.Header, &req.Header, c.identity)
 
 	return msg, nil
 }
 
-// usageOf reports what a run consumed, or nothing when it never got far enough to
-// consume anything.
-//
-// The input total is assembled rather than copied. RunStats.InTokens is the uncached
-// remainder, with the cached input counted separately, so reporting it alone would
-// hand a caller a fraction of what it was billed for and no way to tell.
-func usageOf(stats *util.RunStats) *a2a.Usage {
-	if stats == nil {
-		return nil
-	}
-
-	return &a2a.Usage{
-		InputTokens:       stats.InTokens + stats.CacheReadTokens + stats.CacheCreateTokens,
-		OutputTokens:      stats.OutTokens,
-		CacheReadTokens:   stats.CacheReadTokens,
-		CacheCreateTokens: stats.CacheCreateTokens,
-		LLMCalls:          stats.LlmCalls,
-		ToolCalls:         stats.ToolCalls,
-	}
-}
-
-// stampReply fills in the framing of an answer so it echoes the request it answers.
-// Sequence stays zero: this binding carries no event stream, so the answer is the only
-// message in the set and there is nothing to order it against.
-func (c *Channel) stampReply(h *a2a.Header, req *a2a.Request) {
-	h.ID = a2a.NewID()
-	h.Request = req.Request
-	h.Conversation = req.Conversation
-	h.Time = time.Now().UTC()
-	h.Sender = a2a.Identity{Name: c.identity}
-
-	if req.Sender.Name != "" {
-		h.Recipient = &a2a.Identity{Name: req.Sender.Name}
-	}
-}
-
-// stopReason maps a run's terminal reason onto the protocol's neutral vocabulary. A
-// reason with no counterpart is reported as an error, which is what a caller that
-// cannot interpret it should treat it as.
 // deferredIDs renders the tool_use ids a run is waiting on, for the terminating
 // error a queue operator reads off the task. The note and handle are deliberately
 // left out: they are tool-supplied text and this string is stored, so only the ids
@@ -324,21 +279,6 @@ func deferredIDs(calls []agent.DeferredCall) string {
 	}
 
 	return strings.Join(ids, ",")
-}
-
-func stopReason(r runstate.TerminalReason) a2a.StopReason {
-	switch r {
-	case runstate.ReasonCompleted:
-		return a2a.StopEndTurn
-	case runstate.ReasonBudget:
-		return a2a.StopBudgetExhausted
-	case runstate.ReasonMaxIterations:
-		return a2a.StopMaxIterations
-	case runstate.ReasonSuspended:
-		return a2a.StopSuspended
-	default:
-		return a2a.StopError
-	}
 }
 
 // budgetOf carries the limits a request may lower. The server clamps them against the

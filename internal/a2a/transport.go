@@ -74,6 +74,13 @@ type StreamingTransport interface {
 	// answers, which is how a caller tells a delivered cancel from a task that is not
 	// running there.
 	SendCancel(ctx context.Context, agent, request string, body []byte) ([]byte, error)
+
+	// DescribeTasks returns the {label, value} lines describing how tasks reach the
+	// named identity and where their cancels are addressed, for display beside
+	// Describe's lines. It is here rather than on Describe because a binding that
+	// cannot carry a reply set has no task path to describe, and a surface that serves
+	// tasks must not have to know what a subject is to print one.
+	DescribeTasks(identity string) []DescLine
 }
 
 // CancelWatch is one running task's claim on the cancels addressed to it.
