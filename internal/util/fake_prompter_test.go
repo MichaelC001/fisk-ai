@@ -30,6 +30,30 @@ type fakePrompter struct {
 	lastGateReq toolkit.GateRequest
 }
 
+// fakeApprovals is a GateApprovals a spec can inspect: granted seeds what the
+// conversation already carries, and recorded is what the gate wrote, in order.
+type fakeApprovals struct {
+	granted  map[string]bool
+	recorded []string
+	grantErr error
+}
+
+func (f *fakeApprovals) Granted(tool string) bool { return f.granted[tool] }
+
+func (f *fakeApprovals) Grant(tool string) error {
+	if f.grantErr != nil {
+		return f.grantErr
+	}
+
+	if f.granted == nil {
+		f.granted = map[string]bool{}
+	}
+	f.granted[tool] = true
+	f.recorded = append(f.recorded, tool)
+
+	return nil
+}
+
 func (f *fakePrompter) CanPrompt() bool { return f.canPrompt }
 
 func (f *fakePrompter) ApproveCommand(_ context.Context, req toolkit.GateRequest) (toolkit.ConfirmChoice, error) {

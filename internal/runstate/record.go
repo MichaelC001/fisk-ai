@@ -59,6 +59,8 @@ const (
 	// is re-run on resume and the first must never be, because the tool already did
 	// whatever it started.
 	DeferredProtocol Protocol = protocolNamespace + ".deferred"
+	// DecisionProtocol records a standing operator approval for a tool.
+	DecisionProtocol Protocol = protocolNamespace + ".decision"
 	// TerminalProtocol records why the run ended (or that it was suspended).
 	TerminalProtocol Protocol = protocolNamespace + ".terminal"
 	// ClaimProtocol records that a worker took the run over on resume. It is
@@ -74,11 +76,24 @@ type Record struct {
 	Seq      uint64   `json:"seq"`
 	Protocol Protocol `json:"protocol"`
 
+	// Optional marks a record a reader may skip when it does not recognize the
+	// protocol. It may be set only on a record whose absence is fail-safe, meaning a
+	// reader that skips it behaves more conservatively rather than differently. A
+	// record whose absence changes a decision in the restrictive direction (a
+	// revocation, an expiry, a narrowed scope) must never set it and requires a
+	// Version bump instead.
+	//
+	// DeferredProtocol is the record in this package that must not set it: a reader
+	// that skipped one would dispatch a call whose answer somebody is already
+	// working on.
+	Optional bool `json:"optional,omitempty"`
+
 	Meta       *MetaRecord       `json:"meta,omitempty"`
 	Assistant  *AssistantRecord  `json:"assistant,omitempty"`
 	User       *UserRecord       `json:"user,omitempty"`
 	ToolResult *ToolResultRecord `json:"tool_result,omitempty"`
 	Deferred   *DeferredRecord   `json:"deferred,omitempty"`
+	Decision   *DecisionRecord   `json:"decision,omitempty"`
 	Terminal   *TerminalRecord   `json:"terminal,omitempty"`
 	Claim      *ClaimRecord      `json:"claim,omitempty"`
 }
@@ -167,6 +182,20 @@ type DeferredRecord struct {
 	ToolName  string `json:"tool_name"`
 	Note      string `json:"note,omitempty"`
 	Handle    string `json:"handle,omitempty"`
+}
+
+// DecisionRecord is a standing approval the operator granted for a named tool,
+// covering the rest of the conversation rather than one call. It holds a tool name
+// and nothing else: the command line the operator saw is model-supplied and already
+// in the transcript, and the approval does not depend on it.
+//
+// The record carries no denial. The gate has no standing refusal, so a declined
+// command is asked about again next time, and a run that ended before the operator
+// answered records nothing.
+type DecisionRecord struct {
+	// Tool is the effective tool name the gate keys on (stream_rm), which is not the
+	// command path the approval prompt displayed (stream rm).
+	Tool string `json:"tool"`
 }
 
 // TerminalReason explains why a run stopped.

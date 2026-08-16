@@ -173,13 +173,21 @@ func (t *Transport) fault(err error) {
 // reply. A missing responder or an elapsed deadline is reported as
 // a2a.ErrAgentUnavailable. The reply is returned undecoded; the engine size-caps
 // and validates it.
+//
+// The two failures read differently. Nobody subscribed says the agent is not there;
+// an elapsed wait says how long this agent waited and which bound it was, since an
+// operator seeing only "unavailable" looks for a dead worker when the answer is that
+// the peer needed longer than the caller allows.
 func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
 	subject, err := t.subject(agent, op)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, ok := ctx.Deadline(); !ok {
+	waited := t.timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		waited = time.Until(deadline)
+	} else {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, t.timeout)
 		defer cancel()
@@ -187,9 +195,14 @@ func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHin
 
 	msg, err := t.nc.RequestWithContext(ctx, subject, body)
 	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("%w: no reply on %q: %w", a2a.ErrAgentUnavailable, subject, err)
+		switch {
+		case errors.Is(err, nats.ErrNoResponders):
+			return nil, fmt.Errorf("%w: no subscription interest on %q", a2a.ErrAgentUnavailable, subject)
+
+		case errors.Is(err, context.DeadlineExceeded):
+			return nil, fmt.Errorf("%w: no reply on %q within %s", a2a.ErrAgentUnavailable, subject, waited.Round(time.Second))
 		}
+
 		return nil, fmt.Errorf("requesting %q: %w", subject, err)
 	}
 

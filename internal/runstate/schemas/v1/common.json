@@ -18,6 +18,10 @@
           "type": "integer",
           "minimum": 1,
           "description": "Monotonic record id within a run, the ordering authority. Starts at 1 on the meta record."
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "Set when a reader that does not recognize the protocol may skip the record. Only a record whose absence is fail-safe carries it: skipping one leaves the reader more conservative rather than differently behaved."
         }
       }
     },

@@ -394,7 +394,7 @@ func (t *Tool) ConfirmTrigger(extraTags []string) string {
 }
 
 // Command is the bare command the call runs, shown in the approval prompt and used
-// as the subject of a session-wide allow. A function tool has no command line of its
+// as the subject of a standing allow. A function tool has no command line of its
 // own, so it is its model-facing name.
 func (t *Tool) Command() string { return t.name }
 

@@ -114,6 +114,17 @@ func (e *RecordingEvents) Warnings() []agent.Warning {
 	return out
 }
 
+// Starts returns a copy of the run parameters reported at start, in order. A run
+// reports once; a spec that drives several runs through one recorder reads them in
+// the order the runs happened.
+func (e *RecordingEvents) Starts() []agent.RunInfo {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]agent.RunInfo, len(e.starts))
+	copy(out, e.starts)
+	return out
+}
+
 // HasWarning reports whether a warning of the given kind was emitted.
 func (e *RecordingEvents) HasWarning(kind agent.WarningKind) bool {
 	e.mu.Lock()

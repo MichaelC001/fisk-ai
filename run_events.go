@@ -96,6 +96,8 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("tool %q carries contradictory behavior tags: %s; the more dangerous reading was used and the tool is still available", w.Name, strings.Join(w.Params, ", "))
 	case agent.WarnToolTimeout:
 		return fmt.Sprintf("tool %q was stopped: %v; raise harness.tool_timeout if the tool needs longer", w.Name, w.Err)
+	case agent.WarnApprovalsDropped:
+		return fmt.Sprintf("%d standing approval(s) were not restored because --force resumed this session across a changed configuration; you will be asked again for those commands", w.Count)
 	default:
 		return ""
 	}
@@ -126,6 +128,11 @@ func (c *cliEvents) Starting(info agent.RunInfo) {
 	}
 	if info.SessionID != "" && !info.Resumed {
 		fmt.Fprintf(os.Stderr, "checkpointing session %q\n", info.SessionID)
+	}
+	// Not behind --verbose: a resume is where the operator inherits approvals they gave
+	// in an earlier sitting, and those commands run without asking again.
+	if info.Resumed && len(info.StandingApprovals) > 0 {
+		fmt.Fprintf(os.Stderr, "standing approvals from this conversation: %s\n", strings.Join(info.StandingApprovals, ", "))
 	}
 }
 

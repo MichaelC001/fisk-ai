@@ -416,7 +416,7 @@ var _ = Describe("runner", func() {
 				stats:  &util.RunStats{},
 				events: ev,
 				tools:  map[string]toolkit.Tool{"stream_rm": tool},
-				gate:   util.NewConfirmGate(toolkit.DefaultDenyPrompter()),
+				gate:   util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 			}
 
 			// With no operator reachable (the deny prompter reports it cannot prompt)
@@ -536,7 +536,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				stats: &util.RunStats{}, events: ev,
 				tools: map[string]toolkit.Tool{"stream_rm": orig, "safe": safe},
-				gate:  util.NewConfirmGate(toolkit.DefaultDenyPrompter()),
+				gate:  util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
 						// The original tool is confirm-gated, which the hook observes.

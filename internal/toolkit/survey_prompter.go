@@ -61,7 +61,7 @@ func (p *surveyPrompter) ApproveCommand(_ context.Context, req GateRequest) (Con
 	options := []string{
 		"No, do not run it",
 		"Yes, run it once",
-		fmt.Sprintf("Yes, and allow %q (any arguments) for the rest of this session", req.Command),
+		fmt.Sprintf("Yes, and allow %q (any arguments) for the rest of this conversation", req.Command),
 	}
 
 	idx := 0
@@ -165,10 +165,10 @@ func printGateHeader(out io.Writer, req GateRequest) {
 	fmt.Fprintf(out, "-> %s\n", req.Display)
 }
 
-// printAlwaysNote confirms to the operator that a session-wide allow was recorded,
-// so they know the tool will not be asked about again this session.
+// printAlwaysNote confirms to the operator that a standing allow was recorded, so
+// they know the tool will not be asked about again in this conversation.
 func printAlwaysNote(out io.Writer, commandPath string) {
-	fmt.Fprintf(out, "confirmation: will not ask again for %q this session\n", commandPath)
+	fmt.Fprintf(out, "confirmation: will not ask again for %q in this conversation\n", commandPath)
 }
 
 // printPromptSeparator writes a blank line to w before an interactive prompt, so a

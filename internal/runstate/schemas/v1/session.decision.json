@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/session.decision.json",
+  "title": "fisk-ai session store v1 gate decision record",
+  "allOf": [
+    {
+      "$ref": "session.common.json#/$defs/envelope"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.session.decision"
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool"
+      ],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "The tool the operator approved for the rest of the conversation, as the gate keys it (stream_rm), not the command path the prompt displayed (stream rm). The record holds no denial: the gate has no standing refusal."
+        }
+      }
+    }
+  },
+  "required": [
+    "decision"
+  ],
+  "unevaluatedProperties": false
+}

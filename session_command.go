@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/ui/columns"
@@ -246,6 +247,17 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 
 	if rs.Pending != nil {
 		c.ItemUnlessZero("Pending", "an in-flight tool batch will resume first")
+	}
+
+	// The approvals a resume honors without asking again. A tool name comes from the
+	// tool set rather than from a model, but it is read back from a journal, so it is
+	// sanitized like anything else printed from one.
+	if len(rs.Approvals) > 0 {
+		approved := make([]string, len(rs.Approvals))
+		for i, tool := range rs.Approvals {
+			approved[i] = util.SanitizeForDisplay(tool)
+		}
+		c.Item("Approvals", strings.Join(approved, ", "))
 	}
 
 	// A run holding a deferred call resumes into the same wait until it is answered,

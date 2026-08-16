@@ -43,9 +43,11 @@ var _ = Describe("Validator", func() {
 				metaRecord(),
 				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
 				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
-				{Seq: 4, Protocol: UserProtocol, User: userRecord("a follow-up")},
-				{Seq: 5, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "agent@host pid 42", Claimed: time.Now().UTC()}},
-				{Seq: 6, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
+				{Seq: 4, Protocol: DeferredProtocol, Deferred: &DeferredRecord{ToolUseID: "tu_2", ToolName: "change_request", Note: "waiting on change approval", Handle: "CHG-1234"}},
+				{Seq: 5, Protocol: UserProtocol, User: userRecord("a follow-up")},
+				{Seq: 6, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "agent@host pid 42", Claimed: time.Now().UTC()}},
+				{Seq: 7, Protocol: DecisionProtocol, Optional: true, Decision: &DecisionRecord{Tool: "stream_rm"}},
+				{Seq: 8, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
 			}
 
 			for _, rec := range records {

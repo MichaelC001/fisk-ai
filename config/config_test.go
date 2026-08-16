@@ -538,6 +538,23 @@ expose:
 			Expect(err).To(MatchError(ContainSubstring("must be greater than zero")))
 		})
 
+		It("Should reject a zero or negative llm call_timeout", func() {
+			base := `
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+  budget:
+    call_timeout: `
+
+			_, err := ParseConfig([]byte(base + "0s\n"))
+			Expect(err).To(MatchError(ContainSubstring("must be greater than zero")))
+
+			_, err = ParseConfig([]byte(base + "-5s\n"))
+			Expect(err).To(MatchError(ContainSubstring("must be greater than zero")))
+		})
+
 		It("Should return an error for an invalid llm call_timeout", func() {
 			cfg, err := ParseConfig([]byte(`
 identity: agent1

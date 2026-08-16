@@ -30,20 +30,56 @@ func SanitizeCommandLine(s string) string {
 	return SanitizeForTerminal(s, maxCommandLineRunes)
 }
 
+// GateApprovals holds the standing approvals a ConfirmGate honors: an approval the
+// operator granted for a whole conversation rather than for one call.
+//
+// It holds grants only. The gate has no standing denial, so a refusal is recorded
+// nowhere and is asked again next time. That is what keeps a run which ended before
+// the operator could answer from persisting a decision they never made, and an
+// implementation must not add a way to record one. It does not forbid a later
+// revocation, which removes a grant rather than recording a refusal.
+//
+// A source belongs to one run and is never shared between concurrent runs, so it
+// needs no locking of its own.
+type GateApprovals interface {
+	// Granted reports whether tool carries a standing approval.
+	Granted(tool string) bool
+
+	// Grant records a standing approval for tool. An error ends the run, matching
+	// every other non-terminal journal write: continuing would mean the operator's
+	// answer was taken and then quietly lost.
+	Grant(tool string) error
+}
+
+// memoryApprovals keeps grants for the life of the gate and writes them nowhere,
+// which is what a run with no journal behind it has always done.
+type memoryApprovals struct {
+	allow map[string]bool
+}
+
+func (m *memoryApprovals) Granted(tool string) bool { return m.allow[tool] }
+
+func (m *memoryApprovals) Grant(tool string) error {
+	m.allow[tool] = true
+
+	return nil
+}
+
 // ConfirmGate enforces confirmation tags in the agent loop: a tool carrying
 // ai:confirm or any operator-configured confirm tag must be approved before it
-// runs. An "allow for the session" answer is remembered by tool name for the rest
-// of the run, so a tool the operator has blessed is not asked about again,
-// regardless of its arguments; the approval covers that one command, not every
-// tool that happens to share its triggering tag.
+// runs. An "allow for the conversation" answer is remembered by tool name, so a
+// tool the operator has blessed is not asked about again, regardless of its
+// arguments; the approval covers that one command, not every tool that happens to
+// share its triggering tag. How long it is remembered is the approval source's
+// business: in memory it lasts the run, journal-backed it lasts the conversation.
 //
 // ConfirmGate is not safe for concurrent use. It is created once per run and used
 // only from the single-goroutine agent loop; it must never be wired into the
 // concurrent MCP path, which has no local operator and where confirmation is
 // instead requested from the calling client through elicitation.
 type ConfirmGate struct {
-	// allow holds tool names the operator approved for the rest of the session.
-	allow map[string]bool
+	// approvals holds the standing grants this gate honors and records new ones to.
+	approvals GateApprovals
 	// prompter renders the approval request and reports the operator's choice. All
 	// prompt and trace rendering lives behind it, so nothing writes to the raw
 	// terminal while a full-screen Prompter owns the screen. The gate keeps the
@@ -51,15 +87,20 @@ type ConfirmGate struct {
 	prompter toolkit.Prompter
 }
 
-// NewConfirmGate returns a ConfirmGate with an empty session allow list that puts
-// its approval prompts to the given Prompter.
-func NewConfirmGate(prompter toolkit.Prompter) *ConfirmGate {
-	return &ConfirmGate{allow: map[string]bool{}, prompter: prompter}
+// NewConfirmGate returns a ConfirmGate putting its approval prompts to prompter.
+// approvals holds the standing grants; nil keeps them in memory for the life of the
+// gate, so a run that does not journal behaves as it always has.
+func NewConfirmGate(prompter toolkit.Prompter, approvals GateApprovals) *ConfirmGate {
+	if approvals == nil {
+		approvals = &memoryApprovals{allow: map[string]bool{}}
+	}
+
+	return &ConfirmGate{approvals: approvals, prompter: prompter}
 }
 
 // Approve decides whether a confirm-tagged command may run, putting the approval
-// request to the prompter when needed. toolName is the cache
-// key for a session-wide approval, commandPath is the human-readable command
+// request to the prompter when needed. toolName is the key a standing approval is
+// recorded and consulted under, commandPath is the human-readable command
 // (e.g. "stream rm") used in messages, display is the sanitized command line
 // shown in the approval prompt, and tag is the command tag that gated it (e.g.
 // "ai:confirm" or "impact:rw"), named in the prompt so the operator sees why
@@ -71,17 +112,13 @@ func NewConfirmGate(prompter toolkit.Prompter) *ConfirmGate {
 // terminal was attached to ask one. A false result is authoritative; the reason
 // is surfaced to the model via ConfirmDeniedResult.
 //
-// A non-nil error means nobody answered, and it is never a denial. The run ends on
-// it and no decision is recorded, because an operator who interrupted at the prompt
-// or a context that ended under it did not decline: on a checkpointed run a denial
-// is journaled and replayed on every later resume, so manufacturing one from an
-// interrupt puts an answer in the record that nobody gave. The caller must not send
-// a result to the model on this path.
+// A non-nil error means nobody answered or the grant could not be recorded, and it
+// is never a denial. The run ends on it and no decision is recorded, because an
+// operator who interrupted at the prompt or a context that ended under it did not
+// decline: on a checkpointed run a denial is journaled and replayed on every later
+// resume, so manufacturing one from an interrupt puts an answer in the record that
+// nobody gave. The caller must not send a result to the model on this path.
 func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, display, tag string) (bool, string, error) {
-	if g.allow[toolName] {
-		return true, "", nil
-	}
-
 	// Default-deny lives here at the caller, not in the prompter: with no operator
 	// reachable there is no one to ask. It is checked before any prompt is shown so the
 	// prompter is never reached in a state where its answer could not be trusted.
@@ -99,6 +136,14 @@ func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, displa
 		return false, "", fmt.Errorf("%w: %w", toolkit.ErrPromptAborted, err)
 	}
 
+	// The standing grant is consulted below both checks, not above them. A grant can
+	// outlive the process that recorded it, so honoring one first would run a gated
+	// command on a resume with no operator present, or on a run whose context has
+	// already ended, in both cases without anyone to stop it.
+	if g.approvals.Granted(toolName) {
+		return true, "", nil
+	}
+
 	choice, err := g.prompter.ApproveCommand(ctx, toolkit.GateRequest{Command: commandPath, Display: display, Tag: tag})
 	switch {
 	case errors.Is(err, toolkit.ErrPromptAborted):
@@ -111,7 +156,11 @@ func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, displa
 
 	switch choice {
 	case toolkit.ConfirmAlways:
-		g.allow[toolName] = true
+		err = g.approvals.Grant(toolName)
+		if err != nil {
+			return false, "", err
+		}
+
 		return true, "", nil
 	case toolkit.ConfirmOnce:
 		return true, "", nil
