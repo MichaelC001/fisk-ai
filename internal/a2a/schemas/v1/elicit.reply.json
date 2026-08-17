@@ -28,9 +28,10 @@
         "confirmed",
         "index",
         "value",
-        "no_operator"
+        "no_operator",
+        "waiting"
       ],
-      "description": "Which field below carries the answer, so an empty value and a zero index are never confused with an absent one. no_operator says the caller has nobody to ask, which is an answer rather than a failure and which fails closed."
+      "description": "Which field below carries the answer, so an empty value and a zero index are never confused with an absent one. no_operator says the caller has nobody to ask, which is an answer rather than a failure and which fails closed. waiting carries no field and answers nothing: it says the question is in front of a person and nobody has answered yet, which restarts the wait_ms window the question is held open for. Send one every third of that window while the question is displayed, stop before sending the answer, and send no_operator rather than falling silent when the person has gone."
     },
     "choice": {
       "type": "string",

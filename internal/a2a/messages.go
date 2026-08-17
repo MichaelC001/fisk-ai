@@ -6,6 +6,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
@@ -258,7 +259,9 @@ const (
 )
 
 // ElicitAnswer names which field of an ElicitReply carries the answer, so a zero
-// index and an absent one are never confused.
+// index and an absent one are never confused. Two values name no field: AnswerNoOperator,
+// which reports that nobody is there to answer, and AnswerWaiting, which is not an answer
+// at all.
 type ElicitAnswer string
 
 const (
@@ -273,6 +276,11 @@ const (
 	// AnswerNoOperator says the caller has nobody to ask. It is a legitimate answer
 	// rather than a failure, and it fails closed: a gated command does not run.
 	AnswerNoOperator ElicitAnswer = "no_operator"
+	// AnswerWaiting says the question is in front of a person and nobody has answered
+	// yet. It restarts the window the agent holds the question open for, so a person
+	// takes as long as they take. It answers nothing, and a caller whose person has
+	// gone sends AnswerNoOperator rather than falling silent.
+	AnswerWaiting ElicitAnswer = "waiting"
 )
 
 // ElicitRequest is a question a running task puts to the caller that submitted it,
@@ -304,6 +312,27 @@ type ElicitRequest struct {
 	// Default is the value an input question pre-fills for the operator to accept or
 	// edit.
 	Default string `json:"default,omitempty"`
+	// WaitMS is how long this question is held open before the agent gives up on it,
+	// in milliseconds. A caller that keeps a person in front of the question sends
+	// AnswerWaiting inside that window to restart it, at AckInterval.
+	//
+	// Zero is an agent that predates this and takes no such replies, which is also
+	// what a 400 on one means. Answer inside the window instead.
+	WaitMS int64 `json:"wait_ms,omitempty"`
+}
+
+// AckInterval is how often to say the question is still in front of a person, which is
+// a third of the window so two replies may be lost or late before it closes. It is zero
+// for a question whose agent takes no such replies.
+//
+// The window restarts when the agent receives the reply rather than when it is sent, so
+// the third that is left over is also where a caller's own round trip is paid for.
+func (r *ElicitRequest) AckInterval() time.Duration {
+	if r.WaitMS <= 0 {
+		return 0
+	}
+
+	return time.Duration(r.WaitMS) * time.Millisecond / 3
 }
 
 // NewElicitRequest builds an ElicitRequest with the protocol id and kind set.
@@ -392,6 +421,16 @@ func NewInputReply(ask *ElicitRequest, sender string, value string) *ElicitReply
 // treats it as a refusal, so a gated command does not run.
 func NewNoOperatorReply(ask *ElicitRequest, sender string) *ElicitReply {
 	return NewElicitReplyFromRequest(ask, sender, AnswerNoOperator)
+}
+
+// NewWaitingAck says the question is still in front of a person and nobody has answered
+// yet, which restarts the window the agent holds it open for. It is sent every
+// ElicitRequest.AckInterval while the question is displayed.
+//
+// Stop sending them before the answer goes out. One arriving after it reaches a question
+// the agent has finished with and is refused.
+func NewWaitingAck(ask *ElicitRequest, sender string) *ElicitReply {
+	return NewElicitReplyFromRequest(ask, sender, AnswerWaiting)
 }
 
 // NewElicitReply builds an ElicitReply with the protocol id set. The caller fills the

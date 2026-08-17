@@ -41,9 +41,10 @@ type Channel struct {
 
 	// elicits is expose.agent.a2a.prompts.elicit: with it off the channel supplies no
 	// prompter and the server refuses every confirmation-gated tool, which is what a
-	// caller that answers nothing needs. promptWait is how long a question is held
-	// open, taken from request_timeout since it measures the same thing, and it reaches
-	// the server on Work.PromptWait.
+	// caller that answers nothing needs. promptWait is how long one question is held
+	// open, taken from request_timeout since it measures the same thing, and the
+	// channel's own prompter enforces it: a caller with a person in front of the
+	// question restarts it, which is why the server bounds none of them.
 	elicits    bool
 	promptWait time.Duration
 
@@ -167,6 +168,17 @@ func (c *Channel) Close() error {
 // Faults reports that this identity has stopped answering for a reason nobody asked
 // for, which for this channel means no further prompt can arrive.
 func (c *Channel) Faults() <-chan error { return c.held.faults }
+
+// draining reports that this channel has been closed, so a question stops having its
+// window restarted and the runs in flight reach an ending the shutdown can wait for.
+func (c *Channel) draining() bool {
+	select {
+	case <-c.shutdown:
+		return true
+	default:
+		return false
+	}
+}
 
 // nopWriter discards a log a caller did not ask for. A channel with no logger still
 // logs, since every line it writes is about work it has accepted from the network.
