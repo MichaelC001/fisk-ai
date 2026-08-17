@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.request.json",
+  "title": "fisk-ai A2A v1 elicit request",
+  "description": "A question a running task puts to the caller that submitted it, sent on the task's reply set. The header's request names the task and question_id names the question within it.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "kind"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.request"
+    },
+    "question_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "description": "Correlates the reply. Unique within the task."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "confirm",
+        "select",
+        "input"
+      ],
+      "description": "Which of the four questions this is: whether a confirmation-gated command may run, a yes/no question, a choice among options, or a free text value."
+    },
+    "question": {
+      "type": "string",
+      "description": "The text to put to the operator, for confirm, select and input. Model-supplied and sanitized before sending; sanitize again for your own surface."
+    },
+    "command": {
+      "type": "string",
+      "description": "The command path an approve question is about, e.g. stream rm."
+    },
+    "display": {
+      "type": "string",
+      "description": "The full command line an approve question shows, already sanitized."
+    },
+    "tag": {
+      "type": "string",
+      "description": "The tag that gated the command, e.g. ai:confirm, so the operator sees why they are being asked."
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The choices a select question offers, in the order to show them. The reply answers with a position in this list."
+    },
+    "default": {
+      "type": "string",
+      "description": "The value an input question pre-fills for the operator to accept or edit."
+    }
+  }
+}

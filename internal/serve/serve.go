@@ -5,7 +5,7 @@
 // Package serve hosts an agent behind one or more channels: it takes work from
 // them, runs it, and reports what each run produced.
 //
-// A channel is a calling surface. A work queue, a NATS binding, an HTTP listener and
+// A channel is a calling endpoint. A work queue, a NATS binding, an HTTP listener and
 // an in-process caller are all channels, and they differ in what they can do rather
 // than in kind. How work reaches a channel is the channel's own business: the
 // interface here names no transport, so a channel is proxy and binding in one and
@@ -21,6 +21,7 @@ package serve
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -33,7 +34,7 @@ import (
 // finite channel (a fixed batch, a test double) ends cleanly.
 var ErrChannelDone = errors.New("channel has no more work")
 
-// Channel is a calling surface an agent is hosted behind.
+// Channel is a calling endpoint an agent is hosted behind.
 //
 // An implementation is used from one goroutine at a time for Next, but the sinks it
 // hands out on Work run concurrently with each other and with Next, so any state a
@@ -88,13 +89,13 @@ type ReleasableChannel interface {
 	Close() error
 }
 
-// Service is a surface a server hosts that answers its callers directly instead of
+// Service is an endpoint a server hosts that answers its callers directly instead of
 // producing work.
 //
 // A tool call served to a peer runs one tool and returns. No prompt is involved, no
 // run is journaled and nothing reaches the agent loop, so there is no Work to hand
 // over and no Outcome to report. That is the whole of the difference between the two
-// kinds of surface, and the reason a server takes both.
+// kinds of endpoint, and the reason a server takes both.
 //
 // A service answers from the moment it is built. Nothing here starts it: the
 // constructor that registers its handlers is what makes it live, which is why New
@@ -116,27 +117,27 @@ type Service interface {
 	// called.
 	//
 	// Drain closes services as well as channels, so a service stops answering when a
-	// worker begins shutting down rather than when it finishes. A surface that shares
+	// worker begins shutting down rather than when it finishes. A endpoint that shares
 	// a queue group with its siblings sheds to them that way.
 	//
 	// It must tolerate being called more than once. A program that drains on one
-	// signal and stops on the next releases every surface twice.
+	// signal and stops on the next releases every endpoint twice.
 	Close() error
 }
 
-// FaultingSurface is the optional interface a surface implements when it can stop
+// FaultingEndpoint is the optional interface an endpoint implements when it can stop
 // working for a reason nobody asked for and nothing here can see: a registration the
 // substrate dropped, a subscription that overflowed, a listener that died.
 //
 // Serve ends when a fault arrives, draining what is in flight first and returning the
 // error, so the program exits non-zero and a supervisor restarts it. That is the only
-// answer available: a surface that has stopped answering cannot be restarted from
-// here, and a worker whose surfaces are gone keeps running while doing nothing.
+// answer available: an endpoint that has stopped answering cannot be restarted from
+// here, and a worker whose endpoints are gone keeps running while doing nothing.
 //
-// A surface that cannot fail this way does not implement it, as a channel holding
+// A endpoint that cannot fail this way does not implement it, as a channel holding
 // nothing does not implement ReleasableChannel.
-type FaultingSurface interface {
-	// Faults yields at most one fault per surface lifetime; a nil channel never
+type FaultingEndpoint interface {
+	// Faults yields at most one fault per endpoint lifetime; a nil channel never
 	// yields. It is read once, when Serve starts, and never closed by the reader.
 	Faults() <-chan error
 }
@@ -202,6 +203,22 @@ type Work struct {
 	// operator is reachable and every confirmation-gated tool is refused, which is the
 	// correct answer for a queue.
 	Prompter toolkit.Prompter
+
+	// PromptsMayBlock lets a question hold the run open, for a channel whose operator
+	// is on the other end of a live connection. The run context bounds it: a channel
+	// that loses its operator cancels the run, and the question ends there.
+	//
+	// False, the zero value, bounds each question by PromptWait, which is what a
+	// channel with nobody attached needs. Human think-time is minutes to days and a
+	// worker held for it serves nothing, so an unanswered question gives the run back
+	// instead: a question a tool asked defers, and a gate question leaves its call
+	// unanswered for the next resume to ask again.
+	PromptsMayBlock bool
+
+	// PromptWait is how long one question is held open. A non-positive value takes two
+	// minutes, the default expose.agent.a2a.request_timeout carries, since waiting for
+	// a caller to answer is the same measurement. PromptsMayBlock set ignores it.
+	PromptWait time.Duration
 
 	// Continue is called at a turn boundary for the next turn, holding the run open
 	// while it blocks. Nil is one shot.

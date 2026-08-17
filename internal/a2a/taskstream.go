@@ -61,7 +61,7 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 	t.countGap(hdr.Sequence)
 
 	switch m := msg.(type) {
-	case *Ack, *Event:
+	case *Ack, *Event, *ElicitRequest:
 		return m, nil
 	case *Result, *ErrorMessage:
 		t.done = true

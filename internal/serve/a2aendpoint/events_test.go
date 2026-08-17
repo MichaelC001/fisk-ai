@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2asurface
+package a2aendpoint
 
 import (
 	"encoding/json"

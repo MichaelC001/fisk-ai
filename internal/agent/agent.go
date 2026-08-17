@@ -1531,10 +1531,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// Standing approvals restore with the conversation, unless --force carried the
 			// resume across a changed configuration: a grant is keyed on a tool name alone,
 			// so a tool set that moved under it may have changed the very command the
-			// operator approved.
+			// operator approved. A one-shot approval is dropped on the same terms, its call
+			// naming a tool that may have moved under it too.
 			forced := !rs.Fingerprint.Equal(fp)
 			if !forced {
-				approvals.seed(rs.Approvals)
+				approvals.seed(rs.Approvals, rs.CallApprovals)
 				info.StandingApprovals = rs.Approvals
 			}
 

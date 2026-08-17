@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2asurface
+package a2aendpoint
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 // A tool service answers its callers directly and produces no work.
 var _ serve.Service = (*Service)(nil)
 
-// Service is the tool-serving surface: an a2a server, the transport it answers on, and
+// Service is the tool-serving endpoint: an a2a server, the transport it answers on, and
 // what a program needs to describe it at startup.
 type Service struct {
 	srv      *a2a.Server
@@ -30,14 +30,14 @@ type Service struct {
 	describe []a2a.DescLine
 }
 
-// newService builds the tool-serving surface described by expose.agent.a2a.serve_tools
+// newService builds the tool-serving endpoint described by expose.agent.a2a.serve_tools
 // over the transport its siblings share.
 //
 // The tool set is loaded before anything is registered, so a configuration whose
 // filters leave nothing is refused rather than served as an agent with no tools.
 func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (*Service, error) {
 	// Loaded on a background context: the process installs its signal handling after
-	// the surfaces are built, so a context passed in here is one nothing would cancel.
+	// the endpoints are built, so a context passed in here is one nothing would cancel.
 	// Introspecting the application carries a bound of its own.
 	tools, err := fisktool.ServedTools(context.Background(), cfg)
 	if err != nil {
@@ -74,7 +74,7 @@ func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 	return svc, nil
 }
 
-// Name identifies the surface. There is one tool service per identity and the identity
+// Name identifies the endpoint. There is one tool service per identity and the identity
 // is what a program has already named by the time it prints this, so nothing qualifies
 // it further.
 func (s *Service) Name() string { return "a2a" }
@@ -90,11 +90,11 @@ func (s *Service) Name() string { return "a2a" }
 func (s *Service) Close() error { return s.held.Close() }
 
 // Faults reports that this identity has stopped answering for a reason nobody asked
-// for. Both surfaces share one transport, so both report the same stop and whichever
+// for. Both endpoints share one transport, so both report the same stop and whichever
 // the server reads first ends it.
 func (s *Service) Faults() <-chan error { return s.held.faults }
 
-// ExposedTools are the tools this surface serves, in card order.
+// ExposedTools are the tools this endpoint serves, in card order.
 func (s *Service) ExposedTools() []string { return s.exposed }
 
 // WithheldBuiltins names the built-in tools this configuration enables that are not
@@ -102,5 +102,5 @@ func (s *Service) ExposedTools() []string { return s.exposed }
 // enabled some would otherwise see a served set that silently excludes them.
 func (s *Service) WithheldBuiltins() []string { return s.withheld }
 
-// Describe returns the subjects this surface is reached on, for display.
+// Describe returns the subjects this endpoint is reached on, for display.
 func (s *Service) Describe() []a2a.DescLine { return s.describe }

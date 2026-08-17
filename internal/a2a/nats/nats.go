@@ -98,6 +98,17 @@ func CancelSubject(identity, request string) string {
 	return fmt.Sprintf("%s.cancel.%s.%s", SubjectPrefix, identity, request)
 }
 
+// ElicitSubject is the subject the one process running the named task listens on for
+// the answers to its questions. The request id is part of the address for the same
+// reason a cancel's is, and the token rules are the same.
+//
+// It is a subject of its own rather than a second use of the cancel subject, so an
+// operator can grant answering a question and stopping a task separately: an answer
+// can approve a confirmation-gated command, where a cancel only ends the run.
+func ElicitSubject(identity, request string) string {
+	return fmt.Sprintf("%s.elicit.%s.%s", SubjectPrefix, identity, request)
+}
+
 // options is the nats-specific transport options block. It has no fields yet; it
 // exists so the factory can reject any unknown option strictly, surfacing an
 // operator's mistake at construction.

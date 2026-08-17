@@ -14,7 +14,7 @@ import (
 // caller that cannot interpret it should treat it as.
 //
 // It lives here rather than in each channel that answers over this protocol, since
-// two copies would let one surface call a suspended run something the other does not.
+// two copies would let one endpoint call a suspended run something the other does not.
 func StopReasonFor(reason runstate.TerminalReason) StopReason {
 	switch reason {
 	case runstate.ReasonCompleted:

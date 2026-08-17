@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2asurface
+package a2aendpoint
 
 import (
 	"fmt"
@@ -25,9 +25,9 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-func TestA2ASurface(t *testing.T) {
+func TestA2AEndpoint(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Serve/A2ASurface")
+	RunSpecs(t, "Serve/A2AEndpoint")
 }
 
 func quietLogger() *slog.Logger {
@@ -45,7 +45,7 @@ func servedApp() *fisk.Application {
 }
 
 // The server, the connection and the fake application are built once for the suite.
-// Every spec closes the surfaces it built, so nothing is left registered between them,
+// Every spec closes the endpoints it built, so nothing is left registered between them,
 // and introspecting the application redirects os.Stdout, which has to happen serially
 // anyway.
 var (
@@ -70,7 +70,7 @@ var _ = BeforeSuite(func() {
 	appPath = agenttest.NewFakeApp(GinkgoTB(), servedApp()).Path
 })
 
-// parseConfig builds a served configuration from a body, so the accessors the surfaces
+// parseConfig builds a served configuration from a body, so the accessors the endpoints
 // read are the ones prepare produced rather than fields assembled by hand.
 func parseConfig(body string) *config.Config {
 	GinkgoHelper()
@@ -97,8 +97,8 @@ func promptsConfig(extra string) *config.Config {
 	return parseConfig(fmt.Sprintf("identity: agent1\nsystem_prompt: do the thing\nnats_context: ctx\nllm:\n  model: claude-sonnet-4-6\nexpose:\n  agent:\n    a2a:\n      prompts:\n%s", extra))
 }
 
-// serviceOf and channelOf pick one kind of surface out of what a builder returned.
-func serviceOf(built []serve.Surface) *Service {
+// serviceOf and channelOf pick one kind of endpoint out of what a builder returned.
+func serviceOf(built []serve.Endpoint) *Service {
 	GinkgoHelper()
 
 	for _, s := range built {
@@ -113,7 +113,7 @@ func serviceOf(built []serve.Surface) *Service {
 	return nil
 }
 
-func channelOf(built []serve.Surface) *Channel {
+func channelOf(built []serve.Endpoint) *Channel {
 	GinkgoHelper()
 
 	for _, s := range built {
@@ -128,8 +128,8 @@ func channelOf(built []serve.Surface) *Channel {
 	return nil
 }
 
-// closeAll releases whatever a spec built, whichever surfaces those were.
-func closeAll(built []serve.Surface) {
+// closeAll releases whatever a spec built, whichever endpoints those were.
+func closeAll(built []serve.Endpoint) {
 	for _, s := range built {
 		closer, ok := s.(interface{ Close() error })
 		if ok {
@@ -138,9 +138,9 @@ func closeAll(built []serve.Surface) {
 	}
 }
 
-var _ = Describe("A2A surface", func() {
+var _ = Describe("A2A endpoint", func() {
 	Describe("The builder", func() {
-		It("Should be enabled by either surface and by neither when the block is absent", func() {
+		It("Should be enabled by either endpoint and by neither when the block is absent", func() {
 			b := Builder()
 			Expect(b.Name).To(Equal("a2a"))
 			Expect(b.Enabled(toolsConfig(""))).To(BeTrue())
@@ -193,7 +193,7 @@ var _ = Describe("A2A surface", func() {
 			Expect(svc.WithheldBuiltins()).To(BeEmpty(), "this configuration enables no built-in")
 		})
 
-		// An agent that answers prompts needs no application, so the tool surface's own
+		// An agent that answers prompts needs no application, so the tool endpoint's own
 		// requirement must not reach it.
 		It("Should build a prompt channel with no application to serve", func() {
 			built, err := NewFromConfig(promptsConfig("        workers: 3\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
@@ -207,10 +207,11 @@ var _ = Describe("A2A surface", func() {
 			Expect(ch.Describe()).To(ConsistOf(
 				a2a.DescLine{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
 				a2a.DescLine{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
+				a2a.DescLine{Label: "Answers", Value: natstransport.ElicitSubject("agent1", "*")},
 			))
 		})
 
-		It("Should build both surfaces over one transport, the channel first", func() {
+		It("Should build both endpoints over one transport, the channel first", func() {
 			cfg := toolsConfig("      prompts: {}\nsystem_prompt: do the thing\nllm:\n  model: claude-sonnet-4-6\n")
 
 			built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
@@ -225,7 +226,7 @@ var _ = Describe("A2A surface", func() {
 	})
 
 	Describe("Closing", func() {
-		// A drain closes the surface while the process keeps running, so what proves it
+		// A drain closes the endpoint while the process keeps running, so what proves it
 		// worked is that the identity has left its queue group and a caller is told there
 		// is nobody there rather than waiting.
 		It("Should stop answering and be harmless a second time", func() {
@@ -248,10 +249,10 @@ var _ = Describe("A2A surface", func() {
 			Expect(svc.Close()).To(Succeed(), "a drain and a stop both reach it")
 		})
 
-		// Both surfaces are paths of one micro service, so releasing either takes the
+		// Both endpoints are paths of one micro service, so releasing either takes the
 		// identity out of its queue group for all of them. The second close reports the
 		// first one's answer rather than a failure, so a clean shutdown prints no error.
-		It("Should stop both surfaces whichever of them is closed", func() {
+		It("Should stop both endpoints whichever of them is closed", func() {
 			cfg := toolsConfig("      prompts: {}\nsystem_prompt: do the thing\nllm:\n  model: claude-sonnet-4-6\n")
 
 			built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})

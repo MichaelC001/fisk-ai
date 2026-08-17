@@ -39,7 +39,7 @@ func NewService(tb testing.TB, name string) *Service {
 	return &Service{name: name, faults: make(chan error, 1)}
 }
 
-// Faults implements serve.FaultingSurface, so a spec can make a hosted service report
+// Faults implements serve.FaultingEndpoint, so a spec can make a hosted service report
 // that it has stopped answering and assert what the server does about it.
 func (s *Service) Faults() <-chan error { return s.faults }
 

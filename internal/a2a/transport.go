@@ -79,13 +79,29 @@ type StreamingTransport interface {
 	// own subscription rather than a path of the service, so it is opened when the
 	// task is accepted and released on every ending. request must be a
 	// ValidRequestID, since a binding may make it part of an address.
-	WatchCancel(request string, h Handler) (CancelWatch, error)
+	WatchCancel(request string, h Handler) (TaskWatch, error)
 
 	// SendCancel delivers body as a cancel for request on agent and returns the raw
 	// reply, which the engine validates. It reports ErrAgentUnavailable when nothing
 	// answers, which is how a caller tells a delivered cancel from a task that is not
 	// running there.
 	SendCancel(ctx context.Context, agent, request string, body []byte) ([]byte, error)
+
+	// WatchElicitReplies routes the answers to the named task's questions to h, on
+	// the same terms as WatchCancel: this process only, opened when the task is
+	// accepted, released on every ending, and request must be a ValidRequestID.
+	//
+	// It is a path of its own rather than part of the cancel watch. The two carry
+	// different messages, and a binding that makes each an address can then grant
+	// them separately: answering a question decides what a run does, where a cancel
+	// only stops it.
+	WatchElicitReplies(request string, h Handler) (TaskWatch, error)
+
+	// SendElicitReply delivers body as an answer to a question the named task asked
+	// on agent, and returns the raw reply, which the engine validates. It reports
+	// ErrAgentUnavailable when nothing answers, which is how the answering party
+	// learns the run it was answering has ended.
+	SendElicitReply(ctx context.Context, agent, request string, body []byte) ([]byte, error)
 
 	// DescribeTasks returns the {label, value} lines describing how tasks reach the
 	// named identity and where their cancels are addressed, for display beside
@@ -95,10 +111,11 @@ type StreamingTransport interface {
 	DescribeTasks(identity string) []DescLine
 }
 
-// CancelWatch is one running task's claim on the cancels addressed to it.
-type CancelWatch interface {
-	// Close stops routing cancels for that request. It is called on every ending of
-	// the task, so a second call is harmless.
+// TaskWatch is one running task's claim on a class of messages addressed to it:
+// its cancels, or the answers to its questions.
+type TaskWatch interface {
+	// Close stops routing those messages for that request. It is called on every
+	// ending of the task, so a second call is harmless.
 	Close() error
 }
 

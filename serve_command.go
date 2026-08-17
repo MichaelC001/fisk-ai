@@ -20,7 +20,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/serve"
-	"github.com/choria-io/fisk-ai/internal/serve/a2asurface"
+	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
 	ajchannel "github.com/choria-io/fisk-ai/internal/serve/asyncjobs"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/util"
@@ -44,7 +44,7 @@ type fiskServeCommand struct {
 func registerServeCommand(app *fisk.Application) {
 	c := &fiskServeCommand{}
 
-	srv := app.Command("serve", "Hosts the agent behind the surfaces its configuration enables").Action(c.serveAction)
+	srv := app.Command("serve", "Hosts the agent behind the endpoints its configuration enables").Action(c.serveAction)
 	srv.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&c.configFile)
 	srv.Flag("workers", "How many jobs to run at once, overriding the configured value").
 		Default(fmt.Sprintf("%d", config.DefaultJobsWorkers)).
@@ -55,17 +55,17 @@ func registerServeCommand(app *fisk.Application) {
 	srv.Flag("api-key", "Anthropic API key to use").Envar("ANTHROPIC_API_KEY").StringVar(&c.apiKey)
 	srv.Flag("base-url", "Anthropic API base URL to use").Envar("ANTHROPIC_BASE_URL").StringVar(&c.baseURL)
 	srv.Flag("no-telemetry", "Suppress OpenTelemetry export for this worker, whatever the configuration says").Envar("NO_TELEMETRY").UnNegatableBoolVar(&c.noTelemetry)
-	srv.Flag("verbose", "Log what the surfaces are doing in detail").UnNegatableBoolVar(&c.verbose)
+	srv.Flag("verbose", "Log what the endpoints are doing in detail").UnNegatableBoolVar(&c.verbose)
 }
 
-// serveAction hosts the agent behind whichever surfaces the configuration enables.
+// serveAction hosts the agent behind whichever endpoints the configuration enables.
 //
 // The queued-jobs intake takes a job off a work queue, runs the request its payload
 // carries, and stores the answer on the job's own task. Every run is checkpointed under
 // the task id, so a redelivery continues the run a previous attempt started rather than
 // paying for it again.
 //
-// The a2a surface serves this agent's tools to other agents. A peer invokes a tool and
+// The a2a endpoint serves this agent's tools to other agents. A peer invokes a tool and
 // gets its result; no prompt is involved and the agent loop never runs, so it engages
 // none of the machinery below beyond the connection it answers on.
 //
@@ -78,7 +78,7 @@ func registerServeCommand(app *fisk.Application) {
 //
 // The order is what makes those failures readable. What the command line can be wrong
 // about fails first, then the configuration, then telemetry, then the resources the
-// runs share, then the surfaces. The banner prints last, once everything that can fail
+// runs share, then the endpoints. The banner prints last, once everything that can fail
 // has not.
 func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// Validated at the CLI boundary so a bad base URL fails here, naming the flag the
@@ -102,7 +102,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	}
 
 	if !cfg.JobsEnabled() && !cfg.A2AEnabled() {
-		return c.noSurfaceError()
+		return c.noEndpointError()
 	}
 
 	log := c.logger()
@@ -153,14 +153,14 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// An idle worker therefore exits on the first interrupt, having nothing to wait for.
 	var suspend atomic.Bool
 
-	channels, services, err := serve.Surfaces(cfg, serve.BuildOptions{
+	channels, services, err := serve.Endpoints(cfg, serve.BuildOptions{
 		Workers:          c.workerOverride(),
 		SuspendRequested: suspend.Load,
 		Conns:            resources.Conns,
 		ConfigFile:       c.configFile,
 		Logger:           log,
 		Telemetry:        tel,
-	}, []serve.SurfaceBuilder{ajchannel.Builder(), a2asurface.Builder()})
+	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder()})
 	if err != nil {
 		return err
 	}
@@ -217,9 +217,9 @@ func (c *fiskServeCommand) onInterrupt(srv *serve.Server, suspend *atomic.Bool, 
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 
 	// What a drain means depends on what is hosted. A worker with no channel has no
-	// work to stop and nothing to resume: its surfaces stop answering and that is the
+	// work to stop and nothing to resume: its endpoints stop answering and that is the
 	// whole of it.
-	drainNotice := "\ndraining: the surfaces stop answering. Interrupt again to stop now"
+	drainNotice := "\ndraining: the endpoints stop answering. Interrupt again to stop now"
 	if runs {
 		drainNotice = "\ndraining: no new work is taken and running work stops where it can resume. Interrupt again to stop now"
 	}
@@ -267,10 +267,10 @@ func (c *fiskServeCommand) workerOverride() int {
 	return c.workers
 }
 
-// noSurfaceError names what is missing and shows the blocks that fix it. A key name
+// noEndpointError names what is missing and shows the blocks that fix it. A key name
 // on its own is not enough to work out what goes under it.
-func (c *fiskServeCommand) noSurfaceError() error {
-	return fmt.Errorf(`fisk-ai serve needs a surface to host, and %q enables none. Add a work queue intake:
+func (c *fiskServeCommand) noEndpointError() error {
+	return fmt.Errorf(`fisk-ai serve needs an endpoint to run, and %q enables none. Add a work queue intake:
 
 expose:
   agent:
@@ -294,7 +294,7 @@ the agent loop over them; either alone is enough`,
 // banner describes what the worker resolved, which is an operator's only chance to see
 // the settings that decide whether it works before the log takes over.
 //
-// What it reports depends on which surfaces are hosted. The model, the queue and
+// What it reports depends on which endpoints are hosted. The model, the queue and
 // everything about a run describe the agent loop, and a worker serving only tools runs
 // none, so printing them there would name a queue it does not consume and a tool
 // directory its served calls do not use.
@@ -309,7 +309,7 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	for _, svc := range services {
 		names = append(names, svc.Name())
 	}
-	doc.Values("Surfaces", names)
+	doc.Values("Endpoints", names)
 
 	runs := len(channels) > 0
 	queued := cfg.JobsEnabled()
@@ -319,7 +319,7 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	}
 
 	// The queue's context belongs to the queue: it may be a different cluster from the
-	// one the stores and the a2a surfaces use, and naming both is the only way an
+	// one the stores and the a2a endpoints use, and naming both is the only way an
 	// operator sees that the queue they meant and the store they meant are not where
 	// they thought. A worker with no queue has one context and prints it once.
 	if queued {
@@ -327,7 +327,7 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	}
 
 	// Named whenever it differs from the queue's, and whenever there is no queue to
-	// differ from, since it is the connection the a2a surfaces answer on as well as the
+	// differ from, since it is the connection the a2a endpoints answer on as well as the
 	// one the stores are reached over.
 	if cfg.NatsContext != "" && (!queued || cfg.NatsContext != cfg.JobsNatsContext()) {
 		doc.Item("Agent Context", cfg.NatsContext)
@@ -352,20 +352,20 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 		doc.Item("Queue Workers", c.workersDescription(cfg))
 	}
 
-	c.describeSurfaces(doc, cfg, channels, services)
+	c.describeEndpoints(doc, cfg, channels, services)
 
 	return doc
 }
 
-// describeSurfaces adds a section per surface that has something to say about itself.
+// describeEndpoints adds a section per endpoint that has something to say about itself.
 //
-// Each a2a surface bounds and paces its work with numbers of its own, against the
+// Each a2a endpoint bounds and paces its work with numbers of its own, against the
 // loop's five minutes and the queue's worker count, so they are printed under the
-// surface they belong to rather than beside the loop's where an operator would read one
+// endpoint they belong to rather than beside the loop's where an operator would read one
 // pair as the other.
-func (c *fiskServeCommand) describeSurfaces(doc *columns.Document, cfg *config.Config, channels []serve.Channel, services []serve.Service) {
+func (c *fiskServeCommand) describeEndpoints(doc *columns.Document, cfg *config.Config, channels []serve.Channel, services []serve.Service) {
 	for _, ch := range channels {
-		prompts, ok := ch.(*a2asurface.Channel)
+		prompts, ok := ch.(*a2aendpoint.Channel)
 		if !ok {
 			continue
 		}
@@ -376,12 +376,11 @@ func (c *fiskServeCommand) describeSurfaces(doc *columns.Document, cfg *config.C
 			}
 
 			d.Item("Workers", fmt.Sprintf("%d", cfg.A2APromptsWorkers()))
-			d.Printf("Answering a prompt runs the agent loop and reaches every tool the top-level include and exclude selected.")
 		})
 	}
 
 	for _, svc := range services {
-		a2aSvc, ok := svc.(*a2asurface.Service)
+		a2aSvc, ok := svc.(*a2aendpoint.Service)
 		if !ok {
 			continue
 		}

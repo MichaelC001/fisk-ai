@@ -1261,16 +1261,27 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		// a four-minute tool call look like a four-minute tool.
 		toolSpan.ConfirmRequested()
 		askedAt := time.Now()
-		allowed, reason, aerr := r.approveEffective(ctx, tool, effTool, effName, effInput, effInfo)
+		allowed, reason, aerr := r.approveEffective(ctx, use.ID, tool, effTool, effName, effInput, effInfo)
 		outcome.ConfirmWait = time.Since(askedAt)
 		toolSpan.ConfirmAnswered()
 
-		// Nobody answered, so nothing is told to the model and nothing is journaled: a
-		// refusal recorded here would be replayed as the operator's own on every later
-		// resume. The run ends instead, leaving the call unanswered and the session
-		// resumable, so the question can be put again.
+		// The operator did not answer, so nothing is told to the model and nothing is
+		// journaled: a refusal recorded here would be replayed as the operator's own on
+		// every later resume. The run ends instead, leaving the call unanswered and the
+		// session resumable, so the question can be put again.
+		//
+		// Neither ending is a refusal, so neither is counted as one. An unanswered
+		// question is asked again on the next resume, and a prompter that answers later
+		// reports a deferral, whose call the caller journals as deferred before suspending
+		// the way a deferring tool does. An operator grouping tool calls by outcome would
+		// otherwise read both as commands somebody refused.
 		if aerr != nil {
-			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
+			outcome.Outcome = telemetry.ToolOutcomeUnanswered
+			_, deferred := toolkit.IsDeferred(aerr)
+			if deferred {
+				outcome.Outcome = telemetry.ToolOutcomeDeferred
+			}
+
 			return llm.ToolResultBlock{}, false, aerr
 		}
 
@@ -1305,15 +1316,25 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// expired one there would end the span badly and abort the whole run on a hook that
 	// objects. Nothing after ExecuteUse uses execCtx.
 	execCtx, cancelExec := r.toolContext(ctx, effInfo)
-	result, exec, deferErr := toolkit.ExecuteUse(effTool, execCtx, effUse, deps)
+	result, exec, unansweredErr := toolkit.ExecuteUse(effTool, execCtx, effUse, deps)
 	timedOut := cancelExec()
 
-	// A tool answering later has no result to trace, hand to a hook or journal, so the
-	// call ends here and the caller suspends the run. PostToolUse does not fire: there
-	// is nothing for it to observe and nothing for it to replace.
-	if deferErr != nil {
-		outcome.Outcome = telemetry.ToolOutcomeDeferred
-		return llm.ToolResultBlock{}, remote, deferErr
+	// A call that produced no result has nothing to trace, hand to a hook or journal, so
+	// it ends here and the caller ends the run. PostToolUse does not fire: there is
+	// nothing for it to observe and nothing for it to replace.
+	//
+	// The two endings differ in what happens next, which is why they are classified
+	// apart. A deferred call is marked in the journal and never dispatched again, its
+	// answer arriving later. A question the operator never answered leaves the call
+	// unanswered, so the resume runs it again and asks again.
+	if unansweredErr != nil {
+		outcome.Outcome = telemetry.ToolOutcomeUnanswered
+		_, deferred := toolkit.IsDeferred(unansweredErr)
+		if deferred {
+			outcome.Outcome = telemetry.ToolOutcomeDeferred
+		}
+
+		return llm.ToolResultBlock{}, remote, unansweredErr
 	}
 
 	// A call the bound stopped is already an error result carrying whatever the tool
@@ -1471,7 +1492,7 @@ func confirmGated(tool toolkit.Tool, tags []string) bool {
 // tool's describe line and the original tool's gating tag, so an original gate is enforced
 // rather than silently dropped. The line is sanitized upstream because its argument values
 // come from the model and must not be able to spoof the operator's terminal.
-func (r *runner) approveEffective(ctx context.Context, orig, eff toolkit.Tool, effName string, effInput json.RawMessage, effInfo toolkit.CallInfo) (bool, string, error) {
+func (r *runner) approveEffective(ctx context.Context, useID string, orig, eff toolkit.Tool, effName string, effInput json.RawMessage, effInfo toolkit.CallInfo) (bool, string, error) {
 	commandPath := effName
 	display := effInfo.Display
 	var tag string
@@ -1495,7 +1516,7 @@ func (r *runner) approveEffective(ctx context.Context, orig, eff toolkit.Tool, e
 		display = effName
 	}
 
-	return r.gate.Approve(ctx, effName, commandPath, display, tag)
+	return r.gate.Approve(ctx, useID, effName, commandPath, display, tag)
 }
 
 // describeCall asks a tool to describe one call, from the CallInfo the runner uses

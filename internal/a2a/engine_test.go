@@ -178,9 +178,9 @@ var _ = Describe("resultToToolResult", func() {
 	})
 
 	// A served call has no session to resume and a peer waiting on this reply, so
-	// there is nowhere for a later answer to land. The caller is told the surface
+	// there is nowhere for a later answer to land. The caller is told the endpoint
 	// cannot carry the call rather than being handed the tool's own account of what
-	// it is waiting for, which would read as a promise the surface cannot keep.
+	// it is waiting for, which would read as a promise the endpoint cannot keep.
 	It("Should refuse a deferring tool rather than report its note as a failure", func() {
 		res := resultToToolResult(nil, toolkit.DeferResult("waiting on a human", "TKT-1"))
 		Expect(res.IsError).To(BeTrue())

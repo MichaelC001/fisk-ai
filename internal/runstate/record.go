@@ -61,6 +61,9 @@ const (
 	DeferredProtocol Protocol = protocolNamespace + ".deferred"
 	// DecisionProtocol records a standing operator approval for a tool.
 	DecisionProtocol Protocol = protocolNamespace + ".decision"
+	// CallApprovalProtocol records an operator approval for one gated call, which
+	// authorizes the next dispatch of that call and nothing else.
+	CallApprovalProtocol Protocol = protocolNamespace + ".call_approval"
 	// TerminalProtocol records why the run ended (or that it was suspended).
 	TerminalProtocol Protocol = protocolNamespace + ".terminal"
 	// ClaimProtocol records that a worker took the run over on resume. It is
@@ -88,14 +91,15 @@ type Record struct {
 	// working on.
 	Optional bool `json:"optional,omitempty"`
 
-	Meta       *MetaRecord       `json:"meta,omitempty"`
-	Assistant  *AssistantRecord  `json:"assistant,omitempty"`
-	User       *UserRecord       `json:"user,omitempty"`
-	ToolResult *ToolResultRecord `json:"tool_result,omitempty"`
-	Deferred   *DeferredRecord   `json:"deferred,omitempty"`
-	Decision   *DecisionRecord   `json:"decision,omitempty"`
-	Terminal   *TerminalRecord   `json:"terminal,omitempty"`
-	Claim      *ClaimRecord      `json:"claim,omitempty"`
+	Meta         *MetaRecord         `json:"meta,omitempty"`
+	Assistant    *AssistantRecord    `json:"assistant,omitempty"`
+	User         *UserRecord         `json:"user,omitempty"`
+	ToolResult   *ToolResultRecord   `json:"tool_result,omitempty"`
+	Deferred     *DeferredRecord     `json:"deferred,omitempty"`
+	Decision     *DecisionRecord     `json:"decision,omitempty"`
+	CallApproval *CallApprovalRecord `json:"call_approval,omitempty"`
+	Terminal     *TerminalRecord     `json:"terminal,omitempty"`
+	Claim        *ClaimRecord        `json:"claim,omitempty"`
 }
 
 // ClaimRecord records a worker taking over a run on resume. Writing it is what
@@ -196,6 +200,23 @@ type DecisionRecord struct {
 	// Tool is the effective tool name the gate keys on (stream_rm), which is not the
 	// command path the approval prompt displayed (stream rm).
 	Tool string `json:"tool"`
+}
+
+// CallApprovalRecord is an operator approval for one gated call, keyed by the tool_use
+// id it authorizes. An "allow once" answer given while the run was suspended is written
+// here, so the resume dispatches that call without putting the question again.
+//
+// It authorizes one dispatch of one call. A terminal record after it spends it, so a run
+// that ends before dispatching the call leaves nothing behind and the next resume asks
+// again. That costs a question and never a wrong execution.
+//
+// The record carries no denial, for the reason DecisionRecord states.
+type CallApprovalRecord struct {
+	// ToolUseID is the call the operator approved, and the whole of what the gate
+	// decides on.
+	ToolUseID string `json:"tool_use_id"`
+	// ToolName is the tool that call names, for a person reading the journal.
+	ToolName string `json:"tool_name"`
 }
 
 // TerminalReason explains why a run stopped.

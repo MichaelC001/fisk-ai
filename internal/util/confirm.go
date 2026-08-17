@@ -49,6 +49,12 @@ type GateApprovals interface {
 	// every other non-terminal journal write: continuing would mean the operator's
 	// answer was taken and then quietly lost.
 	Grant(tool string) error
+
+	// TakeCall reports whether toolUseID carries an approval for this dispatch, and
+	// takes it. An operator who answered "allow once" for a call the run had already
+	// suspended on approved that call and no other, so the approval is spent when the
+	// gate reads it and a second call of the same tool is asked about again.
+	TakeCall(toolUseID string) bool
 }
 
 // memoryApprovals keeps grants for the life of the gate and writes them nowhere,
@@ -64,6 +70,10 @@ func (m *memoryApprovals) Grant(tool string) error {
 
 	return nil
 }
+
+// TakeCall reports false: a one-shot approval reaches a run through its journal, and
+// this source has none.
+func (m *memoryApprovals) TakeCall(string) bool { return false }
 
 // ConfirmGate enforces confirmation tags in the agent loop: a tool carrying
 // ai:confirm or any operator-configured confirm tag must be approved before it
@@ -99,7 +109,8 @@ func NewConfirmGate(prompter toolkit.Prompter, approvals GateApprovals) *Confirm
 }
 
 // Approve decides whether a confirm-tagged command may run, putting the approval
-// request to the prompter when needed. toolName is the key a standing approval is
+// request to the prompter when needed. toolUseID names the call being decided, which
+// is what a one-shot approval is keyed on, toolName is the key a standing approval is
 // recorded and consulted under, commandPath is the human-readable command
 // (e.g. "stream rm") used in messages, display is the sanitized command line
 // shown in the approval prompt, and tag is the command tag that gated it (e.g.
@@ -112,13 +123,15 @@ func NewConfirmGate(prompter toolkit.Prompter, approvals GateApprovals) *Confirm
 // terminal was attached to ask one. A false result is authoritative; the reason
 // is surfaced to the model via ConfirmDeniedResult.
 //
-// A non-nil error means nobody answered or the grant could not be recorded, and it
-// is never a denial. The run ends on it and no decision is recorded, because an
-// operator who interrupted at the prompt or a context that ended under it did not
-// decline: on a checkpointed run a denial is journaled and replayed on every later
-// resume, so manufacturing one from an interrupt puts an answer in the record that
-// nobody gave. The caller must not send a result to the model on this path.
-func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, display, tag string) (bool, string, error) {
+// A non-nil error is never a denial, and the caller must not send a result to the
+// model on this path. It means one of three things. The operator was asked and did not
+// answer, so the run ends: on a checkpointed run a denial is journaled and replayed on
+// every later resume, so recording one from an interrupt puts an answer in the record
+// the operator never gave. The grant could not be recorded, so the run ends rather than
+// take an answer and lose it. Or the prompter reports toolkit.ErrDeferredResult, which
+// says the question was put and the answer arrives later: the caller journals the call
+// as deferred and suspends the run, and the operator answers it on a later resume.
+func (g *ConfirmGate) Approve(ctx context.Context, toolUseID, toolName, commandPath, display, tag string) (bool, string, error) {
 	// Default-deny lives here at the caller, not in the prompter: with no operator
 	// reachable there is no one to ask. It is checked before any prompt is shown so the
 	// prompter is never reached in a state where its answer could not be trusted.
@@ -144,9 +157,22 @@ func (g *ConfirmGate) Approve(ctx context.Context, toolName, commandPath, displa
 		return true, "", nil
 	}
 
+	// A one-shot approval is consulted here for the same reason and on the same terms,
+	// and it is spent whether or not the command then succeeds: the operator approved
+	// this dispatch, so a retry is a new question.
+	if g.approvals.TakeCall(toolUseID) {
+		return true, "", nil
+	}
+
 	choice, err := g.prompter.ApproveCommand(ctx, toolkit.GateRequest{Command: commandPath, Display: display, Tag: tag})
 	switch {
 	case errors.Is(err, toolkit.ErrPromptAborted):
+		return false, "", err
+	case errors.Is(err, toolkit.ErrDeferredResult):
+		// A prompter that reaches its operator through something slower than a terminal
+		// reports a deferral: the question is put and the answer arrives later. The caller
+		// journals the call as deferred and suspends, so folding this into a denial would
+		// refuse a command the operator is still deciding on.
 		return false, "", err
 	case err != nil:
 		// A prompt that could not be put is not an operator walking away, so it stays a

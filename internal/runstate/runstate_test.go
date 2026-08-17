@@ -182,6 +182,43 @@ var _ = Describe("runstate", func() {
 			Expect(err).To(MatchError(ErrCorrupt))
 		})
 
+		It("folds call approvals in journal order and leaves the turn alone", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+				{Seq: 3, Protocol: CallApprovalProtocol, Optional: true, CallApproval: &CallApprovalRecord{ToolUseID: "tu_1", ToolName: "stream_rm"}},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.CallApprovals).To(Equal([]CallApprovalRecord{{ToolUseID: "tu_1", ToolName: "stream_rm"}}))
+			// The call it names is unanswered, so the batch it approves is still open.
+			Expect(rs.Pending).ToNot(BeNil())
+			Expect(rs.Pending.Answered).To(BeEmpty())
+		})
+
+		// A one-shot approval authorizes the next dispatch of one call. A run that ended
+		// before reaching it spends it, so a later question nobody answers cannot be
+		// followed by a dispatch this authorizes.
+		It("spends a call approval a terminal record follows", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+				{Seq: 3, Protocol: CallApprovalProtocol, Optional: true, CallApproval: &CallApprovalRecord{ToolUseID: "tu_1", ToolName: "stream_rm"}},
+				{Seq: 4, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended}},
+				{Seq: 5, Protocol: CallApprovalProtocol, Optional: true, CallApproval: &CallApprovalRecord{ToolUseID: "tu_2", ToolName: "server_run"}},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.CallApprovals).To(Equal([]CallApprovalRecord{{ToolUseID: "tu_2", ToolName: "server_run"}}))
+			// A standing grant covers the conversation, so a suspend does not touch it.
+			Expect(rs.Approvals).To(BeEmpty())
+		})
+
+		It("rejects a call approval record with no payload", func() {
+			_, err := Fold([]Record{meta(), {Seq: 2, Protocol: CallApprovalProtocol, Optional: true}})
+			Expect(err).To(MatchError(ErrCorrupt))
+		})
+
 		// A newer build's record kind reaches this one as an unknown protocol. Skipping
 		// is the writer's declaration that a reader without it is more conservative, not
 		// this reader's guess.

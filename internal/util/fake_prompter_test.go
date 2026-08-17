@@ -31,14 +31,28 @@ type fakePrompter struct {
 }
 
 // fakeApprovals is a GateApprovals a spec can inspect: granted seeds what the
-// conversation already carries, and recorded is what the gate wrote, in order.
+// conversation already carries, calls seeds the one-shot approvals a supplied answer
+// left, and recorded is what the gate wrote, in order.
 type fakeApprovals struct {
 	granted  map[string]bool
+	calls    map[string]bool
+	taken    []string
 	recorded []string
 	grantErr error
 }
 
 func (f *fakeApprovals) Granted(tool string) bool { return f.granted[tool] }
+
+func (f *fakeApprovals) TakeCall(toolUseID string) bool {
+	if !f.calls[toolUseID] {
+		return false
+	}
+
+	delete(f.calls, toolUseID)
+	f.taken = append(f.taken, toolUseID)
+
+	return true
+}
 
 func (f *fakeApprovals) Grant(tool string) error {
 	if f.grantErr != nil {

@@ -35,7 +35,7 @@ type TransportConfig struct {
 	// for: a substrate that dropped the registration, a subscription that overflowed.
 	// It is not called for a stop the program asked for by closing the transport.
 	//
-	// A served surface cannot recover from this on its own, so the callback exists to
+	// A served endpoint cannot recover from this on its own, so the callback exists to
 	// let whoever hosts it decide: a worker whose identity is registered nowhere is
 	// answering nothing while still running. It may be called more than once and is
 	// called from the binding's own goroutine, so an implementation must not block.

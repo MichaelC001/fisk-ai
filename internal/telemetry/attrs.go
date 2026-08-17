@@ -361,6 +361,13 @@ const (
 	ToolOutcomeMissingArguments = "missing_arguments"
 	// ToolOutcomeConfirmDenied is a call the operator refused at the gate.
 	ToolOutcomeConfirmDenied = "confirm_denied"
+	// ToolOutcomeUnanswered is a call whose question to the operator got no answer:
+	// they interrupted or closed the input, or the run ended while the question was up.
+	// It covers the approval gate and the human-in-the-loop tools alike, since both
+	// leave the call unanswered and both are asked again by the next resume. Nothing
+	// was refused and nothing ran, so counting these as refusals would report decisions
+	// no operator made.
+	ToolOutcomeUnanswered = "unanswered"
 	// ToolOutcomeDeferred is a call that started work whose answer arrives later. It
 	// is not a success and not a failure: nothing was returned to the model, the run
 	// suspended, and the result is supplied to the journal when it exists. A deferred

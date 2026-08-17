@@ -47,7 +47,8 @@ var _ = Describe("Validator", func() {
 				{Seq: 5, Protocol: UserProtocol, User: userRecord("a follow-up")},
 				{Seq: 6, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "agent@host pid 42", Claimed: time.Now().UTC()}},
 				{Seq: 7, Protocol: DecisionProtocol, Optional: true, Decision: &DecisionRecord{Tool: "stream_rm"}},
-				{Seq: 8, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
+				{Seq: 8, Protocol: CallApprovalProtocol, Optional: true, CallApproval: &CallApprovalRecord{ToolUseID: "tu_3", ToolName: "stream_rm"}},
+				{Seq: 9, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
 			}
 
 			for _, rec := range records {

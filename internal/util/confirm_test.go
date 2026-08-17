@@ -39,13 +39,13 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeTrue())
 			Expect(reason).To(BeEmpty())
 
 			// A second call prompts again because "once" is not remembered.
-			allowed, _, _ = gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm BILLING", "ai:confirm")
+			allowed, _, _ = gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm BILLING", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 			Expect(calls).To(Equal(2))
 		})
@@ -58,17 +58,17 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, _, _ := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, _, _ := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 
 			// A later call with different arguments is allowed without re-prompting; the
 			// gate emits no trace of its own, the caller renders the command's line.
-			allowed, _, _ = gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm EVERYTHING", "ai:confirm")
+			allowed, _, _ = gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm EVERYTHING", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 			Expect(calls).To(Equal(1))
 
 			// A different tool is still asked about.
-			allowed, _, _ = gate.Approve(context.Background(), "server_run", "server run", "server run", "ai:confirm")
+			allowed, _, _ = gate.Approve(context.Background(), "use-2", "server_run", "server run", "server run", "ai:confirm")
 			Expect(allowed).To(BeTrue())
 			Expect(calls).To(Equal(2))
 		})
@@ -77,7 +77,7 @@ var _ = Describe("ConfirmGate", func() {
 			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) { return toolkit.ConfirmOnce, nil }
 			gate := newGate()
 
-			allowed, _, _ := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "impact:rw")
+			allowed, _, _ := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "impact:rw")
 			Expect(allowed).To(BeTrue())
 			Expect(prompter.lastGateReq).To(Equal(toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS", Tag: "impact:rw"}))
 		})
@@ -90,14 +90,14 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(ContainSubstring("declined"))
 			Expect(reason).To(ContainSubstring("do not retry"))
 
 			// No is not sticky: the same command is asked about again.
-			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(calls).To(Equal(2))
 		})
 
@@ -109,7 +109,7 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(ContainSubstring("the terminal went away"))
@@ -124,10 +124,27 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(BeEmpty())
+		})
+
+		// A prompter whose operator is reached over something slower than a terminal
+		// answers later. Folding that into a denial would refuse a command the operator
+		// is still deciding on, and the model would be told the refusal is final.
+		It("Should report a deferred question as an error rather than a denial", func() {
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+				return toolkit.ConfirmNo, toolkit.DeferResult("asked the caller", "q-1")
+			}
+			src := &fakeApprovals{}
+			gate := NewConfirmGate(prompter, src)
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).To(MatchError(toolkit.ErrDeferredResult))
+			Expect(allowed).To(BeFalse())
+			Expect(reason).To(BeEmpty())
+			Expect(src.recorded).To(BeEmpty())
 		})
 
 		It("Should deny with the no-terminal reason when no operator is reachable", func() {
@@ -138,7 +155,7 @@ var _ = Describe("ConfirmGate", func() {
 			}
 			gate := newGate()
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(Equal(NoTerminalReason))
@@ -156,7 +173,7 @@ var _ = Describe("ConfirmGate", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 
-			allowed, reason, aerr := gate.Approve(ctx, "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(ctx, "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
 			Expect(aerr).To(MatchError(context.Canceled))
 			Expect(allowed).To(BeFalse())
@@ -173,7 +190,7 @@ var _ = Describe("ConfirmGate", func() {
 			src := &fakeApprovals{granted: map[string]bool{"stream_rm": true}}
 			gate := NewConfirmGate(prompter, src)
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeTrue())
 			Expect(reason).To(BeEmpty())
@@ -186,15 +203,15 @@ var _ = Describe("ConfirmGate", func() {
 			src := &fakeApprovals{}
 			gate := NewConfirmGate(prompter, src)
 
-			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(src.recorded).To(BeEmpty())
 
 			choice = toolkit.ConfirmNo
-			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(src.recorded).To(BeEmpty())
 
 			choice = toolkit.ConfirmAlways
-			gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(src.recorded).To(Equal([]string{"stream_rm"}))
 		})
 
@@ -205,7 +222,7 @@ var _ = Describe("ConfirmGate", func() {
 			src := &fakeApprovals{}
 			gate := NewConfirmGate(prompter, src)
 
-			_, _, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			_, _, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
 			Expect(src.recorded).To(BeEmpty())
 		})
@@ -215,7 +232,7 @@ var _ = Describe("ConfirmGate", func() {
 			src := &fakeApprovals{grantErr: errors.New("journal is gone")}
 			gate := NewConfirmGate(prompter, src)
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).To(MatchError(src.grantErr))
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(BeEmpty())
@@ -229,7 +246,7 @@ var _ = Describe("ConfirmGate", func() {
 			src := &fakeApprovals{granted: map[string]bool{"stream_rm": true}}
 			gate := NewConfirmGate(prompter, src)
 
-			allowed, reason, aerr := gate.Approve(context.Background(), "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
 			Expect(reason).To(Equal(NoTerminalReason))
@@ -242,9 +259,46 @@ var _ = Describe("ConfirmGate", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 
-			allowed, _, aerr := gate.Approve(ctx, "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			allowed, _, aerr := gate.Approve(ctx, "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).To(MatchError(toolkit.ErrPromptAborted))
 			Expect(allowed).To(BeFalse())
+		})
+
+		// A one-shot approval is the answer an operator gave for a call the run had
+		// suspended on. It authorizes that dispatch and is spent by it.
+		It("Should honor a one-shot approval for its own call and spend it", func() {
+			calls := 0
+			prompter.approveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+				calls++
+				return toolkit.ConfirmNo, nil
+			}
+			src := &fakeApprovals{calls: map[string]bool{"use-1": true}}
+			gate := NewConfirmGate(prompter, src)
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
+			Expect(allowed).To(BeTrue())
+			Expect(reason).To(BeEmpty())
+			Expect(calls).To(Equal(0))
+			Expect(src.taken).To(Equal([]string{"use-1"}))
+
+			// The same tool called again is a call nobody approved.
+			allowed, _, aerr = gate.Approve(context.Background(), "use-2", "stream_rm", "stream rm", "stream rm BILLING", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
+			Expect(allowed).To(BeFalse())
+			Expect(calls).To(Equal(1))
+		})
+
+		It("Should not honor a one-shot approval with no operator reachable", func() {
+			prompter.canPrompt = false
+			src := &fakeApprovals{calls: map[string]bool{"use-1": true}}
+			gate := NewConfirmGate(prompter, src)
+
+			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
+			Expect(aerr).ToNot(HaveOccurred())
+			Expect(allowed).To(BeFalse())
+			Expect(reason).To(Equal(NoTerminalReason))
+			Expect(src.taken).To(BeEmpty(), "an approval nobody could act on is not spent")
 		})
 	})
 

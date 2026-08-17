@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,7 +41,10 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	"github.com/choria-io/fisk-ai/internal/rag"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
 // recordingTelemetry returns a Provider writing every ended span straight into the
@@ -1079,6 +1083,106 @@ func TestTelemetry_ToolSpanRecordsAPolicyDenial(t *testing.T) {
 
 	// Denied, not failed: nothing ran, so this is not a tool error.
 	g.Expect(tool.Status.Code).ToNot(Equal(codes.Error))
+}
+
+// TestTelemetry_ToolSpanRecordsAnUnansweredQuestion asserts a prompt the operator
+// never answered is classified apart from one they refused. The run suspends, the
+// resume asks again, and an outcome of confirm_denied would count a refusal that never
+// happened against an agent whose gate is working.
+func TestTelemetry_ToolSpanRecordsAnUnansweredQuestion(t *testing.T) {
+	g := NewWithT(t)
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	cfg := agenttest.Config(t, app)
+	tel, exp := recordingTelemetry()
+
+	gated, err := functool.New(functool.Spec{
+		Name:        "stream_rm",
+		Description: "removes a stream",
+		Schema:      map[string]any{"type": "object"},
+		Confirm:     &functool.ConfirmSpec{},
+		Handler: func(context.Context, json.RawMessage, *functool.CallContext) (string, error) {
+			return "", nil
+		},
+	})
+	g.Expect(err).ToNot(HaveOccurred())
+
+	prompter := agenttest.NewScriptedPrompter(t)
+	prompter.ApproveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+		return toolkit.ConfirmNo, fmt.Errorf("%w: interrupt", toolkit.ErrPromptAborted)
+	}
+
+	_, err = agent.Run(context.Background(), agent.Options{
+		Config:     cfg,
+		ConfigFile: "agent.yaml",
+		Prompt:     []string{"remove the stream"},
+		Provider: agenttest.NewScriptedProvider(t,
+			agenttest.ToolUseResponse("call_1", "stream_rm", []byte(`{}`)),
+		),
+		Telemetry:   tel,
+		CustomTools: []toolkit.Tool{gated},
+	}, agenttest.NewRecordingEvents(), prompter)
+	g.Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+
+	tool := spanNamed(g, exp, "execute_tool ")
+
+	out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeUnanswered))
+}
+
+// TestTelemetry_ToolSpanRecordsADeferredQuestion asserts a gate question whose answer
+// arrives later is classified as deferred rather than as an operator's refusal.
+//
+// A prompter reaches this by returning toolkit.DeferResult, which an embedder whose
+// operator is not on the end of the connection does: the question is put, nobody has
+// answered yet, and the run suspends with the call recorded. Reported as a refusal it
+// would tell an operator grouping by outcome that somebody declined the command.
+func TestTelemetry_ToolSpanRecordsADeferredQuestion(t *testing.T) {
+	g := NewWithT(t)
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	cfg := agenttest.Config(t, app)
+	tel, exp := recordingTelemetry()
+
+	var ran atomic.Bool
+	gated, err := functool.New(functool.Spec{
+		Name:        "stream_rm",
+		Description: "removes a stream",
+		Schema:      map[string]any{"type": "object"},
+		Confirm:     &functool.ConfirmSpec{},
+		Handler: func(context.Context, json.RawMessage, *functool.CallContext) (string, error) {
+			ran.Store(true)
+			return "", nil
+		},
+	})
+	g.Expect(err).ToNot(HaveOccurred())
+
+	prompter := agenttest.NewScriptedPrompter(t)
+	prompter.ApproveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+		return toolkit.ConfirmNo, toolkit.DeferResult("waiting on the caller", "q-1")
+	}
+
+	res, err := agent.Run(context.Background(), agent.Options{
+		Config:     cfg,
+		ConfigFile: "agent.yaml",
+		Prompt:     []string{"remove the stream"},
+		Provider: agenttest.NewScriptedProvider(t,
+			agenttest.ToolUseResponse("call_1", "stream_rm", []byte(`{}`)),
+		),
+		Telemetry:   tel,
+		CustomTools: []toolkit.Tool{gated},
+	}, agenttest.NewRecordingEvents(), prompter)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res.Reason).To(Equal(runstate.ReasonSuspended))
+	g.Expect(res.Deferred).To(HaveLen(1))
+	g.Expect(ran.Load()).To(BeFalse(), "a command whose approval is still outstanding must not run")
+
+	tool := spanNamed(g, exp, "execute_tool ")
+
+	out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeDeferred))
 }
 
 // TestTelemetry_RootSpanEndsOnACrash asserts a recovered panic still produces a root

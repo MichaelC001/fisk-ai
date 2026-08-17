@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -15,6 +16,13 @@ import (
 
 func TestA2A(t *testing.T) {
 	RegisterFailHandler(Fail)
+
+	// The specs here wait on a shell the served tool starts and on the goroutine that
+	// owns a reply set, and go test runs packages in parallel, so Gomega's one second
+	// measures the machine's load rather than this code. Waiting longer costs nothing
+	// when the assertion holds, since Eventually returns as soon as it is satisfied.
+	SetDefaultEventuallyTimeout(30 * time.Second)
+
 	RunSpecs(t, "A2A")
 }
 
@@ -63,6 +71,8 @@ var _ = Describe("A2A", func() {
 				{NewToolReply("ok", false), &ToolReply{}},
 				{NewDiscoveryRequest(), &DiscoveryRequest{}},
 				{NewDiscoveryReply("agent-a", "1.0.0"), &DiscoveryReply{}},
+				{NewElicitRequest(ElicitConfirm, "q1"), &ElicitRequest{}},
+				{NewElicitReply("q1", AnswerConfirmed), &ElicitReply{}},
 			}
 
 			for _, tc := range cases {
@@ -358,6 +368,96 @@ var _ = Describe("A2A", func() {
 		It("Should satisfy the error interface", func() {
 			var err error = NewError("boom")
 			Expect(err.Error()).To(Equal("boom"))
+		})
+	})
+
+	Describe("NewElicitReplyFromRequest", func() {
+		// The reply is addressed by its header: the task it belongs to, the question it
+		// answers and who is answering. A caller filling those by hand gets no error from
+		// one it fills wrong, only a question that stays unanswered.
+		It("Should correlate the reply to the task and the question", func() {
+			ask := NewElicitRequest(ElicitApprove, "q1")
+			ask.ID = NewID()
+			ask.Request = "task1"
+			ask.Conversation = "conv1"
+			ask.Sequence = 4
+			ask.Sender = Identity{Name: "worker1"}
+
+			reply := NewElicitReplyFromRequest(ask, "caller1", AnswerChoice)
+			reply.Choice = ChoiceOnce
+
+			Expect(reply.Protocol).To(Equal(ElicitReplyProtocol))
+			Expect(reply.QuestionID).To(Equal("q1"))
+			Expect(reply.Request).To(Equal("task1"))
+			Expect(reply.Conversation).To(Equal("conv1"))
+			Expect(reply.Sender.Name).To(Equal("caller1"))
+			Expect(reply.Recipient.Name).To(Equal("worker1"), "the answer goes back to the agent that asked")
+
+			// Its own id, and a sequence of zero: a reply travels alone rather than in the
+			// task's numbered set.
+			Expect(reply.ID).ToNot(BeEmpty())
+			Expect(reply.ID).ToNot(Equal(ask.ID))
+			Expect(reply.Sequence).To(BeZero())
+			Expect(reply.Time).ToNot(BeZero())
+		})
+
+		// One constructor per answer kind, so a reply cannot carry "choice" with only
+		// Confirmed set, which reaches the agent that asked as an approval nobody made.
+		It("Should set the answer kind and its value together", func() {
+			ask := NewElicitRequest(ElicitApprove, "q1")
+			ask.Request = "task1"
+			ask.Conversation = "task1"
+			ask.Sender = Identity{Name: "worker1"}
+
+			approve := NewApproveReply(ask, "caller1", ChoiceAlways)
+			Expect(approve.Answer).To(Equal(AnswerChoice))
+			Expect(approve.Choice).To(Equal(ChoiceAlways))
+
+			confirm := NewConfirmReply(ask, "caller1", true)
+			Expect(confirm.Answer).To(Equal(AnswerConfirmed))
+			Expect(confirm.Confirmed).To(BeTrue())
+
+			selected := NewSelectReply(ask, "caller1", 2)
+			Expect(selected.Answer).To(Equal(AnswerIndex))
+			Expect(selected.Index).To(Equal(2))
+
+			input := NewInputReply(ask, "caller1", "orders.new")
+			Expect(input.Answer).To(Equal(AnswerValue))
+			Expect(input.Value).To(Equal("orders.new"))
+
+			none := NewNoOperatorReply(ask, "caller1")
+			Expect(none.Answer).To(Equal(AnswerNoOperator))
+
+			// All five are addressed the same way, since they share the header
+			// NewElicitReplyFromRequest built.
+			for _, reply := range []*ElicitReply{approve, confirm, selected, input, none} {
+				Expect(reply.QuestionID).To(Equal("q1"))
+				Expect(reply.Request).To(Equal("task1"))
+				Expect(reply.Sender.Name).To(Equal("caller1"))
+				Expect(reply.Recipient.Name).To(Equal("worker1"))
+			}
+		})
+
+		It("Should build a reply the schemas accept", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			ask := NewElicitRequest(ElicitConfirm, "q2")
+			ask.ID = NewID()
+			ask.Request = NewID()
+			ask.Conversation = ask.Request
+			ask.Sender = Identity{Name: "worker1"}
+
+			reply := NewElicitReplyFromRequest(ask, "caller1", AnswerConfirmed)
+			reply.Confirmed = true
+
+			body, err := json.Marshal(reply)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(validator.Validate(body)).To(Succeed())
+
+			decoded, err := Decode(body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(decoded.(*ElicitReply).Confirmed).To(BeTrue())
 		})
 	})
 
