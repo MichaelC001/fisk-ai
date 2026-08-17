@@ -534,6 +534,21 @@ type LLMConfig struct {
 	// says nothing to the provider and the model uses its own default, which is what
 	// distinguishes it from a block that sets enabled false. See ThinkingConfig.
 	Thinking *ThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty"`
+	// ReasoningEffort asks the model for a level of effort, which governs how deeply it
+	// reasons and how many tokens it spends overall. Empty says nothing, so the model
+	// uses its own default.
+	//
+	// The value is passed to the provider as written and is not checked against a list
+	// of levels, because the levels are the model's rather than ours: Anthropic accepts
+	// low, medium, high, xhigh and max, other providers name their own, and a model
+	// released after this build may accept a level this build has never heard of. A
+	// level the model does not take is refused at the first model call, naming the
+	// value, which is the same trade a2a.StopReason makes for the same reason.
+	//
+	// It is a sibling of Thinking rather than a field inside it, so an operator can set
+	// an effort while staying silent about thinking. Nesting would make the block
+	// present, and a present block sends the thinking parameter.
+	ReasoningEffort string `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"`
 	// NoPromptCache disables Anthropic prompt caching for this agent. Caching is on by
 	// default (the zero value), mirroring no_tui / no_bell; set it only for a non-Anthropic
 	// endpoint (ANTHROPIC_BASE_URL) whose proxy rejects or ignores cache_control. Disabling
@@ -553,9 +568,12 @@ type LLMConfig struct {
 
 // ThinkingConfig configures whether the model exposes its reasoning, which some
 // providers call reasoning rather than thinking. It is a struct rather than a bare
-// bool so further controls (e.g. effort) can be added later without changing the
+// bool so a further control of thinking itself can be added without changing the
 // configuration shape. The setting is provider neutral: the active backend maps it
 // to its own mechanism.
+//
+// How hard the model works is LLMConfig.ReasoningEffort, beside this block rather
+// than in it, for the reason that field states.
 //
 // There are three states, and the block's presence is what separates two of them.
 // No block at all says nothing to the provider, so the model does whatever it does by
@@ -1396,6 +1414,13 @@ func (c *Config) ThinkingDisabled() bool {
 	return c.LLM.Thinking != nil && !c.LLM.Thinking.Enabled
 }
 
+// ReasoningEffort is the effort level to ask the model for, or empty to ask for
+// none. See LLMConfig.ReasoningEffort for why the value is not checked against a
+// list of levels.
+func (c *Config) ReasoningEffort() string {
+	return c.LLM.ReasoningEffort
+}
+
 // ToolSearchEnabled reports whether server-side tool search may be used for this
 // agent. It is on unless the agent config sets no_tool_search, the escape hatch for
 // an endpoint that does not implement the tool search tool. It is only the operator
@@ -1703,6 +1728,12 @@ func (c *Config) prepare() error {
 	c.Harness.ConfirmTags = normalizeTags(c.Harness.ConfirmTags)
 	c.GlobalFlags = normalizeGlobalFlags(c.GlobalFlags)
 
+	effort, err := prepareReasoningEffort(c.LLM.ReasoningEffort)
+	if err != nil {
+		return err
+	}
+	c.LLM.ReasoningEffort = effort
+
 	if c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.MCP != nil {
 		mode, err := normalizeConfirmOverMCP(c.Expose.Agent.MCP.ConfirmOverMCP)
 		if err != nil {
@@ -1973,6 +2004,40 @@ func prepareRequestTimeout(timeout string) (time.Duration, error) {
 	}
 
 	return d, nil
+}
+
+// maxReasoningEffortRunes caps llm.reasoning_effort. A level is one short word, and
+// the value is printed at start-up and stamped into the run fingerprint.
+const maxReasoningEffortRunes = 32
+
+// prepareReasoningEffort normalizes llm.reasoning_effort and checks its shape.
+//
+// The shape is all that can be checked here: which levels exist is the model's to
+// say, so a value this build does not recognize is passed through and refused by the
+// provider. What is refused here is a value no provider could take, which catches a
+// typed newline or a pasted sentence at start-up rather than at the first model call.
+func prepareReasoningEffort(effort string) (string, error) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		return "", nil
+	}
+
+	if len([]rune(effort)) > maxReasoningEffortRunes {
+		return "", fmt.Errorf("invalid llm reasoning_effort: over %d characters", maxReasoningEffortRunes)
+	}
+
+	for _, r := range effort {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r == '_' || r == '-' {
+			continue
+		}
+
+		return "", fmt.Errorf("invalid llm reasoning_effort %q: letters, underscores and hyphens only", effort)
+	}
+
+	return effort, nil
 }
 
 // prepare applies LLM budget defaults and parses the call timeout.

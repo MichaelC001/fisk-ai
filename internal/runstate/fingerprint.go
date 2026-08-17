@@ -25,13 +25,28 @@ type Fingerprint struct {
 	// provider that produced it), so it is deliberately excluded from Equal and
 	// Diff, which govern only the forceable configuration drift. The provider check
 	// lives at the resume gate and is unconditional.
-	Provider      string `json:"provider"`
-	Model         string `json:"model"`
-	SystemHash    string `json:"system_hash"`
-	ToolsHash     string `json:"tools_hash"`
-	ThinkingMode  string `json:"thinking_mode"`
-	MaxTokens     int64  `json:"max_tokens"`
-	MaxIterations int64  `json:"max_iterations"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	SystemHash   string `json:"system_hash"`
+	ToolsHash    string `json:"tools_hash"`
+	ThinkingMode string `json:"thinking_mode"`
+	// ReasoningEffort is the effort level the run was started with, empty when it
+	// asked for none. A journal written before this field existed folds it empty, and a
+	// run that sets no effort computes it empty, so every session journaled until now
+	// still resumes.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	MaxTokens       int64  `json:"max_tokens"`
+	MaxIterations   int64  `json:"max_iterations"`
+}
+
+// quotedOrNone renders a fingerprint value for a diff line, so an empty one reads as
+// the absence it is rather than as a gap in the sentence.
+func quotedOrNone(v string) string {
+	if v == "" {
+		return "none"
+	}
+
+	return v
 }
 
 // HashHex returns the hex-encoded SHA-256 of b, for building the system prompt
@@ -63,6 +78,9 @@ func (f Fingerprint) Diff(o Fingerprint) []string {
 	}
 	if f.ThinkingMode != o.ThinkingMode {
 		out = append(out, fmt.Sprintf("thinking: %s -> %s", f.ThinkingMode, o.ThinkingMode))
+	}
+	if f.ReasoningEffort != o.ReasoningEffort {
+		out = append(out, fmt.Sprintf("reasoning_effort: %s -> %s", quotedOrNone(f.ReasoningEffort), quotedOrNone(o.ReasoningEffort)))
 	}
 	if f.MaxTokens != o.MaxTokens {
 		out = append(out, fmt.Sprintf("max_tokens: %d -> %d", f.MaxTokens, o.MaxTokens))

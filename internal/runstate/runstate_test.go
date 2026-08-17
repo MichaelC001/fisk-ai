@@ -493,6 +493,24 @@ var _ = Describe("runstate", func() {
 			Expect(a.Diff(b)).To(BeEmpty())
 		})
 
+		// A run that asks for no effort computes it empty, and a journal written before
+		// the field existed folds it empty, so an old session resumes against a build
+		// that has the field.
+		It("matches a fingerprint written before reasoning_effort existed", func() {
+			var old Fingerprint
+			Expect(json.Unmarshal([]byte(`{"model":"m","system_hash":"h","tools_hash":"t","thinking_mode":"off","max_tokens":1,"max_iterations":2}`), &old)).To(Succeed())
+
+			now := Fingerprint{Model: "m", SystemHash: "h", ToolsHash: "t", ThinkingMode: "off", MaxTokens: 1, MaxIterations: 2}
+			Expect(old.Equal(now)).To(BeTrue())
+		})
+
+		It("reports an effort change, naming an absent level rather than leaving a gap", func() {
+			a := Fingerprint{Model: "m"}
+			b := Fingerprint{Model: "m", ReasoningEffort: "xhigh"}
+			Expect(a.Equal(b)).To(BeFalse())
+			Expect(a.Diff(b)).To(ConsistOf("reasoning_effort: none -> xhigh"))
+		})
+
 		It("never stores the raw system prompt", func() {
 			secret := "SENSITIVE-SYSTEM-PROMPT-TEXT"
 			fp := Fingerprint{Model: "m", SystemHash: HashHex([]byte(secret))}

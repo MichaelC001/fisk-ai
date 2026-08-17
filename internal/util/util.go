@@ -41,7 +41,8 @@ import (
 // turn it is a mid-conversation update and goes to stderr so it stays out of a
 // piped result. Either way the turn's text blocks are concatenated and rendered
 // once, so markdown spanning several blocks (a table, a fenced code block) is not
-// split across separate renders.
+// split across separate renders. A turn whose text is empty or only whitespace
+// prints nothing at all, so a separator beside a tool call costs no blank lines.
 func PrintText(resp llm.Response, terminal, noColor, showThinking bool) {
 	for _, block := range resp.Content {
 		if !showThinking {
@@ -68,7 +69,11 @@ func PrintText(resp llm.Response, terminal, noColor, showThinking bool) {
 		answer.WriteString(block.Text.Text)
 	}
 
-	if answer.Len() == 0 {
+	// Whitespace is not an answer. A turn that calls a tool often carries a text block
+	// holding only a separator, and printing it spends the leading blank line and a
+	// rendered blank on nothing, which shows up as a run of blank lines before each
+	// trace line.
+	if strings.TrimSpace(answer.String()) == "" {
 		return
 	}
 

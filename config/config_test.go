@@ -5,8 +5,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1622,6 +1624,43 @@ llm:
 			Expect(cfg.LLM.Thinking).ToNot(BeNil())
 			Expect(cfg.ThinkingEnabled()).To(BeFalse())
 			Expect(cfg.ThinkingDisabled()).To(BeTrue())
+		})
+
+		It("Should carry an effort level without saying anything about thinking", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+  reasoning_effort: XHigh
+`))
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(cfg.ReasoningEffort()).To(Equal("xhigh"))
+			Expect(cfg.LLM.Thinking).To(BeNil(), "an effort is not a thinking block")
+			Expect(cfg.ThinkingEnabled()).To(BeFalse())
+			Expect(cfg.ThinkingDisabled()).To(BeFalse())
+		})
+
+		// Which levels exist is the model's, so a level this build has never heard of is
+		// carried to the provider rather than refused here.
+		It("Should carry a level it does not recognize", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+system_prompt: do the thing
+llm:
+  model: some-model-from-next-year
+  reasoning_effort: ludicrous
+`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.ReasoningEffort()).To(Equal("ludicrous"))
+		})
+
+		It("Should refuse a value no provider could take", func() {
+			for _, effort := range []string{"high effort", "high\nlow", "high!", strings.Repeat("x", 33)} {
+				_, err := ParseConfig([]byte(fmt.Sprintf("identity: agent1\nsystem_prompt: do the thing\nllm:\n  model: m\n  reasoning_effort: %q\n", effort)))
+				Expect(err).To(MatchError(ContainSubstring("reasoning_effort")), "accepted %q", effort)
+			}
 		})
 
 		It("Should be nil-safe on a zero configuration", func() {

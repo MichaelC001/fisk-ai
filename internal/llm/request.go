@@ -65,6 +65,16 @@ type Request struct {
 	// value asks for nothing, so a caller that does not care never has to set it.
 	Thinking ThinkingMode
 
+	// ReasoningEffort is the effort level to ask the model for, which governs how
+	// deeply it reasons and how many tokens it spends overall. Empty asks for nothing,
+	// so the model uses its own default.
+	//
+	// It is a string rather than an enum because the levels belong to the model: each
+	// provider names its own, and a model released after this build may take a level
+	// this build has never heard of. A provider sends the value as written and lets the
+	// model refuse one it does not take; a provider with no effort mechanism ignores it.
+	ReasoningEffort string
+
 	// MaxOutputTokens caps the tokens generated for this one response. It bounds a
 	// single reply, distinct from any cumulative token budget the caller enforces.
 	MaxOutputTokens int64

@@ -170,6 +170,24 @@ var _ = Describe("transcriptLines", func() {
 		Expect(lines[4]).To(Equal(tui.Line{Kind: tui.LineToolResult, Text: "res-b"}))
 	})
 
+	// The shape a turn takes when the model puts a separator beside its tool_use. A
+	// narration line made of it is blank rows above the tool call.
+	It("adds no narration line for a turn whose text is only whitespace", func() {
+		for _, body := range []string{" ", "\n", "\n\n", "  \n\t"} {
+			state := &runstate.RunState{
+				Messages: []llm.Message{
+					userMsg("go"),
+					assistantMsg(textBlk(body), useBlk("a", "first", "{}")),
+				},
+			}
+
+			lines := transcriptLines(state, false, true)
+			Expect(lines).To(HaveLen(2), "text %q", body)
+			Expect(lines[0].Kind).To(Equal(tui.LinePrompt), "text %q", body)
+			Expect(lines[1].Kind).To(Equal(tui.LineToolCall), "text %q", body)
+		}
+	})
+
 	It("shows only the calls, still paired in order, when tool output is withheld", func() {
 		lines := transcriptLines(rs(), false, true)
 
