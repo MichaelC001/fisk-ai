@@ -207,6 +207,17 @@ var _ = Describe("A2A endpoint", func() {
 			Expect(ch.Describe()).To(ConsistOf(
 				a2a.DescLine{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
 				a2a.DescLine{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
+			), "a channel that asks nothing advertises no answer address")
+		})
+
+		It("Should describe the answer address when it asks its callers questions", func() {
+			built, err := NewFromConfig(promptsConfig("        elicit: true\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(closeAll, built)
+
+			Expect(channelOf(built).Describe()).To(ConsistOf(
+				a2a.DescLine{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
+				a2a.DescLine{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
 				a2a.DescLine{Label: "Answers", Value: natstransport.ElicitSubject("agent1", "*")},
 			))
 		})

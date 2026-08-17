@@ -34,10 +34,10 @@ type scriptedTransport struct {
 func (t *scriptedTransport) RoundTrip(context.Context, string, RouteHint, []byte) ([]byte, error) {
 	return nil, nil
 }
-func (t *scriptedTransport) Serve(RouteHint, Handler) error  { return nil }
-func (t *scriptedTransport) Describe(string) []DescLine      { return nil }
-func (t *scriptedTransport) DescribeTasks(string) []DescLine { return nil }
-func (t *scriptedTransport) Close() error                    { return nil }
+func (t *scriptedTransport) Serve(RouteHint, Handler) error        { return nil }
+func (t *scriptedTransport) Describe(string) []DescLine            { return nil }
+func (t *scriptedTransport) DescribeTasks(string, bool) []DescLine { return nil }
+func (t *scriptedTransport) Close() error                          { return nil }
 
 func (t *scriptedTransport) Stream(_ context.Context, _ string, _ RouteHint, body []byte) (Reader, error) {
 	var hdr Header

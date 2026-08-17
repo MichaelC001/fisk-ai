@@ -121,9 +121,10 @@ const channelName = "a2a/prompts"
 func (c *Channel) Name() string { return channelName }
 
 // Describe returns the addresses a peer sends a prompt to and addresses a cancel under,
-// for display. The transport answers it, so a later binding describes itself in its own
-// terms and this endpoint never builds an address.
-func (c *Channel) Describe() []a2a.DescLine { return c.stream.DescribeTasks(c.identity) }
+// for display, and the one it answers questions on when this channel asks any. The
+// transport answers it, so a later binding describes itself in its own terms and this
+// endpoint never builds an address.
+func (c *Channel) Describe() []a2a.DescLine { return c.stream.DescribeTasks(c.identity, c.elicits) }
 
 // Concurrency is how many prompts this channel may have running at once, which admission
 // also refuses a caller above, so the server's slots and the channel's acks agree.
