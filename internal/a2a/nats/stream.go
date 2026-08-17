@@ -27,12 +27,20 @@ var _ a2a.StreamingTransport = (*Transport)(nil)
 // is addressed under, for the banner of a worker that serves tasks. The cancel line
 // is a pattern rather than a subject because the request id is part of the address,
 // and it is what an operator writes a publish permission against.
-func (t *Transport) DescribeTasks(identity string) []a2a.DescLine {
-	return []a2a.DescLine{
+//
+// The answers line appears only for a worker that asks its callers questions. On one
+// that does not, the subject is a place to publish where nothing is listening.
+func (t *Transport) DescribeTasks(identity string, elicits bool) []a2a.DescLine {
+	lines := []a2a.DescLine{
 		{Label: "Requests", Value: TaskSubject(identity)},
 		{Label: "Cancels", Value: CancelSubject(identity, "*")},
-		{Label: "Answers", Value: ElicitSubject(identity, "*")},
 	}
+
+	if elicits {
+		lines = append(lines, a2a.DescLine{Label: "Answers", Value: ElicitSubject(identity, "*")})
+	}
+
+	return lines
 }
 
 // Stream publishes body on the subject for op against agent, naming an inbox of its

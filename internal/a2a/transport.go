@@ -108,7 +108,11 @@ type StreamingTransport interface {
 	// Describe's lines. It is here rather than on Describe because a binding that
 	// cannot carry a reply set has no task path to describe, and a surface that serves
 	// tasks must not have to know what a subject is to print one.
-	DescribeTasks(identity string) []DescLine
+	//
+	// elicits says whether the surface puts questions to its callers. With it false
+	// the answer address is left out, since a caller publishing there would reach a
+	// run that asks nothing and every question would be refused before it was asked.
+	DescribeTasks(identity string, elicits bool) []DescLine
 }
 
 // TaskWatch is one running task's claim on a class of messages addressed to it:
