@@ -19,6 +19,13 @@ import (
 
 func TestServe(t *testing.T) {
 	RegisterFailHandler(Fail)
+
+	// The specs here wait on runs executing on goroutines the server owns, and go test
+	// runs packages in parallel, so Gomega's one second measures the machine's load
+	// rather than this code. Waiting longer costs nothing when the assertion holds,
+	// since Eventually returns as soon as it is satisfied.
+	SetDefaultEventuallyTimeout(30 * time.Second)
+
 	RunSpecs(t, "Serve")
 }
 

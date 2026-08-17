@@ -15,7 +15,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-var _ = Describe("Surfaces", func() {
+var _ = Describe("Endpoints", func() {
 	var cfg *config.Config
 
 	BeforeEach(func() {
@@ -25,65 +25,65 @@ var _ = Describe("Surfaces", func() {
 	It("Should build only what the configuration enables", func() {
 		var built []string
 
-		builders := []serve.SurfaceBuilder{
+		builders := []serve.EndpointBuilder{
 			{
 				Name:    "on",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
 					built = append(built, "on")
-					return []serve.Surface{agenttest.NewScriptedChannel(GinkgoTB(), "on")}, nil
+					return []serve.Endpoint{agenttest.NewScriptedChannel(GinkgoTB(), "on")}, nil
 				},
 			},
 			{
 				Name:    "off",
 				Enabled: func(*config.Config) bool { return false },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
 					built = append(built, "off")
-					return []serve.Surface{agenttest.NewScriptedChannel(GinkgoTB(), "off")}, nil
+					return []serve.Endpoint{agenttest.NewScriptedChannel(GinkgoTB(), "off")}, nil
 				},
 			},
 			{
 				Name:    "service-on",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
 					built = append(built, "service-on")
-					return []serve.Surface{agenttest.NewService(GinkgoTB(), "service-on")}, nil
+					return []serve.Endpoint{agenttest.NewService(GinkgoTB(), "service-on")}, nil
 				},
 			},
 			{
 				Name:    "service-off",
 				Enabled: func(*config.Config) bool { return false },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
 					built = append(built, "service-off")
-					return []serve.Surface{agenttest.NewService(GinkgoTB(), "service-off")}, nil
+					return []serve.Endpoint{agenttest.NewService(GinkgoTB(), "service-off")}, nil
 				},
 			},
 		}
 
-		channels, builtServices, err := serve.Surfaces(cfg, serve.BuildOptions{}, builders)
+		channels, builtServices, err := serve.Endpoints(cfg, serve.BuildOptions{}, builders)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(channels).To(HaveLen(1))
 		Expect(channels[0].Name()).To(Equal("on"))
 		Expect(builtServices).To(HaveLen(1))
 		Expect(builtServices[0].Name()).To(Equal("service-on"))
-		Expect(built).To(Equal([]string{"on", "service-on"}), "a disabled surface is never constructed")
+		Expect(built).To(Equal([]string{"on", "service-on"}), "a disabled endpoint is never constructed")
 	})
 
-	// One block can ask for both, which is how the a2a surfaces share a transport: the
+	// One block can ask for both, which is how the a2an endpoints share a transport: the
 	// builder returns them together and each lands in the list its kind is hosted from.
-	It("Should sort the surfaces one builder returns", func() {
-		builders := []serve.SurfaceBuilder{{
+	It("Should sort the endpoints one builder returns", func() {
+		builders := []serve.EndpointBuilder{{
 			Name:    "a2a",
 			Enabled: func(*config.Config) bool { return true },
-			Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
-				return []serve.Surface{
+			Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
+				return []serve.Endpoint{
 					agenttest.NewQueue(GinkgoTB(), "a2a/prompts"),
 					agenttest.NewService(GinkgoTB(), "a2a"),
 				}, nil
 			},
 		}}
 
-		channels, services, err := serve.Surfaces(cfg, serve.BuildOptions{}, builders)
+		channels, services, err := serve.Endpoints(cfg, serve.BuildOptions{}, builders)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(channels).To(HaveLen(1))
 		Expect(channels[0].Name()).To(Equal("a2a/prompts"))
@@ -95,36 +95,36 @@ var _ = Describe("Surfaces", func() {
 	// asks for, so a sort that asked both questions would host it twice: counted twice
 	// at validation, closed twice on a drain and printed twice on the banner.
 	It("Should host a releasable channel as a channel alone", func() {
-		builders := []serve.SurfaceBuilder{{
+		builders := []serve.EndpointBuilder{{
 			Name:    "jobs",
 			Enabled: func(*config.Config) bool { return true },
-			Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
-				return []serve.Surface{agenttest.NewQueue(GinkgoTB(), "jobs")}, nil
+			Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
+				return []serve.Endpoint{agenttest.NewQueue(GinkgoTB(), "jobs")}, nil
 			},
 		}}
 
-		channels, services, err := serve.Surfaces(cfg, serve.BuildOptions{}, builders)
+		channels, services, err := serve.Endpoints(cfg, serve.BuildOptions{}, builders)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(channels).To(HaveLen(1))
 		Expect(services).To(BeEmpty())
 	})
 
-	It("Should refuse a surface that is neither a channel nor a service", func() {
-		builders := []serve.SurfaceBuilder{{
+	It("Should refuse an endpoint that is neither a channel nor a service", func() {
+		builders := []serve.EndpointBuilder{{
 			Name:    "odd",
 			Enabled: func(*config.Config) bool { return true },
-			Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
-				return []serve.Surface{namedSurface("odd")}, nil
+			Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
+				return []serve.Endpoint{namedSurface("odd")}, nil
 			},
 		}}
 
-		_, _, err := serve.Surfaces(cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
-		Expect(err).To(MatchError(ContainSubstring("the odd surface built")))
+		_, _, err := serve.Endpoints(cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
+		Expect(err).To(MatchError(ContainSubstring("the odd endpoint built")))
 		Expect(err).To(MatchError(ContainSubstring("neither a Channel nor a Service")))
 	})
 
 	It("Should build nothing when nothing is enabled", func() {
-		channels, services, err := serve.Surfaces(cfg, serve.BuildOptions{}, []serve.SurfaceBuilder{{
+		channels, services, err := serve.Endpoints(cfg, serve.BuildOptions{}, []serve.EndpointBuilder{{
 			Name:    "off",
 			Enabled: func(*config.Config) bool { return false },
 		}, {
@@ -139,28 +139,28 @@ var _ = Describe("Surfaces", func() {
 
 	// Several channels hold connections, so a failure part way through has to release
 	// what it already built or it leaks them somewhere the caller cannot reach.
-	It("Should release what it built when a later surface fails", func() {
+	It("Should release what it built when a later endpoint fails", func() {
 		first := agenttest.NewQueue(GinkgoTB(), "first")
 
-		builders := []serve.SurfaceBuilder{
+		builders := []serve.EndpointBuilder{
 			{
 				Name:    "first",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
-					return []serve.Surface{first}, nil
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
+					return []serve.Endpoint{first}, nil
 				},
 			},
 			{
 				Name:    "second",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
 					return nil, fmt.Errorf("no queue")
 				},
 			},
 		}
 
-		_, _, err := serve.Surfaces(cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
-		Expect(err).To(MatchError(ContainSubstring("building the second surface")))
+		_, _, err := serve.Endpoints(cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
+		Expect(err).To(MatchError(ContainSubstring("building the second endpoint")))
 		Expect(err).To(MatchError(ContainSubstring("no queue")))
 		Expect(first.Closes()).To(Equal(1))
 	})
@@ -172,32 +172,32 @@ var _ = Describe("Surfaces", func() {
 		queue := agenttest.NewQueue(GinkgoTB(), "jobs")
 		service := agenttest.NewService(GinkgoTB(), "first")
 
-		builders := []serve.SurfaceBuilder{
+		builders := []serve.EndpointBuilder{
 			{
 				Name:    "jobs",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
-					return []serve.Surface{queue}, nil
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
+					return []serve.Endpoint{queue}, nil
 				},
 			},
 			{
 				Name:    "first",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
-					return []serve.Surface{service}, nil
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
+					return []serve.Endpoint{service}, nil
 				},
 			},
 			{
 				Name:    "second",
 				Enabled: func(*config.Config) bool { return true },
-				Build: func(*config.Config, serve.BuildOptions) ([]serve.Surface, error) {
+				Build: func(*config.Config, serve.BuildOptions) ([]serve.Endpoint, error) {
 					return nil, fmt.Errorf("no transport")
 				},
 			},
 		}
 
-		_, _, err := serve.Surfaces(cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
-		Expect(err).To(MatchError(ContainSubstring("building the second surface")))
+		_, _, err := serve.Endpoints(cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
+		Expect(err).To(MatchError(ContainSubstring("building the second endpoint")))
 		Expect(err).To(MatchError(ContainSubstring("no transport")))
 		Expect(queue.Closes()).To(Equal(1))
 		Expect(service.Closes()).To(Equal(1))
@@ -206,19 +206,19 @@ var _ = Describe("Surfaces", func() {
 	It("Should pass the process's decisions to every builder", func() {
 		var seen []serve.BuildOptions
 
-		_, _, err := serve.Surfaces(cfg, serve.BuildOptions{Workers: 7, ConfigFile: "agent.yaml"}, []serve.SurfaceBuilder{{
+		_, _, err := serve.Endpoints(cfg, serve.BuildOptions{Workers: 7, ConfigFile: "agent.yaml"}, []serve.EndpointBuilder{{
 			Name:    "one",
 			Enabled: func(*config.Config) bool { return true },
-			Build: func(_ *config.Config, opts serve.BuildOptions) ([]serve.Surface, error) {
+			Build: func(_ *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 				seen = append(seen, opts)
-				return []serve.Surface{agenttest.NewScriptedChannel(GinkgoTB(), "one")}, nil
+				return []serve.Endpoint{agenttest.NewScriptedChannel(GinkgoTB(), "one")}, nil
 			},
 		}, {
 			Name:    "two",
 			Enabled: func(*config.Config) bool { return true },
-			Build: func(_ *config.Config, opts serve.BuildOptions) ([]serve.Surface, error) {
+			Build: func(_ *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 				seen = append(seen, opts)
-				return []serve.Surface{agenttest.NewService(GinkgoTB(), "two")}, nil
+				return []serve.Endpoint{agenttest.NewService(GinkgoTB(), "two")}, nil
 			},
 		}})
 

@@ -79,6 +79,25 @@ var _ = Describe("Validator", func() {
 				},
 			}}
 
+			approve := NewElicitRequest(ElicitApprove, "q1")
+			approve.Command = "stream rm"
+			approve.Display = "stream rm ORDERS"
+			approve.Tag = "ai:confirm"
+
+			selectQuestion := NewElicitRequest(ElicitSelect, "q2")
+			selectQuestion.Question = "which cluster?"
+			selectQuestion.Options = []string{"east", "west"}
+
+			input := NewElicitRequest(ElicitInput, "q3")
+			input.Question = "which subject?"
+			input.Default = "orders.>"
+
+			choice := NewElicitReply("q1", AnswerChoice)
+			choice.Choice = ChoiceOnce
+
+			value := NewElicitReply("q3", AnswerValue)
+			value.Value = "orders.new"
+
 			messages := []any{
 				request,
 				NewEvent(NewThinkingBlock("hmm")),
@@ -95,6 +114,15 @@ var _ = Describe("Validator", func() {
 				toolReply,
 				NewDiscoveryRequest(),
 				discoveryReply,
+				approve,
+				NewElicitRequest(ElicitConfirm, "q4"),
+				selectQuestion,
+				input,
+				choice,
+				NewElicitReply("q4", AnswerConfirmed),
+				NewElicitReply("q2", AnswerIndex),
+				value,
+				NewElicitReply("q1", AnswerNoOperator),
 			}
 
 			for _, msg := range messages {
@@ -118,6 +146,10 @@ var _ = Describe("Validator", func() {
 				case *DiscoveryRequest:
 					fillHeader(&m.Header)
 				case *DiscoveryReply:
+					fillHeader(&m.Header)
+				case *ElicitRequest:
+					fillHeader(&m.Header)
+				case *ElicitReply:
 					fillHeader(&m.Header)
 				default:
 					Fail("unhandled message type in test")
@@ -188,6 +220,36 @@ var _ = Describe("Validator", func() {
 			result := NewResult("")
 			fillHeader(&result.Header)
 			Expect(v.ValidateMessage(result)).ToNot(Succeed())
+		})
+
+		// An answer arrives from whoever can address the running task, so the values it
+		// can carry are pinned rather than left to the reader.
+		It("Should bound what an elicit reply may answer with", func() {
+			for _, answer := range []ElicitAnswer{AnswerChoice, AnswerConfirmed, AnswerIndex, AnswerValue, AnswerNoOperator} {
+				reply := NewElicitReply("q1", answer)
+				fillHeader(&reply.Header)
+				Expect(v.ValidateMessage(reply)).To(Succeed(), "answer %q", answer)
+			}
+
+			unknown := NewElicitReply("q1", ElicitAnswer("whatever"))
+			fillHeader(&unknown.Header)
+			Expect(v.ValidateMessage(unknown)).ToNot(Succeed())
+
+			choice := NewElicitReply("q1", AnswerChoice)
+			choice.Choice = ElicitChoice("maybe")
+			fillHeader(&choice.Header)
+			Expect(v.ValidateMessage(choice)).ToNot(Succeed())
+
+			long := NewElicitReply("q1", AnswerValue)
+			long.Value = strings.Repeat("a", 4097)
+			fillHeader(&long.Header)
+			Expect(v.ValidateMessage(long)).ToNot(Succeed())
+		})
+
+		It("Should refuse an elicit question of a kind it does not name", func() {
+			ask := NewElicitRequest(ElicitKind("interrogate"), "q1")
+			fillHeader(&ask.Header)
+			Expect(v.ValidateMessage(ask)).ToNot(Succeed())
 		})
 	})
 

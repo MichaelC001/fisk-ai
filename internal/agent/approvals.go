@@ -25,13 +25,17 @@ type journalApprovals struct {
 	// staged holds grants the operator has given whose call has not been answered
 	// yet, in the order they were given.
 	staged []string
+	// calls holds the one-shot approvals this run was resumed with, by tool_use id.
+	// They are journaled by whatever supplied the operator's answer while the run was
+	// suspended, so nothing writes one here: the run reads them and spends them.
+	calls map[string]bool
 	// emit appends a record to the run's journal. The runner sets it on itself at
 	// construction, since the gate is built before the journal is opened.
 	emit func(runstate.Record) error
 }
 
 func newJournalApprovals() *journalApprovals {
-	return &journalApprovals{granted: map[string]bool{}}
+	return &journalApprovals{granted: map[string]bool{}, calls: map[string]bool{}}
 }
 
 // Granted reports whether the operator has approved tool for this conversation.
@@ -70,19 +74,38 @@ func (a *journalApprovals) flush() error {
 	return nil
 }
 
+// TakeCall reports whether the operator approved this call while the run was
+// suspended, and spends the approval. It authorizes the dispatch about to happen and
+// nothing after it, so a second call of the same tool is asked about again.
+func (a *journalApprovals) TakeCall(toolUseID string) bool {
+	if !a.calls[toolUseID] {
+		return false
+	}
+
+	delete(a.calls, toolUseID)
+
+	return true
+}
+
 // seed restores the grants a resumed conversation carries. It is not a journal
 // write: these records are already in the journal that supplied them.
-func (a *journalApprovals) seed(tools []string) {
+func (a *journalApprovals) seed(tools []string, calls []runstate.CallApprovalRecord) {
 	for _, tool := range tools {
 		a.granted[tool] = true
+	}
+
+	for _, call := range calls {
+		a.calls[call.ToolUseID] = true
 	}
 }
 
 // clear drops every grant, for a context reset. The cleared conversation is a new
 // one, by rotation to a fresh journal or by emptying an unjournaled context, and a
 // grant is scoped to the conversation it was given in. Staged grants go with them:
-// they belong to the conversation being left.
+// they belong to the conversation being left, as do the one-shot approvals, whose
+// calls are in it.
 func (a *journalApprovals) clear() {
 	a.granted = map[string]bool{}
 	a.staged = nil
+	a.calls = map[string]bool{}
 }

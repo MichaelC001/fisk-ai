@@ -87,6 +87,10 @@ func headerOf(msg any) *Header {
 		return &m.Header
 	case *DiscoveryReply:
 		return &m.Header
+	case *ElicitRequest:
+		return &m.Header
+	case *ElicitReply:
+		return &m.Header
 	default:
 		return nil
 	}

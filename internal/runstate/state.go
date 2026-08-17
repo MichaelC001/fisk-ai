@@ -107,6 +107,15 @@ type RunState struct {
 	// not asked for again. It grants nothing on its own: the gate honors one only
 	// where an operator is reachable to have been asked in the first place.
 	Approvals []string
+	// CallApprovals holds the one-shot approvals that are still live, in journal
+	// order: an operator answered "allow once" for a call the run had not dispatched.
+	// A resume seeds the gate from it, and the gate spends one when it dispatches the
+	// call it names.
+	//
+	// A terminal record clears it, so an approval the run never reached is spent
+	// rather than carried into a later resume. It grants nothing on its own, for the
+	// reason Approvals states.
+	CallApprovals []CallApprovalRecord
 	// Terminal is set when a Terminal record was journaled.
 	Terminal *TerminalRecord
 }
@@ -265,11 +274,24 @@ func Fold(records []Record) (*RunState, error) {
 			// whenever the operator approves one call of several.
 			rs.Approvals = append(rs.Approvals, r.Decision.Tool)
 
+		case CallApprovalProtocol:
+			if r.CallApproval == nil {
+				return nil, fmt.Errorf("%w: call approval record with no payload at seq %d", ErrCorrupt, r.Seq)
+			}
+			// Inert against the turn, as a decision is: the call it names is unanswered,
+			// so the batch it belongs to is still open.
+			rs.CallApprovals = append(rs.CallApprovals, *r.CallApproval)
+
 		case TerminalProtocol:
 			if r.Terminal == nil {
 				return nil, fmt.Errorf("%w: terminal record with no payload at seq %d", ErrCorrupt, r.Seq)
 			}
 			rs.Terminal = r.Terminal
+			// A one-shot approval the run did not reach is spent here rather than carried
+			// into the next resume, where a later question going unanswered would leave it
+			// authorizing a dispatch nobody approved. A standing grant is not: it covers
+			// the conversation and outliving a suspend is the whole of what it is for.
+			rs.CallApprovals = nil
 
 		case ClaimProtocol:
 			if r.Claim == nil {

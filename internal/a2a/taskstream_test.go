@@ -58,8 +58,16 @@ func (t *scriptedTransport) Stream(_ context.Context, _ string, _ RouteHint, bod
 	return r, nil
 }
 
-func (t *scriptedTransport) WatchCancel(string, Handler) (CancelWatch, error) {
+func (t *scriptedTransport) WatchCancel(string, Handler) (TaskWatch, error) {
 	return nil, fmt.Errorf("the scripted transport does not serve")
+}
+
+func (t *scriptedTransport) WatchElicitReplies(string, Handler) (TaskWatch, error) {
+	return nil, fmt.Errorf("the scripted transport does not serve")
+}
+
+func (t *scriptedTransport) SendElicitReply(context.Context, string, string, []byte) ([]byte, error) {
+	return nil, fmt.Errorf("the scripted transport answers no questions")
 }
 
 func (t *scriptedTransport) SendCancel(_ context.Context, _, _ string, body []byte) ([]byte, error) {

@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2asurface
+package a2aendpoint
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // The codes a terminal error carries, so a caller decides on a value rather than on
@@ -46,9 +47,15 @@ type task struct {
 	ch      *Channel
 	req     *a2a.Request
 	stream  *a2a.ReplyStream
-	watch   a2a.CancelWatch
+	watch   a2a.TaskWatch
 	session string
 	log     *slog.Logger
+
+	// answers routes the caller's replies to the questions this run asked, and
+	// prompter is what the run puts them through. Both are nil when elicitation is
+	// off, which leaves the server substituting its deny prompter.
+	answers  a2a.TaskWatch
+	prompter *elicitPrompter
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -108,6 +115,20 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 		t.refuse(codeRejected, "the request id cannot be watched for cancels")
 
 		return
+	}
+
+	// The answers to this run's questions are routed from here for the same reason and
+	// on the same terms, since a question can be asked at any point in the run.
+	if c.elicits {
+		t.prompter = newElicitPrompter(t)
+
+		t.answers, err = c.stream.WatchElicitReplies(req.Request, t.handleElicitReply)
+		if err != nil {
+			log.Warn("Refusing a prompt whose answers could not be routed", "error", err)
+			t.refuse(codeRejected, "the request id cannot be watched for answers")
+
+			return
+		}
 	}
 
 	err = stream.Ack(true, "")
@@ -212,8 +233,13 @@ func (c *Channel) release(t *task) {
 // meaning "session" and must never reach Checkpoint, where it would let one caller name
 // another's journal.
 //
-// Prompter stays nil, so the server refuses every confirmation-gated tool: this channel
-// has nobody to ask. Continue stays nil, so a task is one shot.
+// Prompter is set only when elicitation is on. Nil leaves the server substituting its
+// deny prompter, which refuses every confirmation-gated tool: with the key off this
+// channel has nobody to ask. Continue stays nil, so a task is one shot.
+//
+// PromptsMayBlock stays false. The caller is on the other end of a transport rather
+// than a live connection this process holds, so a question it does not answer within
+// PromptWait gives the worker back.
 func (t *task) work(caller a2a.Caller) *serve.Work {
 	return &serve.Work{
 		// The minted session rather than the caller's request id: the id is a caller's
@@ -235,9 +261,22 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 		Budget:     budgetOf(t.req),
 		Caller:     callerOf(caller, t.req),
 		Events:     t.events(),
+		Prompter:   t.promptsThrough(),
+		PromptWait: t.ch.promptWait,
 		RunContext: t.runContext,
 		Done:       t.done,
 	}
+}
+
+// promptsThrough is the prompter the run puts its questions to, or nil when
+// elicitation is off. It is a method rather than the field so a nil *elicitPrompter
+// never reaches Work as a non-nil interface holding one.
+func (t *task) promptsThrough() toolkit.Prompter {
+	if t.prompter == nil {
+		return nil
+	}
+
+	return t.prompter
 }
 
 // events is the sink that turns the run's narration into blocks on the reply set, or
@@ -466,13 +505,28 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 	return t.stream.Error(msg)
 }
 
-// end releases the cancel subscription and the slot. It runs on every ending, including
-// the ones that never got as far as a terminal message.
+// end releases the subscriptions this task owns and the slot. It runs on every ending,
+// including the ones that never got as far as a terminal message.
+//
+// The pending questions are dropped before the subscriptions go, so an answer that
+// arrives in between is told it reached no question rather than being handed to a run
+// that has finished.
 func (t *task) end() {
+	if t.prompter != nil {
+		t.prompter.close()
+	}
+
 	if t.watch != nil {
 		err := t.watch.Close()
 		if err != nil {
 			t.log.Warn("Releasing a run's cancel watch failed", "error", err)
+		}
+	}
+
+	if t.answers != nil {
+		err := t.answers.Close()
+		if err != nil {
+			t.log.Warn("Releasing a run's answer watch failed", "error", err)
 		}
 	}
 

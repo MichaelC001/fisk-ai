@@ -10,6 +10,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -185,6 +186,138 @@ func TestApprovals_LostWhenTheCallIsNotAnswered(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
 	g.Expect(asked2.Load()).To(Equal(int64(1)))
+}
+
+// TestApprovals_AnUnansweredQuestionIsAskedAgain covers the operator who interrupts at
+// an approval prompt, closes the input, or whose run ends while the question is up. The
+// gate records nothing, so the call stays unanswered in the journal and the resume puts
+// the same question rather than reading a refusal nobody gave.
+func TestApprovals_AnUnansweredQuestionIsAskedAgain(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+
+	store, err := runstatefile.NewFileStore(t.TempDir())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	var ran atomic.Int64
+	tool := gatedTool(t, "stream_rm", &ran)
+
+	opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint) agent.Options {
+		return agent.Options{
+			Config:       agenttest.Config(t, app),
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{"remove the stream"},
+			Provider:     provider,
+			SessionStore: store,
+			Checkpoint:   cp,
+			CustomTools:  []toolkit.Tool{tool},
+		}
+	}
+
+	// Run 1: the operator interrupts at the prompt. The run suspends and the command
+	// does not run.
+	interrupted := agenttest.NewScriptedPrompter(t)
+	interrupted.ApproveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+		return toolkit.ConfirmNo, fmt.Errorf("%w: interrupt", toolkit.ErrPromptAborted)
+	}
+
+	res1, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t, agenttest.ToolUseResponse("c1", "stream_rm", json.RawMessage(`{}`))),
+		agent.Checkpoint{Enabled: true},
+	), agenttest.NewRecordingEvents(), interrupted)
+	g.Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
+	g.Expect(ran.Load()).To(BeZero())
+
+	// Nothing about the call reached the journal, so there is no answer to replay.
+	rs, err := store.Load(res1.SessionID)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(rs.Approvals).To(BeEmpty())
+
+	// Run 2: the same question is put again, and this time it is answered.
+	var asked atomic.Int64
+	res2, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t, agenttest.TextResponse("the stream is gone")),
+		agent.Checkpoint{ResumeID: res1.SessionID},
+	), agenttest.NewRecordingEvents(), alwaysPrompter(t, &asked))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+	g.Expect(asked.Load()).To(Equal(int64(1)))
+	g.Expect(ran.Load()).To(Equal(int64(1)))
+}
+
+// TestApprovals_AOneShotAnswerRunsTheCallItNames covers the answer that arrives after
+// the run gave up on its question. The operator answered "allow once" for one call, so
+// the resume dispatches that call without asking and asks about the next one.
+func TestApprovals_AOneShotAnswerRunsTheCallItNames(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+
+	store, err := runstatefile.NewFileStore(t.TempDir())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	var ran atomic.Int64
+	tool := gatedTool(t, "stream_rm", &ran)
+
+	opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint) agent.Options {
+		return agent.Options{
+			Config:       agenttest.Config(t, app),
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{"remove the stream"},
+			Provider:     provider,
+			SessionStore: store,
+			Checkpoint:   cp,
+			CustomTools:  []toolkit.Tool{tool},
+		}
+	}
+
+	// Run 1: nobody answers the question, so the run suspends with the call unanswered.
+	unanswered := agenttest.NewScriptedPrompter(t)
+	unanswered.ApproveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+		return toolkit.ConfirmNo, fmt.Errorf("%w: the caller did not answer", toolkit.ErrPromptAborted)
+	}
+
+	res1, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t, agenttest.ToolUseResponse("c1", "stream_rm", json.RawMessage(`{}`))),
+		agent.Checkpoint{Enabled: true},
+	), agenttest.NewRecordingEvents(), unanswered)
+	g.Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
+	g.Expect(ran.Load()).To(BeZero())
+
+	// The answer arrives out of band and is journaled against the call it was asked
+	// about, which is what wakes the session.
+	supplyCallApproval(t, store, res1.SessionID, "c1", "stream_rm")
+
+	rs, err := store.Load(res1.SessionID)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(rs.CallApprovals).To(Equal([]runstate.CallApprovalRecord{{ToolUseID: "c1", ToolName: "stream_rm"}}))
+
+	// Run 2: c1 runs without a question. The model then calls the same tool again, and
+	// that call is asked about, since the answer covered one dispatch.
+	//
+	// The prompter answers "once" rather than "always", so a question put about c1 shows
+	// up in the count instead of granting a standing approval that covers c2 as well.
+	var asked atomic.Int64
+	once := agenttest.NewScriptedPrompter(t)
+	once.ApproveFn = func(toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+		asked.Add(1)
+		return toolkit.ConfirmOnce, nil
+	}
+
+	res2, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t,
+			agenttest.ToolUseResponse("c2", "stream_rm", json.RawMessage(`{}`)),
+			agenttest.TextResponse("both streams are gone"),
+		),
+		agent.Checkpoint{ResumeID: res1.SessionID},
+	), agenttest.NewRecordingEvents(), once)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+	g.Expect(ran.Load()).To(Equal(int64(2)))
+	g.Expect(asked.Load()).To(Equal(int64(1)))
 }
 
 // TestApprovals_NotHonoredWithNoOperator is what makes a durable grant safe to
@@ -404,6 +537,24 @@ func TestApprovals_RecordedForACallThatDefers(t *testing.T) {
 }
 
 // journalRecords reads a stored run's records in order.
+// supplyCallApproval journals the answer an operator gave for one gated call while the
+// run was suspended, which is what a waker appends before it resumes the session.
+func supplyCallApproval(t *testing.T, store runstate.Store, id, toolUseID, toolName string) {
+	t.Helper()
+	g := NewWithT(t)
+
+	j, err := store.Open(id)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	err = j.Append(j.LastSeq()+1, runstate.Record{
+		Protocol:     runstate.CallApprovalProtocol,
+		Optional:     true,
+		CallApproval: &runstate.CallApprovalRecord{ToolUseID: toolUseID, ToolName: toolName},
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(j.Close()).To(Succeed())
+}
+
 func journalRecords(t *testing.T, store runstate.Store, id string) []runstate.Record {
 	t.Helper()
 	g := NewWithT(t)

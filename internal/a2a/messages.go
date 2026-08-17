@@ -191,6 +191,187 @@ type AgentCard struct {
 	Tools       []ToolDescriptor `json:"tools,omitempty"`
 }
 
+// ElicitKind names what a run is asking the caller for. The four are the four
+// methods of toolkit.Prompter, so a caller that answers all of them can drive every
+// question the harness knows how to put to a person.
+type ElicitKind string
+
+const (
+	// ElicitApprove asks whether a confirmation-gated command may run. The answer is
+	// an ElicitChoice, since approving for the rest of the conversation is a wider
+	// claim than approving one call.
+	ElicitApprove ElicitKind = "approve"
+	// ElicitConfirm asks a yes/no question.
+	ElicitConfirm ElicitKind = "confirm"
+	// ElicitSelect asks the caller to choose one of Options, answered by index.
+	ElicitSelect ElicitKind = "select"
+	// ElicitInput asks for a free text value.
+	ElicitInput ElicitKind = "input"
+)
+
+// ElicitChoice is the answer to an ElicitApprove question, mirroring
+// toolkit.ConfirmChoice.
+type ElicitChoice string
+
+const (
+	// ChoiceNo declines the command.
+	ChoiceNo ElicitChoice = "no"
+	// ChoiceOnce runs the command this time. It authorizes the one call that asked
+	// and nothing else.
+	ChoiceOnce ElicitChoice = "once"
+	// ChoiceAlways runs the command and stops asking for that tool for the rest of
+	// the conversation, which the answering party is claiming on behalf of an
+	// operator it can reach.
+	ChoiceAlways ElicitChoice = "always"
+)
+
+// ElicitAnswer names which field of an ElicitReply carries the answer, so a zero
+// index and an absent one are never confused.
+type ElicitAnswer string
+
+const (
+	// AnswerChoice reads Choice, for an approve question.
+	AnswerChoice ElicitAnswer = "choice"
+	// AnswerConfirmed reads Confirmed, for a confirm question.
+	AnswerConfirmed ElicitAnswer = "confirmed"
+	// AnswerIndex reads Index, for a select question.
+	AnswerIndex ElicitAnswer = "index"
+	// AnswerValue reads Value, for an input question.
+	AnswerValue ElicitAnswer = "value"
+	// AnswerNoOperator says the caller has nobody to ask. It is a legitimate answer
+	// rather than a failure, and it fails closed: a gated command does not run.
+	AnswerNoOperator ElicitAnswer = "no_operator"
+)
+
+// ElicitRequest is a question a running task puts to the caller that submitted it,
+// sent on the task's reply set. Header.Request names the task and QuestionID names
+// the question within it, since one task may ask several.
+//
+// The text fields are model-supplied and are sanitized before they are sent, as they
+// are before a terminal prompter renders them. A caller displaying one sanitizes
+// again for its own display.
+type ElicitRequest struct {
+	Header
+
+	// QuestionID correlates the reply. It is unique within the task.
+	QuestionID string `json:"question_id"`
+	// Kind selects which of the four questions this is and which fields below carry
+	// its detail.
+	Kind ElicitKind `json:"kind"`
+	// Question is the text to put to the operator, for confirm, select and input.
+	Question string `json:"question,omitempty"`
+	// Command is the command path an approve question is about, e.g. "stream rm".
+	Command string `json:"command,omitempty"`
+	// Display is the full command line an approve question shows, already sanitized.
+	Display string `json:"display,omitempty"`
+	// Tag is the tag that gated the command, e.g. ai:confirm, named so the operator
+	// sees why they are being asked.
+	Tag string `json:"tag,omitempty"`
+	// Options are the choices a select question offers, in the order to show them.
+	Options []string `json:"options,omitempty"`
+	// Default is the value an input question pre-fills for the operator to accept or
+	// edit.
+	Default string `json:"default,omitempty"`
+}
+
+// NewElicitRequest builds an ElicitRequest with the protocol id and kind set.
+func NewElicitRequest(kind ElicitKind, questionID string) *ElicitRequest {
+	r := &ElicitRequest{QuestionID: questionID, Kind: kind}
+	r.Protocol = ElicitRequestProtocol
+
+	return r
+}
+
+// ElicitReply answers one ElicitRequest, addressed to the task that asked and
+// correlated by QuestionID. Answer says which field to read.
+//
+// Nothing authenticates it beyond the transport's own permissions, exactly as with a
+// cancel: whoever may address the running task may answer its questions, and one of
+// those answers approves a confirmation-gated command.
+type ElicitReply struct {
+	Header
+
+	// QuestionID is the question this answers.
+	QuestionID string `json:"question_id"`
+	// Answer names the field carrying the answer, or reports that the caller has
+	// nobody to ask.
+	Answer ElicitAnswer `json:"answer"`
+	// Choice answers an approve question.
+	Choice ElicitChoice `json:"choice,omitempty"`
+	// Confirmed answers a confirm question.
+	Confirmed bool `json:"confirmed,omitempty"`
+	// Index answers a select question, as a position in the Options that were sent.
+	Index int `json:"index,omitempty"`
+	// Value answers an input question. An empty string is a valid answer, which is
+	// why Answer rather than emptiness says what was given.
+	Value string `json:"value,omitempty"`
+}
+
+// NewElicitReplyFromRequest builds the reply to ask, for a caller that then fills in the
+// value for answer. It correlates the reply to the task and to the question, and stamps
+// it as coming from sender, which addresses it back to the agent that asked.
+//
+// Answering a question means filling five header fields correctly, and a reply that gets
+// any of them wrong reaches no question and is refused. Deriving them from the request
+// is what stops each caller reimplementing that.
+func NewElicitReplyFromRequest(ask *ElicitRequest, sender string, answer ElicitAnswer) *ElicitReply {
+	r := NewElicitReply(ask.QuestionID, answer)
+	StampReply(&r.Header, &ask.Header, sender)
+
+	return r
+}
+
+// NewApproveReply answers an ElicitApprove question with the operator's three-way choice.
+func NewApproveReply(ask *ElicitRequest, sender string, choice ElicitChoice) *ElicitReply {
+	r := NewElicitReplyFromRequest(ask, sender, AnswerChoice)
+	r.Choice = choice
+
+	return r
+}
+
+// NewConfirmReply answers an ElicitConfirm question yes or no.
+func NewConfirmReply(ask *ElicitRequest, sender string, confirmed bool) *ElicitReply {
+	r := NewElicitReplyFromRequest(ask, sender, AnswerConfirmed)
+	r.Confirmed = confirmed
+
+	return r
+}
+
+// NewSelectReply answers an ElicitSelect question with a position in the Options that
+// were sent. An index outside them is refused by the agent that asked, since it is a
+// choice nobody offered.
+func NewSelectReply(ask *ElicitRequest, sender string, index int) *ElicitReply {
+	r := NewElicitReplyFromRequest(ask, sender, AnswerIndex)
+	r.Index = index
+
+	return r
+}
+
+// NewInputReply answers an ElicitInput question with a value, which may be empty.
+func NewInputReply(ask *ElicitRequest, sender string, value string) *ElicitReply {
+	r := NewElicitReplyFromRequest(ask, sender, AnswerValue)
+	r.Value = value
+
+	return r
+}
+
+// NewNoOperatorReply answers any question with the fact that nobody is there to answer
+// it. It is an answer rather than a failure, and it fails closed: the agent that asked
+// treats it as a refusal, so a gated command does not run.
+func NewNoOperatorReply(ask *ElicitRequest, sender string) *ElicitReply {
+	return NewElicitReplyFromRequest(ask, sender, AnswerNoOperator)
+}
+
+// NewElicitReply builds an ElicitReply with the protocol id set. The caller fills the
+// header itself, where NewElicitReplyFromRequest derives it from the question and the
+// five constructors above set an answer and its value together.
+func NewElicitReply(questionID string, answer ElicitAnswer) *ElicitReply {
+	r := &ElicitReply{QuestionID: questionID, Answer: answer}
+	r.Protocol = ElicitReplyProtocol
+
+	return r
+}
+
 // DiscoveryRequest asks an agent to describe itself. The reply is a
 // DiscoveryReply.
 type DiscoveryRequest struct {

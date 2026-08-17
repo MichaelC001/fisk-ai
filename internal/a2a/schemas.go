@@ -34,6 +34,9 @@ var protocolSchemaFile = map[string]string{
 	ToolRequestProtocol: "tool.request.json",
 	ToolReplyProtocol:   "tool.reply.json",
 
+	ElicitRequestProtocol: "elicit.request.json",
+	ElicitReplyProtocol:   "elicit.reply.json",
+
 	DiscoveryRequestProtocol: "discovery.request.json",
 	DiscoveryReplyProtocol:   "discovery.reply.json",
 }

@@ -73,7 +73,7 @@ type Config struct {
 	Include *ToolFilter `json:"include,omitempty" yaml:"include,omitempty"`
 	// GlobalFlags is an allowlist of the wrapped application's global (application-
 	// level) flag names to expose to the model as an argument on every leaf command
-	// tool. It is how an operator surfaces a safe global such as nats's --context,
+	// tool. It is how an operator supplies a safe global such as nats's --context,
 	// which selects a stored connection profile, while keeping sensitive globals such
 	// as --user and --password hidden from the model. A name is the long flag name,
 	// with or without the leading dashes; each is validated against the application's
@@ -426,7 +426,7 @@ type MemoryConfig struct {
 	// same store still does.
 	//
 	// It is what a fleet of workers sharing one store usually wants. The store is
-	// process-wide and its contents reach the system prompt, so a surface taking
+	// process-wide and its contents reach the system prompt, so an endpoint taking
 	// caller-supplied prompt text can otherwise be talked into planting something a
 	// later run reads back as its own note.
 	ReadOnly bool `json:"read_only,omitempty" yaml:"read_only,omitempty"`
@@ -511,7 +511,7 @@ const (
 
 	// defaultLLMProvider is the model backend used when llm.provider is unset, so a
 	// zero-config agent keeps working. It must match the name the provider registers
-	// itself under (internal/llm/anthropic); a mismatch surfaces at run start as an
+	// itself under (internal/llm/anthropic); a mismatch fails at run start with an
 	// unknown-provider error rather than silently.
 	defaultLLMProvider = "anthropic"
 )
@@ -616,13 +616,13 @@ type AgentExpose struct {
 	MCP *ExposedMCPConfig `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	// A2A opts this agent in to answering other agents over a2a and says what it
 	// answers: serve_tools for tool requests, a prompts block for prompts. Its presence
-	// is the switch for the a2a surfaces of `fisk-ai serve`, and a block asking for
-	// neither surface is refused unless it carries request_timeout, which bounds the
+	// is the switch for the a2an endpoints of `fisk-ai serve`, and a block asking for
+	// neither endpoint is refused unless it carries request_timeout, which bounds the
 	// calls this agent makes and which an agent that answers nothing still has.
 	//
 	// Both use one transport under one identity, since discovery, tools and tasks are
 	// paths of a single micro service, so the tuning below belongs to the block rather
-	// than to either surface.
+	// than to either endpoint.
 	A2A *ExposedA2AConfig `json:"a2a,omitempty" yaml:"a2a,omitempty"`
 	// Jobs opts this agent in to taking whole units of work off a Choria asyncjobs work
 	// queue. Its presence is the switch for the queued-jobs intake of `fisk-ai serve`,
@@ -709,7 +709,7 @@ type ExposedA2AConfig struct {
 	// ToolTimeoutString below bound those calls.
 	ServeTools bool `json:"serve_tools,omitempty" yaml:"serve_tools,omitempty"`
 	// Prompts answers prompts from peers, which runs the agent loop over each one and
-	// streams what it produces back to the caller. Its presence enables the surface
+	// streams what it produces back to the caller. Its presence enables the endpoint
 	// and an empty block is a working configuration.
 	//
 	// It differs in kind from ServeTools above, and the difference matters. That
@@ -730,7 +730,7 @@ type ExposedA2AConfig struct {
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 	// RequestTimeoutString bounds a request this agent sends to a peer, as a duration
 	// string (e.g. 30s), where tool_timeout bounds a call this agent answers. An agent
-	// that exposes neither surface still sets it, since importing remote tools and
+	// that exposes neither endpoint still sets it, since importing remote tools and
 	// calling them are requests it makes.
 	//
 	// It is how long to wait for the next message before treating the peer as gone,
@@ -761,13 +761,13 @@ type ExposedA2AConfig struct {
 // multiplies spend without anyone having asked for it.
 const DefaultPromptsWorkers = 1
 
-// ExposedPromptsConfig configures the prompt-answering surface: how many prompts from
+// ExposedPromptsConfig configures the prompt-answering endpoint: how many prompts from
 // peers this process runs at once.
 //
 // What is deliberately not here is as much of the shape as what is. The transport, the
 // identity and the tool bounds belong to the a2a block around it; the session store is
 // harness.sessions and the per-tool bound is harness.tool_timeout, both shared with
-// every other surface.
+// every other endpoint.
 type ExposedPromptsConfig struct {
 	// Workers is how many prompts this process answers at once, and the number
 	// admission refuses a caller above: a peer that arrives when every worker is busy
@@ -776,6 +776,17 @@ type ExposedPromptsConfig struct {
 	// The --workers flag does not reach it. That flag sizes the queue intake, and one
 	// flag setting two numbers could not be reported honestly on a startup banner.
 	Workers int `json:"workers,omitempty" yaml:"workers,omitempty"`
+
+	// Elicit lets a run ask the caller the questions it would put to an operator at a
+	// terminal: whether a confirmation-gated command may run, and the three
+	// human-in-the-loop questions. The question travels on the task's reply set and
+	// the answer on the task's own subject.
+	//
+	// Off by default, which leaves every confirmation-gated tool refused, because
+	// answering one of these decides what the run does. Whoever may address the
+	// running task may answer its questions, so on NATS the access control is the
+	// permission to publish on that subject.
+	Elicit bool `json:"elicit,omitempty" yaml:"elicit,omitempty"`
 }
 
 // Defaults for the queued-jobs intake. The queue and task type default to the values
@@ -801,7 +812,7 @@ const (
 // time, retry cap and concurrency belong to the queue and are set with `ajc`, then read
 // from the bound consumer at startup, because stating them in two places is one place
 // to get them out of step. The session store is harness.sessions and the tool bound is
-// harness.tool_timeout, both shared with every other surface.
+// harness.tool_timeout, both shared with every other endpoint.
 type ExposedJobsConfig struct {
 	// Queue is the work queue to consume. It must already exist: the worker binds to
 	// it and creates nothing, so its run time and retry cap stay the operator's.
@@ -827,7 +838,7 @@ type ExposedJobsConfig struct {
 	NatsContext string `json:"nats_context,omitempty" yaml:"nats_context,omitempty"`
 	// MaxPayload bounds a task payload, in bytes, before anything decodes it; 0 uses
 	// the worker's own default. It is configurable because it is the only bound an
-	// operator has on a third party's input to a surface whose sole access control is
+	// operator has on a third party's input to an endpoint whose sole access control is
 	// permission to write to the queue.
 	MaxPayload int `json:"max_payload,omitempty" yaml:"max_payload,omitempty"`
 }
@@ -888,7 +899,7 @@ const (
 	// is needed, since there is no prompt or model in that mode.
 	ModeMCP
 	// ModeServe validates a config for fisk-ai serve, which hosts the agent behind
-	// whichever surfaces the file enables. It checks what each of those surfaces
+	// whichever endpoints the file enables. It checks what each of those endpoints
 	// needs and nothing else: a worker serving only tools runs no agent loop, so it
 	// needs neither a prompt nor a model, and one taking queued jobs needs both.
 	ModeServe
@@ -955,8 +966,8 @@ func Validate(cfg *Config) error {
 // ValidateForMode checks that the fields required by mode are set. application_path
 // is optional for ModeAgent and ModeMCP, which can run on built-in and remote tools
 // alone. ModeMCP needs nothing more, since it serves tools and uses neither a prompt
-// nor a model. ModeServe checks each surface the file enables against what that
-// surface needs. ModeAgent additionally needs a model, and a prompt and identity
+// nor a model. ModeServe checks each endpoint the file enables against what that
+// endpoint needs. ModeAgent additionally needs a model, and a prompt and identity
 // unless the agent is also exposed over MCP.
 func ValidateForMode(cfg *Config, mode Mode) error {
 	if cfg == nil {
@@ -998,7 +1009,7 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	}
 
 	// An MCP-only agent needs neither: it serves tools and runs no agent loop. A jobs
-	// intake and a prompt surface each run the whole loop, so they need both, and the
+	// intake and a prompt endpoint each run the whole loop, so they need both, and the
 	// waiver must not extend to a config that carries an mcp block as well. Without
 	// this a config with both parses clean and fails later inside the channel, naming
 	// no key in the file.
@@ -1026,10 +1037,10 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	return nil
 }
 
-// validateServe checks what the surfaces a serve configuration enables need, each
+// validateServe checks what the endpoints a serve configuration enables need, each
 // error naming the block that asked for the field.
 //
-// A file enabling no surface passes. The command answers that itself with a message
+// A file enabling no endpoint passes. The command answers that itself with a message
 // naming the blocks that fix it, and a validator getting there first would replace a
 // good message with a worse one.
 func validateServe(cfg *Config) error {
@@ -1051,19 +1062,19 @@ func validateServe(cfg *Config) error {
 		}
 	}
 
-	// An a2a block that asks for neither surface would register nothing, so it is
+	// An a2a block that asks for neither endpoint would register nothing, so it is
 	// refused here rather than starting a worker that answers no path at all.
 	//
 	// request_timeout is the exception, since it bounds what this agent asks of peers
 	// rather than what it answers: an agent that imports remote tools and exposes
-	// nothing has no surface to enable and still has a wait to set.
+	// nothing has no endpoint to enable and still has a wait to set.
 	if cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.A2A != nil && !cfg.A2AEnabled() {
 		if cfg.Expose.Agent.A2A.RequestTimeoutString == "" {
 			return fmt.Errorf("expose.agent.a2a enables nothing: set serve_tools: true to answer tool requests, add a prompts block to answer prompts, or set request_timeout alone to bound the requests this agent sends")
 		}
 	}
 
-	// Both surfaces answer over one connection, so the context is required once for
+	// Both endpoints answer over one connection, so the context is required once for
 	// whichever of them is on.
 	if cfg.A2AEnabled() && cfg.NatsContext == "" {
 		return fmt.Errorf("nats_context is required when expose.agent.a2a is set: it is the connection this agent answers on")
@@ -1071,8 +1082,8 @@ func validateServe(cfg *Config) error {
 
 	// Serving tools engages no loop, so it needs neither a prompt nor a model. It does
 	// need something to serve: no built-in declares a2a exposure, so an
-	// application-less surface would start with an empty tool set. That is an earlier,
-	// clearer version of the empty-set error the surface itself produces; when a
+	// application-less endpoint would start with an empty tool set. That is an earlier,
+	// clearer version of the empty-set error the endpoint itself produces; when a
 	// built-in first opts into a2a, delete this and let the downstream check do the
 	// work.
 	if cfg.A2AServeToolsEnabled() && cfg.ApplicationPath == "" {
@@ -1515,10 +1526,10 @@ func (c *Config) ConfirmOverMCPMode() string {
 }
 
 // A2AEnabled reports whether this agent answers other agents over a2a in any way,
-// which is expose.agent.a2a asking for at least one of its surfaces. Answering is off
+// which is expose.agent.a2a asking for at least one of its endpoints. Answering is off
 // unless explicitly enabled, so a config that says nothing exposes nothing.
 //
-// It answers for the transport rather than for either surface: one connection, one
+// It answers for the transport rather than for either endpoint: one connection, one
 // identity and one micro service carry both, so a caller deciding whether to dial asks
 // this and a caller deciding what to register asks the two below.
 func (c *Config) A2AEnabled() bool {
@@ -1537,7 +1548,7 @@ func (c *Config) A2AServeToolsEnabled() bool {
 
 // A2APromptsEnabled reports whether peers may send this agent prompts to run, which is
 // the presence of expose.agent.a2a.prompts. Every field under it defaults, so an empty
-// block enables the surface.
+// block enables the endpoint.
 func (c *Config) A2APromptsEnabled() bool {
 	if c.Expose == nil || c.Expose.Agent == nil || c.Expose.Agent.A2A == nil {
 		return false
@@ -1547,7 +1558,7 @@ func (c *Config) A2APromptsEnabled() bool {
 }
 
 // A2APromptsWorkers returns how many prompts from peers this process answers at once, or
-// the default when unset. It is zero when the surface is not configured.
+// the default when unset. It is zero when the endpoint is not configured.
 func (c *Config) A2APromptsWorkers() int {
 	if !c.A2APromptsEnabled() {
 		return 0
@@ -1557,6 +1568,18 @@ func (c *Config) A2APromptsWorkers() int {
 	}
 
 	return c.Expose.Agent.A2A.Prompts.Workers
+}
+
+// A2APromptsElicit reports whether a run answering a peer's prompt may put its
+// questions to that peer. It is false when the prompts endpoint is not configured, and
+// false by default when it is: a caller that answers no questions must not be asked to
+// approve a gated command.
+func (c *Config) A2APromptsElicit() bool {
+	if !c.A2APromptsEnabled() {
+		return false
+	}
+
+	return c.Expose.Agent.A2A.Prompts.Elicit
 }
 
 // A2ATransportName is the a2a transport binding in use. It is fixed to NATS until
@@ -1791,7 +1814,7 @@ func normalizeConfirmOverMCP(v string) (string, error) {
 //
 // This is the SELECTION half of MCP exposure: which of the servable built-ins this
 // operator wants served. The CAPABILITY half, whether a tool may ever be served at
-// all, is declared on the tool itself and applied by the serving surface, which can
+// all, is declared on the tool itself and applied by the serving endpoint, which can
 // only narrow this list further and never widen it. Both gates apply, so a tool
 // added to a built-in set is not served on the strength of a neighbour's selection.
 // The duplication is deliberate: config is the lowest layer and cannot import the

@@ -2,13 +2,14 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2asurface
+package a2aendpoint
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
@@ -37,6 +38,14 @@ type Channel struct {
 	stream    a2a.StreamingTransport
 	validator *a2a.Validator
 	log       *slog.Logger
+
+	// elicits is expose.agent.a2a.prompts.elicit: with it off the channel supplies no
+	// prompter and the server refuses every confirmation-gated tool, which is what a
+	// caller that answers nothing needs. promptWait is how long a question is held
+	// open, taken from request_timeout since it measures the same thing, and it reaches
+	// the server on Work.PromptWait.
+	elicits    bool
+	promptWait time.Duration
 
 	// work hands one admitted prompt to Next. It is unbuffered: admission has already
 	// reserved the slot, so the wait here is for the server's puller to come round
@@ -79,15 +88,17 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 	}
 
 	c := &Channel{
-		identity:  cfg.Identity,
-		workers:   cfg.A2APromptsWorkers(),
-		held:      held,
-		stream:    stream,
-		validator: validator,
-		log:       log.With("channel", channelName),
-		work:      make(chan *serve.Work),
-		shutdown:  make(chan struct{}),
-		inFlight:  make(map[string]*task),
+		identity:   cfg.Identity,
+		workers:    cfg.A2APromptsWorkers(),
+		held:       held,
+		stream:     stream,
+		validator:  validator,
+		log:        log.With("channel", channelName),
+		elicits:    cfg.A2APromptsElicit(),
+		promptWait: cfg.A2ARequestTimeout(),
+		work:       make(chan *serve.Work),
+		shutdown:   make(chan struct{}),
+		inFlight:   make(map[string]*task),
 	}
 
 	err = held.transport.Serve(a2a.OpTask, c.handle)
@@ -95,7 +106,7 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 		return nil, fmt.Errorf("registering the task handler: %w", err)
 	}
 
-	c.log.Info("Answering prompts over a2a", "identity", cfg.Identity, "workers", c.workers)
+	c.log.Info("Answering prompts over a2a", "identity", cfg.Identity, "workers", c.workers, "elicit", c.elicits)
 
 	return c, nil
 }
@@ -110,7 +121,7 @@ func (c *Channel) Name() string { return channelName }
 
 // Describe returns the addresses a peer sends a prompt to and addresses a cancel under,
 // for display. The transport answers it, so a later binding describes itself in its own
-// terms and this surface never builds an address.
+// terms and this endpoint never builds an address.
 func (c *Channel) Describe() []a2a.DescLine { return c.stream.DescribeTasks(c.identity) }
 
 // Concurrency is how many prompts this channel may have running at once, which admission
@@ -120,7 +131,7 @@ func (c *Channel) Concurrency() int { return c.workers }
 // Next blocks until a peer's prompt has been admitted and returns it as work.
 //
 // It returns serve.ErrChannelDone once the channel has been closed, so the server stops
-// asking a surface that no longer answers.
+// asking an endpoint that no longer answers.
 func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 	select {
 	case w := <-c.work:
@@ -140,7 +151,7 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 // a terminal message rather than left as an ack nothing ever answers.
 //
 // It is idempotent and returns the same answer to every caller, since a program that
-// drains on one signal and stops on the next releases every surface twice.
+// drains on one signal and stops on the next releases every endpoint twice.
 func (c *Channel) Close() error {
 	c.closeOnce.Do(func() {
 		// Shutdown first, so intake refuses a request that arrives while the transport is

@@ -18,7 +18,7 @@ import (
 
 // Job is one unit of work to put on a queue a fisk-ai worker consumes.
 //
-// The submitting surface is the engine's own client and no code of ours is in that
+// A caller submits through the engine's own client and no code of ours is in that
 // path, so a caller assembles a v1 request by hand and the framing a one-shot job does
 // not care about is still required of it. What NewJob is for is the three mistakes that
 // otherwise fail at the worker, on another machine, as one line in the task's LastErr.

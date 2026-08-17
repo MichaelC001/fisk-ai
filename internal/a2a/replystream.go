@@ -97,6 +97,15 @@ func (s *ReplyStream) ToolReply(reply *ToolReply) error {
 	return s.send(&reply.Header, reply, true)
 }
 
+// Elicit publishes a question the run is putting to the caller. It is not terminal:
+// the run continues, and the answer arrives on the task's own inbound path rather
+// than on this set.
+func (s *ReplyStream) Elicit(ask *ElicitRequest) error {
+	ask.Protocol = ElicitRequestProtocol
+
+	return s.send(&ask.Header, ask, false)
+}
+
 // Sequence reports the number stamped on the last message sent, which is how many
 // messages of the set have gone out. It is 0 before the ack.
 func (s *ReplyStream) Sequence() uint64 { return s.seq }

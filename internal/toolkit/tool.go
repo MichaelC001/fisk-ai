@@ -7,6 +7,7 @@ package toolkit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -139,14 +140,20 @@ func Tools[T Tool](in []T) []Tool {
 // tool's own pointer, because it exists to be observed and observation must not hand out
 // a handle on state the tool owns.
 //
-// The third return is non-nil only for a deferral (see DeferResult): the tool has no
-// result now and there is no result block to return, so the caller decides whether it
-// can carry a deferred answer. Every other failure is still reported as an error result
+// The third return is non-nil for the two endings that produce no result at all. A
+// deferral (see DeferResult) says the answer arrives later, so the caller decides
+// whether it can carry one. ErrPromptAborted says a question reached an operator who
+// never answered it, so the call is left unanswered for the caller to end the run on:
+// a result built here would be journaled and replayed on every later resume as the
+// answer the operator did not give. Every other failure is reported as an error result
 // with a nil error, because the model is what should reason about it.
 func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps) (llm.ToolResultBlock, *CommandExec, error) {
 	out, err := t.Execute(ctx, use.Input, deps)
 	if err != nil {
 		if _, deferred := IsDeferred(err); deferred {
+			return llm.ToolResultBlock{}, nil, err
+		}
+		if errors.Is(err, ErrPromptAborted) {
 			return llm.ToolResultBlock{}, nil, err
 		}
 

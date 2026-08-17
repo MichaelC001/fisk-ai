@@ -496,7 +496,7 @@ expose:
 			Expect(cfg.A2AEnabled()).To(BeFalse())
 		})
 
-		It("Should reject an a2a block that sets neither a surface nor a request timeout", func() {
+		It("Should reject an a2a block that sets neither an endpoint nor a request timeout", func() {
 			_, err := ParseConfigForMode([]byte(`
 identity: agent1
 application_path: /usr/bin/nats
@@ -649,7 +649,7 @@ global_flags:
 			Expect(cfg).To(BeNil())
 		})
 
-		It("Should require application_path for the tool surface", func() {
+		It("Should require application_path for the tool endpoint", func() {
 			cfg, err := ParseConfigForMode([]byte(`
 identity: agent1
 nats_context: ctx
@@ -942,11 +942,11 @@ expose:
 			Expect(cfg.A2AEnabled()).To(BeTrue())
 			Expect(cfg.A2AServeToolsEnabled()).To(BeTrue())
 			Expect(cfg.A2APromptsEnabled()).To(BeFalse())
-			Expect(cfg.A2APromptsWorkers()).To(Equal(0), "a surface that is off bounds nothing")
+			Expect(cfg.A2APromptsWorkers()).To(Equal(0), "an endpoint that is off bounds nothing")
 			Expect(cfg.MCPEnabled()).To(BeFalse())
 		})
 
-		// The two surfaces are independent, and either one on its own is what puts this
+		// The two endpoints are independent, and either one on its own is what puts this
 		// agent on the network.
 		It("Should report a2a enabled when the block answers prompts alone", func() {
 			cfg, err := ParseConfigForMode([]byte(`
@@ -1070,7 +1070,7 @@ application_path: /usr/bin/nats
 			Expect(Validate(cfg)).To(Succeed())
 		})
 
-		It("Should fail in serve mode when the tool surface has no application_path", func() {
+		It("Should fail in serve mode when the tool endpoint has no application_path", func() {
 			cfg.ApplicationPath = ""
 			cfg.NatsContext = "ctx"
 			cfg.Expose = &ExposeConfig{Agent: &AgentExpose{A2A: &ExposedA2AConfig{ServeTools: true}}}
@@ -1079,7 +1079,7 @@ application_path: /usr/bin/nats
 			Expect(err.Error()).To(ContainSubstring("application_path is required when expose.agent.a2a.serve_tools is set"))
 		})
 
-		It("Should fail in serve mode when the a2a block asks for no surface", func() {
+		It("Should fail in serve mode when the a2a block asks for no endpoint", func() {
 			cfg.NatsContext = "ctx"
 			cfg.Expose = &ExposeConfig{Agent: &AgentExpose{A2A: &ExposedA2AConfig{ToolTimeoutString: "60s"}}}
 			err := ValidateForMode(cfg, ModeServe)
@@ -1087,7 +1087,7 @@ application_path: /usr/bin/nats
 			Expect(err.Error()).To(ContainSubstring("expose.agent.a2a enables nothing"))
 		})
 
-		It("Should fail in serve mode when a prompt surface has no way to reach NATS", func() {
+		It("Should fail in serve mode when a prompt endpoint has no way to reach NATS", func() {
 			cfg.NatsContext = ""
 			cfg.Expose = &ExposeConfig{Agent: &AgentExpose{A2A: &ExposedA2AConfig{Prompts: &ExposedPromptsConfig{}}}}
 			err := ValidateForMode(cfg, ModeServe)
@@ -1097,7 +1097,7 @@ application_path: /usr/bin/nats
 
 		// Answering a prompt runs the whole loop, so it needs what a queued job needs
 		// rather than what a served tool call needs.
-		It("Should fail in serve mode when a prompt surface has no model", func() {
+		It("Should fail in serve mode when a prompt endpoint has no model", func() {
 			cfg.NatsContext = "ctx"
 			cfg.LLM.Model = ""
 			cfg.Expose = &ExposeConfig{Agent: &AgentExpose{A2A: &ExposedA2AConfig{Prompts: &ExposedPromptsConfig{}}}}
@@ -1106,7 +1106,7 @@ application_path: /usr/bin/nats
 			Expect(err.Error()).To(ContainSubstring("llm.model is required when expose.agent.a2a.prompts is set"))
 		})
 
-		It("Should accept a prompt surface with no application at all", func() {
+		It("Should accept a prompt endpoint with no application at all", func() {
 			cfg.ApplicationPath = ""
 			cfg.NatsContext = "ctx"
 			cfg.Expose = &ExposeConfig{Agent: &AgentExpose{A2A: &ExposedA2AConfig{Prompts: &ExposedPromptsConfig{Workers: 4}}}}

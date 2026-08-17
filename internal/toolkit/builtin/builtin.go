@@ -7,6 +7,7 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -165,7 +166,7 @@ func askHumanConfirmTool() *functool.Tool {
 			"Use this only for a decision you should not make alone: confirming an irreversible or destructive action before you take it (deleting data, overwriting, restarting a service), or resolving a genuine ambiguity that turns on the operator's intent. " +
 			"Do not use it for anything you can determine yourself, to narrate progress, or to ask permission for ordinary read-only steps. " +
 			"The operator is a person at a terminal and each call interrupts them, so ask only when their answer changes what you do next. " +
-			"It returns {\"confirmed\": true} only when the operator answered yes; any other outcome (a no, or no operator could be reached) returns {\"confirmed\": false} with a reason. A false result is authoritative and must not be retried.",
+			"It returns {\"confirmed\": true} only when the operator answered yes. A no returns {\"confirmed\": false} and is their decision: treat it as final and do not ask again. It also returns {\"confirmed\": false} with a reason when no operator could be reached at all, which is a fact about this run rather than an answer: nobody can be asked here, so do not call it again in this run, and do not describe it to the user as a refusal.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -191,10 +192,11 @@ type confirmOutcome struct {
 }
 
 // askHumanConfirm is the ask_human_confirm handler. It denies by default: only an
-// explicit affirmative answer yields confirmed true. A missing terminal, an
-// interrupt, an EOF, or any other prompt error is reported as a normal (non-error)
-// result with confirmed false, so the model treats the refusal as authoritative
-// rather than as a tool failure to route around. Only malformed input is an error.
+// explicit affirmative answer yields confirmed true. With no operator reachable, or
+// with a prompt that could not be put, it answers confirmed false with the reason,
+// which is a normal (non-error) result the model reasons about rather than a tool
+// failure to route around. A question the operator never answered returns
+// unansweredError instead, and malformed input is an error.
 func askHumanConfirm(ctx context.Context, input json.RawMessage, prompter toolkit.Prompter) (string, error) {
 	var args struct {
 		Question string `json:"question"`
@@ -212,15 +214,41 @@ func askHumanConfirm(ctx context.Context, input json.RawMessage, prompter toolki
 		return outcomeJSON(askHumanConfirmName, confirmOutcome{Reason: util.NoTerminalReason})
 	}
 	if err := ctx.Err(); err != nil {
-		return outcomeJSON(askHumanConfirmName, confirmOutcome{Reason: fmt.Sprintf("the run ended before the operator could answer: %v", err)})
+		return "", unansweredError(err)
 	}
 
 	confirmed, err := prompter.Confirm(ctx, question)
 	if err != nil {
+		if unanswered(err) {
+			return "", err
+		}
+
 		return outcomeJSON(askHumanConfirmName, confirmOutcome{Reason: fmt.Sprintf("the operator did not confirm: %v", err)})
 	}
 
 	return outcomeJSON(askHumanConfirmName, confirmOutcome{Confirmed: confirmed})
+}
+
+// unanswered reports an error the caller must not turn into an answer: a question the
+// operator never answered, and one whose answer arrives later. Both leave the call
+// with no result, which is the difference between a decision and a question still
+// open. Every other prompt failure is an answer of sorts, since nothing established
+// that the operator agreed.
+func unanswered(err error) bool {
+	if errors.Is(err, toolkit.ErrPromptAborted) {
+		return true
+	}
+
+	_, deferred := toolkit.IsDeferred(err)
+
+	return deferred
+}
+
+// unansweredError reports a run that ended before its question could be put as an
+// operator who never answered, so the run ends with the call unanswered and the next
+// resume asks it again.
+func unansweredError(err error) error {
+	return fmt.Errorf("%w: %w", toolkit.ErrPromptAborted, err)
 }
 
 // ----- ask_human_select: choose one of a list -----
@@ -233,7 +261,7 @@ func askHumanSelectTool() *functool.Tool {
 		Description: "Ask the human operator to choose one option from a list you provide, at the terminal, and wait for their choice. " +
 			"Use this when the decision depends on the operator's intent or knowledge and you have a concrete, bounded set of options to pick among (which environment, which of several matching resources, which approach). " +
 			"Do not use it for a yes/no question (use ask_human_confirm) or for anything you can determine yourself. " +
-			"It returns {\"selected\": \"<the chosen option>\"}; if the operator cancels or none could be reached it returns {\"selected\": null} with a reason, which is authoritative and must not be retried.",
+			"It returns {\"selected\": \"<the chosen option>\"}. A null selection with a reason means the operator declined to choose, which is final, or that no operator could be reached, which is a fact about this run: nobody can be asked here, so do not call it again in this run.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -263,8 +291,9 @@ type selectOutcome struct {
 }
 
 // askHumanSelect is the ask_human_select handler. Like ask_human_confirm it makes
-// no choice by default: a missing terminal, an interrupt, or an EOF returns a null
-// selection with a reason rather than silently picking the first option.
+// no choice by default: with no operator reachable, or a prompt that could not be
+// put, it returns a null selection with a reason rather than silently picking the
+// first option, and a question the operator never answered leaves the call unanswered.
 func askHumanSelect(ctx context.Context, input json.RawMessage, prompter toolkit.Prompter) (string, error) {
 	var args struct {
 		Question string   `json:"question"`
@@ -291,11 +320,15 @@ func askHumanSelect(ctx context.Context, input json.RawMessage, prompter toolkit
 		return outcomeJSON(askHumanSelectName, selectOutcome{Reason: util.NoTerminalReason})
 	}
 	if err := ctx.Err(); err != nil {
-		return outcomeJSON(askHumanSelectName, selectOutcome{Reason: fmt.Sprintf("the run ended before the operator could choose: %v", err)})
+		return "", unansweredError(err)
 	}
 
 	idx, err := prompter.Select(ctx, question, options)
 	if err != nil {
+		if unanswered(err) {
+			return "", err
+		}
+
 		return outcomeJSON(askHumanSelectName, selectOutcome{Reason: fmt.Sprintf("the operator did not choose: %v", err)})
 	}
 	if idx < 0 || idx >= len(options) {
@@ -314,7 +347,7 @@ func askHumanInputTool() *functool.Tool {
 			"Use this for a value you genuinely cannot determine yourself and that depends on the operator (a name, a path, an identifier, a short reason). " +
 			"You may provide a default the operator can accept or edit, which is the preferred way to let them correct a value you drafted. " +
 			"Do not use it for a yes/no question (use ask_human_confirm), for choosing among known options (use ask_human_select), or to collect a secret or password. " +
-			"It returns {\"value\": \"<the text>\"} (which may be empty if the operator entered nothing); if the operator cancels or none could be reached it returns {\"value\": null} with a reason.",
+			"It returns {\"value\": \"<the text>\"} (which may be empty if the operator entered nothing). A null value with a reason means the operator declined to answer, which is final, or that no operator could be reached, which is a fact about this run: nobody can be asked here, so do not call it again in this run.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -344,8 +377,9 @@ type inputOutcome struct {
 }
 
 // askHumanInput is the ask_human_input handler. An empty answer is a valid value
-// (a non-null empty string); only a missing terminal, an interrupt, or an EOF
-// yields a null value with a reason.
+// (a non-null empty string); no operator reachable and a prompt that could not be put
+// yield a null value with a reason, and a question the operator never answered leaves
+// the call unanswered.
 func askHumanInput(ctx context.Context, input json.RawMessage, prompter toolkit.Prompter) (string, error) {
 	var args struct {
 		Question string `json:"question"`
@@ -364,11 +398,15 @@ func askHumanInput(ctx context.Context, input json.RawMessage, prompter toolkit.
 		return outcomeJSON(askHumanInputName, inputOutcome{Reason: util.NoTerminalReason})
 	}
 	if err := ctx.Err(); err != nil {
-		return outcomeJSON(askHumanInputName, inputOutcome{Reason: fmt.Sprintf("the run ended before the operator could answer: %v", err)})
+		return "", unansweredError(err)
 	}
 
 	value, err := prompter.Input(ctx, question, sanitizePrompt(args.Default))
 	if err != nil {
+		if unanswered(err) {
+			return "", err
+		}
+
 		return outcomeJSON(askHumanInputName, inputOutcome{Reason: fmt.Sprintf("the operator did not answer: %v", err)})
 	}
 

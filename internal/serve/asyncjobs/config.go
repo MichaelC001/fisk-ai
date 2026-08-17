@@ -15,14 +15,14 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-// Builder describes this channel to serve.Surfaces, so a program that wants the
-// queued-jobs surface links it in and a program that does not never references this
+// Builder describes this channel to serve.Endpoints, so a program that wants the
+// queued-jobs endpoint links it in and a program that does not never references this
 // package at all.
-func Builder() serve.SurfaceBuilder {
-	return serve.SurfaceBuilder{
+func Builder() serve.EndpointBuilder {
+	return serve.EndpointBuilder{
 		Name:    "jobs",
 		Enabled: func(cfg *config.Config) bool { return cfg.JobsEnabled() },
-		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Surface, error) {
+		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 			ch, err := NewFromConfig(cfg, ConfigOptions{
 				Workers:          opts.Workers,
 				SuspendRequested: opts.SuspendRequested,
@@ -32,7 +32,7 @@ func Builder() serve.SurfaceBuilder {
 				return nil, err
 			}
 
-			return []serve.Surface{ch}, nil
+			return []serve.Endpoint{ch}, nil
 		},
 	}
 }

@@ -92,7 +92,7 @@ var _ = Describe("fiskServeCommand", func() {
 	})
 
 	Describe("a2a bounds", func() {
-		// The a2a surface paces and bounds its calls with numbers of its own, and
+		// The a2a endpoint paces and bounds its calls with numbers of its own, and
 		// reporting the configured value alone would print zero for a worker that in fact
 		// bounds every call at thirty seconds.
 		It("Should report what a served call will actually get", func() {
@@ -143,7 +143,7 @@ var _ = Describe("fiskServeCommand", func() {
 			Expect(toolsOnly).ToNot(ContainSubstring("Tool Directory"))
 		})
 
-		It("Should name every surface it hosts", func() {
+		It("Should name every endpoint it hosts", func() {
 			c := &fiskServeCommand{}
 			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
 
@@ -160,12 +160,12 @@ var _ = Describe("fiskServeCommand", func() {
 		})
 	})
 
-	Describe("noSurfaceError", func() {
+	Describe("noEndpointError", func() {
 		// A key name on its own is not enough to work out what goes under it, so the
 		// message carries the blocks that fix it and the defaults they imply.
 		It("Should name the file and show the blocks that fix it", func() {
 			c := &fiskServeCommand{configFile: "worker.yaml"}
-			err := c.noSurfaceError()
+			err := c.noEndpointError()
 
 			Expect(err).To(MatchError(ContainSubstring("worker.yaml")))
 			Expect(err).To(MatchError(ContainSubstring("expose:")))

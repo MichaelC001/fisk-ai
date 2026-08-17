@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -100,13 +101,38 @@ var _ = Describe("Built-in tools", func() {
 			Expect(outcome.Reason).To(BeEmpty())
 		})
 
-		It("Should deny by default when the prompt errors (interrupt, EOF)", func() {
-			prompter.confirmFn = func(string) (bool, error) { return false, errors.New("interrupt") }
+		It("Should deny by default when the prompt could not be put", func() {
+			prompter.confirmFn = func(string) (bool, error) { return false, errors.New("the terminal went away") }
 
 			outcome, err := confirmResult(`{"question":"Proceed?"}`)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(outcome.Confirmed).To(BeFalse())
 			Expect(outcome.Reason).To(ContainSubstring("did not confirm"))
+		})
+
+		// The operator was asked and walked away. A result here is journaled and read as
+		// their answer by every later resume, so the call is left unanswered instead and
+		// the resume asks again.
+		It("Should return no result when the operator never answered", func() {
+			prompter.confirmFn = func(string) (bool, error) {
+				return false, fmt.Errorf("%w: interrupt", toolkit.ErrPromptAborted)
+			}
+
+			out, err := askHumanConfirm(context.Background(), json.RawMessage(`{"question":"Proceed?"}`), prompter)
+			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(out).To(BeEmpty())
+		})
+
+		// A prompter that reaches its operator over something slower than a terminal
+		// answers later. The call is marked deferred and the answer is supplied to it.
+		It("Should pass a deferral through", func() {
+			prompter.confirmFn = func(string) (bool, error) {
+				return false, toolkit.DeferResult("asked the caller", "q-1")
+			}
+
+			out, err := askHumanConfirm(context.Background(), json.RawMessage(`{"question":"Proceed?"}`), prompter)
+			Expect(err).To(MatchError(toolkit.ErrDeferredResult))
+			Expect(out).To(BeEmpty())
 		})
 
 		It("Should deny without asking when no interactive terminal is attached", func() {
@@ -122,7 +148,7 @@ var _ = Describe("Built-in tools", func() {
 			Expect(outcome.Reason).To(ContainSubstring("no interactive terminal"))
 		})
 
-		It("Should deny without asking when the run was already canceled", func() {
+		It("Should return no result and not ask when the run was already canceled", func() {
 			prompter.confirmFn = func(string) (bool, error) {
 				Fail("the prompter must not be called once the run is canceled")
 				return false, nil
@@ -131,11 +157,9 @@ var _ = Describe("Built-in tools", func() {
 			cancel()
 
 			out, err := askHumanConfirm(ctx, json.RawMessage(`{"question":"Proceed?"}`), prompter)
-			Expect(err).NotTo(HaveOccurred())
-			var outcome confirmOutcome
-			Expect(json.Unmarshal([]byte(out), &outcome)).To(Succeed())
-			Expect(outcome.Confirmed).To(BeFalse())
-			Expect(outcome.Reason).To(ContainSubstring("before the operator could answer"))
+			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(err).To(MatchError(context.Canceled))
+			Expect(out).To(BeEmpty())
 		})
 
 		It("Should error on a missing or empty question", func() {
@@ -175,13 +199,23 @@ var _ = Describe("Built-in tools", func() {
 			Expect(*outcome.Selected).To(Equal("b"))
 		})
 
-		It("Should make no choice when the operator cancels", func() {
-			prompter.selectFn = func(string, []string) (int, error) { return -1, errors.New("interrupt") }
+		It("Should make no choice when the prompt could not be put", func() {
+			prompter.selectFn = func(string, []string) (int, error) { return -1, errors.New("the terminal went away") }
 
 			outcome, err := selectResult(`{"question":"Pick","options":["a","b"]}`)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(outcome.Selected).To(BeNil())
 			Expect(outcome.Reason).To(ContainSubstring("did not choose"))
+		})
+
+		It("Should return no result when the operator never answered", func() {
+			prompter.selectFn = func(string, []string) (int, error) {
+				return -1, fmt.Errorf("%w: interrupt", toolkit.ErrPromptAborted)
+			}
+
+			out, err := askHumanSelect(context.Background(), json.RawMessage(`{"question":"Pick","options":["a","b"]}`), prompter)
+			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(out).To(BeEmpty())
 		})
 
 		It("Should never auto-pick when no terminal is attached", func() {
@@ -259,13 +293,23 @@ var _ = Describe("Built-in tools", func() {
 			Expect(*outcome.Value).To(BeEmpty())
 		})
 
-		It("Should return no value when the operator cancels", func() {
-			prompter.inputFn = func(string, string) (string, error) { return "", errors.New("interrupt") }
+		It("Should return no value when the prompt could not be put", func() {
+			prompter.inputFn = func(string, string) (string, error) { return "", errors.New("the terminal went away") }
 
 			outcome, err := inputResult(`{"question":"Name?"}`)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(outcome.Value).To(BeNil())
 			Expect(outcome.Reason).To(ContainSubstring("did not answer"))
+		})
+
+		It("Should return no result when the operator never answered", func() {
+			prompter.inputFn = func(string, string) (string, error) {
+				return "", fmt.Errorf("%w: closed input", toolkit.ErrPromptAborted)
+			}
+
+			out, err := askHumanInput(context.Background(), json.RawMessage(`{"question":"Name?"}`), prompter)
+			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
+			Expect(out).To(BeEmpty())
 		})
 
 		It("Should pass a sanitized default through for the operator to edit", func() {

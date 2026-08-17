@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2asurface
+package a2aendpoint
 
 import (
 	"context"
@@ -24,7 +24,7 @@ import (
 
 // The specs here drive the channel the way a server does: take the work it produced,
 // report an outcome against it, and read what the caller received off the wire. The run
-// itself is never started, so what is under test is the surface rather than the loop.
+// itself is never started, so what is under test is the endpoint rather than the loop.
 var _ = Describe("The prompt channel", func() {
 	var (
 		ch     *Channel

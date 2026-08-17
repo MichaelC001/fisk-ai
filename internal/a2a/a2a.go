@@ -64,6 +64,12 @@ const (
 	CancelProtocol  = ProtocolNamespace + ".cancel"
 	AckProtocol     = ProtocolNamespace + ".ack"
 
+	// ElicitRequestProtocol and ElicitReplyProtocol carry a question a running task
+	// puts to its caller, and the caller's answer. The question travels on the
+	// task's reply set and the answer on the task's own inbound path.
+	ElicitRequestProtocol = ProtocolNamespace + ".elicit.request"
+	ElicitReplyProtocol   = ProtocolNamespace + ".elicit.reply"
+
 	// ToolRequestProtocol and ToolReplyProtocol carry a direct tool invocation
 	// (request-reply), used to import or export tools between agents without
 	// engaging the agentic loop.
@@ -127,6 +133,10 @@ func Decode(data []byte) (any, error) {
 		return decodeInto(data, &Cancel{})
 	case AckProtocol:
 		return decodeInto(data, &Ack{})
+	case ElicitRequestProtocol:
+		return decodeInto(data, &ElicitRequest{})
+	case ElicitReplyProtocol:
+		return decodeInto(data, &ElicitReply{})
 	case ToolRequestProtocol:
 		return decodeInto(data, &ToolRequest{})
 	case ToolReplyProtocol:

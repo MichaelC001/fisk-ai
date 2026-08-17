@@ -26,7 +26,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 const (
@@ -69,10 +68,10 @@ type Options struct {
 	// from a constructor that may fail.
 	Channels []Channel
 
-	// Services are the surfaces that answer their callers directly rather than
+	// Services are the endpoints that answer their callers directly rather than
 	// producing work. They are already answering when they arrive here, so they are
 	// released on the same terms as the channels and for a stronger reason: a service
-	// left open by a constructor that failed is a live surface in a process that serves
+	// left open by a constructor that failed is a live endpoint in a process that serves
 	// nothing.
 	//
 	// A server with services and no channels has nothing to pull, so Serve holds itself
@@ -235,7 +234,7 @@ type Server struct {
 // New validates the options and returns a Server. It starts nothing; Serve does the
 // work.
 //
-// A Server owns releasing its surfaces, through Drain and Stop. New therefore releases
+// A Server owns releasing its endpoints, through Drain and Stop. New therefore releases
 // them itself when it refuses the options, since a caller holding an error holds no
 // Server and has nothing to release them with: several channels own a connection and
 // every service is already answering, and there is no third outcome where the caller is
@@ -246,7 +245,7 @@ func New(opts Options) (*Server, error) {
 
 	err := opts.validate()
 	if err != nil {
-		releaseSurfaces(opts.Channels, opts.Services, opts.Logger)
+		releaseEndpoints(opts.Channels, opts.Services, opts.Logger)
 		return nil, err
 	}
 
@@ -347,11 +346,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	return nil
 }
 
-// watchFaults ends the server when a surface reports that it has stopped working.
+// watchFaults ends the server when an endpoint reports that it has stopped working.
 //
 // The drain is what ends the channels: a channel blocked in Next returns
 // ErrChannelDone once it is released, and the runs in flight finish rather than being
-// abandoned, since a surface that cannot be called no longer affects work that is
+// abandoned, since an endpoint that cannot be called no longer affects work that is
 // already running.
 //
 // It returns when Serve does, however Serve ended, so neither it nor the readers it
@@ -360,13 +359,13 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 	sources := make([]<-chan error, 0, len(s.opts.Channels)+len(s.opts.Services))
 
 	for _, ch := range s.opts.Channels {
-		f, ok := ch.(FaultingSurface)
+		f, ok := ch.(FaultingEndpoint)
 		if ok {
 			sources = append(sources, f.Faults())
 		}
 	}
 	for _, svc := range s.opts.Services {
-		f, ok := svc.(FaultingSurface)
+		f, ok := svc.(FaultingEndpoint)
 		if ok {
 			sources = append(sources, f.Faults())
 		}
@@ -377,7 +376,7 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 	}
 
 	// One goroutine per source rather than reflect.Select: the count is the number of
-	// surfaces a process hosts, and the first fault is the one that ends the server.
+	// endpoints a process hosts, and the first fault is the one that ends the server.
 	first := make(chan error, len(sources))
 	for _, src := range sources {
 		go func() {
@@ -393,12 +392,12 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 
 	select {
 	case err := <-first:
-		s.log.Error("A surface stopped working; draining", "error", err)
+		s.log.Error("A endpoint stopped working; draining", "error", err)
 		faulted <- err
 
 		derr := s.Drain()
 		if derr != nil {
-			s.log.Error("Draining after a surface fault failed", "error", derr)
+			s.log.Error("Draining after an endpoint fault failed", "error", derr)
 		}
 
 	case <-ctx.Done():
@@ -407,7 +406,7 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 	}
 }
 
-// Drain asks the surfaces to stop taking callers and waits for what is already in
+// Drain asks the endpoints to stop taking callers and waits for what is already in
 // flight, so Serve ends by itself with nothing canceled and every run stopped at a
 // point it can be resumed from. It is called while Serve is still running, which is
 // what makes it a drain rather than a stop.
@@ -417,7 +416,7 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 // ReleasableChannel has nothing to drain and is left alone, and a server whose channels
 // are all like that returns at once.
 //
-// The services are closed here rather than at the end, so a surface answering callers
+// The services are closed here rather than at the end, so an endpoint answering callers
 // directly stops when the worker starts shutting down instead of when it finishes. What
 // is not covered is a call already in flight: a service answers on goroutines of its
 // own that nothing here can see, so closing it stops the next caller rather than the
@@ -427,11 +426,11 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 // take SIGTERM from an embedder's supervisor with no way to decline, so the two verbs
 // are offered and the program decides which signal means which.
 func (s *Server) Drain() error {
-	return s.release("Draining surface")
+	return s.release("Draining endpoint")
 }
 
-// release closes every surface that can be, saying which phase it is doing it for. A
-// surface's Close is idempotent, so the second call in a drain-then-stop sequence does
+// release closes every endpoint that can be, saying which phase it is doing it for. A
+// endpoint's Close is idempotent, so the second call in a drain-then-stop sequence does
 // nothing; it is logged differently rather than twice so the output does not read as
 // two drains.
 //
@@ -472,14 +471,14 @@ func (s *Server) release(reason string) error {
 	return errors.Join(errs...)
 }
 
-// Stop releases the surfaces after Serve has returned. It is the same call as Drain
+// Stop releases the endpoints after Serve has returned. It is the same call as Drain
 // and differs only in when it is made: before, the runs in flight are waited for;
-// after, there are none left to wait for and it is releasing what the surfaces hold.
+// after, there are none left to wait for and it is releasing what the endpoints hold.
 //
 // Calling it after a Drain is safe and is how a program that drains on one signal and
 // stops on the next ends up releasing everything exactly once.
 func (s *Server) Stop() error {
-	return s.release("Releasing surface")
+	return s.release("Releasing endpoint")
 }
 
 // pull takes work from one channel until it is finished or the context ends, bounded
@@ -569,14 +568,7 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 
 	events := newEventRecorder(work.Events, log)
 
-	// A nil prompter cannot be passed through: the run and the confirm gate call
-	// CanPrompt without guarding it, so a configuration carrying any gated tool would
-	// dereference nil. Denying is also the right answer, since a channel that supplied
-	// no prompter has nobody to ask.
-	prompter := work.Prompter
-	if prompter == nil {
-		prompter = toolkit.DefaultDenyPrompter()
-	}
+	prompter := promptsThrough(work)
 
 	log.Info("Running", "caller", work.Caller.Name, "caller_verified", work.Caller.Verified, "resume", work.Checkpoint.ResumeID)
 

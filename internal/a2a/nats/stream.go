@@ -31,6 +31,7 @@ func (t *Transport) DescribeTasks(identity string) []a2a.DescLine {
 	return []a2a.DescLine{
 		{Label: "Requests", Value: TaskSubject(identity)},
 		{Label: "Cancels", Value: CancelSubject(identity, "*")},
+		{Label: "Answers", Value: ElicitSubject(identity, "*")},
 	}
 }
 
@@ -104,7 +105,7 @@ func (t *Transport) Stream(ctx context.Context, agent string, op a2a.RouteHint, 
 // nobody if it is sent before the subscription exists, and a caller has no reason to
 // cancel a task it has not been told was accepted, so opening this before the ack
 // removes the window rather than bounding it.
-func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.CancelWatch, error) {
+func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.TaskWatch, error) {
 	if !a2a.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address a cancel", request)
 	}
@@ -116,7 +117,29 @@ func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.CancelWatch,
 		return nil, fmt.Errorf("subscribing to cancels for %q: %w", request, err)
 	}
 
-	return &cancelWatch{sub: sub}, nil
+	return &taskWatch{sub: sub}, nil
+}
+
+// WatchElicitReplies subscribes to the subject the answers to this task's questions
+// arrive on and routes them to h until the watch is released.
+//
+// It is a plain subscription for the same reason WatchCancel is: its lifetime is the
+// task's rather than the service's. It is opened when the task is accepted, not when
+// the first question is asked, so an answer cannot arrive before the subscription
+// exists.
+func (t *Transport) WatchElicitReplies(request string, h a2a.Handler) (a2a.TaskWatch, error) {
+	if !a2a.ValidRequestID(request) {
+		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address an answer", request)
+	}
+
+	sub, err := t.nc.Subscribe(ElicitSubject(t.identity, request), func(m *nats.Msg) {
+		h(context.Background(), a2a.Caller{}, m.Data, msgReplier{nc: t.nc, reply: m.Reply})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("subscribing to answers for %q: %w", request, err)
+	}
+
+	return &taskWatch{sub: sub}, nil
 }
 
 // SendCancel delivers body to the process running the named task on agent and returns
@@ -134,6 +157,39 @@ func (t *Transport) SendCancel(ctx context.Context, agent, request string, body 
 
 	subject := CancelSubject(agent, request)
 
+	msg, err := t.requestTask(ctx, subject, body, "cancel")
+	if err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}
+
+// SendElicitReply delivers an answer to the process running the named task and
+// returns what it answered.
+//
+// It is a request rather than a publish for the reason a cancel is: only the running
+// task subscribes, so no responders says the run ended without the answer, which the
+// answering party needs to know. A published answer would be lost silently.
+func (t *Transport) SendElicitReply(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
+	if !a2a.ValidRequestID(request) {
+		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address an answer", request)
+	}
+
+	subject := ElicitSubject(agent, request)
+
+	msg, err := t.requestTask(ctx, subject, body, "answer")
+	if err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}
+
+// requestTask sends body to one running task's own subject and returns what it
+// answered. what names the message for the errors, since an operator reading one
+// needs to know whether their cancel or their answer went nowhere.
+func (t *Transport) requestTask(ctx context.Context, subject string, body []byte, what string) ([]byte, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, t.timeout)
@@ -147,7 +203,7 @@ func (t *Transport) SendCancel(ctx context.Context, agent, request string, body 
 			return nil, fmt.Errorf("%w: no subscription interest on %q, so that task is not running there", a2a.ErrAgentUnavailable, subject)
 
 		case errors.Is(err, context.DeadlineExceeded):
-			return nil, fmt.Errorf("%w: the cancel on %q was not answered", a2a.ErrAgentUnavailable, subject)
+			return nil, fmt.Errorf("%w: the %s on %q was not answered", a2a.ErrAgentUnavailable, what, subject)
 		}
 
 		return nil, fmt.Errorf("requesting %q: %w", subject, err)
@@ -156,15 +212,16 @@ func (t *Transport) SendCancel(ctx context.Context, agent, request string, body 
 	return msg.Data, nil
 }
 
-// cancelWatch holds one task's cancel subscription. Close is idempotent because the
-// task releases it on every ending and a task has several.
-type cancelWatch struct {
+// taskWatch holds one subscription a running task owns, for its cancels or for the
+// answers to its questions. Close is idempotent because the task releases its watches
+// on every ending and a task has several.
+type taskWatch struct {
 	sub  *nats.Subscription
 	once sync.Once
 	err  error
 }
 
-func (w *cancelWatch) Close() error {
+func (w *taskWatch) Close() error {
 	w.once.Do(func() { w.err = w.sub.Unsubscribe() })
 
 	return w.err
