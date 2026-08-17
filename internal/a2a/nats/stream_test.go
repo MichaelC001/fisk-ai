@@ -98,7 +98,7 @@ var _ = Describe("Integration: a2a NATS reply set", func() {
 			Expect(ok).To(BeTrue(), "a streaming transport supplies a stream replier")
 
 			stream := a2a.NewReplyStream(sink, &hdr, "svc")
-			Expect(stream.Ack(true, "")).To(Succeed())
+			Expect(stream.Ack(a2a.NewAck(true))).To(Succeed())
 
 			go func() {
 				defer GinkgoRecover()
@@ -190,7 +190,7 @@ var _ = Describe("Integration: a2a NATS reply set", func() {
 			Expect(sink.Publish(encode(foreign), true)).To(Succeed())
 
 			stream := a2a.NewReplyStream(sink, &hdr, "svc")
-			Expect(stream.Ack(true, "")).To(Succeed())
+			Expect(stream.Ack(a2a.NewAck(true))).To(Succeed())
 
 			res := a2a.NewResult(a2a.StopEndTurn)
 			res.Text = "mine"

@@ -156,7 +156,8 @@ type AssistantRecord struct {
 	ThinkingTokens int64 `json:"thinking_tokens,omitempty"`
 }
 
-// UserRecord is a free-standing interactive user turn (a chat follow-up). Message
+// UserRecord is a free-standing user turn: one typed at a chat's input bar, or one a
+// resumed run was handed to continue a conversation with. Message
 // carries only the newly typed block(s), never a merged view of a preceding user
 // turn: when a follow-up folds into a dangling user message at runtime (the prior
 // turn errored before replying), the journal still records the follow-up on its own

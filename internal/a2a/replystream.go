@@ -35,18 +35,22 @@ func NewReplyStream(reply StreamReplier, req *Header, sender string) *ReplyStrea
 	return &ReplyStream{reply: reply, req: *req, sender: sender}
 }
 
-// Ack accepts or refuses the request and carries the reason a refusal gives. It is
-// sequence 1 and is sent synchronously, while the handler is still on the serving
-// goroutine, so the accept is what the transport measures and no reply is written
-// from a worker the transport may be reading. It is refused after anything else has
-// been sent, since it is the single message Respond is contracted for.
-func (s *ReplyStream) Ack(accepted bool, reason string) error {
+// Ack accepts or refuses the request, carrying whatever the caller put on it: the
+// reason a refusal gives, and the conversation token a follow-up turn is sent with. It
+// is sequence 1 and is sent synchronously, while the handler is still on the serving
+// goroutine, so the accept is what the transport measures and no reply is written from
+// a worker the transport may be reading. It is refused after anything else has been
+// sent, since it is the single message Respond is contracted for.
+//
+// It takes the message rather than its fields, as Result and Error do, so a surface
+// that has something to say on an ack says it here rather than through a parameter
+// every other caller passes empty.
+func (s *ReplyStream) Ack(ack *Ack) error {
 	if s.seq != 0 {
 		return fmt.Errorf("%w: the ack is the first message of a reply set", ErrInvalidMessage)
 	}
 
-	ack := NewAck(accepted)
-	ack.Reason = reason
+	ack.Protocol = AckProtocol
 
 	data, err := s.encode(&ack.Header, ack)
 	if err != nil {

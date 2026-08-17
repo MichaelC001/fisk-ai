@@ -112,7 +112,8 @@ const resumeReminder = "This session was suspended and has now resumed. Tool res
 
 // Checkpoint carries the resumable-run options. Enabled starts a new checkpointed
 // run; ResumeID continues an existing one; the two are mutually exclusive, which
-// the caller validates before calling Run.
+// the caller validates before calling Run. FollowUp says what a resume does with the
+// prompt it was given.
 type Checkpoint struct {
 	Enabled  bool
 	Name     string
@@ -141,6 +142,28 @@ type Checkpoint struct {
 	// resume was asked for rather than that one happened. The SessionStart hook's
 	// Resumed is unaffected and reports what the store said.
 	CreateIfMissing bool
+
+	// FollowUp delivers Options.Prompt as a new user turn on the resumed conversation
+	// instead of discarding it. It is what a caller whose conversations outlive a
+	// connection needs: every turn is a fresh resumed run, so any worker can serve any
+	// turn of a conversation and none of them is pinned to a process.
+	//
+	// It requires ResumeID and a prompt, and Run refuses it with CreateIfMissing, which
+	// is the combination an at-least-once caller reaches for and the one thing this must
+	// never be. A queue cannot tell a first delivery from a redelivery, so a redelivered
+	// item carrying a follow-up would append the same prompt to the conversation again
+	// and pay for another turn on it. A caller that may deliver the same work twice
+	// discards its prompt on a resume, which is the default.
+	//
+	// The turn is delivered where the stored conversation can take a user message: with
+	// nothing in flight it enters before the first model call, and with a turn the last
+	// run left unfinished the loop finishes that turn first and the follow-up is the next
+	// one. A conversation waiting on a deferred tool result reaches no such boundary, so
+	// nothing is delivered and Result.FollowUpTaken reports it.
+	//
+	// A resume whose stored run ended by completing is continued rather than refused,
+	// since a new user turn is the new input a completed conversation lacks.
+	FollowUp bool
 }
 
 // Options is everything Run needs to execute a run. Config is already parsed so
@@ -388,6 +411,14 @@ type Result struct {
 	// The run is resumable and will not proceed until every one of these is answered,
 	// which runstate.SupplyToolResult is how to do.
 	Deferred []DeferredCall
+
+	// FollowUpTaken reports whether a Checkpoint.FollowUp prompt entered the
+	// conversation. It is false when the stored conversation reached no boundary that
+	// could take a user message, which is a conversation waiting on a deferred tool
+	// result: the prompt was neither journaled nor answered, and the caller has to
+	// send it again once the answer arrives. It is meaningless without
+	// Checkpoint.FollowUp, where it is always false.
+	FollowUpTaken bool
 }
 
 // DeferredCall is one tool call whose answer arrives later. ToolUseID is the key the
@@ -399,6 +430,12 @@ type DeferredCall struct {
 	Note      string
 	Handle    string
 }
+
+// ErrConversationNotFound reports that a resume named a session the store does not
+// hold. It is separated from the store's own error so a channel serving follow-up
+// turns can answer its caller with the one thing it can act on: the conversation it
+// named is not here, and a new one is where its prompt has to go.
+var ErrConversationNotFound = errors.New("conversation not found")
 
 // PanicError is the error Run returns when it recovered a panic on its run goroutine.
 // It reports that the run crashed rather than reaching a terminal outcome, so a caller
@@ -642,6 +679,22 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// root is that invocation, while a chat is several invocations of one agent, which
 	// is what a workflow describes, with each turn nested underneath.
 	interactive := opts.NextPrompt != nil
+
+	// A follow-up turn is refused before anything runs rather than being described in a
+	// comment and left to a caller to get right, because both mistakes cost money: with
+	// no session to continue there is nothing to add the turn to, and under
+	// CreateIfMissing a redelivery would append the prompt again and pay for a turn on
+	// it.
+	if opts.Checkpoint.FollowUp {
+		switch {
+		case opts.Checkpoint.ResumeID == "":
+			return res, fmt.Errorf("Checkpoint.FollowUp needs Checkpoint.ResumeID: a follow-up turn joins a conversation and there is none to join")
+		case opts.Checkpoint.CreateIfMissing:
+			return res, fmt.Errorf("Checkpoint.FollowUp cannot be set with Checkpoint.CreateIfMissing: a caller that may deliver the same work twice would append its prompt to the conversation on every redelivery")
+		case strings.TrimSpace(strings.Join(opts.Prompt, " ")) == "":
+			return res, fmt.Errorf("Checkpoint.FollowUp needs Options.Prompt: the follow-up turn is the prompt")
+		}
+	}
 
 	// The root span is the entire run, which is what makes one run one trace. It starts
 	// as the first statement so it covers every early return, and its Finish is deferred
@@ -1293,6 +1346,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		pending               *runstate.PendingTurn
 		sessionID             string
 		resumeAtInputBoundary bool
+		followUpAtStart       bool
 		newSession            func(prompt string) (runstate.Journal, string, error)
 		store                 runstate.Store
 		rs                    *runstate.RunState
@@ -1348,6 +1402,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			switch {
 			case errors.Is(lerr, runstate.ErrNotFound) && opts.Checkpoint.CreateIfMissing:
 				resuming = false
+			case errors.Is(lerr, runstate.ErrNotFound):
+				return res, fmt.Errorf("%w %q: %w", ErrConversationNotFound, sessionID, lerr)
 			case lerr != nil:
 				return res, lerr
 			default:
@@ -1430,7 +1486,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 
 		if resuming {
-			if rs.Completed() {
+			// A completed run is not resumed with nothing to add: the model would be called
+			// on a finished conversation with no new input. A follow-up turn is that input,
+			// so it continues past one and the record its own run writes replaces this one.
+			if rs.Completed() && !opts.Checkpoint.FollowUp {
 				return res, fmt.Errorf("session %q has already completed and cannot be resumed", sessionID)
 			}
 			// The stored session and the caller must agree on interactivity: a chat
@@ -1452,9 +1511,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				return res, fmt.Errorf("cannot resume %q: it was started with provider %q but the current configuration uses %q; a run cannot change provider, and --force does not apply",
 					sessionID, rs.Fingerprint.Provider, fp.Provider)
 			}
-			if !rs.Fingerprint.Equal(fp) && !opts.Checkpoint.Force {
+			// Drift the resume must refuse, which is every part of the configuration that
+			// can leave a stored conversation the provider will not accept. The two budget
+			// bounds are not in it and are reported below, since neither can corrupt
+			// history and a served conversation's caller may lower both per turn.
+			blocking := rs.Fingerprint.BlockingDiff(fp)
+			if len(blocking) > 0 && !opts.Checkpoint.Force {
 				return res, fmt.Errorf("cannot resume %q, the configuration changed since it was saved:\n  %s\nre-run against the original configuration, or pass --force to continue with the current one",
-					sessionID, strings.Join(rs.Fingerprint.Diff(fp), "\n  "))
+					sessionID, strings.Join(blocking, "\n  "))
 			}
 
 			j, err := store.Open(sessionID)
@@ -1484,20 +1548,32 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 			// A chat session's iteration cap grows one turn's worth per accepted
 			// follow-up; on resume that grown cap is not stored, only the position, so
-			// give the resumed turn a fresh per-turn budget from where it left off. A
-			// one-shot resume keeps the absolute cap (cumulative across the whole run).
-			if interactive {
+			// give the resumed turn a fresh per-turn budget from where it left off. A turn
+			// delivered on a resume needs the same, since the cap is an absolute position
+			// and turn five of a conversation would otherwise start past a cap set for turn
+			// one. A one-shot resume keeps the absolute cap (cumulative across the run).
+			if interactive || opts.Checkpoint.FollowUp {
 				maxIter = startIter + cfg.LLM.Budget.MaxIterations
 			}
 
-			// A chat session that rests at a completed boundary (no in-flight turn, the
-			// conversation ends on an assistant turn that was not a server-side pause)
-			// resumes straight to the input bar. With an in-flight turn, or a paused turn
-			// the model means to continue, the loop runs first to finish it.
-			resumeAtInputBoundary = rs.Interactive &&
-				rs.Pending == nil &&
+			// Where the restored conversation can take a user message: nothing in flight,
+			// it ends on an assistant turn, and the model did not mean to continue. The
+			// last two conjuncts are what keep a user turn out of a conversation the model
+			// is part way through, since a journal whose tool results are all recorded but
+			// unanswered has nothing pending and ends on a user message.
+			atUserBoundary := rs.Pending == nil &&
 				endsOnAssistant(messages) &&
 				rs.LastStopReason != string(llm.StopPauseTurn)
+
+			// A chat session resting there resumes straight to the input bar. With an
+			// in-flight turn, or a paused turn the model means to continue, the loop runs
+			// first to finish it.
+			resumeAtInputBoundary = rs.Interactive && atUserBoundary
+
+			// A follow-up turn enters before the first model call when the conversation
+			// already rests there. Otherwise the loop finishes the turn the last run left
+			// and the follow-up is the turn after it.
+			followUpAtStart = atUserBoundary
 
 			stats.LlmCalls = rs.Counters.LlmCalls
 			stats.ToolCalls = rs.Counters.ToolCalls
@@ -1532,8 +1608,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// resume across a changed configuration: a grant is keyed on a tool name alone,
 			// so a tool set that moved under it may have changed the very command the
 			// operator approved. A one-shot approval is dropped on the same terms, its call
-			// naming a tool that may have moved under it too.
-			forced := !rs.Fingerprint.Equal(fp)
+			// naming a tool that may have moved under it too. It reads the same drift the
+			// gate above did, so a budget difference does not drop a grant.
+			forced := len(blocking) > 0
 			if !forced {
 				approvals.seed(rs.Approvals, rs.CallApprovals)
 				info.StandingApprovals = rs.Approvals
@@ -1544,6 +1621,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			events.Starting(info)
 			if forced && len(rs.Approvals) > 0 {
 				events.Warn(Warning{Kind: WarnApprovalsDropped, Count: len(rs.Approvals)})
+			}
+			budgetDrift := rs.Fingerprint.BudgetDiff(fp)
+			if len(budgetDrift) > 0 {
+				events.Warn(Warning{Kind: WarnBudgetDrift, Params: budgetDrift})
 			}
 			for _, w := range resumeHazards(rs) {
 				events.Warn(w)
@@ -1646,6 +1727,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		allTools[name] = t
 	}
 
+	// The turn a follow-up delivers, empty for every other run. It carries whatever the
+	// caller put in Options.Prompt, including the supporting Context it appended, which
+	// is the same text a first prompt would have entered the conversation with.
+	var followUp string
+	if opts.Checkpoint.FollowUp {
+		followUp = strings.Join(prompt, " ")
+	}
+
 	r := &runner{
 		cfg:             cfg,
 		provider:        provider,
@@ -1685,6 +1774,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		memory:          memoryInfo(memStore),
 
 		resumeAtInputBoundary: resumeAtInputBoundary,
+		followUp:              followUp,
+		followUpAtStart:       followUpAtStart,
 	}
 	activeRunner = r
 	// The gate was built before the journal was opened, so its approval source gets the
@@ -1710,6 +1801,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	res.Reason = reason
 	res.Text = r.finalText
 	res.Deferred = r.deferred
+	res.FollowUpTaken = r.followUpTaken
 	// A context reset may have rotated to a fresh session mid-run, so report the session the
 	// run ended on (the one an operator resumes) rather than the one it started with.
 	res.SessionID = r.sessionID

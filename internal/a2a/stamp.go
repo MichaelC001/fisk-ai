@@ -27,7 +27,14 @@ func stampRequest(ctx context.Context, h *Header, sender string, recipient strin
 
 	h.ID = id
 	h.Request = id
-	h.Conversation = id
+	// A conversation tag the caller set is kept, which is how the turns of one
+	// conversation carry one tag: the field is the caller's own correlation and means
+	// nothing to a receiver, so minting over it would leave it unable to do the one
+	// thing it is for. Every message built here with the field empty gets a fresh id,
+	// which is what a request that is part of no larger session carries.
+	if h.Conversation == "" {
+		h.Conversation = id
+	}
 	h.Sequence = 0
 	h.Time = time.Now().UTC()
 	h.Sender = Identity{Name: sender}

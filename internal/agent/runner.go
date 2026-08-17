@@ -198,6 +198,16 @@ type runner struct {
 	// and control drops straight to the input bar. A resume with an in-flight turn
 	// leaves this false so loop() finishes that turn first.
 	resumeAtInputBoundary bool
+
+	// followUp is the user turn a resume was asked to deliver, empty for every other
+	// run. followUpAtStart says the restored conversation already rests where a user
+	// message may be added, so the turn enters before the first model call; false sends
+	// the loop to finish the turn the last run left and delivers at the boundary it
+	// reaches. followUpTaken records that it entered the conversation, which is what
+	// tells a caller its prompt ran from a conversation that never reached a boundary.
+	followUp        string
+	followUpAtStart bool
+	followUpTaken   bool
 }
 
 // emit appends a record to the journal, advancing the seq. It is a no-op when
@@ -404,18 +414,35 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	// it then stays monotonic across the interactive re-entries below.
 	r.iter = r.startIter
 
-	// A resumed chat that is already at a completed boundary skips the initial loop:
-	// the conversation ends on an assistant turn awaiting a follow-up, so a fresh LLM
-	// call would be wrong. Treat it as a just-completed turn and fall straight into the
-	// continuation loop, which opens the input bar.
 	var (
 		reason runstate.TerminalReason
 		err    error
 	)
-	if r.resumeAtInputBoundary {
+
+	switch {
+	case r.followUp != "" && r.followUpAtStart:
+		// The conversation rests where a user message may be added, so the turn the
+		// caller asked for is the next model call.
+		reason, err = r.followUpTurn(ctx)
+
+	case r.resumeAtInputBoundary:
+		// A resumed chat that is already at a completed boundary skips the initial loop:
+		// the conversation ends on an assistant turn awaiting a follow-up, so a fresh LLM
+		// call would be wrong. Treat it as a just-completed turn and fall straight into
+		// the continuation loop, which opens the input bar.
 		reason = runstate.ReasonCompleted
-	} else {
+
+	default:
 		reason, err = r.runTurn(ctx)
+
+		// A follow-up arrived on a conversation the last run left part way through. That
+		// turn is finished now, so the follow-up is the next one. A turn that ended
+		// without reaching a boundary the conversation can take input at, which is one
+		// waiting on a deferred tool result, leaves the prompt undelivered and says so
+		// through Result.FollowUpTaken rather than journaling a turn nothing answers.
+		if r.followUp != "" && continuable(reason) && ctx.Err() == nil {
+			reason, err = r.followUpTurn(ctx)
+		}
 	}
 
 	// Interactive continuation: after a turn the operator can act on, hand back for a
@@ -560,6 +587,47 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	}
 
 	return reason, err
+}
+
+// followUpTurn adds the caller's new user turn to the conversation and runs it.
+//
+// The prompt is appended and journaled before the model call, in that order, so a
+// resume reconstructs the same conversation and a crash between the two costs the turn
+// rather than leaving a journal describing a conversation the model never saw. A
+// journal failure ends the run here, before the turn, on the rule the interactive
+// follow-up already follows: the journal stops at its last coherent boundary rather
+// than recording assistant turns with no user message in front of them.
+//
+// The turn gets a full iteration budget from where the conversation actually is, so a
+// turn that finished interrupted work first does not spend that work's iterations on
+// the caller's prompt.
+func (r *runner) followUpTurn(ctx context.Context) (runstate.TerminalReason, error) {
+	text := r.followUp
+	r.followUp = ""
+
+	dec, herr := r.hooks.fireUserPromptSubmit(ctx, UserPromptSubmitInfo{Text: text, Initial: false})
+	if herr != nil {
+		return runstate.ReasonError, fmt.Errorf("UserPromptSubmit hook: %w", herr)
+	}
+	if dec.Deny {
+		return runstate.ReasonError, fmt.Errorf("the follow-up prompt was rejected by a policy hook: %s", dec.DenyReason)
+	}
+
+	r.appendUserPrompt(text)
+
+	jerr := r.emit(runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{
+		Message: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: text}}}},
+	}})
+	if jerr != nil {
+		r.events.Warn(Warning{Kind: WarnJournalUser, Err: jerr})
+
+		return runstate.ReasonError, jerr
+	}
+
+	r.followUpTaken = true
+	r.maxIter = r.iter + r.cfg.LLM.Budget.MaxIterations
+
+	return r.runTurn(ctx)
 }
 
 // terminalFor is the reason a run ends on err. An operator who was asked something

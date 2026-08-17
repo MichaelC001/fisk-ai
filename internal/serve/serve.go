@@ -167,8 +167,13 @@ type Work struct {
 	// for the model calls a previous attempt already made. The zero value runs without
 	// a journal.
 	//
-	// It does not carry a follow-up turn. A resumed run replaces its conversation with
-	// the journaled one, so Prompt is not delivered to a run that resumes.
+	// A resumed run replaces its conversation with the journaled one and discards
+	// Prompt, unless Checkpoint.FollowUp says to deliver it as the conversation's next
+	// turn. A channel whose deliveries can repeat must leave FollowUp unset: a queue
+	// cannot tell a first delivery from a redelivery, so a redelivered item carrying a
+	// follow-up would append the same prompt to the conversation again and pay for
+	// another turn on it. Setting it is for a channel where each delivery is a caller
+	// asking for something, which is what a live caller sending a second prompt is.
 	Checkpoint agent.Checkpoint
 
 	// ClaimedBy names this worker in the claim a resumed run writes to its journal,
@@ -320,4 +325,12 @@ type Outcome struct {
 	// The work is not finished and not failed. It resumes under the same session once
 	// every one of these is answered, which is what a channel decides how to arrange.
 	Deferred []agent.DeferredCall
+
+	// FollowUpTaken reports whether a Checkpoint.FollowUp prompt entered the
+	// conversation. It is false where the stored conversation reached no boundary that
+	// could take a user message, which is one waiting on a deferred tool result: the
+	// prompt was neither journaled nor answered and has to be sent again. A channel that
+	// sets FollowUp tells its caller from it; every other channel gets false and has
+	// nothing to report.
+	FollowUpTaken bool
 }

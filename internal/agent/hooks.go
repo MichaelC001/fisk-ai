@@ -35,8 +35,9 @@ type Hooks struct {
 	SessionStart SessionStartHook
 
 	// UserPromptSubmit fires as a prompt enters the conversation: the initial prompt of a
-	// fresh run, then each interactive follow-up. A resume does not re-fire it for the
-	// history it reconstructs.
+	// fresh run, then each follow-up, whether an operator typed it at the input bar or a
+	// resume was handed one. A resume does not re-fire it for the history it
+	// reconstructs.
 	UserPromptSubmit UserPromptSubmitHook
 
 	// PreModelCall fires before each model call. It sits above the provider, so it fires

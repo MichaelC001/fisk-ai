@@ -17,6 +17,9 @@
     "reason": {
       "type": "string",
       "description": "Why rejected, when accepted is false."
+    },
+    "conversation_token": {
+      "$ref": "common.json#/$defs/conversation_token"
     }
   },
   "required": [

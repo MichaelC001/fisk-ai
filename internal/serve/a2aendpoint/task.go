@@ -6,7 +6,10 @@ package a2aendpoint
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -33,6 +36,14 @@ const (
 	codeDeferred   = "deferred"
 	codeSuspended  = "suspended"
 	codeCanceled   = "canceled"
+
+	// The three endings a follow-up turn has that a first prompt does not, each with a
+	// different answer for the caller: send the prompt as a first turn instead, send it
+	// again once the conversation is free, and send it again once whatever the
+	// conversation is waiting on has been answered.
+	codeUnknownConversation = "unknown_conversation"
+	codeConversationBusy    = "conversation_busy"
+	codeTurnNotTaken        = "turn_not_taken"
 )
 
 // task is one accepted request: the reply set it answers on, the cancel addressed to
@@ -44,12 +55,22 @@ const (
 // The cancel below is the exception and is guarded, being the one thing that arrives
 // while the run is in progress.
 type task struct {
-	ch      *Channel
-	req     *a2a.Request
-	stream  *a2a.ReplyStream
-	watch   a2a.TaskWatch
-	session string
-	log     *slog.Logger
+	ch     *Channel
+	req    *a2a.Request
+	stream *a2a.ReplyStream
+	watch  a2a.TaskWatch
+	log    *slog.Logger
+
+	// session is the journal this task runs in, derived from the token. token is the
+	// handle the caller holds, minted here on a first turn and echoed on a follow-up,
+	// and followUp says which of the two this is.
+	//
+	// The token is a credential: holding it is the authorization to add a turn to this
+	// conversation, so it stays out of the log lines and out of the terminal messages
+	// that name the session.
+	session  string
+	token    string
+	followUp bool
 
 	// answers routes the caller's replies to the questions this run asked, and
 	// prompter is what the run puts them through. Both are nil when elicitation is
@@ -89,12 +110,23 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 	log := c.log.With("request", req.Request, "caller", callerName(caller, req))
 	stream := a2a.NewReplyStream(sink, &req.Header, c.identity)
 
+	// A request carrying a token continues the conversation that token names; one
+	// carrying none starts a conversation and is handed a token for it. So a caller
+	// declares nothing on a first turn and decides per turn afterwards.
+	token := req.ConversationToken
+	followUp := token != ""
+	if !followUp {
+		token = a2a.NewID()
+	}
+
 	t := &task{
-		ch:      c,
-		req:     req,
-		stream:  stream,
-		session: a2a.NewID(),
-		log:     log,
+		ch:       c,
+		req:      req,
+		stream:   stream,
+		session:  sessionFor(c.identity, token),
+		token:    token,
+		followUp: followUp,
+		log:      log,
 	}
 
 	code, reason := c.admit(t)
@@ -131,7 +163,13 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 		}
 	}
 
-	err = stream.Ack(true, "")
+	// The ack carries the token on every acceptance, the minted one on a first turn and
+	// the one it accepted on a follow-up, so a caller reads back which conversation it is
+	// on rather than assuming its token was understood.
+	accept := a2a.NewAck(true)
+	accept.ConversationToken = t.token
+
+	err = stream.Ack(accept)
 	if err != nil {
 		// Nobody to tell: the ack is the first thing this worker says, so a caller that
 		// did not receive it has no reply set to be told anything else on.
@@ -141,7 +179,7 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 		return
 	}
 
-	log.Info("Accepted a prompt", "session", t.session, "prompt_bytes", len(req.Prompt))
+	log.Info("Accepted a prompt", "session", t.session, "conversation", req.Conversation, "follow_up", followUp, "prompt_bytes", len(req.Prompt))
 
 	work := t.work(caller)
 
@@ -192,6 +230,12 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 // A request id already in flight is refused because the id addresses the cancel
 // subscription: two tasks sharing one would both hear a cancel meant for one of them,
 // and the ack a caller reads back would come from whichever answered first.
+//
+// A second turn of a conversation this worker is already running is refused for a
+// different reason: both turns would resume one journal, and the second to claim it
+// takes it while the first fails at its next append. The caller is told to wait for the
+// terminal message of the turn it already sent rather than to try elsewhere, since a
+// sibling worker would take the conversation the same way.
 func (c *Channel) admit(t *task) (string, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -211,6 +255,12 @@ func (c *Channel) admit(t *task) (string, string) {
 		return codeDuplicate, "a run with this request id is already in flight here"
 	}
 
+	for _, other := range c.inFlight {
+		if other.session == t.session {
+			return codeConversationBusy, "a turn of this conversation is running here; wait for its terminal message before sending another"
+		}
+	}
+
 	c.inFlight[t.req.Request] = t
 
 	return "", ""
@@ -218,43 +268,56 @@ func (c *Channel) admit(t *task) (string, string) {
 
 // release gives the slot back and forgets the request id, so the next caller is
 // admitted and the id can be used again.
+//
+// Only the task holding the slot releases it. Every ending runs through here, including
+// the endings of a task that was never admitted, and a request refused for reusing an id
+// that is already running carries that id: deleting on the id alone would free the
+// running task's slot and forget it, so the worker would over-admit and stop refusing
+// that id. It also makes a second release a no-op, which the cancel-watch failure path
+// performs.
 func (c *Channel) release(t *task) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	delete(c.inFlight, t.req.Request)
+	if c.inFlight[t.req.Request] == t {
+		delete(c.inFlight, t.req.Request)
+	}
 }
 
 // work is the unit the server runs, with the attachment points this channel can supply.
 //
 // Fields the request carries that Work has no home for are dropped, and deliberately:
 // tool_hints, budget.call_timeout, Header.Parent and Header.Recipient.
-// Header.Conversation is dropped with the most care, since it is a caller-chosen string
-// meaning "session" and must never reach Checkpoint, where it would let one caller name
-// another's journal.
+// Header.Conversation is dropped with the most care. It is a caller-chosen string that
+// means correlation, echoed on every reply and interpreted by nothing, and it must never
+// reach Checkpoint, where it would let one caller name another's journal. What names a
+// journal here is the token this worker minted, hashed.
 //
 // Prompter is set only when elicitation is on. Nil leaves the server substituting its
 // deny prompter, which refuses every confirmation-gated tool: with the key off this
-// channel has nobody to ask. Continue stays nil, so a task is one shot.
+// channel has nobody to ask. Continue stays nil: a conversation holds no run between
+// turns, so a follow-up arrives as another request rather than through a parked one.
 //
 // PromptsMayBlock stays false. The caller is on the other end of a transport rather
 // than a live connection this process holds, so a question it does not answer within
 // PromptWait gives the worker back.
 func (t *task) work(caller a2a.Caller) *serve.Work {
+	// A first turn creates the journal the token names; a follow-up resumes it and its
+	// prompt is the conversation's next turn. CreateIfMissing is what separates them and
+	// a follow-up must not carry it: a token naming no journal is a caller's mistake to
+	// hear about, not a conversation to invent under a name it chose.
+	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true}
+	if t.followUp {
+		checkpoint = agent.Checkpoint{ResumeID: t.session, FollowUp: true}
+	}
+
 	return &serve.Work{
-		// The minted session rather than the caller's request id: the id is a caller's
-		// to choose and this names the work in a worker's logs beside jobs from a queue.
-		ID:      t.session,
-		Prompt:  t.req.Prompt,
-		Context: t.req.Context,
-		// A journal per task, so a crash leaves a resumable run and a tool that answers
-		// later has somewhere for its answer to land. Nothing resumes it in this
-		// release: a fresh id per task means there is never an existing journal to
-		// answer from.
-		Checkpoint: agent.Checkpoint{
-			ResumeID:        t.session,
-			CreateIfMissing: true,
-		},
+		// The session rather than the caller's request id: the id is a caller's to choose
+		// and this names the work in a worker's logs beside jobs from a queue.
+		ID:         t.session,
+		Prompt:     t.req.Prompt,
+		Context:    t.req.Context,
+		Checkpoint: checkpoint,
 		// The caller's request id, which greps across this worker's logs and the caller's
 		// own record of what it asked for.
 		ClaimedBy:  t.req.Request,
@@ -391,7 +454,9 @@ func (t *task) done(_ context.Context, out serve.Outcome) error {
 //
 // The order settles the cases that overlap. A canceled run reports a context error and
 // no terminal reason, so it is recognized before the outcome's own vocabulary; a
-// deferred call and a drain both suspend, and the deferred list separates them.
+// deferred call and a drain both suspend, and the deferred list separates them. A
+// follow-up that was not taken is answered before the deferral that stopped it, since
+// what the caller does about it is send its own prompt again rather than answer the call.
 func (t *task) disposition(out serve.Outcome) (string, string) {
 	t.mu.Lock()
 	canceled := t.canceled
@@ -413,6 +478,19 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 
 	case canceled:
 		return codeCanceled, "the run was canceled"
+
+	case errors.Is(out.Err, agent.ErrConversationNotFound):
+		// The token named no journal here. Every worker of this identity reads one store,
+		// so this is a token that was never minted, or one whose conversation the store no
+		// longer holds.
+		return codeUnknownConversation, "this conversation is not known here; send the prompt without a conversation token to start one"
+
+	case t.followUp && !out.FollowUpTaken:
+		// The conversation was waiting on a deferred tool result, so it reached no
+		// boundary a user turn could join. The prompt was not journaled and not answered.
+		t.log.Info("A follow-up turn was not taken", "session", t.session, "deferred", deferredIDs(out.Deferred))
+
+		return codeTurnNotTaken, "the conversation is waiting on a deferred tool result and cannot take a turn; send the prompt again once it has been answered"
 
 	case len(out.Deferred) > 0:
 		// Nothing wakes it in this release. The ids travel to the caller and to the log
@@ -443,7 +521,12 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 // refuse tells a caller its request was not taken: the ack that says no, then the
 // terminal message that ends the set.
 func (t *task) refuse(code, reason string) {
-	t.terminateWith(func() error { return t.stream.Ack(false, reason) }, serve.Outcome{}, code, reason)
+	t.terminateWith(func() error {
+		refusal := a2a.NewAck(false)
+		refusal.Reason = reason
+
+		return t.stream.Ack(refusal)
+	}, serve.Outcome{}, code, reason)
 }
 
 // terminate ends an accepted task with a result or an error and releases what it holds.
@@ -581,6 +664,22 @@ func callerName(caller a2a.Caller, req *a2a.Request) string {
 	}
 
 	return c.Name
+}
+
+// sessionFor is the journal a conversation token runs in: the hash of the token under
+// this identity, prefixed so an operator reading a session list sees which surface a
+// journal came from.
+//
+// The token is hashed rather than used as the key so the only journals a caller can
+// reach are the ones this channel minted a token for. A session id is not a secret: it
+// is logged, it is in the terminal message a deferred run sends, and the queue channel
+// takes a submitter-chosen one as the journal to resume. Handing the store a caller's
+// bytes directly would put every one of those journals within reach of anyone who
+// learned an id.
+func sessionFor(identity, token string) string {
+	sum := sha256.Sum256([]byte(identity + "\x00" + token))
+
+	return "t-" + hex.EncodeToString(sum[:])
 }
 
 // deferredIDs renders the tool_use ids a run is waiting on. The note and the handle are

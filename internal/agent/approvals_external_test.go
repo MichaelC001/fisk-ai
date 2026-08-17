@@ -434,6 +434,66 @@ func TestApprovals_DroppedByAForcedResume(t *testing.T) {
 	g.Expect(events.Starts()[0].StandingApprovals).To(BeEmpty())
 }
 
+// TestApprovals_KeptAcrossABudgetChange separates the drift a resume refuses from the
+// drift it reports. Neither budget bound can leave a stored conversation incoherent,
+// so a resume under a different cap continues without --force and the grants the
+// operator gave come with it.
+func TestApprovals_KeptAcrossABudgetChange(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+
+	store, err := runstatefile.NewFileStore(t.TempDir())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	var ran atomic.Int64
+	tool := gatedTool(t, "stream_rm", &ran)
+
+	opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint, tokens int64, suspend func() bool) agent.Options {
+		return agent.Options{
+			Config:           agenttest.Config(t, app, agenttest.WithMaxTokens(tokens)),
+			ConfigFile:       "agent.yaml",
+			Prompt:           []string{"remove the stream"},
+			Provider:         provider,
+			SessionStore:     store,
+			Checkpoint:       cp,
+			CustomTools:      []toolkit.Tool{tool},
+			SuspendRequested: suspend,
+		}
+	}
+
+	var asked atomic.Int64
+	polls := 0
+	res1, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t, agenttest.ToolUseResponse("c1", "stream_rm", json.RawMessage(`{}`))),
+		agent.Checkpoint{Enabled: true},
+		500000,
+		func() bool { polls++; return polls > 1 },
+	), agenttest.NewRecordingEvents(), alwaysPrompter(t, &asked))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(ran.Load()).To(Equal(int64(1)))
+
+	// Resumed under a lower token cap: the run continues without --force, the operator
+	// is told, and the restored grant runs the second call without a question.
+	var asked2 atomic.Int64
+	events := agenttest.NewRecordingEvents()
+	res2, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t,
+			agenttest.ToolUseResponse("c2", "stream_rm", json.RawMessage(`{}`)),
+			agenttest.TextResponse("both streams are gone"),
+		),
+		agent.Checkpoint{ResumeID: res1.SessionID},
+		400000,
+		nil,
+	), events, alwaysPrompter(t, &asked2))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+	g.Expect(ran.Load()).To(Equal(int64(2)))
+	g.Expect(asked2.Load()).To(BeZero())
+	g.Expect(events.HasWarning(agent.WarnBudgetDrift)).To(BeTrue())
+	g.Expect(events.Starts()[0].StandingApprovals).To(ConsistOf("stream_rm"))
+}
+
 // TestApprovals_DroppedByAContextReset holds the scoping rule that has no
 // exceptions: a grant belongs to the conversation it was given in, and a reset
 // starts another one. A checkpointed reset rotates to a separately resumable

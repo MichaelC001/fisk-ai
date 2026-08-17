@@ -173,6 +173,11 @@ const (
 	// approved, so the run asks again. Told at the resume rather than at the next
 	// prompt, where it would look like the gate forgetting.
 	WarnApprovalsDropped
+	// WarnBudgetDrift: the session was saved with different token or iteration bounds,
+	// listed in Params, and the resume continues under the current ones. Neither bound
+	// can leave a stored conversation incoherent, so a difference is reported rather
+	// than refused; what it changes is how far this run may get.
+	WarnBudgetDrift
 )
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;

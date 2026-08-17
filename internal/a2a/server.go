@@ -354,7 +354,7 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 
 	// Accepted on the serving goroutine, so the caller knows it has a worker before
 	// anything long starts and can tell this from a peer that never received it.
-	err = stream.Ack(true, "")
+	err = stream.Ack(NewAck(true))
 	if err != nil {
 		<-s.sem
 		log.Error("Acknowledging the tool call failed", "tool", tool.Name(), "error", err)
@@ -417,7 +417,10 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 // reply carries what a caller acts on. Both are needed because the ack ends nothing,
 // and the code is on the reply because an ack has no room for one.
 func (s *Server) refuse(stream *ReplyStream, log *slog.Logger, reason, code string) {
-	err := stream.Ack(false, reason)
+	refusal := NewAck(false)
+	refusal.Reason = reason
+
+	err := stream.Ack(refusal)
 	if err != nil {
 		log.Error("Refusing the tool call failed", "error", err)
 		return

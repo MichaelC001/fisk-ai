@@ -21,12 +21,35 @@ type Request struct {
 	// Stream, when false, asks for only a terminal result with no event stream.
 	// A nil value means the default, which is to stream.
 	Stream *bool `json:"stream,omitempty"`
+	// ConversationToken runs Prompt as the next turn of the conversation the token
+	// names, which is the one an earlier Ack handed back. Empty starts a conversation
+	// of its own, which is what every first request carries.
+	//
+	// A caller decides per request and declares nothing in advance: a client that
+	// answers once and stops ignores the token it was given, and one that wants another
+	// turn sends the token it already holds.
+	ConversationToken string `json:"conversation_token,omitempty"`
 }
 
 // NewRequest builds a Request with the protocol id set.
 func NewRequest(prompt string) *Request {
 	r := &Request{Prompt: prompt}
 	r.Protocol = RequestProtocol
+
+	return r
+}
+
+// NewFollowUp builds a request that continues the conversation ack accepted, running
+// prompt as its next turn. It correlates from the ack rather than leaving a caller to
+// copy the token across, for the reason NewElicitReplyFromRequest states.
+//
+// The conversation tag is carried over as well, so a caller's own correlation across
+// the turns of one conversation survives without being set again. Header.Request is
+// left for the send to stamp, since a follow-up opens a reply set of its own.
+func NewFollowUp(ack *Ack, prompt string) *Request {
+	r := NewRequest(prompt)
+	r.ConversationToken = ack.ConversationToken
+	r.Conversation = ack.Conversation
 
 	return r
 }
@@ -111,6 +134,15 @@ type Ack struct {
 
 	Accepted bool   `json:"accepted"`
 	Reason   string `json:"reason,omitempty"`
+	// ConversationToken is the handle a later request carries to run its prompt as the
+	// next turn of the conversation this ack accepted. An agent that serves follow-up
+	// turns carries it on every ack it accepts with, the minted one on a first turn and
+	// the accepted one on a follow-up, so a caller reads back which conversation it is
+	// on. Empty from an agent that does not serve them.
+	//
+	// Holding it is the authorization to add a turn to that conversation, so it is
+	// neither logged nor displayed.
+	ConversationToken string `json:"conversation_token,omitempty"`
 }
 
 // NewAck builds an Ack with the protocol id set.

@@ -93,7 +93,7 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should number from 1 with no gaps across the ack, the events and the terminal", func() {
-		Expect(stream.Ack(true, "")).To(Succeed())
+		Expect(stream.Ack(NewAck(true))).To(Succeed())
 		Expect(stream.Event(NewTextBlock("first"))).To(Succeed())
 		Expect(stream.Event(NewTextBlock("second"))).To(Succeed())
 
@@ -106,7 +106,7 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should carry the ack through Respond and everything after it through Publish, marking only the last", func() {
-		Expect(stream.Ack(true, "")).To(Succeed())
+		Expect(stream.Ack(NewAck(true))).To(Succeed())
 		Expect(stream.Event(NewTextBlock("working"))).To(Succeed())
 		Expect(stream.Error(NewError("it broke"))).To(Succeed())
 
@@ -124,7 +124,7 @@ var _ = Describe("ReplyStream", func() {
 		req := taskRequest()
 		stream = NewReplyStream(sink, req, "svc")
 
-		Expect(stream.Ack(true, "")).To(Succeed())
+		Expect(stream.Ack(NewAck(true))).To(Succeed())
 		Expect(stream.Event(NewTextBlock("hi"))).To(Succeed())
 
 		for _, msg := range sink.sent {
@@ -138,7 +138,7 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should refuse an oversized event without advancing the sequence", func() {
-		Expect(stream.Ack(true, "")).To(Succeed())
+		Expect(stream.Ack(NewAck(true))).To(Succeed())
 
 		err := stream.Event(NewTextBlock(strings.Repeat("x", MaxMessageSize)))
 		Expect(err).To(MatchError(ErrMessageTooLarge))
@@ -151,7 +151,7 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should report a failed terminal publish rather than dropping it", func() {
-		Expect(stream.Ack(true, "")).To(Succeed())
+		Expect(stream.Ack(NewAck(true))).To(Succeed())
 
 		sink.failFrom = 2
 		err := stream.Result(NewResult(StopEndTurn))
@@ -163,17 +163,21 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should refuse an ack that is not the first message of the set", func() {
-		Expect(stream.Ack(true, "")).To(Succeed())
+		Expect(stream.Ack(NewAck(true))).To(Succeed())
 		Expect(stream.Event(NewTextBlock("hi"))).To(Succeed())
 
-		Expect(stream.Ack(true, "")).To(MatchError(ErrInvalidMessage))
+		Expect(stream.Ack(NewAck(true))).To(MatchError(ErrInvalidMessage))
 	})
 
 	It("Should produce messages that pass the schema", func() {
 		validator, err := NewValidator()
 		Expect(err).ToNot(HaveOccurred())
 
-		Expect(stream.Ack(false, "at capacity")).To(Succeed())
+		refusal := NewAck(false)
+		refusal.Reason = "at capacity"
+		refusal.ConversationToken = "2Ab3Cd4Ef5Gh"
+
+		Expect(stream.Ack(refusal)).To(Succeed())
 		Expect(stream.Event(NewTextBlock("hi"))).To(Succeed())
 		Expect(stream.Result(NewResult(StopEndTurn))).To(Succeed())
 
