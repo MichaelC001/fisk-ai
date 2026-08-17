@@ -56,15 +56,26 @@ func HashHex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Equal reports whether two fingerprints match exactly.
+// Equal reports whether two fingerprints match exactly. It is the strict
+// comparison; a resume asks BlockingDiff instead, since not every difference can
+// make a stored conversation incoherent.
 func (f Fingerprint) Equal(o Fingerprint) bool {
 	return len(f.Diff(o)) == 0
 }
 
-// Diff returns a human-readable line per field that differs between f (the saved
-// fingerprint) and o (the current one), for an actionable mismatch error. Hashed
-// fields are reported as changed rather than showing their opaque values.
-func (f Fingerprint) Diff(o Fingerprint) []string {
+// BlockingDiff returns the differences a resume must refuse: the model, the system
+// prompt, the tool set, the thinking mode and the reasoning effort, each of which can
+// leave a stored conversation the provider will not accept. A stored tool_use may name a
+// tool that is gone, and a thinking signature belongs to the mode and effort that
+// produced it.
+//
+// MaxTokens and MaxIterations are excluded. Neither can corrupt history: they bound
+// how far a run gets, so a difference finishes a run under limits it did not start
+// with, which is reported to the operator rather than refused. A served conversation
+// makes that routine, since a caller may lower both per request and the local
+// configuration is the ceiling, so refusing on them would end a conversation on a
+// difference that changes nothing about what the model can be sent.
+func (f Fingerprint) BlockingDiff(o Fingerprint) []string {
 	var out []string
 
 	if f.Model != o.Model {
@@ -82,6 +93,15 @@ func (f Fingerprint) Diff(o Fingerprint) []string {
 	if f.ReasoningEffort != o.ReasoningEffort {
 		out = append(out, fmt.Sprintf("reasoning_effort: %s -> %s", quotedOrNone(f.ReasoningEffort), quotedOrNone(o.ReasoningEffort)))
 	}
+
+	return out
+}
+
+// BudgetDiff returns the differences in the two bounds BlockingDiff excludes, for a
+// resume to report while continuing.
+func (f Fingerprint) BudgetDiff(o Fingerprint) []string {
+	var out []string
+
 	if f.MaxTokens != o.MaxTokens {
 		out = append(out, fmt.Sprintf("max_tokens: %d -> %d", f.MaxTokens, o.MaxTokens))
 	}
@@ -90,4 +110,11 @@ func (f Fingerprint) Diff(o Fingerprint) []string {
 	}
 
 	return out
+}
+
+// Diff returns a human-readable line per field that differs between f (the saved
+// fingerprint) and o (the current one). Hashed fields are reported as changed rather
+// than showing their opaque values.
+func (f Fingerprint) Diff(o Fingerprint) []string {
+	return append(f.BlockingDiff(o), f.BudgetDiff(o)...)
 }

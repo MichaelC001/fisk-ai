@@ -5,6 +5,7 @@
 package a2a
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -368,6 +369,84 @@ var _ = Describe("A2A", func() {
 		It("Should satisfy the error interface", func() {
 			var err error = NewError("boom")
 			Expect(err.Error()).To(Equal("boom"))
+		})
+	})
+
+	Describe("stampRequest", func() {
+		// The tag is the caller's own correlation and means nothing to a receiver, so the
+		// turns of one conversation can carry one tag only if the stamp leaves it alone.
+		It("Should keep a conversation tag the caller set and mint one when it did not", func() {
+			fresh := NewRequest("p")
+			stampRequest(context.Background(), &fresh.Header, "caller1", "svc")
+			Expect(fresh.Conversation).To(Equal(fresh.ID))
+
+			carried := NewRequest("p")
+			carried.Conversation = "conv1"
+			stampRequest(context.Background(), &carried.Header, "caller1", "svc")
+			Expect(carried.Conversation).To(Equal("conv1"))
+			Expect(carried.Request).To(Equal(carried.ID))
+		})
+	})
+
+	Describe("NewFollowUp", func() {
+		// A follow-up is built from the ack that accepted the conversation, so a caller
+		// copies neither the token nor the tag across by hand.
+		It("Should correlate the turn to the conversation the ack accepted", func() {
+			ack := NewAck(true)
+			ack.Conversation = "conv1"
+			ack.ConversationToken = "2Ab3Cd4Ef5Gh"
+
+			req := NewFollowUp(ack, "and the other one")
+			Expect(req.Protocol).To(Equal(RequestProtocol))
+			Expect(req.Prompt).To(Equal("and the other one"))
+			Expect(req.ConversationToken).To(Equal("2Ab3Cd4Ef5Gh"))
+			Expect(req.Conversation).To(Equal("conv1"))
+			// The reply set is its own, so the correlation tag is left for the send.
+			Expect(req.Request).To(BeEmpty())
+		})
+
+		It("Should round-trip the token through the schema on both messages", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			ack := NewAck(true)
+			fillHeader(&ack.Header)
+			ack.ConversationToken = "2Ab3Cd4Ef5Gh"
+
+			body, err := json.Marshal(ack)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(validator.Validate(body)).To(Succeed())
+
+			decoded, err := Decode(body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(decoded.(*Ack).ConversationToken).To(Equal("2Ab3Cd4Ef5Gh"))
+
+			req := NewFollowUp(decoded.(*Ack), "carry on")
+			fillHeader(&req.Header)
+			req.Conversation = decoded.(*Ack).Conversation
+
+			body, err = json.Marshal(req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(validator.Validate(body)).To(Succeed())
+
+			decoded, err = Decode(body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(decoded.(*Request).ConversationToken).To(Equal("2Ab3Cd4Ef5Gh"))
+		})
+
+		// The token reaches a store key and a subject, so a receiver refuses one carrying
+		// anything else at the boundary rather than after it has been used.
+		It("Should refuse a token outside the character set", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			req := NewRequest("carry on")
+			fillHeader(&req.Header)
+			req.ConversationToken = "../../etc/passwd"
+
+			body, err := json.Marshal(req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(validator.Validate(body)).ToNot(Succeed())
 		})
 	})
 

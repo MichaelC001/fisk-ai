@@ -120,8 +120,11 @@ type RunState struct {
 	Terminal *TerminalRecord
 }
 
-// Completed reports whether the run reached a natural terminal state and should
-// not be resumed.
+// Completed reports whether the last run in this journal ended by answering.
+//
+// It is not a claim that the conversation is over. A resume with nothing to add is
+// refused on it, since the model would be called on a finished conversation with no
+// new input, and a resume carrying a new user turn continues past it.
 func (s *RunState) Completed() bool {
 	return s.Terminal != nil && s.Terminal.Reason == ReasonCompleted
 }

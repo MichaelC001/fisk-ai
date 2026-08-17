@@ -98,6 +98,8 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("tool %q was stopped: %v; raise harness.tool_timeout if the tool needs longer", w.Name, w.Err)
 	case agent.WarnApprovalsDropped:
 		return fmt.Sprintf("%d standing approval(s) were not restored because --force resumed this session across a changed configuration; you will be asked again for those commands", w.Count)
+	case agent.WarnBudgetDrift:
+		return fmt.Sprintf("this session was saved with different budget bounds (%s); it continues under the current configuration", strings.Join(w.Params, ", "))
 	default:
 		return ""
 	}

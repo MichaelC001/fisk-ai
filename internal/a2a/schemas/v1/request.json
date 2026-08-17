@@ -31,6 +31,9 @@
       "type": "boolean",
       "default": true,
       "description": "false means the caller wants only a terminal result, no event stream."
+    },
+    "conversation_token": {
+      "$ref": "common.json#/$defs/conversation_token"
     }
   },
   "required": [

@@ -177,6 +177,28 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
 		})
 
+		// A terminal record ends a run rather than a conversation, so a turn delivered
+		// on a later resume folds in behind one and the record that run writes replaces
+		// it.
+		It("folds a user turn that follows a terminal record", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "first answer")},
+				{Seq: 3, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}},
+				{Seq: 4, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-2"}},
+				{Seq: 5, Protocol: UserProtocol, User: userRecord("second question")},
+				{Seq: 6, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "second answer")},
+				{Seq: 7, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended}},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Messages).To(HaveLen(4))
+			Expect(userTexts(rs)).To(Equal([]string{"start here", "second question"}))
+			Expect(rs.Terminal).To(Equal(&TerminalRecord{Reason: ReasonSuspended}))
+			Expect(rs.Completed()).To(BeFalse())
+			Expect(rs.NextIteration).To(Equal(int64(2)))
+		})
+
 		It("rejects a decision record with no payload", func() {
 			_, err := Fold([]Record{meta(), {Seq: 2, Protocol: DecisionProtocol, Optional: true}})
 			Expect(err).To(MatchError(ErrCorrupt))
@@ -484,6 +506,22 @@ var _ = Describe("runstate", func() {
 			b := Fingerprint{Model: "claude-opus-4-8", SystemHash: "h2", MaxTokens: 100}
 			Expect(a.Equal(b)).To(BeFalse())
 			Expect(a.Diff(b)).To(ConsistOf("model: claude-opus-4-7 -> claude-opus-4-8", "system prompt: changed"))
+		})
+
+		It("keeps the budget bounds out of the drift a resume refuses", func() {
+			a := Fingerprint{Model: "m", MaxTokens: 100, MaxIterations: 5}
+			b := Fingerprint{Model: "m", MaxTokens: 200, MaxIterations: 9}
+			Expect(a.BlockingDiff(b)).To(BeEmpty())
+			Expect(a.BudgetDiff(b)).To(ConsistOf("max_tokens: 100 -> 200", "max_iterations: 5 -> 9"))
+			Expect(a.Diff(b)).To(ConsistOf("max_tokens: 100 -> 200", "max_iterations: 5 -> 9"))
+			Expect(a.Equal(b)).To(BeFalse())
+		})
+
+		It("reports a changed tool set as drift a resume refuses", func() {
+			a := Fingerprint{Model: "m", ToolsHash: "h1", MaxTokens: 100}
+			b := Fingerprint{Model: "m", ToolsHash: "h2", MaxTokens: 100}
+			Expect(a.BlockingDiff(b)).To(ConsistOf("tool set: changed"))
+			Expect(a.BudgetDiff(b)).To(BeEmpty())
 		})
 
 		It("excludes the provider from Equal and Diff so it stays a separate hard gate", func() {

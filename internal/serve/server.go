@@ -587,6 +587,7 @@ func (s *Server) execute(ctx context.Context, work *Work, log *slog.Logger) {
 		out.Reason = res.Reason
 		out.Stats = res.Stats
 		out.Deferred = res.Deferred
+		out.FollowUpTaken = res.FollowUpTaken
 	}
 	out.Err = err
 

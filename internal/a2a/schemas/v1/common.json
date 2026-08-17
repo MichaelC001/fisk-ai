@@ -143,6 +143,12 @@
       "pattern": "^[a-z][a-z0-9_]*$",
       "description": "Why a task ended. This version names end_turn, max_tokens, refusal, canceled, error, budget_exhausted, suspended and max_iterations. A reason outside that set is accepted rather than refused, since rejecting one would cost the whole terminal message including the answer text; it is bounded because a receiver displays it."
     },
+    "conversation_token": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "maxLength": 128,
+      "description": "Handle for a conversation, minted by the answering agent and carried on its ack. A later request carrying it runs its prompt as the next turn of that conversation. It is a credential rather than an id: holding it is the authorization to add a turn, so a receiver neither logs nor displays it."
+    },
     "exec_result": {
       "type": "object",
       "description": "Optional command metadata, mirroring CommandResult; absent for non-shell tools.",

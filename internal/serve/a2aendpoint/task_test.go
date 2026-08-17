@@ -238,6 +238,117 @@ var _ = Describe("The prompt channel", func() {
 			Expect(second.Accepted).To(BeFalse())
 			Expect(second.Reason).To(ContainSubstring("already in flight here"))
 		})
+
+		// Every ending releases, including the ending of a request that was never
+		// admitted, and a duplicate carries the running task's id. Releasing on the id
+		// alone would hand back a slot this task never held.
+		It("Should keep the running task's slot when a duplicate is refused", func() {
+			newChannel(1)
+
+			body := rawRequest("dup1", "first")
+			Expect(ackOf(body).Accepted).To(BeTrue())
+			takeWork()
+
+			Expect(ackOf(body).Accepted).To(BeFalse())
+
+			// The only slot is still held, so the next caller is refused at capacity
+			// rather than admitted over the running run.
+			third := ackOf(rawRequest("other1", "second"))
+			Expect(third.Accepted).To(BeFalse())
+			Expect(third.Reason).To(ContainSubstring("maximum of 1 prompts"))
+		})
+	})
+
+	Describe("Follow-up turns", func() {
+		It("Should hand back a token on a first turn and resume its journal on the next", func() {
+			newChannel(1)
+
+			first := send(a2a.NewRequest("how many streams are there"))
+
+			ack, ok := next(first).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+			Expect(ack.Accepted).To(BeTrue())
+			Expect(ack.ConversationToken).ToNot(BeEmpty())
+
+			opening := takeWork()
+			Expect(opening.Checkpoint.CreateIfMissing).To(BeTrue(), "a first turn creates the journal")
+			Expect(opening.Checkpoint.FollowUp).To(BeFalse())
+			// The journal is the hash of the token, so a caller's bytes never become a
+			// store key and no journal is reachable by knowing one.
+			Expect(opening.Checkpoint.ResumeID).To(HavePrefix("t-"))
+			Expect(opening.Checkpoint.ResumeID).ToNot(ContainSubstring(ack.ConversationToken))
+
+			report(opening, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "there are three"})
+			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.Result{}))
+
+			// The next turn carries the token back and lands in the same journal.
+			second := send(a2a.NewFollowUp(ack, "what is the first one called"))
+
+			echoed, ok := next(second).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+			Expect(echoed.Accepted).To(BeTrue())
+			Expect(echoed.ConversationToken).To(Equal(ack.ConversationToken), "a caller reads back which conversation it is on")
+
+			turn := takeWork()
+			Expect(turn.Prompt).To(Equal("what is the first one called"))
+			Expect(turn.Checkpoint.ResumeID).To(Equal(opening.Checkpoint.ResumeID))
+			Expect(turn.Checkpoint.FollowUp).To(BeTrue())
+			Expect(turn.Checkpoint.CreateIfMissing).To(BeFalse(), "a token naming no journal is refused rather than creating one")
+
+			report(turn, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "the first is ORDERS", FollowUpTaken: true})
+
+			res, ok := next(second).(*a2a.Result)
+			Expect(ok).To(BeTrue())
+			Expect(res.Text).To(Equal("the first is ORDERS"))
+		})
+
+		// Both turns would resume one journal, and the second to claim it takes it while
+		// the first fails at its next append. A sibling worker would do the same, so the
+		// caller is told to wait rather than to try elsewhere.
+		It("Should refuse a turn of a conversation it is already running", func() {
+			newChannel(2)
+
+			first := send(a2a.NewRequest("how many streams are there"))
+			ack, ok := next(first).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+			takeWork()
+
+			second := send(a2a.NewFollowUp(ack, "and the other one"))
+
+			refused, ok := next(second).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+			Expect(refused.Accepted).To(BeFalse())
+
+			failed, ok := next(second).(*a2a.ErrorMessage)
+			Expect(ok).To(BeTrue())
+			Expect(failed.Code).To(Equal(codeConversationBusy))
+			Expect(failed.Err).To(ContainSubstring("wait for its terminal message"))
+		})
+
+		DescribeTable("Should tell a caller what became of its turn",
+			func(followUp bool, out serve.Outcome, code string) {
+				newChannel(1)
+
+				req := a2a.NewRequest("and the other one")
+				if followUp {
+					req.ConversationToken = "2Ab3Cd4Ef5Gh"
+				}
+				stream := send(req)
+				Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+
+				report(takeWork(), out)
+
+				failed, ok := next(stream).(*a2a.ErrorMessage)
+				Expect(ok).To(BeTrue())
+				Expect(failed.Code).To(Equal(code))
+			},
+			Entry("a token naming no journal", true,
+				serve.Outcome{Err: fmt.Errorf("resuming: %w", agent.ErrConversationNotFound)}, codeUnknownConversation),
+			Entry("a conversation that could not take the turn", true,
+				serve.Outcome{Reason: runstate.ReasonSuspended, Deferred: []agent.DeferredCall{{ToolUseID: "c1", ToolName: "change_request"}}}, codeTurnNotTaken),
+			Entry("a first turn that deferred, which is not a turn refused", false,
+				serve.Outcome{Reason: runstate.ReasonSuspended, Deferred: []agent.DeferredCall{{ToolUseID: "c1", ToolName: "change_request"}}}, codeDeferred),
+		)
 	})
 
 	Describe("Endings", func() {

@@ -233,6 +233,8 @@ func warningKindName(k WarningKind) string {
 		return "behavior_tag_conflict"
 	case WarnToolTimeout:
 		return "tool_timeout"
+	case WarnBudgetDrift:
+		return "budget_drift"
 	default:
 		return "unknown"
 	}
