@@ -54,9 +54,15 @@ expose:
 		built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
 		Expect(err).ToNot(HaveOccurred())
 
+		ch := channelOf(built)
+
+		// How long one question is held before the worker gives up on it, shortened so
+		// the caller below can outlast it rather than the spec sitting out two minutes.
+		ch.promptWait = 500 * time.Millisecond
+
 		// The model calls the gated command, then answers once it has its result.
 		srv, err := serve.New(serve.Options{
-			Channels:   []serve.Channel{channelOf(built)},
+			Channels:   []serve.Channel{ch},
 			Config:     cfg,
 			ConfigFile: "agent.yaml",
 			StoreDir:   GinkgoT().TempDir(),
@@ -110,6 +116,21 @@ expose:
 			switch m := msg.(type) {
 			case *a2a.ElicitRequest:
 				asked = m
+				Expect(m.WaitMS).To(Equal(int64(500)), "the caller is told what it has to beat")
+
+				// A person reading the command takes longer than one window. Saying so
+				// buys another, twice, so the approval below lands past the point an
+				// unattended question would have been given up on.
+				for range 2 {
+					time.Sleep(300 * time.Millisecond)
+
+					held, merr := json.Marshal(a2a.NewWaitingAck(m, "caller1"))
+					Expect(merr).ToNot(HaveOccurred())
+
+					acked, rerr := nc.Request(natstransport.ElicitSubject("agent1", m.Request), held, 5*time.Second)
+					Expect(rerr).ToNot(HaveOccurred())
+					Expect(acked.Header.Get("Nats-Service-Error-Code")).To(BeEmpty())
+				}
 
 				body, merr := json.Marshal(a2a.NewApproveReply(m, "caller1", a2a.ChoiceOnce))
 				Expect(merr).ToNot(HaveOccurred())

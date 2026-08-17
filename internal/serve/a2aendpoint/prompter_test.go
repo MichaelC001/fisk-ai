@@ -112,6 +112,26 @@ var _ = Describe("Elicitation", func() {
 		return ack
 	}
 
+	// refusalFor sends a reply the worker is expected to turn down and returns the code
+	// it refused with, where answer above decodes an acceptance.
+	refusalFor := func(task string, reply *a2a.ElicitReply) string {
+		GinkgoHelper()
+
+		reply.ID = a2a.NewID()
+		reply.Request = task
+		reply.Conversation = task
+		reply.Time = time.Now().UTC()
+		reply.Sender = a2a.Identity{Name: "caller1"}
+
+		body, err := json.Marshal(reply)
+		Expect(err).ToNot(HaveOccurred())
+
+		msg, err := nc.Request(natstransport.ElicitSubject("agent1", task), body, 5*time.Second)
+		Expect(err).ToNot(HaveOccurred())
+
+		return msg.Header.Get("Nats-Service-Error-Code")
+	}
+
 	// ask puts one question through the work's prompter on a goroutine, since the
 	// answer has to be sent while it is waiting.
 	ask := func(put func() (string, error)) chan struct {
@@ -296,44 +316,217 @@ var _ = Describe("Elicitation", func() {
 		})
 	})
 
-	// The wait is the server's, applied to the context each method is called on, and the
-	// channel supplies request_timeout as its length. A question outliving it ends
+	// The channel bounds the question itself, one window of request_timeout at a time,
+	// which is what lets a caller restart it. A question outliving the window ends
 	// differently for the gate than for a tool: the gate's call is left unanswered so the
 	// resume asks again, and a tool's call is deferred so the answer can be supplied to it.
 	Describe("A question nobody answers", func() {
 		BeforeEach(func() {
 			newChannel("        workers: 1\n        elicit: true\n")
+
+			// The real window is request_timeout, shortened here so the spec does not sit
+			// it out.
+			ch.promptWait = 20 * time.Millisecond
 		})
 
 		It("Should abort an approval and defer the rest", func() {
 			_, work := start()
 
-			Expect(work.PromptWait).To(Equal(promptsConfig("        elicit: true\n").A2ARequestTimeout()), "the wait is request_timeout")
-			Expect(work.PromptsMayBlock).To(BeFalse(), "the caller is not attached")
+			Expect(work.PromptWait).To(BeZero(), "the server bounds none of this channel's questions")
+			Expect(work.PromptsMayBlock).To(BeTrue(), "the channel bounds them itself")
 
 			prompter, ok := work.Prompter.(*elicitPrompter)
 			Expect(ok).To(BeTrue())
 
-			// The bound the server applies, shortened here so the spec does not sit out
-			// the real one.
-			short := func() context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-				DeferCleanup(cancel)
-
-				return ctx
-			}
-
-			_, err := prompter.ApproveCommand(short(), toolkit.GateRequest{Command: "stream rm"})
+			_, err := prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "stream rm"})
 			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
 
-			_, err = prompter.Confirm(short(), "Proceed?")
+			_, err = prompter.Confirm(context.Background(), "Proceed?")
 			Expect(err).To(MatchError(toolkit.ErrDeferredResult))
 
-			_, err = prompter.Select(short(), "Which one?", []string{"east"})
+			_, err = prompter.Select(context.Background(), "Which one?", []string{"east"})
 			Expect(err).To(MatchError(toolkit.ErrDeferredResult))
 
-			_, err = prompter.Input(short(), "Which subject?", "")
+			_, err = prompter.Input(context.Background(), "Which subject?", "")
 			Expect(err).To(MatchError(toolkit.ErrDeferredResult))
+		})
+
+		It("Should refuse an answer that arrives after the window closed", func() {
+			stream, work := start()
+
+			done := ask(func() (string, error) {
+				_, err := work.Prompter.Confirm(context.Background(), "Proceed?")
+
+				return "", err
+			})
+
+			asked := question(stream)
+
+			var got struct {
+				answer string
+				err    error
+			}
+			Eventually(done, 5*time.Second).Should(Receive(&got))
+			Expect(got.err).To(MatchError(toolkit.ErrDeferredResult))
+
+			refused := refusalFor(asked.Request, a2a.NewWaitingAck(asked, "caller1"))
+			Expect(refused).To(Equal("404"), "the question is gone")
+
+			refused = refusalFor(asked.Request, a2a.NewConfirmReply(asked, "caller1", true))
+			Expect(refused).To(Equal("404"), "and so is the answer behind it")
+		})
+	})
+
+	// A caller with somebody in front of the question says so, which restarts the window
+	// rather than answering it. It is evidence rather than a claim: a caller that stops
+	// saying it loses the question one window later, exactly as one that never said it.
+	Describe("A caller that says it is still waiting", func() {
+		BeforeEach(func() {
+			newChannel("        workers: 1\n        elicit: true\n")
+
+			// Long enough that a slow machine does not close a window between the acks
+			// below, short enough that three of them are not a wait anybody notices.
+			ch.promptWait = 500 * time.Millisecond
+		})
+
+		It("Should tell the caller how long it has", func() {
+			stream, work := start()
+
+			done := ask(func() (string, error) {
+				_, err := work.Prompter.Confirm(context.Background(), "Proceed?")
+
+				return "", err
+			})
+
+			asked := question(stream)
+			Expect(asked.WaitMS).To(Equal(int64(500)), "the window actually enforced")
+			Expect(asked.AckInterval()).To(Equal(500 * time.Millisecond / 3))
+
+			Eventually(done, 5*time.Second).Should(Receive())
+		})
+
+		It("Should hold the question open past the window while acks arrive", func() {
+			stream, work := start()
+
+			answered := ask(func() (string, error) {
+				ok, err := work.Prompter.Confirm(context.Background(), "Proceed?")
+
+				return fmt.Sprintf("%v", ok), err
+			})
+
+			asked := question(stream)
+
+			// Three windows of elapsed time, each crossed on an ack. Without them the
+			// question is given up on before the first sleep ends.
+			for range 3 {
+				time.Sleep(300 * time.Millisecond)
+
+				ack := answer(asked.Request, a2a.NewWaitingAck(asked, "caller1"))
+				Expect(ack.Accepted).To(BeTrue())
+			}
+
+			answer(asked.Request, a2a.NewConfirmReply(asked, "caller1", true))
+
+			var got struct {
+				answer string
+				err    error
+			}
+			Eventually(answered, 5*time.Second).Should(Receive(&got))
+			Expect(got.err).ToNot(HaveOccurred())
+			Expect(got.answer).To(Equal("true"), "the answer rather than the acks before it")
+		})
+
+		It("Should deliver the answer that follows an ack rather than refusing it", func() {
+			stream, work := start()
+
+			answered := ask(func() (string, error) {
+				ok, err := work.Prompter.Confirm(context.Background(), "Proceed?")
+
+				return fmt.Sprintf("%v", ok), err
+			})
+
+			asked := question(stream)
+
+			// Two acks back to back leave one queued, since the signal is one deep. The
+			// second is still accepted, and neither takes the slot the answer needs.
+			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
+			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue(), "a duplicate reaches a question that is wide open")
+			Expect(answer(asked.Request, a2a.NewConfirmReply(asked, "caller1", true)).Accepted).To(BeTrue())
+
+			var got struct {
+				answer string
+				err    error
+			}
+			Eventually(answered, 5*time.Second).Should(Receive(&got))
+			Expect(got.err).ToNot(HaveOccurred())
+			Expect(got.answer).To(Equal("true"))
+		})
+
+		It("Should refuse an ack for a question it is not holding", func() {
+			stream, _ := start()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			DeferCleanup(cancel)
+
+			msg, err := stream.Next(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			ack, ok := msg.(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+
+			refused := refusalFor(ack.Request, a2a.NewElicitReply("q-nobody-asked", a2a.AnswerWaiting))
+			Expect(refused).To(Equal("404"))
+		})
+
+		It("Should end a question the run was canceled under, acks notwithstanding", func() {
+			stream, work := start()
+
+			runCtx, endRun := context.WithCancel(context.Background())
+			DeferCleanup(endRun)
+
+			answered := ask(func() (string, error) {
+				_, err := work.Prompter.Confirm(runCtx, "Proceed?")
+
+				return "", err
+			})
+
+			asked := question(stream)
+			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
+
+			endRun()
+
+			var got struct {
+				answer string
+				err    error
+			}
+			Eventually(answered, 5*time.Second).Should(Receive(&got))
+			Expect(got.err).To(MatchError(toolkit.ErrDeferredResult))
+		})
+
+		// A drain closes the endpoints and waits for the runs already under way without
+		// canceling them, so a question that could be restarted forever would hold the
+		// shutdown open with it.
+		It("Should stop restarting the window once the channel is draining", func() {
+			stream, work := start()
+
+			answered := ask(func() (string, error) {
+				_, err := work.Prompter.Confirm(context.Background(), "Proceed?")
+
+				return "", err
+			})
+
+			asked := question(stream)
+			Expect(ch.Close()).To(Succeed())
+
+			// The ack is still delivered, since the task's own subscriptions outlive the
+			// service registration. What it no longer does is buy another window.
+			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
+
+			var got struct {
+				answer string
+				err    error
+			}
+			Eventually(answered, 5*time.Second).Should(Receive(&got))
+			Expect(got.err).To(MatchError(toolkit.ErrDeferredResult))
 		})
 	})
 

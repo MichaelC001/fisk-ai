@@ -209,9 +209,12 @@ type Work struct {
 	// correct answer for a queue.
 	Prompter toolkit.Prompter
 
-	// PromptsMayBlock lets a question hold the run open, for a channel whose operator
-	// is on the other end of a live connection. The run context bounds it: a channel
-	// that loses its operator cancels the run, and the question ends there.
+	// PromptsMayBlock says this channel bounds its own questions, so the server holds
+	// none of them to PromptWait. Two kinds of channel set it: one whose operator is on
+	// the other end of a live connection, where the run context is the only bound; and
+	// one that holds the question against evidence the operator is still there, as the
+	// a2a prompt channel does with the replies a caller sends while a question is on
+	// its screen.
 	//
 	// False, the zero value, bounds each question by PromptWait, which is what a
 	// channel with nobody attached needs. Human think-time is minutes to days and a
@@ -223,6 +226,10 @@ type Work struct {
 	// PromptWait is how long one question is held open. A non-positive value takes two
 	// minutes, the default expose.agent.a2a.request_timeout carries, since waiting for
 	// a caller to answer is the same measurement. PromptsMayBlock set ignores it.
+	//
+	// No channel in this repository sets it, every one of them either supplying no
+	// prompter or bounding its own questions. It stays for an embedder's channel that
+	// can reach an operator but cannot tell whether one is still there.
 	PromptWait time.Duration
 
 	// Continue is called at a turn boundary for the next turn, holding the run open

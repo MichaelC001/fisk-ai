@@ -225,7 +225,7 @@ var _ = Describe("Validator", func() {
 		// An answer arrives from whoever can address the running task, so the values it
 		// can carry are pinned rather than left to the reader.
 		It("Should bound what an elicit reply may answer with", func() {
-			for _, answer := range []ElicitAnswer{AnswerChoice, AnswerConfirmed, AnswerIndex, AnswerValue, AnswerNoOperator} {
+			for _, answer := range []ElicitAnswer{AnswerChoice, AnswerConfirmed, AnswerIndex, AnswerValue, AnswerNoOperator, AnswerWaiting} {
 				reply := NewElicitReply("q1", answer)
 				fillHeader(&reply.Header)
 				Expect(v.ValidateMessage(reply)).To(Succeed(), "answer %q", answer)
@@ -250,6 +250,37 @@ var _ = Describe("Validator", func() {
 			ask := NewElicitRequest(ElicitKind("interrogate"), "q1")
 			fillHeader(&ask.Header)
 			Expect(v.ValidateMessage(ask)).ToNot(Succeed())
+		})
+
+		// The window is what a caller paces its acks against, so it travels on the
+		// question rather than being agreed in advance.
+		It("Should carry the window a question is held open for", func() {
+			ask := NewElicitRequest(ElicitConfirm, "q1")
+			ask.WaitMS = 120000
+			fillHeader(&ask.Header)
+			Expect(v.ValidateMessage(ask)).To(Succeed())
+			Expect(ask.AckInterval()).To(Equal(40 * time.Second))
+
+			negative := NewElicitRequest(ElicitConfirm, "q1")
+			negative.WaitMS = -1
+			fillHeader(&negative.Header)
+			Expect(v.ValidateMessage(negative)).ToNot(Succeed())
+
+			// An agent that predates the window takes no acks, which is what a caller
+			// reads an absent one as.
+			Expect(NewElicitRequest(ElicitConfirm, "q1").AckInterval()).To(BeZero())
+		})
+
+		It("Should correlate a waiting ack to the question it holds open", func() {
+			ask := NewElicitRequest(ElicitApprove, "q1")
+			fillHeader(&ask.Header)
+
+			held := NewWaitingAck(ask, "caller1")
+			Expect(held.Answer).To(Equal(AnswerWaiting))
+			Expect(held.QuestionID).To(Equal("q1"))
+			Expect(held.Request).To(Equal(ask.Request))
+			Expect(held.Sender.Name).To(Equal("caller1"))
+			Expect(v.ValidateMessage(held)).To(Succeed())
 		})
 	})
 

@@ -298,9 +298,11 @@ func (c *Channel) release(t *task) {
 // channel has nobody to ask. Continue stays nil: a conversation holds no run between
 // turns, so a follow-up arrives as another request rather than through a parked one.
 //
-// PromptsMayBlock stays false. The caller is on the other end of a transport rather
-// than a live connection this process holds, so a question it does not answer within
-// PromptWait gives the worker back.
+// PromptsMayBlock is set and PromptWait is left unset, so the server bounds none of
+// this run's questions and elicitPrompter bounds them itself. A caller with a person in
+// front of a question restarts its window by saying so, which the server's fixed
+// deadline cannot express; a caller that says nothing gives the worker back after one
+// window, as it does now.
 func (t *task) work(caller a2a.Caller) *serve.Work {
 	// A first turn creates the journal the token names; a follow-up resumes it and its
 	// prompt is the conversation's next turn. CreateIfMissing is what separates them and
@@ -320,14 +322,14 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 		Checkpoint: checkpoint,
 		// The caller's request id, which greps across this worker's logs and the caller's
 		// own record of what it asked for.
-		ClaimedBy:  t.req.Request,
-		Budget:     budgetOf(t.req),
-		Caller:     callerOf(caller, t.req),
-		Events:     t.events(),
-		Prompter:   t.promptsThrough(),
-		PromptWait: t.ch.promptWait,
-		RunContext: t.runContext,
-		Done:       t.done,
+		ClaimedBy:       t.req.Request,
+		Budget:          budgetOf(t.req),
+		Caller:          callerOf(caller, t.req),
+		Events:          t.events(),
+		Prompter:        t.promptsThrough(),
+		PromptsMayBlock: true,
+		RunContext:      t.runContext,
+		Done:            t.done,
 	}
 }
 

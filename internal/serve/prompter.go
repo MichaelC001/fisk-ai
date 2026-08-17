@@ -44,6 +44,11 @@ func promptsThrough(work *Work) toolkit.Prompter {
 // whose caller is not attached. Human think-time is minutes to days, so a worker that
 // waited it out would serve nothing while it did.
 //
+// No channel in this repository reaches it: the queue supplies no prompter and the a2a
+// prompt channel bounds its own questions, which is what lets a caller hold one open
+// while a person reads it. It is here for an embedder's channel that can reach an
+// operator but cannot tell whether one is still there.
+//
 // It bounds rather than answers. The prompter it wraps sees the elapsed wait as its own
 // context ending, and only that prompter knows what an unanswered question of each kind
 // produces: a question a tool asked defers, and a gate question leaves its call

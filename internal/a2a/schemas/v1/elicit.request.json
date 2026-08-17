@@ -57,6 +57,11 @@
     "default": {
       "type": "string",
       "description": "The value an input question pre-fills for the operator to accept or edit."
+    },
+    "wait_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How long this question is held open before the agent gives up on it, in milliseconds. A caller with a person in front of the question sends an elicit reply of waiting every third of it to restart it. Absent is an agent that predates this and takes no such replies, as is a 400 in answer to one; answer inside the window instead."
     }
   }
 }
