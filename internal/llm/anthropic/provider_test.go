@@ -132,6 +132,25 @@ var _ = Describe("Provider.buildParams", func() {
 			Expect(params.Thinking.OfEnabled).To(BeNil())
 		})
 
+		It("sends the effort level as written, including one it does not name", func() {
+			req := baseReq()
+			req.ReasoningEffort = "ludicrous"
+
+			params, err := p.buildParams(req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(params.OutputConfig.Effort).To(Equal(sdk.OutputConfigEffort("ludicrous")))
+		})
+
+		It("sends no output config when no effort is asked for", func() {
+			params, err := p.buildParams(baseReq())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(params.OutputConfig.Effort).To(BeEmpty())
+
+			body, err := params.OutputConfig.MarshalJSON()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(Equal("{}"), "an empty effort must not send a level")
+		})
+
 		It("sends the disabled parameter when the mode is off", func() {
 			req := baseReq()
 			req.Thinking = llm.ThinkingOff

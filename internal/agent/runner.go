@@ -746,6 +746,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			Tools:           r.toolDefs,
 			ToolSearch:      r.toolSearch,
 			Thinking:        r.thinking,
+			ReasoningEffort: r.cfg.ReasoningEffort(),
 			MaxOutputTokens: r.maxOutputTokens,
 			PromptCache:     r.promptCache,
 			Interactive:     r.interactive,

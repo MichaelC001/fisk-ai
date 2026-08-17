@@ -66,6 +66,16 @@ var _ = Describe("tcellEvents mapping", func() {
 			Expect(lines).To(BeEmpty())
 			Expect(answer).To(BeEmpty())
 		})
+
+		// The shape a turn takes when the model puts a separator beside its tool_use,
+		// which an operator sees as blank rows before every tool call.
+		It("Should return nothing for a turn whose text is only whitespace", func() {
+			for _, body := range []string{" ", "\n", "\n\n", "  \n\t"} {
+				lines, answer := messageLines(resp(text(body)), true, true)
+				Expect(lines).To(BeEmpty(), "text %q", body)
+				Expect(answer).To(BeEmpty(), "text %q", body)
+			}
+		})
 	})
 
 	Describe("toolTraceLine", func() {

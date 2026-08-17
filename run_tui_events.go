@@ -186,6 +186,9 @@ func toolTraceLine(t agent.ToolTrace, verbose bool) (tui.Line, bool) {
 // its prose. A terminal turn's prose is the final answer, set apart with a delimiter
 // since the viewport has no separate answer channel; its raw text is returned so the
 // caller can re-print it on exit.
+//
+// A turn whose text is empty or only whitespace contributes no prose line, so a
+// separator beside a tool call costs no blank rows.
 func messageLines(resp llm.Response, terminal, showThinking bool) ([]tui.Line, string) {
 	var lines []tui.Line
 
@@ -204,7 +207,10 @@ func messageLines(resp llm.Response, terminal, showThinking bool) ([]tui.Line, s
 		}
 	}
 
-	if answer.Len() == 0 {
+	// Whitespace is not an answer. A turn that calls a tool often carries a text block
+	// holding only a separator, and a narration line made of it renders as blank rows
+	// in the viewport, before every tool call.
+	if strings.TrimSpace(answer.String()) == "" {
 		return lines, ""
 	}
 

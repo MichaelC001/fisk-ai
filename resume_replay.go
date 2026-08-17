@@ -441,12 +441,21 @@ func appendLine(out []tui.Line, kind tui.LineKind, text string) []tui.Line {
 }
 
 // messageText concatenates the text blocks of a message.
+//
+// A message whose text is only whitespace returns empty, which is the shape a turn
+// takes when the model puts a separator beside its tool_use. Every caller here treats
+// empty as nothing to render, so this is what keeps a replay free of the blank rows
+// such a turn would otherwise contribute before each tool call.
 func messageText(msg llm.Message) string {
 	var text strings.Builder
 	for _, block := range msg.Content {
 		if block.Text != nil {
 			text.WriteString(block.Text.Text)
 		}
+	}
+
+	if strings.TrimSpace(text.String()) == "" {
+		return ""
 	}
 
 	return text.String()

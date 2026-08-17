@@ -1893,12 +1893,16 @@ func computeFingerprint(cfg *config.Config, providerID string, system []string, 
 	}
 
 	return runstate.Fingerprint{
-		Provider:      providerID,
-		Model:         cfg.LLM.Model,
-		SystemHash:    runstate.HashHex(sys),
-		ToolsHash:     runstate.HashHex(tools),
-		ThinkingMode:  mode,
-		MaxTokens:     cfg.LLM.Budget.MaxTokens,
-		MaxIterations: cfg.LLM.Budget.MaxIterations,
+		Provider:     providerID,
+		Model:        cfg.LLM.Model,
+		SystemHash:   runstate.HashHex(sys),
+		ToolsHash:    runstate.HashHex(tools),
+		ThinkingMode: mode,
+		// Recorded verbatim rather than folded the way the thinking mode is: an effort
+		// change alters how the run reasons and what it costs, and nothing about it is
+		// equivalent to another level.
+		ReasoningEffort: cfg.ReasoningEffort(),
+		MaxTokens:       cfg.LLM.Budget.MaxTokens,
+		MaxIterations:   cfg.LLM.Budget.MaxIterations,
 	}, nil
 }

@@ -141,6 +141,22 @@ var _ = Describe("PrintText", func() {
 		Expect(stdout).To(ContainSubstring("done"))
 	})
 
+	// A turn that calls a tool often carries a text block holding only a separator.
+	// Printing it spends the leading blank line and a rendered blank on nothing, which
+	// an operator sees as a run of blank lines before every trace line.
+	It("Should print nothing for a turn whose text is only whitespace", func() {
+		for _, text := range []string{"", " ", "\n", "\n\n", "  \n\t"} {
+			msg := newResponse(textBlock(text), toolUseBlock("cowsay"))
+
+			stdout, stderr := captureStdoutStderr(func() {
+				PrintText(msg, true, true, false)
+			})
+
+			Expect(stdout).To(BeEmpty(), "text %q", text)
+			Expect(stderr).To(BeEmpty(), "text %q", text)
+		}
+	})
+
 	It("Should strip terminal escapes the model emits so a style cannot bleed past the answer", func() {
 		msg := newResponse(textBlock("safe \x1b[31mred-injection\x1b[0m tail"))
 

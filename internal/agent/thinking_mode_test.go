@@ -85,4 +85,39 @@ var _ = Describe("thinking mode", func() {
 			Expect(mode(on())).ToNot(Equal(mode(unset())))
 		})
 	})
+
+	// An effort is recorded verbatim rather than folded the way the mode above is: it
+	// changes how the run reasons and what it costs, so no two levels are equivalent.
+	Describe("the fingerprint effort", func() {
+		effort := func(cfg *config.Config) string {
+			GinkgoHelper()
+
+			fp, err := computeFingerprint(cfg, "anthropic", []string{"sys"}, nil)
+			Expect(err).ToNot(HaveOccurred())
+
+			return fp.ReasoningEffort
+		}
+
+		It("Should record nothing for a configuration that asks for none", func() {
+			Expect(effort(unset())).To(BeEmpty())
+		})
+
+		It("Should record the level as configured", func() {
+			cfg := unset()
+			cfg.LLM.ReasoningEffort = "xhigh"
+
+			Expect(effort(cfg)).To(Equal("xhigh"))
+		})
+
+		// Effort and thinking are separate keys, so setting one records nothing about
+		// the other.
+		It("Should leave the thinking value alone", func() {
+			cfg := unset()
+			cfg.LLM.ReasoningEffort = "low"
+
+			fp, err := computeFingerprint(cfg, "anthropic", []string{"sys"}, nil)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(fp.ThinkingMode).To(Equal("off"))
+		})
+	})
 })
