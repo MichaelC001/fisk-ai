@@ -371,7 +371,11 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	// prompt is the conversation's next turn. CreateIfMissing is what separates them and
 	// a follow-up must not carry it: a token naming no journal is a caller's mistake to
 	// hear about, not a conversation to invent under a name it chose.
-	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true}
+	//
+	// The token rides along on the turn that creates the journal, and only there, so a
+	// caller that lost it can be handed it back and an operator can say which stored
+	// conversation is which. The run records it; nothing else reads it.
+	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true, ConversationToken: t.token}
 
 	switch {
 	case t.req.Answer != nil:

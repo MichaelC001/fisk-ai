@@ -300,6 +300,9 @@ var _ = Describe("The prompt channel", func() {
 			// store key and no journal is reachable by knowing one.
 			Expect(opening.Checkpoint.ResumeID).To(HavePrefix("t-"))
 			Expect(opening.Checkpoint.ResumeID).ToNot(ContainSubstring(ack.ConversationToken))
+			// The turn that creates the journal is the one that records the token in it,
+			// so a caller that loses the ack can be handed it back from the store.
+			Expect(opening.Checkpoint.ConversationToken).To(Equal(ack.ConversationToken))
 
 			report(opening, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "there are three"})
 			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.Result{}))
@@ -317,6 +320,7 @@ var _ = Describe("The prompt channel", func() {
 			Expect(turn.Checkpoint.ResumeID).To(Equal(opening.Checkpoint.ResumeID))
 			Expect(turn.Checkpoint.FollowUp).To(BeTrue())
 			Expect(turn.Checkpoint.CreateIfMissing).To(BeFalse(), "a token naming no journal is refused rather than creating one")
+			Expect(turn.Checkpoint.ConversationToken).To(BeEmpty(), "the journal recorded it when it was created")
 
 			report(turn, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "the first is ORDERS", FollowUpTaken: true})
 
@@ -350,6 +354,7 @@ var _ = Describe("The prompt channel", func() {
 			Expect(resumed.Checkpoint.ResumeID).To(Equal(opening.Checkpoint.ResumeID))
 			Expect(resumed.Checkpoint.FollowUp).To(BeFalse(), "it adds no turn")
 			Expect(resumed.Checkpoint.CreateIfMissing).To(BeFalse())
+			Expect(resumed.Checkpoint.ConversationToken).To(BeEmpty(), "the journal recorded it when it was created")
 			Expect(resumed.Checkpoint.Answer).To(Equal(&agent.DeferredAnswer{ToolUseID: "toolu_1", Content: `{"value":"ORDERS"}`}))
 
 			// It is not reported as a turn that was not taken, which is what a follow-up

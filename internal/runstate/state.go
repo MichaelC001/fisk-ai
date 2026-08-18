@@ -75,8 +75,9 @@ func (p *PendingTurn) OpenDeferrals() []DeferredRecord {
 }
 
 // RunState is the folded, resumable state of a run. It is deliberately free of
-// infrastructure and secrets (clients, credentials, config): those are rebuilt
-// from configuration on resume.
+// infrastructure and of this process's credentials (clients, API keys, config):
+// those are rebuilt from configuration on resume. ConversationToken is the
+// exception, being the caller's credential rather than the process's.
 type RunState struct {
 	Version     int
 	RunID       string
@@ -85,6 +86,11 @@ type RunState struct {
 	// Interactive marks a chat run, restored from the Meta record, so a resume
 	// reopens the input bar rather than making a fresh LLM call at a completed turn.
 	Interactive bool
+	// ConversationToken is the caller's handle for this conversation and Caller is
+	// what the channel knew about who asked, both restored from the Meta record. See
+	// MetaRecord for what each is worth; neither is read by the loop.
+	ConversationToken string
+	Caller            string
 
 	// Messages is the committed, coherent conversation prefix: it always ends on
 	// a boundary the API would accept (an initial user prompt, or an assistant
@@ -151,12 +157,14 @@ func Fold(records []Record) (*RunState, error) {
 	}
 
 	rs := &RunState{
-		Version:     meta.Version,
-		RunID:       meta.RunID,
-		Fingerprint: meta.Fingerprint,
-		Prompt:      meta.Prompt,
-		Interactive: meta.Interactive,
-		Messages:    []llm.Message{userTextMessage(meta.Prompt)},
+		Version:           meta.Version,
+		RunID:             meta.RunID,
+		Fingerprint:       meta.Fingerprint,
+		Prompt:            meta.Prompt,
+		Interactive:       meta.Interactive,
+		ConversationToken: meta.ConversationToken,
+		Caller:            meta.Caller,
+		Messages:          []llm.Message{userTextMessage(meta.Prompt)},
 	}
 
 	// cur* accumulate the assistant turn currently being answered. The journal

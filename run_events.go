@@ -21,6 +21,14 @@ import (
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
+// Both optional halves are declared for the reason the full-screen renderer declares
+// them: this is a surface somebody is reading.
+var (
+	_ agent.Events             = (*cliEvents)(nil)
+	_ agent.RemoteHostReporter = (*cliEvents)(nil)
+	_ agent.TranscriptReplayer = (*cliEvents)(nil)
+)
+
 // cliEvents renders a run's events for the terminal: it owns every byte of
 // wording and the stdout-vs-stderr split, so agent.Run can stay free of
 // presentation. Answers go to stdout; narration, traces and advisories go to

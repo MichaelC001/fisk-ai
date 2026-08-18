@@ -447,6 +447,11 @@ Journals from this channel are named `t-` and a hash, so an operator reading `fi
 journal from a queued job's. A session listing shows the last run's outcome, so a conversation resting between turns
 reads as `completed`, and the prompt column shows the conversation's first prompt.
 
+The worker records the token and the caller's claimed name with the journal, so a caller that lost a token can ask an
+operator for it instead of losing the conversation. Find the conversation with `fisk session ls`, which lists the first
+prompt and the time each journal was last touched, then read both values with `fisk session show <id>`. The listing has
+no token column, because a token is a credential and `ls` output is often pasted into tickets.
+
 ## Safety
 
 NATS publish permission on `choria.fisk-ai.task.<identity>` is the only access control: anyone holding it runs this
@@ -471,6 +476,11 @@ and a caller should not either.
 The session store is shared with the other channels of this identity. The queued-jobs channel resumes the journal its
 submitter names, so a party holding queue-submit rights who learns one of these journal ids can resume a conversation
 started here. Restrict queue submission accordingly.
+
+The worker records the token in the conversation's journal, so anyone who can read the session store can read the token
+and continue that conversation. This gives away no access that reading the store did not already give, since the same
+access reads and writes those journals directly, but the store needs the same protection the tokens do. The caller's
+name is recorded beside the token, and it is the unverified claim from the `sender` field.
 
 The worker logs the caller, the request id and the session as a prompt is accepted, runs and ends:
 

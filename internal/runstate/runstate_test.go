@@ -103,6 +103,26 @@ var _ = Describe("runstate", func() {
 			Expect(rs.NextIteration).To(Equal(int64(0)))
 		})
 
+		It("restores the conversation token and the caller", func() {
+			rec := meta()
+			rec.Meta.ConversationToken = "3Hzmp8VqrKL42NmXcPd7bTgWfR1"
+			rec.Meta.Caller = "peer1"
+
+			rs, err := Fold([]Record{rec})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.ConversationToken).To(Equal("3Hzmp8VqrKL42NmXcPd7bTgWfR1"))
+			Expect(rs.Caller).To(Equal("peer1"))
+		})
+
+		// A journal written before either field existed folds with both empty rather
+		// than failing, which is what keeps the record version at 3.
+		It("folds a journal that carries neither", func() {
+			rs, err := Fold([]Record{meta()})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.ConversationToken).To(BeEmpty())
+			Expect(rs.Caller).To(BeEmpty())
+		})
+
 		claim := func(seq uint64) Record {
 			return Record{Seq: seq, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-a", Claimed: time.Now().UTC()}}
 		}

@@ -651,6 +651,11 @@ func (s *Server) runOptions(work *Work) agent.Options {
 		opts.Prompt = append(opts.Prompt, work.Context)
 	}
 
+	// Filled here rather than by each channel, which said who its caller was once when
+	// it built the work. It reaches the journal's Meta record where the run creates one,
+	// so an operator reading the store can tell whose conversation it is.
+	opts.Checkpoint.Caller = work.Caller.Name
+
 	return opts
 }
 

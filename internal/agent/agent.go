@@ -176,6 +176,32 @@ type Checkpoint struct {
 	// that may not exist yet. Naming a call this conversation is not waiting on, or
 	// one that already has a result, refuses the resume before anything runs.
 	Answer *DeferredAnswer
+
+	// ConversationToken is the caller's handle for the conversation this run journals.
+	// It is written to the Meta record where the journal is created and read by nothing
+	// in the loop, so that a caller that lost its handle can be given it back and an
+	// operator can say which stored conversation is which.
+	//
+	// It is for a channel that derives the run id from a token rather than letting a
+	// caller name a journal. Recovering it needs the store access that already grants
+	// reading and writing that journal directly.
+	//
+	// A journal is created by Enabled, or by ResumeID with CreateIfMissing where the
+	// run does not exist yet. Anything else has nowhere to record it and is refused
+	// rather than dropped, a token nothing wrote down being unrecoverable. Against a
+	// journal that already exists it is a no-op, since that journal holds its own.
+	ConversationToken string
+
+	// Caller is what the channel that produced this run knows about who asked for it,
+	// recorded in the Meta record beside ConversationToken and read by nothing.
+	//
+	// It is a label for a person reading a journal, so that two conversations whose
+	// first prompts are alike can still be told apart. It is the caller's own claim:
+	// nothing verifies it, and nothing may decide on it.
+	//
+	// A server that hosts channels fills it from what the channel reported, so a
+	// channel that already said who its caller is does not say so twice.
+	Caller string
 }
 
 // DeferredAnswer is the result of a call that deferred, supplied by whoever the tool
@@ -731,6 +757,21 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	// The token is recorded where the journal is created and nowhere else, so a
+	// checkpoint that creates none has nowhere to put it. It is refused rather than
+	// dropped because dropping it is the failure it exists to prevent: a token nothing
+	// wrote down cannot be recovered, which leaves its conversation unreachable.
+	if opts.Checkpoint.ConversationToken != "" {
+		switch {
+		case opts.Checkpoint.FollowUp:
+			return res, fmt.Errorf("Checkpoint.ConversationToken cannot be set with Checkpoint.FollowUp: the conversation this turn joins recorded its token when it was created")
+		case opts.Checkpoint.Answer != nil:
+			return res, fmt.Errorf("Checkpoint.ConversationToken cannot be set with Checkpoint.Answer: the conversation this answer belongs to recorded its token when it was created")
+		case !opts.Checkpoint.Enabled && !opts.Checkpoint.CreateIfMissing:
+			return res, fmt.Errorf("Checkpoint.ConversationToken needs a checkpoint that creates a journal: set Checkpoint.Enabled, or Checkpoint.ResumeID with Checkpoint.CreateIfMissing")
+		}
+	}
+
 	// The root span is the entire run, which is what makes one run one trace. It starts
 	// as the first statement so it covers every early return, and its Finish is deferred
 	// immediately, before the panic barrier below: defers unwind
@@ -1060,7 +1101,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if err != nil {
 			return res, err
 		}
-		events.RemoteHostNotes(imports)
+		reporter, ok := events.(RemoteHostReporter)
+		if ok {
+			reporter.RemoteHostNotes(imports)
+		}
 	}
 
 	// Caller-injected custom tools are registered last, after every other source has
@@ -1678,7 +1722,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			for _, w := range resumeHazards(rs) {
 				events.Warn(w)
 			}
-			events.ResumeTranscript(rs, byName)
+			replayer, ok := events.(TranscriptReplayer)
+			if ok {
+				replayer.ResumeTranscript(rs, byName)
+			}
 		} else {
 			meta := runstate.MetaRecord{
 				Version:     runstate.Version,
@@ -1687,6 +1734,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Fingerprint: fp,
 				Prompt:      strings.Join(prompt, " "),
 				Interactive: interactive,
+				// Recorded here because this is where the journal is created, which is the
+				// only place either is written: a resume finds them already in the Meta
+				// record it folded.
+				ConversationToken: opts.Checkpoint.ConversationToken,
+				Caller:            opts.Checkpoint.Caller,
 			}
 			j, err := store.Create(sessionID, meta)
 			if err != nil {
@@ -1704,6 +1756,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// newSession lets a context reset rotate to a fresh session mid-run: it creates a new
 		// journal with the same fingerprint and a new id, seeded with the reset prompt as its
 		// Meta.Prompt. It closes over the store and fingerprint the runner does not hold.
+		//
+		// It carries no conversation token. A channel names a journal by hashing the token,
+		// so this id is not that hash and no caller reaches this journal by holding one.
+		// Copying it would put two conversations in a listing claiming one token, only one
+		// of which can be continued. The caller is copied, since who asked did not change.
 		newSession = func(prompt string) (runstate.Journal, string, error) {
 			id := a2a.NewID()
 			meta := runstate.MetaRecord{
@@ -1713,6 +1770,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Fingerprint: fp,
 				Prompt:      prompt,
 				Interactive: interactive,
+				Caller:      opts.Checkpoint.Caller,
 			}
 			j, err := store.Create(id, meta)
 			if err != nil {
