@@ -21,6 +21,11 @@
       "pattern": "^[a-zA-Z0-9_-]+$",
       "description": "Correlates the reply. Unique within the task."
     },
+    "tool_use_id": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "The tool call this question is about, which is what an answer given after the run has ended names: a resume asks the question again under a new question_id, so the call is what both ends agree on. Absent from an agent that takes no answer once its run has ended."
+    },
     "kind": {
       "type": "string",
       "enum": [

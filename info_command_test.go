@@ -13,27 +13,39 @@ import (
 	"github.com/choria-io/ui/columns"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 var _ = Describe("toolSearchStatus", func() {
 	It("Should report tool search enabled for the default provider", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "claude-sonnet-5"
-		Expect(toolSearchStatus(cfg)).To(ContainSubstring("enabled"))
+		Expect(toolSearchStatus(cfg, 3)).To(ContainSubstring("enabled"))
 	})
 
 	It("Should report the operator-disabled cause when no_tool_search is set", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "claude-sonnet-5"
 		cfg.LLM.NoToolSearch = true
-		Expect(toolSearchStatus(cfg)).To(Equal("disabled (no_tool_search)"))
+		Expect(toolSearchStatus(cfg, util.ToolSearchThreshold-1)).To(Equal("disabled (no_tool_search)"))
+	})
+
+	It("Should name what the operator-disabled tool search costs once the set crosses the threshold", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "claude-sonnet-5"
+		cfg.LLM.NoToolSearch = true
+
+		status := toolSearchStatus(cfg, 12)
+		Expect(status).To(ContainSubstring("disabled (no_tool_search)"))
+		Expect(status).To(ContainSubstring("12 tools are sent to the model directly"))
+		Expect(status).To(ContainSubstring("Anthropic models only"))
 	})
 
 	It("Should report an unavailable provider that is not linked into the build", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "gpt-5"
 		cfg.LLM.Provider = "openai"
-		Expect(toolSearchStatus(cfg)).To(ContainSubstring(`provider "openai" is not available`))
+		Expect(toolSearchStatus(cfg, 3)).To(ContainSubstring(`provider "openai" is not available`))
 	})
 })
 

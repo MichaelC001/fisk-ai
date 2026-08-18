@@ -69,6 +69,44 @@ var _ = Describe("SupplyToolResult", func() {
 		Expect(last.Content).To(HaveLen(2))
 	})
 
+	// The run holds its journal already, so it answers through the same rule rather
+	// than opening the store a second time, and the state it is about to run against
+	// has to agree with what was written.
+	It("Should answer through a journal the caller already holds and fold it in", func() {
+		rs, err := store.Load(id)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rs.Pending.Answered).ToNot(HaveKey("tu_2"))
+
+		j, err := store.Open(id)
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(j.Close)
+
+		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", `{"approved":true}`, false)).To(Succeed())
+
+		Expect(rs.Pending.Answered).To(HaveKeyWithValue("tu_2", true), "the caller's state says the call is answered")
+		Expect(rs.Pending.Results).To(ContainElement(llm.ToolResultBlock{ToolUseID: "tu_2", Content: `{"approved":true}`}))
+
+		reloaded, err := store.Load(id)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(reloaded.Pending).To(BeNil(), "and the journal says the turn is complete")
+	})
+
+	It("Should refuse through a held journal on the same terms", func() {
+		rs, err := store.Load(id)
+		Expect(err).ToNot(HaveOccurred())
+
+		j, err := store.Open(id)
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(j.Close)
+
+		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", strings.Repeat("a", runstate.MaxSuppliedResultBytes+1), false)).To(MatchError(runstate.ErrResultTooLarge))
+		Expect(runstate.AnswerDeferredCall(j, rs, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred), "the tool answered this one itself")
+		Expect(runstate.AnswerDeferredCall(j, rs, "tu_9", "late", false)).To(MatchError(runstate.ErrNotDeferred), "and this call is not in the turn at all")
+
+		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", "first", false)).To(Succeed())
+		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", "second", false)).To(MatchError(runstate.ErrAlreadyAnswered))
+	})
+
 	It("Should mark an answer as an error when asked to", func() {
 		Expect(runstate.SupplyToolResult(store, id, "tu_2", "the request was rejected", true)).To(Succeed())
 

@@ -179,14 +179,10 @@ var _ = Describe("tcellEvents mapping", func() {
 			Expect(warningMessage(agent.Warning{Kind: agent.WarnConfirmNoTerminal, Count: 3})).To(ContainSubstring("3 tool(s) require confirmation"))
 		})
 
-		It("Should name the tool count and the cause-specific remedy for a tool-search degradation", func() {
+		It("Should name the tool count and the remedy for a tool-search degradation", func() {
 			unsupported := warningMessage(agent.Warning{Kind: agent.WarnToolSearchUnsupported, Count: 12})
 			Expect(unsupported).To(ContainSubstring("12 tools"))
 			Expect(unsupported).To(ContainSubstring("does not support server-side tool search"))
-
-			disabled := warningMessage(agent.Warning{Kind: agent.WarnToolSearchDisabled, Count: 12})
-			Expect(disabled).To(ContainSubstring("12 tools"))
-			Expect(disabled).To(ContainSubstring("no_tool_search"))
 		})
 
 		It("Should name the tool and the tags for a reserved tag problem", func() {

@@ -34,9 +34,70 @@
     },
     "conversation_token": {
       "$ref": "common.json#/$defs/conversation_token"
+    },
+    "answer": {
+      "type": "object",
+      "description": "Answers a question the conversation is still waiting on, for a caller that was asked something and could not answer before the run gave up. It needs a conversation_token and takes the place of a prompt, so the run is resumed rather than given a new turn.",
+      "required": [
+        "tool_use_id",
+        "kind",
+        "answer"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The call the question was about, taken from the question."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "confirm",
+            "select",
+            "input"
+          ],
+          "description": "The question that was asked, taken from the question. It says what the answer means where the answer value alone cannot, since no_operator is the same value for all four."
+        },
+        "answer": {
+          "type": "string",
+          "enum": [
+            "choice",
+            "confirmed",
+            "value",
+            "no_operator"
+          ],
+          "description": "Which field below carries the answer, as on an elicit reply. index and waiting have no meaning here: the run that offered the options has ended, so a selection names the option it chose rather than a position into a list the receiver no longer holds."
+        },
+        "choice": {
+          "type": "string",
+          "enum": [
+            "no",
+            "once",
+            "always"
+          ]
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Answers an input question, where an empty string is a valid answer, and a select question, where it is the option that was chosen."
+        }
+      }
     }
   },
-  "required": [
-    "prompt"
+  "anyOf": [
+    {
+      "required": [
+        "prompt"
+      ]
+    },
+    {
+      "required": [
+        "answer"
+      ]
+    }
   ]
 }

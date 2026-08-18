@@ -39,6 +39,40 @@ type elicitPrompter struct {
 	mu      sync.Mutex
 	pending map[string]*pending
 	closed  bool
+
+	// heldCall and heldChoice are an approval the request carried, for a caller that
+	// was asked before its run gave up and is answering now. The gate asks about the
+	// same call again on this resume, and that question is answered from here rather
+	// than put back to the caller which already answered it.
+	//
+	// It is spent on the first question about that call, so a second call of the same
+	// tool is asked about, and the run asks normally once it is gone.
+	heldCall   string
+	heldChoice toolkit.ConfirmChoice
+}
+
+// hold takes the approval a request carried, to answer the question the resumed run
+// puts about that call.
+func (p *elicitPrompter) hold(toolUseID string, choice toolkit.ConfirmChoice) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.heldCall = toolUseID
+	p.heldChoice = choice
+}
+
+// heldFor reports the answer this task is holding for the named call, and spends it.
+func (p *elicitPrompter) heldFor(toolUseID string) (toolkit.ConfirmChoice, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if toolUseID == "" || p.heldCall != toolUseID {
+		return toolkit.ConfirmNo, false
+	}
+
+	p.heldCall = ""
+
+	return p.heldChoice, true
 }
 
 // pending is one question this run is waiting on: the answer, and the evidence that
@@ -74,7 +108,15 @@ func (p *elicitPrompter) CanPrompt() bool { return true }
 // call is never dispatched again, and a peer approving later would find nothing left to
 // run. The abort leaves the call unanswered, so the resume dispatches it and asks again.
 func (p *elicitPrompter) ApproveCommand(ctx context.Context, req toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+	choice, held := p.heldFor(req.ToolUseID)
+	if held {
+		p.task.log.Info("Answering an approval from the answer its caller sent", "tool_use", req.ToolUseID, "command", req.Command)
+
+		return choice, nil
+	}
+
 	ask := a2a.NewElicitRequest(a2a.ElicitApprove, a2a.NewID())
+	ask.ToolUseID = req.ToolUseID
 	ask.Command = req.Command
 	ask.Display = req.Display
 	ask.Tag = req.Tag
@@ -106,6 +148,7 @@ func (p *elicitPrompter) ApproveCommand(ctx context.Context, req toolkit.GateReq
 // Confirm puts a yes/no question to the caller.
 func (p *elicitPrompter) Confirm(ctx context.Context, question string) (bool, error) {
 	ask := a2a.NewElicitRequest(a2a.ElicitConfirm, a2a.NewID())
+	ask.ToolUseID = toolkit.ToolUseIDFromContext(ctx)
 	ask.Question = question
 
 	reply, err := p.ask(ctx, ask, unansweredDefers)
@@ -127,6 +170,7 @@ func (p *elicitPrompter) Confirm(ctx context.Context, question string) (bool, er
 // outside the options is a choice nobody made, reported as such rather than clamped.
 func (p *elicitPrompter) Select(ctx context.Context, question string, options []string) (int, error) {
 	ask := a2a.NewElicitRequest(a2a.ElicitSelect, a2a.NewID())
+	ask.ToolUseID = toolkit.ToolUseIDFromContext(ctx)
 	ask.Question = question
 	ask.Options = options
 
@@ -155,6 +199,7 @@ func (p *elicitPrompter) Select(ctx context.Context, question string, options []
 // which is why the reply's own answer field says what was given.
 func (p *elicitPrompter) Input(ctx context.Context, question, def string) (string, error) {
 	ask := a2a.NewElicitRequest(a2a.ElicitInput, a2a.NewID())
+	ask.ToolUseID = toolkit.ToolUseIDFromContext(ctx)
 	ask.Question = question
 	ask.Default = def
 

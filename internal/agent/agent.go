@@ -87,22 +87,20 @@ func resolveMaxOutputTokens(cfg *config.Config, thinking bool) int64 {
 }
 
 // toolSearchDegradation returns the advisory to raise when totalTools crosses the
-// tool-search threshold but tool search cannot run, so every tool is sent to the
-// model directly. It returns nil when there is nothing to warn about (tool search is
-// available, or the set is small enough to send directly anyway). The remedy differs
-// by cause, so the kind names it: the provider cannot do tool search, or the operator
-// disabled it with no_tool_search.
-func toolSearchDegradation(totalTools int, caps llm.Caps, toolSearchAllowed bool) *Warning {
-	if toolSearchAllowed || totalTools < util.ToolSearchThreshold {
+// tool-search threshold but the provider cannot do tool search, so every tool is
+// sent to the model directly. It returns nil when there is nothing to warn about:
+// the provider supports tool search, the set is small enough to send directly
+// anyway, or operatorEnabled is false.
+//
+// An operator who set no_tool_search chose the direct send, so a run does not
+// report it back to them each time; fisk info reports the state and its cost when
+// they ask for it.
+func toolSearchDegradation(totalTools int, caps llm.Caps, operatorEnabled bool) *Warning {
+	if !operatorEnabled || caps.SupportsToolSearch || totalTools < util.ToolSearchThreshold {
 		return nil
 	}
 
-	kind := WarnToolSearchDisabled
-	if !caps.SupportsToolSearch {
-		kind = WarnToolSearchUnsupported
-	}
-
-	return &Warning{Kind: kind, Count: totalTools}
+	return &Warning{Kind: WarnToolSearchUnsupported, Count: totalTools}
 }
 
 // resumeReminder is appended to the system prompt of a resumed run so the model
@@ -164,6 +162,32 @@ type Checkpoint struct {
 	// A resume whose stored run ended by completing is continued rather than refused,
 	// since a new user turn is the new input a completed conversation lacks.
 	FollowUp bool
+
+	// Answer supplies the result of a call this conversation deferred, applied once
+	// the resume holds the journal and before the loop runs, so the turn continues
+	// with the answer rather than stopping on the same call again.
+	//
+	// It is for a caller that was asked something and could not answer in time: a
+	// deferred call is never dispatched again, so the answer is the only way its turn
+	// finishes. An approval needs nothing here, since the call it guards is
+	// dispatched again on any resume and the question is put again with it.
+	//
+	// It requires ResumeID and is refused with CreateIfMissing, which names a run
+	// that may not exist yet. Naming a call this conversation is not waiting on, or
+	// one that already has a result, refuses the resume before anything runs.
+	Answer *DeferredAnswer
+}
+
+// DeferredAnswer is the result of a call that deferred, supplied by whoever the tool
+// was waiting on.
+type DeferredAnswer struct {
+	// ToolUseID is the call being answered.
+	ToolUseID string
+	// Content is what the tool would have returned had it answered at once, in the
+	// shape that tool's own results take.
+	Content string
+	// IsError marks the result the way a tool's own failure would be marked.
+	IsError bool
 }
 
 // Options is everything Run needs to execute a run. Config is already parsed so
@@ -693,6 +717,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			return res, fmt.Errorf("Checkpoint.FollowUp cannot be set with Checkpoint.CreateIfMissing: a caller that may deliver the same work twice would append its prompt to the conversation on every redelivery")
 		case strings.TrimSpace(strings.Join(opts.Prompt, " ")) == "":
 			return res, fmt.Errorf("Checkpoint.FollowUp needs Options.Prompt: the follow-up turn is the prompt")
+		}
+	}
+
+	if opts.Checkpoint.Answer != nil {
+		switch {
+		case opts.Checkpoint.ResumeID == "":
+			return res, fmt.Errorf("Checkpoint.Answer needs Checkpoint.ResumeID: an answer belongs to a call in a conversation and there is none to answer")
+		case opts.Checkpoint.CreateIfMissing:
+			return res, fmt.Errorf("Checkpoint.Answer cannot be set with Checkpoint.CreateIfMissing: a conversation that may not exist has no call to answer")
+		case opts.Checkpoint.Answer.ToolUseID == "":
+			return res, fmt.Errorf("Checkpoint.Answer needs a ToolUseID: it is the call being answered")
 		}
 	}
 
@@ -1275,7 +1310,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// sent to the model in full every request, spending context the search tool exists
 	// to save. That is a silent degradation worth surfacing.
 	totalTools := len(deferrable) + len(builtins) + len(memBuiltins) + len(ragBuiltins)
-	if w := toolSearchDegradation(totalTools, caps, toolSearchAllowed); w != nil {
+	if w := toolSearchDegradation(totalTools, caps, cfg.ToolSearchEnabled()); w != nil {
 		events.Warn(*w)
 	}
 
@@ -1538,6 +1573,20 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			err = claimRun(j, cfg.Identity, opts.ClaimedBy)
 			if err != nil {
 				return res, fmt.Errorf("cannot resume %q: %w", sessionID, err)
+			}
+
+			// The answer lands under the claim taken above and before anything runs, so
+			// a worker that lost the run writes nothing, and the loop below sees the
+			// call answered rather than dispatching the tool a second time. A call this
+			// conversation is not waiting on refuses the resume here, where the caller
+			// still gets an error, rather than part way through a turn.
+			if opts.Checkpoint.Answer != nil {
+				a := opts.Checkpoint.Answer
+
+				err = runstate.AnswerDeferredCall(j, rs, a.ToolUseID, a.Content, a.IsError)
+				if err != nil {
+					return res, fmt.Errorf("cannot answer call %q of %q: %w", a.ToolUseID, sessionID, err)
+				}
 			}
 
 			journal = j

@@ -118,10 +118,6 @@ const (
 	// active provider does not support server-side tool search, so every tool is sent
 	// to the model directly and uses more context on each request.
 	WarnToolSearchUnsupported
-	// WarnToolSearchDisabled: Count tools crossed the tool-search threshold but
-	// no_tool_search is set, so every tool is sent to the model directly and uses more
-	// context on each request.
-	WarnToolSearchDisabled
 	// WarnKnowledgeIndexAbsent: knowledge is enabled and a store base (StoreDir) is in
 	// effect, but no index exists at the resolved path Name. Most often the knowledge
 	// CLI wrote the index elsewhere because it ran with a different (or no) store base;

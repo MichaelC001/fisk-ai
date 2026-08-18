@@ -62,22 +62,25 @@ func infoAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
+	// The memory and knowledge tools are enumerated with a nil store: info only needs
+	// their names and descriptions, and never invokes a handler.
+	hitlTools := builtin.HITLTools(cfg)
+	memTools := builtin.MemoryTools(cfg, nil)
+	ragTools := builtin.RAGTools(cfg, nil)
+
 	// Names already claimed by local tools and the built-ins, so remote tools are
 	// named (and prefixed on clash) exactly as a run would name them.
 	taken := make(map[string]bool, len(tools))
 	for _, t := range tools {
 		taken[t.Name()] = true
 	}
-	for _, b := range builtin.HITLTools(cfg) {
+	for _, b := range hitlTools {
 		taken[b.Name()] = true
 	}
-	// The memory tools are enumerated with a nil store: info only needs their names
-	// and descriptions, and never invokes a handler.
-	for _, b := range builtin.MemoryTools(cfg, nil) {
+	for _, b := range memTools {
 		taken[b.Name()] = true
 	}
-	// The knowledge tools are likewise enumerated with a nil store.
-	for _, b := range builtin.RAGTools(cfg, nil) {
+	for _, b := range ragTools {
 		taken[b.Name()] = true
 	}
 
@@ -89,10 +92,15 @@ func infoAction(_ *fisk.ParseContext) error {
 		fmt.Fprintf(os.Stderr, "warning: cannot connect to NATS context %q to discover remote tools: %v\n", cfg.NatsContext, err)
 	}
 
+	totalTools := len(tools) + len(hitlTools) + len(memTools) + len(ragTools)
+	for _, imp := range imports {
+		totalTools += len(imp.Tools)
+	}
+
 	c := columns.New()
 	defer c.WriteTo(os.Stdout)
 
-	printModelSection(c, cfg)
+	printModelSection(c, cfg, totalTools)
 	printMemorySection(c, cfg)
 	printSessionsSection(c, cfg)
 	printTelemetrySection(c, cfg)
@@ -126,16 +134,16 @@ func infoAction(_ *fisk.ParseContext) error {
 	// Built-in human-in-the-loop tools are not introspected from the application,
 	// so list them too when enabled, to show the full tool set a run would expose.
 	// They carry no tags.
-	for _, b := range builtin.HITLTools(cfg) {
+	for _, b := range hitlTools {
 		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
 	// Built-in memory tools are likewise not introspected from the application, so
 	// list them when enabled to show the full tool set a run would expose.
-	for _, b := range builtin.MemoryTools(cfg, nil) {
+	for _, b := range memTools {
 		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
 	// The built-in knowledge tools, likewise, when RAG is enabled.
-	for _, b := range builtin.RAGTools(cfg, nil) {
+	for _, b := range ragTools {
 		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
 	// Imported remote tools are listed with the host alias as their source, so the
@@ -212,7 +220,10 @@ func infoAction(_ *fisk.ParseContext) error {
 // search will behave, so an operator can confirm the backend and the feature gates
 // without starting a run. It is skipped for a config with no model (an MCP-only config
 // parsed in ModeMCP), which has no LLM run to describe.
-func printModelSection(c *columns.Document, cfg *config.Config) {
+//
+// totalTools is how many tools a run would put in front of the model, which decides
+// whether the tool search state costs anything worth reporting.
+func printModelSection(c *columns.Document, cfg *config.Config, totalTools int) {
 	if cfg.LLM.Model == "" {
 		return
 	}
@@ -233,7 +244,7 @@ func printModelSection(c *columns.Document, cfg *config.Config) {
 		}
 		c.Item("Thinking", thinking)
 
-		c.Item("Tool search", toolSearchStatus(cfg))
+		c.Item("Tool search", toolSearchStatus(cfg, totalTools))
 	})
 }
 
@@ -463,8 +474,17 @@ func telemetryScrubStatus(cfg *config.Config) string {
 // enabled and used once the tool count crosses the threshold. It resolves the
 // provider only to read its capabilities, never to make a call, so it works offline
 // and with no credentials.
-func toolSearchStatus(cfg *config.Config) string {
+//
+// A run does not warn about no_tool_search, since the operator chose it, so the cost
+// of that choice is reported here instead: with totalTools at or above the threshold
+// every one of them is sent on every request. totalTools comes from the caller's
+// resolved tool set, which counts the remote tools discovery reached; a discovery
+// that failed leaves it short of what a run would send.
+func toolSearchStatus(cfg *config.Config, totalTools int) string {
 	if !cfg.ToolSearchEnabled() {
+		if totalTools >= util.ToolSearchThreshold {
+			return fmt.Sprintf("disabled (no_tool_search), %d tools are sent to the model directly and use more context on each request; unset it to defer them behind the search tool, supported on Anthropic models only", totalTools)
+		}
 		return "disabled (no_tool_search)"
 	}
 

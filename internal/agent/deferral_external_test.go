@@ -190,3 +190,67 @@ func TestDeferral_BatchFinishesAroundADeferredCall(t *testing.T) {
 	g.Expect(deferCalls.Load()).To(Equal(int64(1)))
 	g.Expect(doneCalls.Load()).To(Equal(int64(1)))
 }
+
+// TestDeferral_ResumeCarriesTheAnswer proves the answer can arrive with the resume
+// rather than ahead of it, which is what a caller answering over the wire does: it
+// holds no journal, so the run applies the answer under the claim it takes.
+func TestDeferral_ResumeCarriesTheAnswer(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+
+	store, err := runstatefile.NewFileStore(t.TempDir())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	var calls atomic.Int64
+	tool := deferringTool(t, "change_request", &calls)
+
+	opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint) agent.Options {
+		return agent.Options{
+			Config:       agenttest.Config(t, app),
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{"raise a change"},
+			Provider:     provider,
+			SessionStore: store,
+			Checkpoint:   cp,
+			CustomTools:  []toolkit.Tool{tool},
+		}
+	}
+
+	res1, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t, agenttest.ToolUseResponse("c1", "change_request", json.RawMessage(`{}`))),
+		agent.Checkpoint{Enabled: true},
+	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
+	useID := res1.Deferred[0].ToolUseID
+
+	// A call this conversation is not waiting on refuses the resume before anything
+	// runs, so the caller hears about it rather than the run ending on the same wait.
+	_, err = agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t),
+		agent.Checkpoint{ResumeID: res1.SessionID, Answer: &agent.DeferredAnswer{ToolUseID: "nobody", Content: `{}`}},
+	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	g.Expect(err).To(MatchError(runstate.ErrNotDeferred))
+
+	// The answer rides in with the resume: the turn completes on it and the tool is
+	// not dispatched a second time.
+	res2, err := agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t, agenttest.TextResponse("the change was approved")),
+		agent.Checkpoint{ResumeID: res1.SessionID, Answer: &agent.DeferredAnswer{ToolUseID: useID, Content: `{"approved":true}`}},
+	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+	g.Expect(res2.Text).To(Equal("the change was approved"))
+	g.Expect(res2.Deferred).To(BeEmpty())
+	g.Expect(calls.Load()).To(Equal(int64(1)))
+
+	// Answering it a second time is refused, the conversation having finished the turn
+	// the call belonged to. A caller that sent its answer twice is told so rather than
+	// paying for a run that has nothing to do.
+	_, err = agent.Run(ctx, opts(
+		agenttest.NewScriptedProvider(t),
+		agent.Checkpoint{ResumeID: res1.SessionID, Answer: &agent.DeferredAnswer{ToolUseID: useID, Content: `{"approved":true}`}},
+	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	g.Expect(err).To(MatchError(ContainSubstring("already completed")))
+}

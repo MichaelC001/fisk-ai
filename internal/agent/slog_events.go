@@ -213,8 +213,6 @@ func warningKindName(k WarningKind) string {
 		return "session_rotate"
 	case WarnToolSearchUnsupported:
 		return "tool_search_unsupported"
-	case WarnToolSearchDisabled:
-		return "tool_search_disabled"
 	case WarnKnowledgeIndexAbsent:
 		return "knowledge_index_absent"
 	case WarnTraceClose:
