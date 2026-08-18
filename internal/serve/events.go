@@ -66,15 +66,21 @@ func (e *eventRecorder) Starting(info agent.RunInfo) {
 	}
 }
 
+// The two optional halves of agent.Events are implemented here unconditionally and
+// forwarded only to a channel's sink that wants them, so the recorder is transparent:
+// a channel that renders for a person keeps hearing them, and one that does not is not
+// made to implement them by sitting behind this.
 func (e *eventRecorder) RemoteHostNotes(notes []remotetools.HostImport) {
-	if e.inner != nil {
-		e.inner.RemoteHostNotes(notes)
+	reporter, ok := e.inner.(agent.RemoteHostReporter)
+	if ok {
+		reporter.RemoteHostNotes(notes)
 	}
 }
 
 func (e *eventRecorder) ResumeTranscript(rs *runstate.RunState, tools map[string]*fisk.FiskCommandTool) {
-	if e.inner != nil {
-		e.inner.ResumeTranscript(rs, tools)
+	replayer, ok := e.inner.(agent.TranscriptReplayer)
+	if ok {
+		replayer.ResumeTranscript(rs, tools)
 	}
 }
 

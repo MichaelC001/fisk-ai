@@ -119,8 +119,10 @@ type ClaimRecord struct {
 	Claimed time.Time `json:"claimed"`
 }
 
-// MetaRecord frames a run. It carries no secrets: the fingerprint holds only a
-// hash of the system prompt, never the prompt or credentials.
+// MetaRecord frames a run. It carries no credentials of the process that ran it:
+// the fingerprint holds only a hash of the system prompt, never the prompt or an
+// API key. ConversationToken is the one credential it does carry, and it is the
+// caller's rather than this process's, recorded so that it can be recovered.
 type MetaRecord struct {
 	Version     int         `json:"version"`
 	RunID       string      `json:"run_id"`
@@ -132,6 +134,26 @@ type MetaRecord struct {
 	// reopen the input bar rather than making a fresh LLM call at a completed
 	// boundary. Absent (false) on a one-shot or batch checkpoint run.
 	Interactive bool `json:"interactive,omitempty"`
+	// ConversationToken is the handle the caller holds for the conversation this
+	// journal records, empty for a run nobody was handed one for. A channel that
+	// derives the run id from a token records it here, so that a caller that lost
+	// one can be given it back and an operator can say which conversation is which.
+	//
+	// It is a credential: holding it authorizes adding a turn. Reading it needs the
+	// store access that already grants reading and writing this journal directly, so
+	// it discloses nothing that access does not, and it is still never logged.
+	//
+	// It is worth nothing on its own. A channel hashes it together with the serving
+	// identity to name the journal, so a token recovered here reaches this
+	// conversation only through the identity that minted it.
+	ConversationToken string `json:"conversation_token,omitempty"`
+	// Caller is what the channel that produced this run knew about who asked for it,
+	// empty where it knew nothing or where no channel was involved. It exists so that
+	// an operator can tell two conversations apart when their first prompts do not.
+	//
+	// It is the caller's own claim. Nothing verifies it and nothing decides on it, so
+	// it is a label for a person reading a journal and never evidence of who owns one.
+	Caller string `json:"caller,omitempty"`
 }
 
 // AssistantRecord is one assistant turn in the neutral model, so thinking blocks

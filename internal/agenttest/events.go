@@ -9,9 +9,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
-	"github.com/choria-io/fisk-ai/internal/remotetools"
-	"github.com/choria-io/fisk-ai/internal/runstate"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 )
 
 // RecordedMessage pairs an assistant turn with whether the loop reported it as the
@@ -98,11 +95,11 @@ func (e *RecordingEvents) Panics() []RecordedPanic {
 	return out
 }
 
-// The remaining events carry nothing a spec asserts on today, so they are accepted
-// and dropped rather than recorded; they exist to satisfy the interface.
-func (e *RecordingEvents) RemoteHostNotes([]remotetools.HostImport) {}
-func (e *RecordingEvents) ResumeTranscript(*runstate.RunState, map[string]*fisktool.FiskCommandTool) {
-}
+// LLMRequest carries nothing a spec asserts on today, so it is accepted and dropped
+// rather than recorded.
+//
+// The two optional halves of agent.Events are deliberately absent, which is what makes
+// this fake evidence that a sink implementing neither still runs.
 func (e *RecordingEvents) LLMRequest(string) {}
 
 // Warnings returns a copy of the warnings emitted, in order.

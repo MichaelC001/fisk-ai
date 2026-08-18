@@ -6,6 +6,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -30,6 +31,83 @@ type Request struct {
 	// answers once and stops ignores the token it was given, and one that wants another
 	// turn sends the token it already holds.
 	ConversationToken string `json:"conversation_token,omitempty"`
+	// Answer answers a question the conversation is still waiting on, for a caller
+	// that was asked something and could not answer before the run gave up. It
+	// requires ConversationToken and replaces Prompt: a request carries one or the
+	// other and is refused for carrying both.
+	//
+	// The run is resumed either way. An answer to a question a tool asked becomes
+	// that call's result, since a deferred call is never dispatched again. An answer
+	// to an approval is held for the question the resumed run asks about the same
+	// call, so nobody is asked twice for something they already answered.
+	Answer *Answer `json:"answer,omitempty"`
+}
+
+// Answer carries what an operator said, for a question whose run has ended. It is an
+// ElicitReply with the call it belongs to and the question it was, so a receiver knows
+// what it is answering without consulting a journal.
+type Answer struct {
+	// ToolUseID is the call the question was about, taken from the question.
+	ToolUseID string `json:"tool_use_id"`
+	// Kind is the question that was asked, taken from the question. It says what the
+	// answer means where the answer value alone cannot: AnswerNoOperator is the same
+	// value for all four.
+	Kind ElicitKind `json:"kind"`
+	// Answer names which field below carries the answer, as it does on an ElicitReply.
+	// AnswerIndex and AnswerWaiting have no meaning here and are refused.
+	Answer ElicitAnswer `json:"answer"`
+	// Choice answers an approve question.
+	Choice ElicitChoice `json:"choice,omitempty"`
+	// Confirmed answers a confirm question.
+	Confirmed bool `json:"confirmed,omitempty"`
+	// Value answers an input question, where an empty string is a valid answer, and a
+	// select question, where it is the option that was chosen.
+	//
+	// A live reply answers a selection with a position in the options it was sent.
+	// This one names the option itself, because the run that offered the list has
+	// ended and a position into a list the receiver no longer holds says nothing.
+	Value string `json:"value,omitempty"`
+}
+
+// NewAnswer builds the answer to ask out of the reply that would have answered it
+// live, so a caller that already built one to answer in the moment sends the same
+// thing when the moment has passed. A selection names the option it chose, taken from
+// the options the question carried.
+func NewAnswer(ask *ElicitRequest, reply *ElicitReply) (*Answer, error) {
+	a := &Answer{
+		ToolUseID: ask.ToolUseID,
+		Kind:      ask.Kind,
+		Answer:    reply.Answer,
+		Choice:    reply.Choice,
+		Confirmed: reply.Confirmed,
+		Value:     reply.Value,
+	}
+
+	if reply.Answer == AnswerIndex {
+		if reply.Index < 0 || reply.Index >= len(ask.Options) {
+			return nil, fmt.Errorf("option %d is not one of the %d the question offered", reply.Index, len(ask.Options))
+		}
+
+		a.Answer = AnswerValue
+		a.Value = ask.Options[reply.Index]
+	}
+
+	return a, nil
+}
+
+// NewAnsweringRequest builds the request that answers ask on the conversation token
+// carries, for a caller whose question outlived its run. It sends no prompt, so the
+// run is resumed rather than given a new turn.
+func NewAnsweringRequest(token string, ask *ElicitRequest, reply *ElicitReply) (*Request, error) {
+	answer, err := NewAnswer(ask, reply)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &Request{ConversationToken: token, Answer: answer}
+	r.Protocol = RequestProtocol
+
+	return r, nil
 }
 
 // NewRequest builds a Request with the protocol id set.
@@ -295,6 +373,13 @@ type ElicitRequest struct {
 
 	// QuestionID correlates the reply. It is unique within the task.
 	QuestionID string `json:"question_id"`
+	// ToolUseID is the tool call this question is about. It is what an answer given
+	// after the run has ended names, since a resume asks the question again under a
+	// new QuestionID and the call is what both ends can agree on.
+	//
+	// Empty from an agent that predates it, which is an agent that takes no answer
+	// once its run has ended.
+	ToolUseID string `json:"tool_use_id,omitempty"`
 	// Kind selects which of the four questions this is and which fields below carry
 	// its detail.
 	Kind ElicitKind `json:"kind"`

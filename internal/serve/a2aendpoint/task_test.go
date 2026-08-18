@@ -19,6 +19,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
@@ -105,6 +106,28 @@ var _ = Describe("The prompt channel", func() {
 		Expect(ok).To(BeTrue())
 
 		return ack
+	}
+
+	// refuse sends a request the worker is expected to turn down at intake and returns
+	// what it said, which reaches the caller as a transport error since nothing was
+	// accepted and there is no reply set to end.
+	refuse := func(req *a2a.Request) string {
+		GinkgoHelper()
+
+		req.ID = a2a.NewID()
+		req.Request = req.ID
+		req.Conversation = req.ID
+		req.Time = time.Now().UTC()
+		req.Sender = a2a.Identity{Name: "caller1"}
+
+		body, err := json.Marshal(req)
+		Expect(err).ToNot(HaveOccurred())
+
+		reply, err := nc.Request(natstransport.TaskSubject("agent1"), body, 5*time.Second)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(reply.Header.Get("Nats-Service-Error-Code")).To(Equal("400"))
+
+		return reply.Header.Get("Nats-Service-Error")
 	}
 
 	// next reads one message of a reply set, failing rather than hanging when nothing
@@ -277,6 +300,9 @@ var _ = Describe("The prompt channel", func() {
 			// store key and no journal is reachable by knowing one.
 			Expect(opening.Checkpoint.ResumeID).To(HavePrefix("t-"))
 			Expect(opening.Checkpoint.ResumeID).ToNot(ContainSubstring(ack.ConversationToken))
+			// The turn that creates the journal is the one that records the token in it,
+			// so a caller that loses the ack can be handed it back from the store.
+			Expect(opening.Checkpoint.ConversationToken).To(Equal(ack.ConversationToken))
 
 			report(opening, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "there are three"})
 			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.Result{}))
@@ -294,12 +320,146 @@ var _ = Describe("The prompt channel", func() {
 			Expect(turn.Checkpoint.ResumeID).To(Equal(opening.Checkpoint.ResumeID))
 			Expect(turn.Checkpoint.FollowUp).To(BeTrue())
 			Expect(turn.Checkpoint.CreateIfMissing).To(BeFalse(), "a token naming no journal is refused rather than creating one")
+			Expect(turn.Checkpoint.ConversationToken).To(BeEmpty(), "the journal recorded it when it was created")
 
 			report(turn, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "the first is ORDERS", FollowUpTaken: true})
 
 			res, ok := next(second).(*a2a.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("the first is ORDERS"))
+		})
+
+		// A person who was asked something and could not answer in time answers on a
+		// request of its own, which resumes the conversation and adds no turn to it.
+		It("Should resume the conversation an answer names without adding a turn", func() {
+			newChannel(1)
+
+			first := send(a2a.NewRequest("delete the stream"))
+			ack := next(first).(*a2a.Ack)
+			opening := takeWork()
+			report(opening, serve.Outcome{Reason: runstate.ReasonSuspended})
+			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+
+			asked := a2a.NewElicitRequest(a2a.ElicitInput, "q1")
+			asked.ToolUseID = "toolu_1"
+
+			answering, err := a2a.NewAnsweringRequest(ack.ConversationToken, asked, a2a.NewInputReply(asked, "caller1", "ORDERS"))
+			Expect(err).ToNot(HaveOccurred())
+
+			second := send(answering)
+			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+
+			resumed := takeWork()
+			Expect(resumed.Prompt).To(BeEmpty(), "an answer is not a prompt")
+			Expect(resumed.Checkpoint.ResumeID).To(Equal(opening.Checkpoint.ResumeID))
+			Expect(resumed.Checkpoint.FollowUp).To(BeFalse(), "it adds no turn")
+			Expect(resumed.Checkpoint.CreateIfMissing).To(BeFalse())
+			Expect(resumed.Checkpoint.ConversationToken).To(BeEmpty(), "the journal recorded it when it was created")
+			Expect(resumed.Checkpoint.Answer).To(Equal(&agent.DeferredAnswer{ToolUseID: "toolu_1", Content: `{"value":"ORDERS"}`}))
+
+			// It is not reported as a turn that was not taken, which is what a follow-up
+			// that reached no boundary would be.
+			report(resumed, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "deleted"})
+
+			res, ok := next(second).(*a2a.Result)
+			Expect(ok).To(BeTrue())
+			Expect(res.Text).To(Equal("deleted"))
+		})
+
+		// The gate asks about the same call again on the resume, so nothing is written
+		// and nothing is stored: the answer waits in the prompter for that question.
+		It("Should answer the approval the resumed run asks about again", func() {
+			newChannel(1)
+			// An approval is answered through the prompter, which a channel that asks
+			// its callers nothing does not have.
+			ch.elicits = true
+
+			first := send(a2a.NewRequest("delete the stream"))
+			ack := next(first).(*a2a.Ack)
+			report(takeWork(), serve.Outcome{Reason: runstate.ReasonSuspended})
+			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+
+			asked := a2a.NewElicitRequest(a2a.ElicitApprove, "q1")
+			asked.ToolUseID = "toolu_1"
+			asked.Command = "stream rm"
+
+			answering, err := a2a.NewAnsweringRequest(ack.ConversationToken, asked, a2a.NewApproveReply(asked, "caller1", a2a.ChoiceOnce))
+			Expect(err).ToNot(HaveOccurred())
+
+			second := send(answering)
+			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+
+			resumed := takeWork()
+			Expect(resumed.Checkpoint.Answer).To(BeNil(), "an approval writes nothing to the journal")
+
+			choice, err := resumed.Prompter.ApproveCommand(context.Background(), toolkit.GateRequest{ToolUseID: "toolu_1", Command: "stream rm"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(choice).To(Equal(toolkit.ConfirmOnce), "the question is answered from what the caller sent")
+
+			report(resumed, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "deleted"})
+			Expect(next(second)).To(BeAssignableToTypeOf(&a2a.Result{}))
+		})
+
+		It("Should spend a held approval on the call it was given for and no other", func() {
+			newChannel(1)
+			ch.elicits = true
+
+			first := send(a2a.NewRequest("delete the streams"))
+			ack := next(first).(*a2a.Ack)
+			report(takeWork(), serve.Outcome{Reason: runstate.ReasonSuspended})
+			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+
+			asked := a2a.NewElicitRequest(a2a.ElicitApprove, "q1")
+			asked.ToolUseID = "toolu_1"
+
+			answering, err := a2a.NewAnsweringRequest(ack.ConversationToken, asked, a2a.NewApproveReply(asked, "caller1", a2a.ChoiceOnce))
+			Expect(err).ToNot(HaveOccurred())
+
+			second := send(answering)
+			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+
+			resumed := takeWork()
+			prompter := resumed.Prompter.(*elicitPrompter)
+
+			_, held := prompter.heldFor("toolu_2")
+			Expect(held).To(BeFalse(), "another call is not what was answered")
+
+			_, held = prompter.heldFor("toolu_1")
+			Expect(held).To(BeTrue())
+
+			_, held = prompter.heldFor("toolu_1")
+			Expect(held).To(BeFalse(), "and it authorizes one dispatch")
+
+			report(resumed, serve.Outcome{Reason: runstate.ReasonCompleted})
+			Expect(next(second)).To(BeAssignableToTypeOf(&a2a.Result{}))
+		})
+
+		It("Should refuse an answer that carries no token, a prompt beside it, or neither", func() {
+			newChannel(1)
+
+			answer := &a2a.Answer{ToolUseID: "toolu_1", Kind: a2a.ElicitInput, Answer: a2a.AnswerValue, Value: "ORDERS"}
+
+			untokened := a2a.NewRequest("")
+			untokened.Answer = answer
+			Expect(refuse(untokened)).To(ContainSubstring("conversation_token"))
+
+			both := a2a.NewRequest("do the thing")
+			both.ConversationToken = "t1"
+			both.Answer = answer
+			Expect(refuse(both)).To(ContainSubstring("both a prompt and an answer"))
+
+			neither := a2a.NewRequest("")
+			Expect(refuse(neither)).To(ContainSubstring("neither a prompt nor an answer"))
+		})
+
+		It("Should refuse an answer whose value does not fit the question it names", func() {
+			newChannel(1)
+
+			mismatched := a2a.NewRequest("")
+			mismatched.ConversationToken = "t1"
+			mismatched.Answer = &a2a.Answer{ToolUseID: "toolu_1", Kind: a2a.ElicitApprove, Answer: a2a.AnswerValue, Value: "yes"}
+
+			Expect(refuse(mismatched)).To(ContainSubstring("an approval is answered with a choice"))
 		})
 
 		// Both turns would resume one journal, and the second to claim it takes it while
@@ -404,8 +564,8 @@ var _ = Describe("The prompt channel", func() {
 			failed, ok := next(stream).(*a2a.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeDeferred))
-			Expect(failed.Err).To(ContainSubstring(work.ID))
-			Expect(failed.Err).To(ContainSubstring("toolu_1"))
+			Expect(failed.Err).To(ContainSubstring("toolu_1"), "the call an answer names")
+			Expect(failed.Err).ToNot(ContainSubstring(work.ID), "the caller answers on its token, so the session stays out of it")
 			Expect(failed.Err).ToNot(ContainSubstring("waiting on a human"), "the tool's own text does not travel")
 		})
 

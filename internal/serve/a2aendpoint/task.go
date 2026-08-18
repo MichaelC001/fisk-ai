@@ -21,6 +21,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 )
 
 // The codes a terminal error carries, so a caller decides on a value rather than on
@@ -44,6 +45,13 @@ const (
 	codeUnknownConversation = "unknown_conversation"
 	codeConversationBusy    = "conversation_busy"
 	codeTurnNotTaken        = "turn_not_taken"
+
+	// The endings an answer has. Each is permanent: the call it named is not one this
+	// conversation can take an answer for, so sending it again reaches the same
+	// answer.
+	codeUnknownCall     = "unknown_call"
+	codeAlreadyAnswered = "already_answered"
+	codeAnswerTooLarge  = "answer_too_large"
 )
 
 // task is one accepted request: the reply set it answers on, the cancel addressed to
@@ -114,10 +122,15 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 	// carrying none starts a conversation and is handed a token for it. So a caller
 	// declares nothing on a first turn and decides per turn afterwards.
 	token := req.ConversationToken
-	followUp := token != ""
-	if !followUp {
+	if token == "" {
 		token = a2a.NewID()
 	}
+
+	// A follow-up is a request that adds a turn to a conversation it names. One that
+	// answers a question names a conversation too and adds no turn, so it is not one:
+	// calling it one would report every answered question as a turn that was not
+	// taken.
+	followUp := req.ConversationToken != "" && req.Answer == nil
 
 	t := &task{
 		ch:       c,
@@ -211,11 +224,61 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 	}
 
 	req := msg.(*a2a.Request)
-	if req.Prompt == "" {
-		return nil, fmt.Errorf("the request carries no prompt")
+
+	// A request either asks for something or answers a question, and the two are
+	// separate operations on the conversation: one adds a turn and pays for it, the
+	// other finishes a turn that is already there. Carrying both would leave the
+	// worker to decide which the caller meant.
+	switch {
+	case req.Prompt == "" && req.Answer == nil:
+		return nil, fmt.Errorf("the request carries neither a prompt nor an answer")
+	case req.Prompt != "" && req.Answer != nil:
+		return nil, fmt.Errorf("the request carries both a prompt and an answer; send one or the other")
+	}
+
+	if req.Answer != nil {
+		err = checkAnswer(req)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return req, nil
+}
+
+// checkAnswer decides whether an answer can be acted on at all, before a task is built
+// around it. Everything here is about the message; whether the call it names is one
+// this conversation is waiting on is the run's to answer, since only the journal knows.
+func checkAnswer(req *a2a.Request) error {
+	if req.ConversationToken == "" {
+		return fmt.Errorf("an answer needs the conversation_token of the conversation that asked")
+	}
+
+	a := req.Answer
+	if a.ToolUseID == "" {
+		return fmt.Errorf("the answer names no tool call")
+	}
+
+	switch a.Kind {
+	case a2a.ElicitApprove, a2a.ElicitConfirm, a2a.ElicitSelect, a2a.ElicitInput:
+	default:
+		return fmt.Errorf("%q is not a question this agent asks", a.Kind)
+	}
+
+	// The answer value has to fit the question, since each kind reaches a different
+	// tool and an answer of the wrong shape would reach the model as one the operator
+	// never gave.
+	switch {
+	case a.Answer == a2a.AnswerNoOperator:
+	case a.Kind == a2a.ElicitApprove && a.Answer != a2a.AnswerChoice:
+		return fmt.Errorf("an approval is answered with a choice, not with %q", a.Answer)
+	case a.Kind == a2a.ElicitConfirm && a.Answer != a2a.AnswerConfirmed:
+		return fmt.Errorf("a confirmation is answered with confirmed, not with %q", a.Answer)
+	case (a.Kind == a2a.ElicitSelect || a.Kind == a2a.ElicitInput) && a.Answer != a2a.AnswerValue:
+		return fmt.Errorf("a %s question is answered with a value, not with %q", a.Kind, a.Answer)
+	}
+
+	return nil
 }
 
 // admit decides whether this worker takes the task, reserving its slot when it does. It
@@ -308,8 +371,21 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	// prompt is the conversation's next turn. CreateIfMissing is what separates them and
 	// a follow-up must not carry it: a token naming no journal is a caller's mistake to
 	// hear about, not a conversation to invent under a name it chose.
-	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true}
-	if t.followUp {
+	//
+	// The token rides along on the turn that creates the journal, and only there, so a
+	// caller that lost it can be handed it back and an operator can say which stored
+	// conversation is which. The run records it; nothing else reads it.
+	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true, ConversationToken: t.token}
+
+	switch {
+	case t.req.Answer != nil:
+		// An answer resumes the conversation and adds no turn to it. A call that
+		// deferred takes the answer as its result, since it is never dispatched again;
+		// an approval needs nothing here, the resume dispatching the call it guards and
+		// the gate asking again, which t.prompter answers from the same answer.
+		checkpoint = agent.Checkpoint{ResumeID: t.session, Answer: t.answerFor()}
+
+	case t.followUp:
 		checkpoint = agent.Checkpoint{ResumeID: t.session, FollowUp: true}
 	}
 
@@ -330,6 +406,88 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 		PromptsMayBlock: true,
 		RunContext:      t.runContext,
 		Done:            t.done,
+	}
+}
+
+// answerFor turns the answer a request carried into the result of the call that
+// deferred, or nil for an approval, whose call has no result to supply.
+//
+// The worker renders it rather than the caller, because the shape is the one the
+// deferring tool's own results take and the model was told to expect it. A caller
+// building that shape itself would be copying this agent's internals, and a wrong
+// shape reaches the model as an answer rather than as an error.
+//
+// A run whose elicitation is off holds the answer for nothing, which cannot happen:
+// the question it answers could only have been asked with elicitation on.
+func (t *task) answerFor() *agent.DeferredAnswer {
+	a := t.req.Answer
+
+	if a.Kind == a2a.ElicitApprove {
+		if t.prompter != nil {
+			t.prompter.hold(a.ToolUseID, approvalFrom(a))
+		}
+
+		return nil
+	}
+
+	content, err := renderAnswer(a)
+	if err != nil {
+		// Nothing here can refuse: intake checked the answer fits its question, so a
+		// failure is this worker's own marshaling. The run is given no answer and ends
+		// on the call it is still waiting for, which the caller can answer again.
+		t.log.Error("Rendering a supplied answer failed", "tool_use", a.ToolUseID, "kind", a.Kind, "error", err)
+
+		return nil
+	}
+
+	return &agent.DeferredAnswer{ToolUseID: a.ToolUseID, Content: content}
+}
+
+// approvalFrom reads an approval out of an answer. Anything that is not an explicit
+// yes is a refusal, which is the direction the gate defaults in.
+func approvalFrom(a *a2a.Answer) toolkit.ConfirmChoice {
+	if a.Answer != a2a.AnswerChoice {
+		return toolkit.ConfirmNo
+	}
+
+	switch a.Choice {
+	case a2a.ChoiceAlways:
+		return toolkit.ConfirmAlways
+	case a2a.ChoiceOnce:
+		return toolkit.ConfirmOnce
+	default:
+		return toolkit.ConfirmNo
+	}
+}
+
+// renderAnswer produces the result the tool that asked would have returned.
+func renderAnswer(a *a2a.Answer) (string, error) {
+	if a.Answer == a2a.AnswerNoOperator {
+		return builtin.NoAnswerResult(questionTool(a.Kind), "the caller has no operator to answer on its behalf")
+	}
+
+	switch a.Kind {
+	case a2a.ElicitConfirm:
+		return builtin.ConfirmResult(a.Confirmed, "")
+	case a2a.ElicitSelect:
+		return builtin.SelectResult(a.Value, "")
+	case a2a.ElicitInput:
+		return builtin.InputResult(a.Value, "")
+	default:
+		return "", fmt.Errorf("%q has no result shape", a.Kind)
+	}
+}
+
+// questionTool names the built-in that asks each kind of question, which is what says
+// the shape its result takes.
+func questionTool(kind a2a.ElicitKind) string {
+	switch kind {
+	case a2a.ElicitConfirm:
+		return builtin.AskHumanConfirmName
+	case a2a.ElicitSelect:
+		return builtin.AskHumanSelectName
+	default:
+		return builtin.AskHumanInputName
 	}
 }
 
@@ -481,6 +639,17 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 	case canceled:
 		return codeCanceled, "the run was canceled"
 
+	case errors.Is(out.Err, runstate.ErrNotDeferred):
+		// The call is not one this conversation is waiting on: it was never deferred,
+		// or the conversation has no turn in flight at all.
+		return codeUnknownCall, "this conversation is not waiting on an answer for that call"
+
+	case errors.Is(out.Err, runstate.ErrAlreadyAnswered):
+		return codeAlreadyAnswered, "that call already has an answer"
+
+	case errors.Is(out.Err, runstate.ErrResultTooLarge):
+		return codeAnswerTooLarge, out.Err.Error()
+
 	case errors.Is(out.Err, agent.ErrConversationNotFound):
 		// The token named no journal here. Every worker of this identity reads one store,
 		// so this is a token that was never minted, or one whose conversation the store no
@@ -495,13 +664,13 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 		return codeTurnNotTaken, "the conversation is waiting on a deferred tool result and cannot take a turn; send the prompt again once it has been answered"
 
 	case len(out.Deferred) > 0:
-		// Nothing wakes it in this release. The ids travel to the caller and to the log
-		// because the answer is supplied against the session on the worker that holds
-		// the journal, which is an operator's job rather than the caller's.
+		// The ids travel to the caller because they are what an answer names, whether
+		// it comes back on a request of its own or from an operator running
+		// fisk-ai session against the worker holding the journal.
 		ids := deferredIDs(out.Deferred)
 		t.log.Info("A run is waiting on a deferred tool result", "session", t.session, "deferred", ids)
 
-		return codeDeferred, fmt.Sprintf("the run is waiting on a deferred tool result; answer session %s tool_use %s on this worker", t.session, ids)
+		return codeDeferred, fmt.Sprintf("the run is waiting on an answer for tool_use %s; send it on a request carrying this conversation's token", ids)
 
 	case out.Reason == runstate.ReasonSuspended:
 		return codeSuspended, "the run suspended and left a resumable session"

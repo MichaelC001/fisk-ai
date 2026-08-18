@@ -21,6 +21,14 @@ import (
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
+// Both optional halves are declared for the reason the full-screen renderer declares
+// them: this is a surface somebody is reading.
+var (
+	_ agent.Events             = (*cliEvents)(nil)
+	_ agent.RemoteHostReporter = (*cliEvents)(nil)
+	_ agent.TranscriptReplayer = (*cliEvents)(nil)
+)
+
 // cliEvents renders a run's events for the terminal: it owns every byte of
 // wording and the stdout-vs-stderr split, so agent.Run can stay free of
 // presentation. Answers go to stdout; narration, traces and advisories go to
@@ -76,8 +84,6 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("reading memory for the start-of-run index failed: %v; continuing without it, the memory tools still work", w.Err)
 	case agent.WarnToolSearchUnsupported:
 		return fmt.Sprintf("%d tools are available but the model backend does not support server-side tool search, so all are sent to the model directly and use more context each request; use a provider that supports tool search to defer them", w.Count)
-	case agent.WarnToolSearchDisabled:
-		return fmt.Sprintf("%d tools are available but tool search is disabled (no_tool_search), so all are sent to the model directly and use more context each request; unset no_tool_search to defer them behind the search tool", w.Count)
 	case agent.WarnKnowledgeIndexAbsent:
 		return fmt.Sprintf("knowledge is enabled but no index exists at %q; if you built it with 'knowledge index', re-run it with a matching --store-dir (or an absolute knowledge directory), or knowledge_search will return nothing", w.Name)
 	case agent.WarnTraceClose:

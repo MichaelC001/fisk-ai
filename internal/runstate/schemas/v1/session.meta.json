@@ -45,6 +45,14 @@
         "interactive": {
           "type": "boolean",
           "description": "Marks a chat (--chat) run so a resume reopens the input bar. Absent on a one-shot or batch checkpoint run."
+        },
+        "conversation_token": {
+          "type": "string",
+          "description": "The handle the caller holds for this conversation, recorded so a lost one can be recovered. A credential: reading it needs the store access that already grants writing this journal. Absent for a run nobody was handed one for."
+        },
+        "caller": {
+          "type": "string",
+          "description": "What the channel knew about who asked for this run, as the caller's own unverified claim. Absent where it knew nothing."
         }
       }
     }

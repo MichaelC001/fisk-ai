@@ -28,11 +28,13 @@ var _ = Describe("Validator", func() {
 			Seq:      1,
 			Protocol: MetaProtocol,
 			Meta: &MetaRecord{
-				Version:     Version,
-				RunID:       "run-1",
-				Created:     time.Now().UTC(),
-				Fingerprint: Fingerprint{Model: "claude-opus-4-8", SystemHash: "abc", ToolsHash: "def", ThinkingMode: "on", MaxTokens: 1000, MaxIterations: 5},
-				Prompt:      "do the thing",
+				Version:           Version,
+				RunID:             "run-1",
+				Created:           time.Now().UTC(),
+				Fingerprint:       Fingerprint{Model: "claude-opus-4-8", SystemHash: "abc", ToolsHash: "def", ThinkingMode: "on", MaxTokens: 1000, MaxIterations: 5},
+				Prompt:            "do the thing",
+				ConversationToken: "3Hzmp8VqrKL42NmXcPd7bTgWfR1",
+				Caller:            "peer1",
 			},
 		}
 	}

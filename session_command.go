@@ -238,6 +238,18 @@ func sessionShowAction(_ *fisk.ParseContext) error {
 func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	c.Headingf("Session {bold}%s{/bold}", rs.RunID)
 
+	// Who a channel said asked for this run, and the handle they hold for the
+	// conversation. Both are strings a caller chose, read back from a journal, so they
+	// are sanitized like everything else printed from one. The token is annotated
+	// because the heading above shows an id that reaches nothing over the wire, and a
+	// person handing a conversation back needs to know which of the two to send.
+	if rs.Caller != "" {
+		c.Item("Caller", util.SanitizeForDisplay(rs.Caller))
+	}
+	if rs.ConversationToken != "" {
+		c.Item("Conversation token", columns.Annotated(util.SanitizeForDisplay(rs.ConversationToken), "a caller sends this to continue the conversation"))
+	}
+
 	c.Item("Status", sessionStatus(terminalReason(rs)))
 	c.Item("Model", rs.Fingerprint.Model)
 	c.Item("Next iter", rs.NextIteration)

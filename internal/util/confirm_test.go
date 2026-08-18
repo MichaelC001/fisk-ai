@@ -79,7 +79,7 @@ var _ = Describe("ConfirmGate", func() {
 
 			allowed, _, _ := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "impact:rw")
 			Expect(allowed).To(BeTrue())
-			Expect(prompter.lastGateReq).To(Equal(toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS", Tag: "impact:rw"}))
+			Expect(prompter.lastGateReq).To(Equal(toolkit.GateRequest{ToolUseID: "use-1", Command: "stream rm", Display: "stream rm ORDERS", Tag: "impact:rw"}))
 		})
 
 		It("Should decline when the operator says no, and re-prompt next time", func() {

@@ -36,13 +36,6 @@ type Events interface {
 	Warn(Warning)
 	// Starting reports the resolved run parameters once, before the loop begins.
 	Starting(RunInfo)
-	// RemoteHostNotes reports the per-host outcome of importing remote tools, for
-	// advisory rendering.
-	RemoteHostNotes([]remotetools.HostImport)
-	// ResumeTranscript asks the caller to replay the prior conversation of a
-	// resumed run before it continues; tools is the registry used to render tool
-	// calls the way a live run does.
-	ResumeTranscript(rs *runstate.RunState, tools map[string]*fisk.FiskCommandTool)
 	// LLMRequest reports one request's summary; emitted only when verbose.
 	LLMRequest(summary string)
 	// ToolCall reports a tool invocation as it is dispatched.
@@ -70,6 +63,36 @@ type Events interface {
 	// generic PanicError message. It is called from Run's deferred recover during
 	// unwind, so an implementation must not itself panic or block.
 	Panicked(value any, stack []byte)
+}
+
+// RemoteHostReporter is the optional half of Events that hears how importing remote
+// tools went, host by host. A sink that renders advisories for an operator implements
+// it; one narrating to a peer, a log or a queue has nothing to do with it.
+//
+// It is separate from Events because the argument names this package's own run-path
+// helper, and a sink should not have to import that to compile.
+type RemoteHostReporter interface {
+	// RemoteHostNotes reports the per-host outcome of importing remote tools, for
+	// advisory rendering.
+	RemoteHostNotes([]remotetools.HostImport)
+}
+
+// TranscriptReplayer is the optional half of Events that replays a resumed run's
+// prior conversation before it continues. A surface a person is watching implements it,
+// so they see what was already said; nothing else needs to.
+//
+// It is separate from Events because tools is a rendering registry carrying the
+// application-command layer's type, which a sink that renders nothing should not have
+// to name.
+//
+// A sink that implements it receives the whole folded run, which carries the
+// conversation's token where a channel recorded one. Implement it on a surface that
+// shows the run to the person who owns it, and not on one that forwards elsewhere.
+type TranscriptReplayer interface {
+	// ResumeTranscript asks the caller to replay the prior conversation of a
+	// resumed run before it continues; tools is the registry used to render tool
+	// calls the way a live run does.
+	ResumeTranscript(rs *runstate.RunState, tools map[string]*fisk.FiskCommandTool)
 }
 
 // WarningKind selects which advisory a Warning carries and which of its fields
@@ -118,10 +141,6 @@ const (
 	// active provider does not support server-side tool search, so every tool is sent
 	// to the model directly and uses more context on each request.
 	WarnToolSearchUnsupported
-	// WarnToolSearchDisabled: Count tools crossed the tool-search threshold but
-	// no_tool_search is set, so every tool is sent to the model directly and uses more
-	// context on each request.
-	WarnToolSearchDisabled
 	// WarnKnowledgeIndexAbsent: knowledge is enabled and a store base (StoreDir) is in
 	// effect, but no index exists at the resolved path Name. Most often the knowledge
 	// CLI wrote the index elsewhere because it ran with a different (or no) store base;

@@ -31,6 +31,11 @@ const (
 // caller; a Prompter must still escape it for whatever widget markup its own
 // rendering layer uses.
 type GateRequest struct {
+	// ToolUseID is the call this approval is about. A prompter that carries the
+	// question to somebody who may answer it later needs it: the question itself is
+	// asked again on every resume under a new question id, so the call is the only
+	// thing both ends can agree the answer belongs to.
+	ToolUseID string
 	// Command is the human-readable command path, e.g. "stream rm", used in the
 	// prompt wording and as the subject of a standing allow.
 	Command string

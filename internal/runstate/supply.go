@@ -84,17 +84,48 @@ func SupplyToolResult(store Store, sessionID, toolUseID, content string, isError
 	}
 	defer journal.Close()
 
-	return journal.Append(journal.LastSeq()+1, Record{
-		Protocol: ToolResultProtocol,
-		ToolResult: &ToolResultRecord{
-			ToolUseID: toolUseID,
-			Result: llm.ToolResultBlock{
-				ToolUseID: toolUseID,
-				Content:   content,
-				IsError:   isError,
-			},
-		},
+	return AnswerDeferredCall(journal, state, toolUseID, content, isError)
+}
+
+// AnswerDeferredCall writes the answer to a deferred call into a journal the caller
+// already holds, and folds it into the state the caller already read. It is what a run
+// resuming with an answer in hand uses, where SupplyToolResult is for a caller that
+// holds neither and has to open both.
+//
+// The two share one rule about which call may be answered, and one record shape, so a
+// resumed run and an operator at a terminal cannot disagree about either.
+//
+// state is updated to match the journal: the call is marked answered and its result
+// joins the turn's results. A caller that goes on to run the loop against that state
+// therefore sees the call as answered, which is what stops the tool being dispatched a
+// second time.
+func AnswerDeferredCall(journal Journal, state *RunState, toolUseID, content string, isError bool) error {
+	if journal == nil {
+		return fmt.Errorf("an open journal is required")
+	}
+	if len(content) > MaxSuppliedResultBytes {
+		return fmt.Errorf("%w: %d bytes, limit %d", ErrResultTooLarge, len(content), MaxSuppliedResultBytes)
+	}
+
+	err := checkDeferred(state, toolUseID)
+	if err != nil {
+		return err
+	}
+
+	result := llm.ToolResultBlock{ToolUseID: toolUseID, Content: content, IsError: isError}
+
+	err = journal.Append(journal.LastSeq()+1, Record{
+		Protocol:   ToolResultProtocol,
+		ToolResult: &ToolResultRecord{ToolUseID: toolUseID, Result: result},
 	})
+	if err != nil {
+		return err
+	}
+
+	state.Pending.Answered[toolUseID] = true
+	state.Pending.Results = append(state.Pending.Results, result)
+
+	return nil
 }
 
 // checkDeferred reports whether toolUseID names a deferred call of state that is

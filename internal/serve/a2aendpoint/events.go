@@ -13,9 +13,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
-	"github.com/choria-io/fisk-ai/internal/remotetools"
-	"github.com/choria-io/fisk-ai/internal/runstate"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 )
 
 // maxWireText bounds the text of one message on the reply set.
@@ -97,14 +94,13 @@ func (e *eventSink) Warn(agent.Warning) {}
 func (e *eventSink) Panicked(any, []byte) {}
 
 // The rest describe a run to something rendering it locally and have no counterpart on
-// the wire: the resolved run parameters, the remote import notes, the transcript replay
-// of a resumed run, the verbose request summary, and a context reset naming the session
-// it left behind.
-func (e *eventSink) Starting(agent.RunInfo)                                                {}
-func (e *eventSink) RemoteHostNotes([]remotetools.HostImport)                              {}
-func (e *eventSink) ResumeTranscript(*runstate.RunState, map[string]*fisk.FiskCommandTool) {}
-func (e *eventSink) LLMRequest(string)                                                     {}
-func (e *eventSink) SessionRotated(string)                                                 {}
+// the wire: the resolved run parameters, the verbose request summary, and a context
+// reset naming the session it left behind. The remote import notes and the transcript
+// replay of a resumed run are not here at all, being the optional halves of
+// agent.Events that a sink rendering for nobody does not implement.
+func (e *eventSink) Starting(agent.RunInfo) {}
+func (e *eventSink) LLMRequest(string)      {}
+func (e *eventSink) SessionRotated(string)  {}
 
 // send publishes one block, keeping the run going whatever the sink says. A message
 // over the size cap is the one failure this can still provoke after trimming, and it is

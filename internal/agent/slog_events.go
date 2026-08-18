@@ -37,7 +37,14 @@ type SlogEvents struct {
 	verbose bool
 }
 
-var _ Events = (*SlogEvents)(nil)
+// Both optional halves are implemented: a structured log is where an operator goes to
+// find out what a run did, so the import notes and the resumed conversation belong in
+// it as much as anything else.
+var (
+	_ Events             = (*SlogEvents)(nil)
+	_ RemoteHostReporter = (*SlogEvents)(nil)
+	_ TranscriptReplayer = (*SlogEvents)(nil)
+)
 
 // NewSlogEvents returns a SlogEvents that writes to log; a nil log uses
 // slog.Default. When verbose is true it additionally emits per-request records
@@ -213,8 +220,6 @@ func warningKindName(k WarningKind) string {
 		return "session_rotate"
 	case WarnToolSearchUnsupported:
 		return "tool_search_unsupported"
-	case WarnToolSearchDisabled:
-		return "tool_search_disabled"
 	case WarnKnowledgeIndexAbsent:
 		return "knowledge_index_absent"
 	case WarnTraceClose:

@@ -19,7 +19,14 @@ import (
 )
 
 // tcellEvents satisfies agent.Events, the same contract cliEvents implements.
-var _ agent.Events = (*tcellEvents)(nil)
+// Both optional halves are declared, since this renders for somebody watching: losing
+// either would stop the import notes or the transcript replay appearing, with nothing
+// to notice it but the person who missed them.
+var (
+	_ agent.Events             = (*tcellEvents)(nil)
+	_ agent.RemoteHostReporter = (*tcellEvents)(nil)
+	_ agent.TranscriptReplayer = (*tcellEvents)(nil)
+)
 
 // tcellEvents renders a run's events into the full-screen live view. Like cliEvents
 // it owns the wording, but everything goes to one scrolling viewport rather than

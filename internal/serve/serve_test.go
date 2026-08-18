@@ -93,6 +93,27 @@ var _ = Describe("Budget clamping", func() {
 	})
 })
 
+var _ = Describe("Run options", func() {
+	// A channel says who its caller is once, on the work. The server is what carries
+	// that to the run, which records it in the journal it creates, so an operator
+	// reading the store can say whose conversation a journal is.
+	It("Should carry the caller a channel reported to the checkpoint", func() {
+		srv, err := New(Options{
+			Channels: []Channel{&idleChannel{name: "c"}},
+			Config:   servedConfig(),
+			Logger:   quietLogger(),
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		opts := srv.runOptions(&Work{ID: "w1", Prompt: "hello", Caller: Caller{Name: "peer1"}})
+		Expect(opts.Checkpoint.Caller).To(Equal("peer1"))
+
+		By("leaving it empty for a channel that knows no caller")
+		opts = srv.runOptions(&Work{ID: "w2", Prompt: "hello"})
+		Expect(opts.Checkpoint.Caller).To(BeEmpty())
+	})
+})
+
 var _ = Describe("Tool timeout", func() {
 	newServer := func(cfg *config.Config, opts ...func(*Options)) *Server {
 		GinkgoHelper()

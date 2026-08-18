@@ -87,22 +87,20 @@ func resolveMaxOutputTokens(cfg *config.Config, thinking bool) int64 {
 }
 
 // toolSearchDegradation returns the advisory to raise when totalTools crosses the
-// tool-search threshold but tool search cannot run, so every tool is sent to the
-// model directly. It returns nil when there is nothing to warn about (tool search is
-// available, or the set is small enough to send directly anyway). The remedy differs
-// by cause, so the kind names it: the provider cannot do tool search, or the operator
-// disabled it with no_tool_search.
-func toolSearchDegradation(totalTools int, caps llm.Caps, toolSearchAllowed bool) *Warning {
-	if toolSearchAllowed || totalTools < util.ToolSearchThreshold {
+// tool-search threshold but the provider cannot do tool search, so every tool is
+// sent to the model directly. It returns nil when there is nothing to warn about:
+// the provider supports tool search, the set is small enough to send directly
+// anyway, or operatorEnabled is false.
+//
+// An operator who set no_tool_search chose the direct send, so a run does not
+// report it back to them each time; fisk info reports the state and its cost when
+// they ask for it.
+func toolSearchDegradation(totalTools int, caps llm.Caps, operatorEnabled bool) *Warning {
+	if !operatorEnabled || caps.SupportsToolSearch || totalTools < util.ToolSearchThreshold {
 		return nil
 	}
 
-	kind := WarnToolSearchDisabled
-	if !caps.SupportsToolSearch {
-		kind = WarnToolSearchUnsupported
-	}
-
-	return &Warning{Kind: kind, Count: totalTools}
+	return &Warning{Kind: WarnToolSearchUnsupported, Count: totalTools}
 }
 
 // resumeReminder is appended to the system prompt of a resumed run so the model
@@ -164,6 +162,58 @@ type Checkpoint struct {
 	// A resume whose stored run ended by completing is continued rather than refused,
 	// since a new user turn is the new input a completed conversation lacks.
 	FollowUp bool
+
+	// Answer supplies the result of a call this conversation deferred, applied once
+	// the resume holds the journal and before the loop runs, so the turn continues
+	// with the answer rather than stopping on the same call again.
+	//
+	// It is for a caller that was asked something and could not answer in time: a
+	// deferred call is never dispatched again, so the answer is the only way its turn
+	// finishes. An approval needs nothing here, since the call it guards is
+	// dispatched again on any resume and the question is put again with it.
+	//
+	// It requires ResumeID and is refused with CreateIfMissing, which names a run
+	// that may not exist yet. Naming a call this conversation is not waiting on, or
+	// one that already has a result, refuses the resume before anything runs.
+	Answer *DeferredAnswer
+
+	// ConversationToken is the caller's handle for the conversation this run journals.
+	// It is written to the Meta record where the journal is created and read by nothing
+	// in the loop, so that a caller that lost its handle can be given it back and an
+	// operator can say which stored conversation is which.
+	//
+	// It is for a channel that derives the run id from a token rather than letting a
+	// caller name a journal. Recovering it needs the store access that already grants
+	// reading and writing that journal directly.
+	//
+	// A journal is created by Enabled, or by ResumeID with CreateIfMissing where the
+	// run does not exist yet. Anything else has nowhere to record it and is refused
+	// rather than dropped, a token nothing wrote down being unrecoverable. Against a
+	// journal that already exists it is a no-op, since that journal holds its own.
+	ConversationToken string
+
+	// Caller is what the channel that produced this run knows about who asked for it,
+	// recorded in the Meta record beside ConversationToken and read by nothing.
+	//
+	// It is a label for a person reading a journal, so that two conversations whose
+	// first prompts are alike can still be told apart. It is the caller's own claim:
+	// nothing verifies it, and nothing may decide on it.
+	//
+	// A server that hosts channels fills it from what the channel reported, so a
+	// channel that already said who its caller is does not say so twice.
+	Caller string
+}
+
+// DeferredAnswer is the result of a call that deferred, supplied by whoever the tool
+// was waiting on.
+type DeferredAnswer struct {
+	// ToolUseID is the call being answered.
+	ToolUseID string
+	// Content is what the tool would have returned had it answered at once, in the
+	// shape that tool's own results take.
+	Content string
+	// IsError marks the result the way a tool's own failure would be marked.
+	IsError bool
 }
 
 // Options is everything Run needs to execute a run. Config is already parsed so
@@ -696,6 +746,32 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	if opts.Checkpoint.Answer != nil {
+		switch {
+		case opts.Checkpoint.ResumeID == "":
+			return res, fmt.Errorf("Checkpoint.Answer needs Checkpoint.ResumeID: an answer belongs to a call in a conversation and there is none to answer")
+		case opts.Checkpoint.CreateIfMissing:
+			return res, fmt.Errorf("Checkpoint.Answer cannot be set with Checkpoint.CreateIfMissing: a conversation that may not exist has no call to answer")
+		case opts.Checkpoint.Answer.ToolUseID == "":
+			return res, fmt.Errorf("Checkpoint.Answer needs a ToolUseID: it is the call being answered")
+		}
+	}
+
+	// The token is recorded where the journal is created and nowhere else, so a
+	// checkpoint that creates none has nowhere to put it. It is refused rather than
+	// dropped because dropping it is the failure it exists to prevent: a token nothing
+	// wrote down cannot be recovered, which leaves its conversation unreachable.
+	if opts.Checkpoint.ConversationToken != "" {
+		switch {
+		case opts.Checkpoint.FollowUp:
+			return res, fmt.Errorf("Checkpoint.ConversationToken cannot be set with Checkpoint.FollowUp: the conversation this turn joins recorded its token when it was created")
+		case opts.Checkpoint.Answer != nil:
+			return res, fmt.Errorf("Checkpoint.ConversationToken cannot be set with Checkpoint.Answer: the conversation this answer belongs to recorded its token when it was created")
+		case !opts.Checkpoint.Enabled && !opts.Checkpoint.CreateIfMissing:
+			return res, fmt.Errorf("Checkpoint.ConversationToken needs a checkpoint that creates a journal: set Checkpoint.Enabled, or Checkpoint.ResumeID with Checkpoint.CreateIfMissing")
+		}
+	}
+
 	// The root span is the entire run, which is what makes one run one trace. It starts
 	// as the first statement so it covers every early return, and its Finish is deferred
 	// immediately, before the panic barrier below: defers unwind
@@ -1025,7 +1101,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if err != nil {
 			return res, err
 		}
-		events.RemoteHostNotes(imports)
+		reporter, ok := events.(RemoteHostReporter)
+		if ok {
+			reporter.RemoteHostNotes(imports)
+		}
 	}
 
 	// Caller-injected custom tools are registered last, after every other source has
@@ -1275,7 +1354,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// sent to the model in full every request, spending context the search tool exists
 	// to save. That is a silent degradation worth surfacing.
 	totalTools := len(deferrable) + len(builtins) + len(memBuiltins) + len(ragBuiltins)
-	if w := toolSearchDegradation(totalTools, caps, toolSearchAllowed); w != nil {
+	if w := toolSearchDegradation(totalTools, caps, cfg.ToolSearchEnabled()); w != nil {
 		events.Warn(*w)
 	}
 
@@ -1540,6 +1619,20 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				return res, fmt.Errorf("cannot resume %q: %w", sessionID, err)
 			}
 
+			// The answer lands under the claim taken above and before anything runs, so
+			// a worker that lost the run writes nothing, and the loop below sees the
+			// call answered rather than dispatching the tool a second time. A call this
+			// conversation is not waiting on refuses the resume here, where the caller
+			// still gets an error, rather than part way through a turn.
+			if opts.Checkpoint.Answer != nil {
+				a := opts.Checkpoint.Answer
+
+				err = runstate.AnswerDeferredCall(j, rs, a.ToolUseID, a.Content, a.IsError)
+				if err != nil {
+					return res, fmt.Errorf("cannot answer call %q of %q: %w", a.ToolUseID, sessionID, err)
+				}
+			}
+
 			journal = j
 			seq = j.LastSeq()
 			startIter = rs.NextIteration
@@ -1629,7 +1722,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			for _, w := range resumeHazards(rs) {
 				events.Warn(w)
 			}
-			events.ResumeTranscript(rs, byName)
+			replayer, ok := events.(TranscriptReplayer)
+			if ok {
+				replayer.ResumeTranscript(rs, byName)
+			}
 		} else {
 			meta := runstate.MetaRecord{
 				Version:     runstate.Version,
@@ -1638,6 +1734,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Fingerprint: fp,
 				Prompt:      strings.Join(prompt, " "),
 				Interactive: interactive,
+				// Recorded here because this is where the journal is created, which is the
+				// only place either is written: a resume finds them already in the Meta
+				// record it folded.
+				ConversationToken: opts.Checkpoint.ConversationToken,
+				Caller:            opts.Checkpoint.Caller,
 			}
 			j, err := store.Create(sessionID, meta)
 			if err != nil {
@@ -1655,6 +1756,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// newSession lets a context reset rotate to a fresh session mid-run: it creates a new
 		// journal with the same fingerprint and a new id, seeded with the reset prompt as its
 		// Meta.Prompt. It closes over the store and fingerprint the runner does not hold.
+		//
+		// It carries no conversation token. A channel names a journal by hashing the token,
+		// so this id is not that hash and no caller reaches this journal by holding one.
+		// Copying it would put two conversations in a listing claiming one token, only one
+		// of which can be continued. The caller is copied, since who asked did not change.
 		newSession = func(prompt string) (runstate.Journal, string, error) {
 			id := a2a.NewID()
 			meta := runstate.MetaRecord{
@@ -1664,6 +1770,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Fingerprint: fp,
 				Prompt:      prompt,
 				Interactive: interactive,
+				Caller:      opts.Checkpoint.Caller,
 			}
 			j, err := store.Create(id, meta)
 			if err != nil {

@@ -271,6 +271,39 @@ var _ = Describe("Validator", func() {
 			Expect(NewElicitRequest(ElicitConfirm, "q1").AckInterval()).To(BeZero())
 		})
 
+		// A question outlives its run, so an answer to one has to say what it answers
+		// without the receiver consulting anything it kept.
+		It("Should carry an answer to a question whose run has ended", func() {
+			ask := NewElicitRequest(ElicitSelect, "q1")
+			ask.ToolUseID = "toolu_1"
+			ask.Options = []string{"east", "west"}
+			fillHeader(&ask.Header)
+			Expect(v.ValidateMessage(ask)).To(Succeed())
+
+			req, err := NewAnsweringRequest("token1", ask, NewSelectReply(ask, "caller1", 1))
+			Expect(err).ToNot(HaveOccurred())
+			fillHeader(&req.Header)
+
+			Expect(req.Prompt).To(BeEmpty(), "an answer is not a prompt")
+			Expect(req.ConversationToken).To(Equal("token1"))
+			Expect(req.Answer.ToolUseID).To(Equal("toolu_1"))
+			Expect(req.Answer.Kind).To(Equal(ElicitSelect))
+			Expect(req.Answer.Answer).To(Equal(AnswerValue))
+			Expect(req.Answer.Value).To(Equal("west"), "the option chosen, not where it sat in a list the receiver no longer holds")
+			Expect(v.ValidateMessage(req)).To(Succeed())
+
+			_, err = NewAnsweringRequest("token1", ask, NewSelectReply(ask, "caller1", 7))
+			Expect(err).To(MatchError(ContainSubstring("not one of the 2")))
+		})
+
+		// An endpoint decides whether the prompt it carries is one it will run, and says
+		// so in its own words. What the schema settles is that one of the two is there
+		// at all, so a message naming neither is refused before anybody reads it.
+		It("Should refuse a request naming neither a prompt nor an answer", func() {
+			bare := []byte(`{"protocol":"io.choria.fisk-ai.v1.request","id":"i1","request":"r1","conversation":"c1","sequence":0,"time":"2026-08-16T11:24:10Z","sender":{"name":"caller1"}}`)
+			Expect(v.Validate(bare)).ToNot(Succeed())
+		})
+
 		It("Should correlate a waiting ack to the question it holds open", func() {
 			ask := NewElicitRequest(ElicitApprove, "q1")
 			fillHeader(&ask.Header)

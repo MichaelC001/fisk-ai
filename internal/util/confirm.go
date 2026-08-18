@@ -164,7 +164,7 @@ func (g *ConfirmGate) Approve(ctx context.Context, toolUseID, toolName, commandP
 		return true, "", nil
 	}
 
-	choice, err := g.prompter.ApproveCommand(ctx, toolkit.GateRequest{Command: commandPath, Display: display, Tag: tag})
+	choice, err := g.prompter.ApproveCommand(ctx, toolkit.GateRequest{ToolUseID: toolUseID, Command: commandPath, Display: display, Tag: tag})
 	switch {
 	case errors.Is(err, toolkit.ErrPromptAborted):
 		return false, "", err

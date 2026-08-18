@@ -1919,24 +1919,22 @@ var _ = Describe("toolSearchDegradation", func() {
 	supports := llm.Caps{SupportsToolSearch: true}
 	noSupport := llm.Caps{SupportsToolSearch: false}
 
-	It("Should not warn when tool search is allowed", func() {
+	It("Should not warn when the provider supports tool search", func() {
 		Expect(toolSearchDegradation(util.ToolSearchThreshold, supports, true)).To(BeNil())
 	})
 
 	It("Should not warn when the set is below the threshold", func() {
-		Expect(toolSearchDegradation(util.ToolSearchThreshold-1, supports, false)).To(BeNil())
+		Expect(toolSearchDegradation(util.ToolSearchThreshold-1, noSupport, true)).To(BeNil())
 	})
 
-	It("Should report the operator-disabled cause when the provider supports tool search", func() {
-		w := toolSearchDegradation(util.ToolSearchThreshold, supports, false)
-		Expect(w).NotTo(BeNil())
-		Expect(w.Kind).To(Equal(WarnToolSearchDisabled))
-		Expect(w.Count).To(Equal(util.ToolSearchThreshold))
+	It("Should not warn when the operator disabled tool search", func() {
+		Expect(toolSearchDegradation(util.ToolSearchThreshold, noSupport, false)).To(BeNil())
 	})
 
 	It("Should report the provider-unsupported cause when the provider cannot do tool search", func() {
-		w := toolSearchDegradation(util.ToolSearchThreshold, noSupport, false)
+		w := toolSearchDegradation(util.ToolSearchThreshold, noSupport, true)
 		Expect(w).NotTo(BeNil())
 		Expect(w.Kind).To(Equal(WarnToolSearchUnsupported))
+		Expect(w.Count).To(Equal(util.ToolSearchThreshold))
 	})
 })
