@@ -35,6 +35,15 @@
     "conversation_token": {
       "$ref": "common.json#/$defs/conversation_token"
     },
+    "replay": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Open the reply set with this many blocks of the stored conversation, counted back from the end, before the first new event. Zero replays nothing. The worker rounds outwards to a turn boundary and caps what it sends. Meaningless without a conversation_token."
+    },
+    "force": {
+      "type": "boolean",
+      "description": "Resume a conversation whose stored fingerprint no longer matches the worker's configuration, which is otherwise refused. Standing approvals that cannot be vouched for across the change are dropped. Meaningless without a conversation_token."
+    },
     "answer": {
       "type": "object",
       "description": "Answers a question the conversation is still waiting on, for a caller that was asked something and could not answer before the run gave up. It needs a conversation_token and takes the place of a prompt, so the run is resumed rather than given a new turn.",

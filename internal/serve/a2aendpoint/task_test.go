@@ -17,6 +17,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	natstransport "github.com/choria-io/fisk-ai/internal/a2a/nats"
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/agenttest"
+	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -177,7 +179,7 @@ var _ = Describe("The prompt channel", func() {
 			work := takeWork()
 			Expect(work.Prompt).To(Equal("do the thing"))
 			Expect(work.Prompter).To(BeNil(), "this channel has nobody to ask, so gated tools are refused")
-			Expect(work.Continue).To(BeNil(), "a prompt gets one turn")
+			Expect(work.HumanPaced).To(BeTrue(), "the next turn is the token holder's to send, at their pace")
 			Expect(work.Checkpoint.ResumeID).To(Equal(work.ID))
 			Expect(work.Checkpoint.CreateIfMissing).To(BeTrue())
 			Expect(work.Caller.Name).To(Equal("caller1"))
@@ -448,8 +450,53 @@ var _ = Describe("The prompt channel", func() {
 			both.Answer = answer
 			Expect(refuse(both)).To(ContainSubstring("both a prompt and an answer"))
 
+			// Neither, and no conversation to continue either, so the request asks for
+			// nothing at all.
 			neither := a2a.NewRequest("")
-			Expect(refuse(neither)).To(ContainSubstring("neither a prompt nor an answer"))
+			Expect(refuse(neither)).To(ContainSubstring("neither a prompt, an answer nor a conversation"))
+		})
+
+		// A caller that was suspended part way through a turn continues it rather than
+		// adding to it, so the request carries a conversation and nothing else.
+		It("Should take a request that continues a run and adds nothing", func() {
+			newChannel(1)
+
+			first := send(a2a.NewRequest("how many streams are there"))
+			ack, ok := next(first).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+
+			opening := takeWork()
+			report(opening, serve.Outcome{Reason: runstate.ReasonSuspended})
+			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+
+			carryOn := a2a.NewRequest("")
+			carryOn.ConversationToken = ack.ConversationToken
+			second := send(carryOn)
+			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+
+			resumed := takeWork()
+			Expect(resumed.Prompt).To(BeEmpty())
+			Expect(resumed.Checkpoint.ResumeID).To(Equal(opening.Checkpoint.ResumeID))
+			Expect(resumed.Checkpoint.FollowUp).To(BeFalse(), "it adds no turn")
+			Expect(resumed.Checkpoint.CreateIfMissing).To(BeFalse())
+			Expect(resumed.Checkpoint.Answer).To(BeNil())
+		})
+
+		// A caller resuming across a configuration its conversation no longer matches
+		// asks for it, and the run drops what it cannot vouch for.
+		It("Should carry force onto a resume", func() {
+			newChannel(1)
+
+			first := send(a2a.NewRequest("how many streams are there"))
+			ack := next(first).(*a2a.Ack)
+			report(takeWork(), serve.Outcome{Reason: runstate.ReasonSuspended})
+			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+
+			forced := a2a.NewFollowUp(ack, "and the second one")
+			forced.Force = true
+			Expect(next(send(forced)).(*a2a.Ack).Accepted).To(BeTrue())
+
+			Expect(takeWork().Checkpoint.Force).To(BeTrue())
 		})
 
 		It("Should refuse an answer whose value does not fit the question it names", func() {
@@ -508,7 +555,38 @@ var _ = Describe("The prompt channel", func() {
 				serve.Outcome{Reason: runstate.ReasonSuspended, Deferred: []agent.DeferredCall{{ToolUseID: "c1", ToolName: "change_request"}}}, codeTurnNotTaken),
 			Entry("a first turn that deferred, which is not a turn refused", false,
 				serve.Outcome{Reason: runstate.ReasonSuspended, Deferred: []agent.DeferredCall{{ToolUseID: "c1", ToolName: "change_request"}}}, codeDeferred),
+			// A budget refusal also leaves FollowUpTaken false, so without a case of its
+			// own it would take the deferred-tool branch above and tell the caller to send
+			// the prompt again once something that does not exist has been answered.
+			Entry("a conversation that has spent its token budget", true,
+				serve.Outcome{Reason: runstate.ReasonBudget, Err: fmt.Errorf("this conversation has processed 210 of its 200 token budget (llm.budget.max_tokens)")}, codeBudgetExhausted),
 		)
+
+		It("Should tell a caller a spent budget is permanent, and say what it spent", func() {
+			newChannel(1)
+
+			req := a2a.NewRequest("and the other one")
+			req.ConversationToken = "2Ab3Cd4Ef5Gh"
+			stream := send(req)
+			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+
+			report(takeWork(), serve.Outcome{
+				Reason: runstate.ReasonBudget,
+				Err:    fmt.Errorf("this conversation has processed 210 of its 200 token budget (llm.budget.max_tokens)"),
+			})
+
+			failed, ok := next(stream).(*a2a.ErrorMessage)
+			Expect(ok).To(BeTrue())
+			Expect(failed.Code).To(Equal(codeBudgetExhausted))
+
+			// Both numbers and the key reach the caller, and the advice is the only one
+			// that works: this conversation is finished, whoever sends the next turn.
+			Expect(failed.Err).To(ContainSubstring("processed 210 of its 200 token budget"))
+			Expect(failed.Err).To(ContainSubstring("llm.budget.max_tokens"))
+			Expect(failed.Err).To(ContainSubstring("no further turn"))
+			Expect(failed.Err).ToNot(ContainSubstring("deferred"))
+			Expect(failed.StopReason).To(Equal(a2a.StopBudgetExhausted))
+		})
 	})
 
 	Describe("Endings", func() {
@@ -586,7 +664,10 @@ var _ = Describe("The prompt channel", func() {
 	})
 
 	Describe("Canceling", func() {
-		It("Should cancel the run and answer the caller", func() {
+		// A cancel asks for a boundary rather than a stop: the run is left to finish the
+		// step in hand and park somewhere a resume can continue from, so the caller is
+		// answered suspended and keeps a conversation rather than half a turn.
+		It("Should ask the run to stop at its next boundary", func() {
 			newChannel(1)
 
 			req := a2a.NewRequest("do the thing")
@@ -596,24 +677,25 @@ var _ = Describe("The prompt channel", func() {
 			work := takeWork()
 			runCtx, cancel := work.RunContext(context.Background())
 			DeferCleanup(cancel)
-			Expect(runCtx.Err()).To(BeNil())
+			Expect(work.SuspendRequested()).To(BeFalse())
 
 			ack, err := client.Cancel(context.Background(), "agent1", req.Request, "changed my mind")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(ack.Accepted).To(BeTrue())
 
-			Eventually(runCtx.Done()).Should(BeClosed())
+			Eventually(work.SuspendRequested).Should(BeTrue())
+			Expect(runCtx.Err()).To(BeNil(), "the run is asked to stop, not stopped where it stands")
 
-			report(work, serve.Outcome{Err: context.Canceled})
+			report(work, serve.Outcome{Reason: runstate.ReasonSuspended})
 
 			failed, ok := next(stream).(*a2a.ErrorMessage)
 			Expect(ok).To(BeTrue())
-			Expect(failed.Code).To(Equal(codeCanceled))
-			Expect(failed.StopReason).To(Equal(a2a.StopCanceled))
+			Expect(failed.Code).To(Equal(codeSuspended))
 		})
 
-		// Between the ack and the run's start there is no context to cancel, so the task
-		// records the cancel and the run is entered on a context that has already ended.
+		// Between the ack and the run's start there is nothing to poll, so the flag is
+		// what carries the cancel: the loop reads it at the boundary before its first
+		// model call and parks without spending anything.
 		It("Should honor a cancel that arrives before the run starts", func() {
 			newChannel(1)
 
@@ -628,7 +710,24 @@ var _ = Describe("The prompt channel", func() {
 
 			runCtx, cancel := work.RunContext(context.Background())
 			DeferCleanup(cancel)
-			Expect(runCtx.Err()).To(MatchError(context.Canceled))
+			Expect(runCtx.Err()).To(BeNil())
+			Expect(work.SuspendRequested()).To(BeTrue())
+		})
+
+		// The worker stopping a run under its caller is the ending that is still a
+		// cancel: nothing was asked for, the run ended where it stood, and what it left
+		// is whatever the journal holds.
+		It("Should report a worker that stopped the run as canceled", func() {
+			newChannel(1)
+
+			stream := send(a2a.NewRequest("do the thing"))
+			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+
+			report(takeWork(), serve.Outcome{Err: context.Canceled})
+
+			failed, ok := next(stream).(*a2a.ErrorMessage)
+			Expect(ok).To(BeTrue())
+			Expect(failed.Code).To(Equal(codeCanceled))
 		})
 
 		// The subscription is the run's own, so a cancel for a run that is not going
@@ -653,6 +752,161 @@ var _ = Describe("The prompt channel", func() {
 
 			_, err := client.Cancel(context.Background(), "agent1", req.Request, "too late")
 			Expect(err).To(MatchError(a2a.ErrAgentUnavailable))
+		})
+	})
+
+	// A read is a request that names a conversation and asks for some of it back,
+	// carrying neither a prompt nor an answer. It is what a client opens a resumed
+	// conversation with: a completed one refuses a plain resume, and a request that
+	// carried a prompt would put the history underneath it.
+	Describe("Reading a conversation back", func() {
+		// withStore builds a channel holding a store, and seeds one stored conversation
+		// under the session id the given token names.
+		withStore := func(token string) *agenttest.FakeSessionStore {
+			GinkgoHelper()
+
+			store := agenttest.NewFakeSessionStore(GinkgoTB())
+
+			built, err := NewFromConfig(promptsConfig("        workers: 1\n"), ConfigOptions{Conns: provider, Logger: quietLogger(), Sessions: store})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(closeAll, built)
+
+			ch = channelOf(built)
+
+			id := SessionFor("agent1", token)
+			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "how many streams"})
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Seq: 2, Assistant: &runstate.AssistantRecord{
+				Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+					{Text: &llm.TextBlock{Text: "there are three"}},
+				}},
+			}})).To(Succeed())
+			Expect(j.Append(3, runstate.Record{Protocol: runstate.TerminalProtocol, Seq: 3, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			return store
+		}
+
+		It("Should replay the conversation and answer without running a turn", func() {
+			withStore("tok1")
+
+			req := a2a.NewRequest("")
+			req.ConversationToken = "tok1"
+			req.Replay = 50
+			stream := send(req)
+
+			ack, ok := next(stream).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+			Expect(ack.Accepted).To(BeTrue())
+			Expect(ack.ConversationToken).To(Equal("tok1"))
+
+			start, ok := next(stream).(*a2a.Event)
+			Expect(ok).To(BeTrue())
+			Expect(start.Block.Content().(a2a.StatusBlock).Phase).To(Equal(a2a.PhaseReplayStart))
+
+			prompt, ok := next(stream).(*a2a.Event)
+			Expect(ok).To(BeTrue())
+			Expect(prompt.Block.Content().(a2a.PromptBlock).Text).To(Equal("how many streams"))
+
+			answer, ok := next(stream).(*a2a.Event)
+			Expect(ok).To(BeTrue())
+			Expect(answer.Block.Content().(a2a.TextBlock).Text).To(Equal("there are three"))
+
+			end, ok := next(stream).(*a2a.Event)
+			Expect(ok).To(BeTrue())
+			Expect(end.Block.Content().(a2a.StatusBlock).Phase).To(Equal(a2a.PhaseReplayEnd))
+			Expect(end.Block.Content().(a2a.StatusBlock).Usage).ToNot(BeNil(), "a client seeds its running total from here")
+
+			res, ok := next(stream).(*a2a.Result)
+			Expect(ok).To(BeTrue())
+			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.Text).To(BeEmpty(), "a read answers nothing, it only says what is there")
+		})
+
+		// The whole point of the shape: the conversation above has completed, which is
+		// what every finished turn leaves behind, and no other request could open on it.
+		It("Should read a conversation no plain resume could continue", func() {
+			withStore("tok2")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			DeferCleanup(cancel)
+
+			// No work is ever produced, so the channel's worker is free throughout.
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, err := ch.Next(ctx)
+				Expect(err).To(HaveOccurred())
+			}()
+
+			req := a2a.NewRequest("")
+			req.ConversationToken = "tok2"
+			req.Replay = 50
+			stream := send(req)
+
+			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+
+			for {
+				msg := next(stream)
+				if _, ok := msg.(*a2a.Result); ok {
+					break
+				}
+			}
+
+			cancel()
+			Eventually(done, 5*time.Second).Should(BeClosed())
+		})
+
+		It("Should say so when the token names no conversation", func() {
+			withStore("tok3")
+
+			req := a2a.NewRequest("")
+			req.ConversationToken = "nosuchtoken"
+			req.Replay = 50
+			stream := send(req)
+
+			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+
+			msg, ok := next(stream).(*a2a.ErrorMessage)
+			Expect(ok).To(BeTrue())
+			Expect(msg.Code).To(Equal(a2a.CodeUnknownConversation))
+		})
+
+		// A resume that asks for no history is the other operation: continue a run that
+		// stopped part way. It still reaches the worker.
+		It("Should leave a plain resume as work for the run", func() {
+			withStore("tok4")
+
+			req := a2a.NewRequest("")
+			req.ConversationToken = "tok4"
+			stream := send(req)
+
+			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+
+			work := takeWork()
+			Expect(work.Prompt).To(BeEmpty())
+			Expect(work.Checkpoint.ResumeID).To(Equal(SessionFor("agent1", "tok4")))
+
+			report(work, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "carried on"})
+			Expect(next(stream)).To(BeAssignableToTypeOf(&a2a.Result{}))
+		})
+
+		It("Should refuse a read when the worker holds no store", func() {
+			newChannel(1)
+
+			req := a2a.NewRequest("")
+			req.ConversationToken = "tok5"
+			req.Replay = 50
+			stream := send(req)
+
+			ack, ok := next(stream).(*a2a.Ack)
+			Expect(ok).To(BeTrue())
+			Expect(ack.Accepted).To(BeFalse())
+
+			msg, ok := next(stream).(*a2a.ErrorMessage)
+			Expect(ok).To(BeTrue())
+			Expect(msg.Code).To(Equal(a2a.CodeRejected))
 		})
 	})
 

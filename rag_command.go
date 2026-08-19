@@ -254,7 +254,7 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 
 	switch res.Status {
 	case rag.StatusIndexNotBuilt:
-		c.Print("the knowledge index has not been built yet; run: fisk-ai knowledge index")
+		c.Print("the knowledge index has not been built yet; run: fisk knowledge index")
 		return nil
 	case rag.StatusIndexEmpty:
 		c.Print("the knowledge index is empty, or the query had no searchable terms")
@@ -306,10 +306,10 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 
 	headingPath, content, err := store.ChunkText(ctx, relPath, ordinal)
 	if errors.Is(err, rag.ErrIndexNotBuilt) {
-		return fmt.Errorf("the knowledge index has not been built yet; run: fisk-ai knowledge index")
+		return fmt.Errorf("the knowledge index has not been built yet; run: fisk knowledge index")
 	}
 	if err != nil {
-		return fmt.Errorf("no chunk found for citation %q: it may have shifted since the last reindex; run 'fisk-ai knowledge sources' to list files", knowledgeCitation)
+		return fmt.Errorf("no chunk found for citation %q: it may have shifted since the last reindex; run 'fisk knowledge sources' to list files", knowledgeCitation)
 	}
 
 	if headingPath != "" {
@@ -334,7 +334,7 @@ func knowledgeRmAction(_ *fisk.ParseContext) error {
 		return err
 	}
 	if !exists {
-		fmt.Println("the knowledge index has not been built yet; run: fisk-ai knowledge index")
+		fmt.Println("the knowledge index has not been built yet; run: fisk knowledge index")
 		return nil
 	}
 
@@ -402,7 +402,7 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 		}
 
 		fmt.Printf("reset: discarded %s, which was built by an older format and could not be read\n", path)
-		fmt.Println("run: fisk-ai knowledge index")
+		fmt.Println("run: fisk knowledge index")
 
 		return nil
 	}
@@ -465,7 +465,7 @@ func knowledgeRebuildAction(_ *fisk.ParseContext) error {
 	if err := store.RebuildFTS(ctx); err != nil {
 		switch {
 		case errors.Is(err, rag.ErrIndexNotBuilt):
-			return fmt.Errorf("there is no knowledge index to rebuild; run: fisk-ai knowledge index")
+			return fmt.Errorf("there is no knowledge index to rebuild; run: fisk knowledge index")
 		case errors.Is(err, rag.ErrLocked):
 			return fmt.Errorf("another knowledge writer holds the index lock; rebuild needs it, so try again when it finishes")
 		}
@@ -473,7 +473,7 @@ func knowledgeRebuildAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	c.Print("Rebuilt. Verify with: fisk-ai knowledge doctor --integrity")
+	c.Print("Rebuilt. Verify with: fisk knowledge doctor --integrity")
 
 	return nil
 }
@@ -499,7 +499,7 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 
 	sources, err := store.Sources(ctx)
 	if errors.Is(err, rag.ErrIndexNotBuilt) {
-		fmt.Println("the knowledge index has not been built yet; run: fisk-ai knowledge index")
+		fmt.Println("the knowledge index has not been built yet; run: fisk knowledge index")
 		return nil
 	}
 	if err != nil {
@@ -615,7 +615,7 @@ func knowledgeStatsAction(_ *fisk.ParseContext) error {
 	c.Blank()
 
 	if !st.Built {
-		c.Item("Store", fmt.Sprintf("%s (not built; run: fisk-ai knowledge index)", st.StorePath))
+		c.Item("Store", fmt.Sprintf("%s (not built; run: fisk knowledge index)", st.StorePath))
 		return nil
 	}
 

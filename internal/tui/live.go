@@ -78,22 +78,25 @@ type Live struct {
 	// The status fields are mutated only on the tview loop (from Message, the prompter,
 	// the ticker and teardown) so nothing races the draw. ended is read by the leave-key
 	// handler to decide suspend vs abort.
-	ended     bool
-	inTokens  int64
-	outTokens int64
-	// cacheReadTokens is the input served from the prompt cache, shown as cached=X so a
-	// live run's cache hit-rate is visible; a stuck-at-zero value against a climbing
-	// inTokens is the tell of a silent cache miss. cacheCreateTokens (cache writes) is
-	// tracked so a resumed run's counters stay whole but is not shown on the compact bar.
+	ended bool
+	// The four counters a conversation is bounded by, kept apart because a caller
+	// reports them apart and a resumed run seeds them from stored ones. The bar renders
+	// their sum: that total is what the token budget counts, and showing any subset of
+	// it against the budget would be a number that does not add up to the one that
+	// stops the conversation.
+	inTokens          int64
+	outTokens         int64
 	cacheReadTokens   int64
 	cacheCreateTokens int64
-	// thinkingTokens is the part of outTokens the model spent reasoning. It is shown
-	// unconditionally, unlike cached=X, because zero is the answer to a question an
-	// operator cannot otherwise ask: reasoning is not rendered, so a bar that omitted
-	// the counter when it was zero would look identical whether the model was not
-	// reasoning or reasoning where nothing shows it.
+	// thinkingTokens is the part of outTokens the model spent reasoning. It is tracked
+	// so a resumed run's counters stay whole; the compact bar does not show it, having
+	// only room for the number that decides whether the conversation can go on.
 	thinkingTokens int64
-	state          runState
+	// maxTokens is what the agent said this conversation may process in total, zero
+	// where it bounds nothing. It comes off the ack rather than from configuration,
+	// since the agent enforcing it may be on another machine.
+	maxTokens int64
+	state     runState
 
 	// spinnerFrame indexes the spinner animation, advanced by the ticker while the run
 	// is working. spinning is the ticker's read of "the run is working" (state ==
@@ -315,25 +318,22 @@ func (l *Live) Run(parent context.Context, run func(context.Context) error) (run
 		quitOnce.Do(func() { close(quitCh) })
 	}
 
-	// A leave key (q / Esc / Ctrl-C) drives the checkpoint suspend/abort contract. On a
-	// checkpointing run the first press requests a graceful suspend at the next boundary
-	// and keeps the view up; a second press, a non-checkpointing run, a run already
-	// ended, or a run blocked on a prompt (which cannot reach a suspend boundary) all
-	// abort. Runs on the tview loop, so it mutates view state directly.
+	// A leave key (q / Esc / Ctrl-C) asks the run to stop where the conversation can be
+	// continued; a second press, or a run already ended, gives up on it instead. Runs on
+	// the tview loop, so it mutates view state directly.
 	//
-	// At the interactive input bar the loop-boundary suspend flag is useless (the run is
-	// parked in nextPrompt, not the loop, so it never polls the flag): the graceful leave
-	// there is Ctrl-D, which delivers a clean end that the runner turns into a suspend for
-	// a checkpointed chat. So Ctrl-C at the input bar (which also lands here) aborts
-	// directly rather than starting a dance that could never complete.
+	// A run blocked on a question is included: asking it to stop closes the question, so
+	// it reaches a boundary rather than sitting on one nobody will answer. At the input
+	// row there is nothing running to ask, so the key leaves directly rather than
+	// starting an exchange that could never complete.
 	var suspendAsked bool
 	l.v.onQuit = func() {
-		if l.suspend != nil && !suspendAsked && !l.ended && l.state != stateBlocked && l.state != stateAwaitingInput {
+		if l.suspend != nil && !suspendAsked && !l.ended && l.state != stateAwaitingInput {
 			suspendAsked = true
 			l.suspend()
 			l.state = stateSuspending
 			l.refreshStatus()
-			l.v.appendLine(Line{Kind: LineMeta, Text: "suspend requested; finishing current step, press again to abort"})
+			l.v.appendLine(Line{Kind: LineMeta, Text: "stopping at the next safe point; press again to leave now"})
 			return
 		}
 		abort()
@@ -519,6 +519,30 @@ func (l *Live) SeedUsage(in, out, cacheRead, cacheCreate, thinking int64) {
 	})
 }
 
+// SetTokenBudget records what the agent said this conversation may process in total, so
+// the bar can show how much of it is left. Zero means the agent bounds nothing and the
+// bar shows the running total alone.
+func (l *Live) SetTokenBudget(max int64) {
+	l.v.app.QueueUpdateDraw(func() {
+		l.maxTokens = max
+		l.refreshStatus()
+	})
+}
+
+// tokenStatus renders the conversation's position against its bound.
+//
+// The total is every tier the bound counts: the uncached input, the output, and both
+// cache tiers, which the bound weighs the same as uncached input. Thinking is left out,
+// being a share of the output rather than an addition to it.
+func (l *Live) tokenStatus() string {
+	spent := l.inTokens + l.outTokens + l.cacheReadTokens + l.cacheCreateTokens
+	if l.maxTokens <= 0 {
+		return fmt.Sprintf("tokens=%d", spent)
+	}
+
+	return fmt.Sprintf("tokens=%d/%d", spent, l.maxTokens)
+}
+
 // AddUsage accumulates a message's token usage into the live counter from the run
 // goroutine, marshaling onto the loop. Summing every message's usage matches the
 // end-of-run RunStats total, so the running number and the summary agree.
@@ -619,19 +643,12 @@ func (l *Live) liveStatusText() string {
 		spin = spinnerFrames[l.spinnerFrame%len(spinnerFrames)]
 	}
 
-	parts := []string{
-		fmt.Sprintf("tokens=%d/%d", l.inTokens, l.outTokens),
-		// Always, including zero: reasoning is not rendered, so this counter is the only
-		// thing that says whether any happened. It is a share of the output total rather
-		// than an addition to it.
-		fmt.Sprintf("thinking=%d", l.thinkingTokens),
-	}
-	// cached=X appears only once the cache is hit, mirroring the end-of-run summary line,
-	// so an uncached run's bar stays uncluttered while a caching run shows the read total
-	// climbing as a live hit indicator.
-	if l.cacheReadTokens > 0 {
-		parts = append(parts, fmt.Sprintf("cached=%d", l.cacheReadTokens))
-	}
+	// The one number that decides whether this conversation can take another turn, and
+	// the bound it is measured against when there is one. A split of input against
+	// output said nothing about that: the budget counts cache reads and cache writes at
+	// full weight too, so a bar showing the uncached remainder could read as a few
+	// thousand tokens on a conversation that was about to be refused.
+	parts := []string{l.tokenStatus()}
 	if l.v.meta.Model != "" {
 		parts = append(parts, "model="+tview.Escape(l.v.meta.Model))
 	}
@@ -647,14 +664,11 @@ func (l *Live) liveStatusText() string {
 
 	hint := "? help   q quit   / search   z/Z fold"
 	if l.state == stateAwaitingInput {
-		// Ctrl-D leaves the session: a checkpointed chat suspends (resumable), a plain
-		// chat completes. Word it for what actually happens so the key does not read as
-		// "end" when it in fact saves the conversation for later.
-		leave := "ctrl-d end"
-		if l.suspend != nil {
-			leave = "ctrl-d suspend"
-		}
-		hint = fmt.Sprintf("enter send   %s   ctrl-c abort   tab transcript", leave)
+		// Every conversation is stored, so leaving here is not an ending to warn anybody
+		// about: Ctrl-D is how a person is done, and what they leave behind is a
+		// conversation they can continue. "suspend" was the word when leaving one was a
+		// thing that happened to a run, and it reads as a warning rather than a way out.
+		hint = "enter send   ctrl-d done   ctrl-c stop   tab transcript"
 	}
 
 	return fmt.Sprintf(" [::b]%s  %s   |   %s[::-] ", spin, strings.Join(parts, "  "), hint)
@@ -719,6 +733,11 @@ func muzzleStderr() func() {
 // onto the tview loop so it never races the draw. It blocks until the loop has
 // applied the update, which the teardown path keeps possible by draining the loop
 // until the run goroutine returns.
+//
+// It must not be called before Run. The loop that applies the update is the one Run
+// starts, so a line queued ahead of it blocks its caller forever, with the screen
+// already taken and nothing drawing on it. A caller with something to say from the
+// start says it inside the function it hands to Run.
 func (l *Live) Append(lines ...Line) {
 	if len(lines) == 0 {
 		return

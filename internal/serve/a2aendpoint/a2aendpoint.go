@@ -26,8 +26,10 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/conns"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // Builder describes these endpoints to serve.Endpoints, so a program that wants to
@@ -43,6 +45,7 @@ func Builder() serve.EndpointBuilder {
 				ConfigFile: opts.ConfigFile,
 				Logger:     opts.Logger,
 				Telemetry:  opts.Telemetry,
+				Sessions:   opts.Sessions,
 			})
 		},
 	}
@@ -67,6 +70,12 @@ type ConfigOptions struct {
 	// those calls run. It is the process's provider, borrowed like the connection: the
 	// program that built it flushes it.
 	Telemetry *telemetry.Provider
+
+	// Sessions is the run-journal store, borrowed like the connection. The prompt
+	// channel reads it to answer a caller that asks only to be told what a conversation
+	// holds, which takes no turn and calls no model. Nil refuses those requests and
+	// changes nothing else: every other shape reaches the store through the run.
+	Sessions runstate.Store
 }
 
 // NewFromConfig builds the endpoints expose.agent.a2a asks for: the tool service under
@@ -114,6 +123,13 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 		built = append(built, ch)
 	}
 
+	// Discovery is one route on the one micro service this identity registers, so
+	// whoever answers it answers for every endpoint here. The tool service owns it when
+	// there is one, since its card is the one with tools on it; an identity that only
+	// takes prompts still has to say what it is, and gets a card with no tools rather
+	// than no answer at all. Registering it twice would not fail: micro would subscribe
+	// again on the same subject in the same queue group, and a peer would get whichever
+	// card NATS picked.
 	if cfg.A2AServeToolsEnabled() {
 		svc, err := newService(cfg, held, opts)
 		if err != nil {
@@ -122,9 +138,33 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 		}
 
 		built = append(built, svc)
+	} else {
+		err = serveCard(cfg, held, opts)
+		if err != nil {
+			held.closeQuietly(opts.Logger)
+			return nil, err
+		}
 	}
 
 	return built, nil
+}
+
+// serveCard answers discovery for an identity that serves no tools, so a peer can ask
+// what it is and a caller can read what it does with a conversation before sending one.
+//
+// It registers the discovery route and nothing else. The server it builds owns no tools
+// and answers no tool calls, and it is released with the transport rather than being an
+// endpoint of its own, since it produces no work and has nothing to close.
+func serveCard(cfg *config.Config, held *sharedTransport, opts ConfigOptions) error {
+	_, err := a2a.NewServer(held.transport, nil, a2a.ServerOptions{
+		Identity:      cfg.Identity,
+		Version:       util.Version(),
+		Logger:        opts.Logger,
+		Telemetry:     opts.Telemetry,
+		DiscoveryOnly: true,
+	})
+
+	return err
 }
 
 // sharedTransport is the one transport both endpoints answer on, closed once however

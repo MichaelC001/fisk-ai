@@ -257,6 +257,16 @@ type Options struct {
 	// the single run goroutine, like the prompter.
 	NextPrompt func(context.Context) Continuation
 
+	// HumanPaced says the gap before the next call on this conversation is a person's
+	// think time rather than a loop's cadence, which is what lets a provider choose a
+	// cache lifetime long enough to still be there for the next turn.
+	//
+	// It is a property of the conversation rather than of this run, so a caller that
+	// takes one turn at a time still sets it: under that model each turn is a run of its
+	// own, and NextPrompt being nil says nothing about whether another turn is coming.
+	// A one-shot job leaves it false, its history never being re-sent.
+	HumanPaced bool
+
 	// Provider, when non-nil, is the llm.Provider Run uses for every model call,
 	// bypassing the registry lookup by llm.provider name. It lets a Go caller build a
 	// provider itself (a fleet-wide rate-limiter wrapper, a test fake) and hand it in
@@ -1724,7 +1734,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 			replayer, ok := events.(TranscriptReplayer)
 			if ok {
-				replayer.ResumeTranscript(rs, byName)
+				replayer.ResumeTranscript(rs)
 			}
 		} else {
 			meta := runstate.MetaRecord{
@@ -1861,6 +1871,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		verbose:         opts.Verbose,
 		promptCache:     cfg.PromptCacheEnabled(),
 		interactive:     interactive,
+		humanPaced:      opts.HumanPaced,
 		events:          events,
 		hooks:           opts.Hooks,
 		prompter:        prompter,
@@ -2008,16 +2019,31 @@ func endsOnAssistant(messages []llm.Message) bool {
 // resume without the operator re-passing the flag. It does not lock the session (the
 // subsequent resume takes the lock), so it is a cheap pre-flight read.
 func SessionInteractive(cfg *config.Config, id string) (bool, error) {
-	// This is a CLI-only pre-flight read. A file-backed journal lives in the XDG
-	// default, so the file backend resolves with an empty environment (a server resume
-	// runs through Run, which passes its own StoreDir). A jetstream backend needs a
-	// connection: dial a short-lived one here for the read; the resume that follows
-	// dials its own through Run (the double dial is accepted for simplicity).
+	rs, err := LoadSession(cfg, id)
+	if err != nil {
+		return false, err
+	}
+
+	return rs.Interactive, nil
+}
+
+// LoadSession reads one stored run without holding it, for a caller deciding what to do
+// before it starts: whether the conversation was interactive, what token continues it,
+// what it was asked in the first place.
+//
+// It is a pre-flight read and takes no lock, so what it returns describes the journal at
+// the moment it was read and not a run in progress. Resuming is Run's business.
+//
+// A file-backed journal lives in the XDG default, so the file backend resolves with an
+// empty environment; a server resume runs through Run, which passes its own StoreDir. A
+// jetstream backend needs a connection, and a short-lived one is dialed here for the
+// read, with the resume that follows dialing its own.
+func LoadSession(cfg *config.Config, id string) (*runstate.RunState, error) {
 	env := runstate.RuntimeEnv{}
 	if runstate.NeedsNats(cfg.SessionBackend()) {
 		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
 		if err != nil {
-			return false, fmt.Errorf("connecting to NATS for the jetstream session pre-flight read: %w", err)
+			return nil, fmt.Errorf("connecting to NATS for the jetstream session pre-flight read: %w", err)
 		}
 		defer p.Close()
 		env.Nats = p.Nats()
@@ -2025,15 +2051,10 @@ func SessionInteractive(cfg *config.Config, id string) (bool, error) {
 
 	store, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), env)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	rs, err := store.Load(id)
-	if err != nil {
-		return false, err
-	}
-
-	return rs.Interactive, nil
+	return store.Load(id)
 }
 
 // resumeHazards reports the resume situation that can misbehave: a pause at a

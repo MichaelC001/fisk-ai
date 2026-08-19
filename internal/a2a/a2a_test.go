@@ -386,6 +386,23 @@ var _ = Describe("A2A", func() {
 			Expect(carried.Conversation).To(Equal("conv1"))
 			Expect(carried.Request).To(Equal(carried.ID))
 		})
+
+		// Canceling a task and answering its questions both name the request tag, so a
+		// caller that only learned it when the call returned could not name the call it
+		// was inside.
+		It("Should keep a request tag the caller set and mint one when it did not", func() {
+			fresh := NewRequest("p")
+			stampRequest(context.Background(), &fresh.Header, "caller1", "svc")
+			Expect(fresh.Request).ToNot(BeEmpty())
+			Expect(fresh.Request).To(Equal(fresh.ID))
+
+			carried := NewRequest("p")
+			carried.Request = "req1"
+			stampRequest(context.Background(), &carried.Header, "caller1", "svc")
+			Expect(carried.Request).To(Equal("req1"))
+			Expect(carried.ID).To(Equal("req1"), "a request message's id is its correlation tag")
+			Expect(carried.Conversation).ToNot(Equal("req1"), "a conversation the caller did not name is still fresh")
+		})
 	})
 
 	Describe("NewFollowUp", func() {

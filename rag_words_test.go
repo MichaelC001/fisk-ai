@@ -83,15 +83,15 @@ var _ = Describe("knowledge words", func() {
 		// The word is not in the index, so only its opening letters are worth keeping:
 		// suggesting the whole of it would send the reader to another empty result.
 		It("keeps a short prefix of the absent word", func() {
-			Expect(wordsSuggestion("kafka")).To(Equal("fisk-ai knowledge words kaf"))
+			Expect(wordsSuggestion("kafka")).To(Equal("fisk knowledge words kaf"))
 		})
 
 		It("leaves a word shorter than the prefix alone", func() {
-			Expect(wordsSuggestion("db")).To(Equal("fisk-ai knowledge words db"))
+			Expect(wordsSuggestion("db")).To(Equal("fisk knowledge words db"))
 		})
 
 		It("folds case, because the vocabulary is folded", func() {
-			Expect(wordsSuggestion("Kafka")).To(Equal("fisk-ai knowledge words kaf"))
+			Expect(wordsSuggestion("Kafka")).To(Equal("fisk knowledge words kaf"))
 		})
 	})
 

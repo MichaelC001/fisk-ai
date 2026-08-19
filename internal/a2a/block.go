@@ -19,6 +19,8 @@ const (
 	BlockToolResult BlockType = "tool_result"
 	BlockAgentCall  BlockType = "agent_call"
 	BlockStatus     BlockType = "status"
+	BlockWarning    BlockType = "warning"
+	BlockPrompt     BlockType = "prompt"
 )
 
 // BlockContent is the content of a single event block. The concrete types are
@@ -45,9 +47,45 @@ func (ThinkingBlock) blockType() BlockType { return BlockThinking }
 // TextBlock is answer text.
 type TextBlock struct {
 	Text string `json:"text"`
+	// Final marks the text of the turn that ended the run, which is the answer
+	// rather than narration on the way to it. The same text is in Result.Text, so a
+	// caller that renders both shows the answer twice unless it can tell them apart,
+	// and only the run knows which message was terminal.
+	Final bool `json:"final,omitempty"`
 }
 
 func (TextBlock) blockType() BlockType { return BlockText }
+
+// PromptBlock is a turn somebody asked for: the prompt a conversation opened with,
+// or one added to it later.
+//
+// A live run never sends one, the caller having just written it. It exists so that a
+// conversation replayed to a caller that was not there, or read back from a journal,
+// carries both halves rather than an agent talking to itself.
+type PromptBlock struct {
+	Text string `json:"text"`
+}
+
+func (PromptBlock) blockType() BlockType { return BlockPrompt }
+
+// WarningBlock is an advisory the run raised: something went wrong short of the run
+// failing, or something an operator should know about what the run is allowed to do.
+//
+// It carries the warning rather than a sentence about it, so the wording belongs to
+// whatever renders it and a receiver that does not know a kind still has the fields.
+// Kind is the string form rather than the harness enumeration, which is an iota whose
+// values are not a wire contract.
+type WarningBlock struct {
+	Kind   string   `json:"kind"`
+	Name   string   `json:"name,omitempty"`
+	Count  int      `json:"count,omitempty"`
+	Params []string `json:"params,omitempty"`
+	// Error is the failure the warning reports, as text. It is display material read
+	// by a person, never matched on.
+	Error string `json:"error,omitempty"`
+}
+
+func (WarningBlock) blockType() BlockType { return BlockWarning }
 
 // ToolCallBlock is the agent invoking one of its own tools.
 type ToolCallBlock struct {
@@ -83,7 +121,22 @@ type StatusBlock struct {
 	Iteration int    `json:"iteration,omitempty"`
 	Phase     string `json:"phase,omitempty"`
 	Usage     *Usage `json:"usage,omitempty"`
+	// Count and Truncated describe a replay: how many blocks of the stored
+	// conversation were sent, and whether older ones were left behind because the
+	// caller asked for fewer than the conversation holds or the worker capped it. A
+	// client renders history that begins mid-conversation as such rather than as a
+	// conversation that began there.
+	Count     int  `json:"count,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
 }
+
+// The phases a status block carries. PhaseReplayStart and PhaseReplayEnd bracket the
+// stored conversation a resume was asked to replay, so a client knows which blocks
+// already happened.
+const (
+	PhaseReplayStart = "replay_start"
+	PhaseReplayEnd   = "replay_end"
+)
 
 func (StatusBlock) blockType() BlockType { return BlockStatus }
 
@@ -132,6 +185,9 @@ func NewThinkingBlock(text string) Block { return NewBlock(ThinkingBlock{Text: t
 
 // NewTextBlock builds a text Block.
 func NewTextBlock(text string) Block { return NewBlock(TextBlock{Text: text}) }
+
+// NewFinalTextBlock builds the text Block of the turn that ended the run.
+func NewFinalTextBlock(text string) Block { return NewBlock(TextBlock{Text: text, Final: true}) }
 
 // NewToolCallBlock builds a tool_call Block.
 func NewToolCallBlock(id, name string, input json.RawMessage) Block {
@@ -239,6 +295,14 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		content = v
 	case BlockStatus:
 		var v StatusBlock
+		err = json.Unmarshal(data, &v)
+		content = v
+	case BlockWarning:
+		var v WarningBlock
+		err = json.Unmarshal(data, &v)
+		content = v
+	case BlockPrompt:
+		var v PromptBlock
 		err = json.Unmarshal(data, &v)
 		content = v
 	default:

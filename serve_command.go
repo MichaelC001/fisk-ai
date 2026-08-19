@@ -26,7 +26,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
-// fiskServeCommand is the state of one `fisk-ai serve` invocation. Its flags are
+// fiskServeCommand is the state of one `fisk serve` invocation. Its flags are
 // fields rather than package variables so the helpers below can hang off it instead of
 // crowding the command package with functions that mean nothing on their own.
 type fiskServeCommand struct {
@@ -160,6 +160,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		ConfigFile:       c.configFile,
 		Logger:           log,
 		Telemetry:        tel,
+		Sessions:         resources.SessionStore,
 	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder()})
 	if err != nil {
 		return err
@@ -270,7 +271,7 @@ func (c *fiskServeCommand) workerOverride() int {
 // noEndpointError names what is missing and shows the blocks that fix it. A key name
 // on its own is not enough to work out what goes under it.
 func (c *fiskServeCommand) noEndpointError() error {
-	return fmt.Errorf(`fisk-ai serve needs an endpoint to run, and %q enables none. Add a work queue intake:
+	return fmt.Errorf(`fisk serve needs an endpoint to run, and %q enables none. Add a work queue intake:
 
 expose:
   agent:

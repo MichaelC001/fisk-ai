@@ -79,6 +79,25 @@ type Line struct {
 	Short string
 }
 
+// ContentExport is what a view has been able to learn about whether a run's
+// conversation itself reaches a collector, rather than only the shape and timing of the
+// run.
+//
+// It has three values rather than two because not knowing is a real answer and must not
+// look like no. The process that exports is the one running the agent, so a terminal
+// talking to a worker elsewhere knows only what that worker told it, and a worker that
+// did not answer in time has told it nothing.
+type ContentExport int
+
+const (
+	// ContentNotExported is an agent that says its traces carry no conversation.
+	ContentNotExported ContentExport = iota
+	// ContentExported is an agent that says they do.
+	ContentExported
+	// ContentExportUnknown is an agent that did not say.
+	ContentExportUnknown
+)
+
 // Meta describes the session being viewed, shown in the status and header bars.
 type Meta struct {
 	// Title identifies the session, e.g. its run id.
@@ -94,9 +113,6 @@ type Meta struct {
 	// startup card. Empty hides the line. It is only consulted by the live run's splash;
 	// the static transcript viewer never shows it.
 	Dir string
-	// Interactive marks a chat run, shown as a badge in the header bar so the operator
-	// knows the input row will open when a turn finishes.
-	Interactive bool
 	// Resume marks a resumed session, whose restored transcript draws straight away. The
 	// live view skips the startup card in that case: it would only flash up and vanish as
 	// the first response is already in hand.
@@ -110,7 +126,7 @@ type Meta struct {
 	// the same thing is printed before this UI takes the terminal and is then covered for
 	// the whole run: an operator watching this screen for an hour should be able to see
 	// that their prompts are leaving the machine.
-	TelemetryContent bool
+	TelemetryContent ContentExport
 	// InTokens and OutTokens are the session's accumulated token usage, shown on the
 	// static statusbar the same way the live bar shows its running counter. Both zero
 	// (a view with no usage to report) hides the count rather than showing "0/0".
@@ -485,7 +501,10 @@ func groupOf(kind LineKind) lineGroup {
 // transition between a turn's prose and its tool activity, in either direction, so
 // the narration is set off from the tool calls below it and from the previous turn's
 // tool output above it. Lines within a group (a call then its result, thinking then
-// narration) stay tight, and fences and warnings never trigger a break.
+// narration) stay tight, and a fence never triggers a break.
+//
+// A warning is followed by one, since it interrupts whatever the run was doing and
+// would otherwise read as a heading for the line beneath it.
 //
 // A prompt is set off on both sides, since it is the one line an operator scrolling a
 // long chat is looking for: it marks where a turn began, and everything below it until
@@ -498,6 +517,13 @@ func (v *viewer) breakBefore(i int) bool {
 	}
 
 	if v.lines[i].Kind == LinePrompt || v.lines[i-1].Kind == LinePrompt {
+		return true
+	}
+
+	// A warning interrupts whatever the run was doing, so it is set off from what comes
+	// after it rather than reading as a heading for it. Several in a row stay together,
+	// being one interruption rather than several.
+	if v.lines[i-1].Kind == LineWarning && v.lines[i].Kind != LineWarning {
 		return true
 	}
 
@@ -856,7 +882,7 @@ func (v *viewer) onKey(ev *tcell.EventKey) *tcell.EventKey {
 // inputReadyHint is the grey placeholder shown when a turn boundary opens and focuses the
 // input row, until the operator types. While the agent works the placeholder is cleared so
 // the reserved row is blank.
-const inputReadyHint = "Ready for a follow-up. Enter sends, Alt-Enter for a newline, /help for commands"
+const inputReadyHint = "Ready for a follow-up. Enter sends, Ctrl-D when you are done, /help for commands"
 
 // enableInput builds the interactive follow-up row, a "> " field framed by divider
 // rules, and inserts it above the statusbar. It is called once, only for a live view
@@ -1195,7 +1221,7 @@ var slashCommands = []slashCommand{
 	{
 		name:    "exit",
 		aliases: []string{"quit"},
-		summary: "end the session (a checkpointed chat suspends)",
+		summary: "leave; the conversation stays where it can be continued",
 		run:     (*viewer).cmdExit,
 	},
 	{
@@ -1255,8 +1281,8 @@ func (v *viewer) setNotice(msg string) {
 
 // cmdClear drops the conversation context, keeping the scrollback. With no argument it
 // reopens the input for a fresh prompt; with one it runs that prompt against the cleared
-// context. In a checkpointed chat the runner rotates to a fresh, resumable session behind
-// this; a plain chat clears in memory.
+// context. The caller walks away from the conversation behind this, which leaves it
+// stored and continuable and starts the next turn in one of its own.
 func (v *viewer) cmdClear(args string) {
 	v.appendLine(Line{Kind: LineMeta, Text: "--- context cleared ---"})
 	if args != "" {
@@ -1512,19 +1538,14 @@ func styleLine(kind LineKind, escaped string) string {
 	}
 }
 
-// headerText is the top bar: the build version and, in a chat run, a [chat] marker. The
-// prompt itself is no longer shown here; it leads the transcript body as a prompt line so
-// it stays with the response rather than sitting truncated in the bar. It returns "" when
-// nothing is set so the caller can drop the band.
+// headerText is the top bar: the build version. The prompt itself is not shown here; it
+// leads the transcript body as a prompt line so it stays with the response rather than
+// sitting truncated in the bar. It returns "" when nothing is set so the caller can drop
+// the band.
 func headerText(meta Meta) string {
 	parts := []string{"o(((c"}
 	if meta.Version != "" {
 		parts = append(parts, "fisk-ai "+tview.Escape(meta.Version))
-	}
-	if meta.Interactive {
-		// The header has dynamic colors on, so a bracketed word would be read as a tag;
-		// escape it so the brackets render literally.
-		parts = append(parts, tview.Escape("[chat]"))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -1572,7 +1593,7 @@ func statusText(meta Meta) string {
 func helpLines(canSuspend, interactive bool) []string {
 	leave := "  q / Esc             quit"
 	if canSuspend {
-		leave = "  q / Esc / ^C        suspend (again: abort)"
+		leave = "  q / Esc / Ctrl-C    stop (again: leave)"
 	}
 
 	lines := []string{
@@ -1587,14 +1608,14 @@ func helpLines(canSuspend, interactive bool) []string {
 		leave,
 	}
 	if interactive {
-		// In a checkpointed chat Ctrl-D suspends (the session stays resumable) and Ctrl-C
-		// aborts, but the journal keeps the conversation so an abort is resumable too; a
-		// plain chat's Ctrl-D ends it for good. Word each for what actually happens.
+		// Every conversation is stored, so neither key ends anything that cannot be
+		// picked up again. Ctrl-D is being done with it and Ctrl-C is giving up on the
+		// turn in front of you; word each for what it does rather than for what it costs.
 		leave := []string{"  Ctrl-D / Ctrl-C     end / abort"}
 		if canSuspend {
 			leave = []string{
-				"  Ctrl-D              suspend (resumable)",
-				"  Ctrl-C              abort (still resumable)",
+				"  Ctrl-D              done (conversation saved)",
+				"  Ctrl-C              stop the turn (conversation saved)",
 			}
 		}
 

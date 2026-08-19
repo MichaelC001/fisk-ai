@@ -215,7 +215,7 @@ var _ = Describe("Live", func() {
 
 		It("Should open the input row, accept a follow-up, continue, and end on Ctrl-D", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 
 			run := func(ctx context.Context) error {
@@ -233,9 +233,8 @@ var _ = Describe("Live", func() {
 			out := make(chan error, 1)
 			go func() { out <- l.Run(context.Background(), run) }()
 
-			// The header badge advertises chat mode, and the row opens focused after the
-			// first turn: the statusbar reads ready and the grey hint shows in the field.
-			Eventually(screenTextOf(l, sim), time.Second).Should(ContainSubstring("[chat]"))
+			// The row opens focused after the first turn: the statusbar reads ready and
+			// the grey hint shows in the field.
 			Eventually(screenTextOf(l, sim), time.Second).Should(And(
 				ContainSubstring("ready for input"),
 				ContainSubstring("Ready for a follow-up"),
@@ -262,7 +261,7 @@ var _ = Describe("Live", func() {
 
 		It("Should recall submitted follow-ups with Up/Down and stash the draft", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 			v := l.v
 
@@ -288,7 +287,7 @@ var _ = Describe("Live", func() {
 
 		It("Should grow the input row for a multi-line draft and collapse it after sending", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 
 			delivered := make(chan string, 1)
@@ -335,7 +334,7 @@ var _ = Describe("Live", func() {
 
 		It("Should deliver a reset for /clear and mark the cleared context", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 
 			type turn struct {
@@ -373,7 +372,7 @@ var _ = Describe("Live", func() {
 
 		It("Should report an unknown command and keep the input open", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 
 			run := func(ctx context.Context) error {
@@ -402,7 +401,7 @@ var _ = Describe("Live", func() {
 
 		It("Should skip a consecutive duplicate in history", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 			v := l.v
 
@@ -414,14 +413,14 @@ var _ = Describe("Live", func() {
 
 		It("Should fold thinking by default", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 			Expect(l.v.foldThinking).To(BeTrue())
 		})
 
 		It("Should abort the session with Ctrl-C while the input row is open", func() {
 			sim := tcell.NewSimulationScreen("")
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, nil)
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
 			l.EnableInteractive()
 
 			run := func(ctx context.Context) error {
@@ -442,22 +441,22 @@ var _ = Describe("Live", func() {
 			Eventually(out, time.Second).Should(Receive(MatchError(context.Canceled)))
 		})
 
-		It("Should word the input-bar leave key as suspend for a checkpointed chat, and end otherwise", func() {
-			checkpointed := newLive(tcell.NewSimulationScreen(""), Meta{Model: "m", Interactive: true}, true, func() {})
-			checkpointed.EnableInteractive()
-			checkpointed.state = stateAwaitingInput
-			Expect(checkpointed.liveStatusText()).To(ContainSubstring("ctrl-d suspend"))
+		// Every conversation is stored, so leaving the input row is being done rather than
+		// suspending something. The hint says so, and says it the same way whoever is
+		// hosting the run.
+		It("Should word the input-row leave key as being done", func() {
+			l := newLive(tcell.NewSimulationScreen(""), Meta{Model: "m"}, true, func() {})
+			l.EnableInteractive()
+			l.state = stateAwaitingInput
 
-			plain := newLive(tcell.NewSimulationScreen(""), Meta{Model: "m", Interactive: true}, true, nil)
-			plain.EnableInteractive()
-			plain.state = stateAwaitingInput
-			Expect(plain.liveStatusText()).To(ContainSubstring("ctrl-d end"))
+			Expect(l.liveStatusText()).To(ContainSubstring("ctrl-d done"))
+			Expect(l.liveStatusText()).ToNot(ContainSubstring("suspend"))
 		})
 
 		It("Should abort a checkpointed chat with Ctrl-C at the input bar rather than starting a doomed suspend", func() {
 			sim := tcell.NewSimulationScreen("")
 			var suspendCalled atomic.Bool
-			l := newLive(sim, Meta{Model: "m", Interactive: true}, true, func() { suspendCalled.Store(true) })
+			l := newLive(sim, Meta{Model: "m"}, true, func() { suspendCalled.Store(true) })
 			l.EnableInteractive()
 
 			run := func(ctx context.Context) error {
@@ -569,23 +568,44 @@ var _ = Describe("Live", func() {
 			l.v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))
 
-			Expect(text).To(ContainSubstring("tokens=150/50"))
+			// The sum rather than the split: it is what the token budget counts, and
+			// with no budget reported there is nothing to show it against.
+			Expect(text).To(ContainSubstring("tokens=200"))
+			Expect(text).ToNot(ContainSubstring("tokens=150/50"))
 		})
 
-		It("Should show the cache read count only once the cache is hit", func() {
+		// The bar counts every tier the budget counts. Showing the uncached remainder
+		// alone let a conversation about to be refused read as a few thousand tokens.
+		It("Should count the cache tiers in the total", func() {
 			sim := tcell.NewSimulationScreen("")
 			l := newLive(sim, Meta{Model: "m"}, true, nil)
 
 			done := make(chan error, 1)
 			go func() { done <- l.v.app.Run() }()
 
-			l.AddUsage(20, 5, 0, 0, 0)
+			l.AddUsage(20, 5, 4096, 512, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
-			Expect(screenTextOf(l, sim)()).NotTo(ContainSubstring("cached="))
 
-			l.AddUsage(10, 5, 4096, 0, 0)
+			Expect(screenTextOf(l, sim)()).To(ContainSubstring("tokens=4633"))
+
+			l.v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
+		It("Should show the bound the agent reported once it has one", func() {
+			sim := tcell.NewSimulationScreen("")
+			l := newLive(sim, Meta{Model: "m"}, true, nil)
+
+			done := make(chan error, 1)
+			go func() { done <- l.v.app.Run() }()
+
+			l.AddUsage(100, 40, 0, 0, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
-			Expect(screenTextOf(l, sim)()).To(ContainSubstring("cached=4096"))
+			Expect(screenTextOf(l, sim)()).To(ContainSubstring("tokens=140"))
+
+			l.SetTokenBudget(500000)
+			l.v.app.QueueUpdateDraw(l.refreshStatus)
+			Expect(screenTextOf(l, sim)()).To(ContainSubstring("tokens=140/500000"))
 
 			l.v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))
@@ -816,7 +836,7 @@ var _ = Describe("Live", func() {
 
 			// First press requests the suspend; the run keeps going.
 			sim.InjectKey(tcell.KeyCtrlC, 0, tcell.ModNone)
-			Eventually(screenTextOf(l, sim), time.Second).Should(ContainSubstring("suspend requested"))
+			Eventually(screenTextOf(l, sim), time.Second).Should(ContainSubstring("stopping at the next safe point"))
 			Expect(screenTextOf(l, sim)()).To(ContainSubstring("suspending"))
 			Consistently(out, 100*time.Millisecond).ShouldNot(Receive())
 
@@ -881,7 +901,7 @@ var _ = Describe("Live", func() {
 			l.AddUsage(30, 10, 0, 0, 0)
 			l.v.app.QueueUpdateDraw(l.refreshStatus)
 
-			Expect(screenTextOf(l, sim)()).To(ContainSubstring("tokens=530/210"))
+			Expect(screenTextOf(l, sim)()).To(ContainSubstring("tokens=740"))
 
 			l.v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))
@@ -897,7 +917,7 @@ var _ = Describe("Live", func() {
 
 			l.v.app.QueueUpdateDraw(func() { l.v.pages.ShowPage("help") })
 			Eventually(screenTextOf(l, sim), time.Second).Should(And(
-				ContainSubstring("suspend (again: abort)"),
+				ContainSubstring("stop (again: leave)"),
 				ContainSubstring("https://choria.io"),
 			))
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
@@ -48,6 +49,13 @@ type Channel struct {
 	elicits    bool
 	promptWait time.Duration
 
+	// maxTokens is the configured cumulative token bound on a conversation, carried on
+	// every accepting ack so a caller can show how much of the allowance is left. Zero
+	// where the configuration bounds nothing. It is the local ceiling: a request that
+	// lowers its own budget is clamped by the server, so the ack reports the lower of
+	// the two rather than this.
+	maxTokens int64
+
 	// work hands one admitted prompt to Next. It is unbuffered: admission has already
 	// reserved the slot, so the wait here is for the server's puller to come round
 	// rather than for capacity, and it is waited out on a goroutine per prompt.
@@ -57,6 +65,11 @@ type Channel struct {
 	closeOnce sync.Once
 	closeErr  error
 	shutdown  chan struct{}
+
+	// sessions is the run-journal store, read to answer a request that only asks to be
+	// told what a conversation holds. It is nil when the process hosting this channel
+	// supplied none, which refuses such a request rather than running one.
+	sessions runstate.Store
 
 	// mu guards inFlight, which is both the capacity count and the set of request ids
 	// this worker is answering. It is touched from the serving goroutine, from each
@@ -97,6 +110,8 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 		log:        log.With("channel", channelName),
 		elicits:    cfg.A2APromptsElicit(),
 		promptWait: cfg.A2ARequestTimeout(),
+		maxTokens:  cfg.LLM.Budget.MaxTokens,
+		sessions:   opts.Sessions,
 		work:       make(chan *serve.Work),
 		shutdown:   make(chan struct{}),
 		inFlight:   make(map[string]*task),

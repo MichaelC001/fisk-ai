@@ -75,10 +75,18 @@ func discoverAction(_ *fisk.ParseContext) error {
 	c.Item("Version", card.Version)
 	c.ItemUnlessZero("Description", card.Description)
 	c.ItemUnlessZero("Protocols", card.Protocols)
+	// Said only when true, and said in full. Somebody reading a card before they send a
+	// prompt is deciding whether to send it, and "telemetry: true" does not tell them
+	// that the words themselves travel.
+	if card.TelemetryContent {
+		c.Item("Conversation content", "exported to a telemetry collector")
+	}
 	fmt.Println(c.String())
 
 	if len(card.Tools) == 0 {
-		fmt.Println("The agent exposes no tools.")
+		// An agent that answers prompts and serves no tools to peers is a working agent,
+		// not a broken one, so this says what is true rather than what is missing.
+		fmt.Println("The agent serves no tools to peers.")
 		return nil
 	}
 
@@ -98,7 +106,7 @@ func discoverAction(_ *fisk.ParseContext) error {
 // otherwise the config file is read for nats_context and the agent's identity is used
 // as the sender. The sender defaults to "fisk-ai" when no config identity is available.
 //
-// The wait comes from the same key a run waits on, so this command and `fisk-ai info`
+// The wait comes from the same key a run waits on, so this command and `fisk info`
 // give a peer the same time to answer the same request. With --context there is no
 // configuration to read one from, and the transport applies its own default.
 func discoverContext() (contextName string, sender string, wait time.Duration, err error) {

@@ -20,6 +20,14 @@
     },
     "usage": {
       "$ref": "common.json#/$defs/usage"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "The trace the run recorded, empty when the worker exports no telemetry."
+    },
+    "content_exported": {
+      "type": "boolean",
+      "description": "This turn's conversation itself reached a collector, not only the shape and timing of the run."
     }
   },
   "required": [

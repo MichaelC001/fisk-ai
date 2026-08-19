@@ -176,10 +176,13 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 		}
 	}
 
-	r.SessionStore, err = runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: opts.StoreDir, Nats: r.Conns.Nats()})
+	sessions, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: opts.StoreDir, Nats: r.Conns.Nats()})
 	if err != nil {
 		return nil, fmt.Errorf("building the session store: %w", err)
 	}
+	// A worker holds no conversation between turns, so every turn reads its journal back
+	// from here. Wrapping it is what makes that cost visible in the run log.
+	r.SessionStore = withStoreLogging(sessions, opts.Logger)
 
 	return r, nil
 }

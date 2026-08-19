@@ -54,7 +54,7 @@ func mcpAction(_ *fisk.ParseContext) error {
 	}
 
 	if !cfg.MCPEnabled() {
-		return fmt.Errorf("fisk-ai mcp requires an expose.agent.mcp block in %q; add expose.agent.mcp (optionally with a port) to serve tools over MCP", configFile)
+		return fmt.Errorf("fisk mcp requires an expose.agent.mcp block in %q; add expose.agent.mcp (optionally with a port) to serve tools over MCP", configFile)
 	}
 
 	if cfg.ApplicationPath == "" {

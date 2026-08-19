@@ -69,7 +69,7 @@ var _ = Describe("buildCard", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ping", "ping it")
 
-		card := buildCard("svc", "v1", toolsFor(app))
+		card := buildCard("svc", "v1", toolsFor(app), nil)
 		Expect(card.Name).To(Equal("svc"))
 		Expect(card.Version).To(Equal("v1"))
 		Expect(card.Protocols).To(ConsistOf(ProtocolNamespace))
@@ -83,7 +83,7 @@ var _ = Describe("buildCard", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ls", "list things").Tag("ai:read_only").Tag("ai:idempotent")
 
-		card := buildCard("svc", "v1", toolsFor(app))
+		card := buildCard("svc", "v1", toolsFor(app), nil)
 		Expect(card.Tools).To(HaveLen(1))
 		Expect(card.Tools[0].Behavior).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
 	})

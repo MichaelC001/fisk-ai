@@ -208,7 +208,7 @@ func (t *Transport) requestTask(ctx context.Context, subject string, body []byte
 	if err != nil {
 		switch {
 		case errors.Is(err, nats.ErrNoResponders):
-			return nil, fmt.Errorf("%w: no subscription interest on %q, so that task is not running there", a2a.ErrAgentUnavailable, subject)
+			return nil, fmt.Errorf("%w on %q, so that task is not running there", a2a.ErrNoResponders, subject)
 
 		case errors.Is(err, context.DeadlineExceeded):
 			return nil, fmt.Errorf("%w: the %s on %q was not answered", a2a.ErrAgentUnavailable, what, subject)

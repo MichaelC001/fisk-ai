@@ -41,6 +41,27 @@ type Request struct {
 	// to an approval is held for the question the resumed run asks about the same
 	// call, so nobody is asked twice for something they already answered.
 	Answer *Answer `json:"answer,omitempty"`
+	// Replay asks a request that continues a conversation to open its reply set with
+	// that many blocks of the stored conversation, counted back from the end, before
+	// the first new event. Zero, the default, replays nothing.
+	//
+	// The caller names the number because only the caller knows what it can show: a
+	// full-screen client asks for the conversation, a line-based one for as much as
+	// somebody will scroll back through, and an agent delegating a question wants the
+	// answer rather than a transcript. The worker rounds outwards to a turn boundary,
+	// so a result never arrives without the call it answers, and caps what it will
+	// send.
+	//
+	// It has no meaning without ConversationToken, a first turn having no history.
+	Replay int `json:"replay,omitempty"`
+	// Force resumes a conversation whose stored fingerprint no longer matches this
+	// worker's configuration, which is otherwise refused. The run drops the standing
+	// approvals it cannot vouch for across the change, as it does for any forced
+	// resume, so what it costs is being asked again rather than a grant carried onto a
+	// tool that moved under it.
+	//
+	// It has no meaning without ConversationToken.
+	Force bool `json:"force,omitempty"`
 }
 
 // Answer carries what an operator said, for a question whose run has ended. It is an
@@ -110,6 +131,16 @@ func NewAnsweringRequest(token string, ask *ElicitRequest, reply *ElicitReply) (
 	return r, nil
 }
 
+// NewAnswerRequest builds the request that delivers an answer already in hand, for a
+// caller holding one its run gave up on before it could be sent. It carries no prompt,
+// so the conversation is resumed rather than given a turn.
+func NewAnswerRequest(token string, answer *Answer) *Request {
+	r := &Request{ConversationToken: token, Answer: answer}
+	r.Protocol = RequestProtocol
+
+	return r
+}
+
 // NewRequest builds a Request with the protocol id set.
 func NewRequest(prompt string) *Request {
 	r := &Request{Prompt: prompt}
@@ -161,6 +192,18 @@ type Result struct {
 	StopReason StopReason `json:"stop_reason"`
 	Text       string     `json:"text,omitempty"`
 	Usage      *Usage     `json:"usage,omitempty"`
+	// TraceID names the trace the run recorded, so a caller can go and read what the
+	// worker did. It is empty when the worker exports no telemetry, and it is not a
+	// secret: it identifies a trace to somebody who already has access to the
+	// collector holding it.
+	TraceID string `json:"trace_id,omitempty"`
+	// ContentExported reports that this turn's conversation itself reached a collector,
+	// not only the shape and timing of the run.
+	//
+	// The card says what the worker is configured to do and this says what the turn did,
+	// which is the one a caller should keep: it is true of work already done rather than
+	// of work that might be.
+	ContentExported bool `json:"content_exported,omitempty"`
 }
 
 // NewResult builds a Result with the protocol id set.
@@ -179,6 +222,17 @@ type ErrorMessage struct {
 	StopReason StopReason `json:"stop_reason,omitempty"`
 	Err        string     `json:"error"`
 	Code       string     `json:"code,omitempty"`
+	// Usage is what the run spent before it ended, for an ending that ran and stopped
+	// rather than one that never started. A suspended run is the case that needs it:
+	// it did the work of a turn and is answered here rather than with a result, and a
+	// caller that pays for its runs cannot tell what it owes from an error alone.
+	Usage *Usage `json:"usage,omitempty"`
+	// TraceID names the trace the run recorded, on the same terms as Result.TraceID.
+	// An ending that was not an answer is where a caller wants it most.
+	TraceID string `json:"trace_id,omitempty"`
+	// ContentExported reports what Result.ContentExported reports, for a turn that ran
+	// and did not answer. A turn that spent the words still sent them.
+	ContentExported bool `json:"content_exported,omitempty"`
 }
 
 // NewError builds an ErrorMessage with the protocol id set.
@@ -222,6 +276,15 @@ type Ack struct {
 	// Holding it is the authorization to add a turn to that conversation, so it is
 	// neither logged nor displayed.
 	ConversationToken string `json:"conversation_token,omitempty"`
+	// MaxTokens is the tokens this conversation may process in total, counted the way
+	// Usage counts them so a caller can compare the two directly and show how much of
+	// the allowance is left. Zero from an agent that bounds nothing, or one that predates
+	// the field.
+	//
+	// It is the effective bound for this turn, so a caller that lowered its own budget
+	// reads back what it will actually be held to rather than what it asked for. A
+	// conversation that reaches it takes no further turn.
+	MaxTokens int64 `json:"max_tokens,omitempty"`
 }
 
 // NewAck builds an Ack with the protocol id set.
@@ -300,6 +363,17 @@ type AgentCard struct {
 	Description string           `json:"description,omitempty"`
 	Protocols   []string         `json:"protocols,omitempty"`
 	Tools       []ToolDescriptor `json:"tools,omitempty"`
+
+	// Telemetry reports that the agent exports traces of what it does, and
+	// TelemetryContent that those traces carry the conversation itself rather than only
+	// its structure and timing.
+	//
+	// They are published because they are what somebody should know before sending a
+	// prompt: the second one says the words travel to a collector this agent's operator
+	// chose. A caller that cannot reach the card cannot assume either is false, which is
+	// why they are reported separately rather than as one flag.
+	Telemetry        bool `json:"telemetry,omitempty"`
+	TelemetryContent bool `json:"telemetry_content,omitempty"`
 }
 
 // ElicitKind names what a run is asking the caller for. The four are the four

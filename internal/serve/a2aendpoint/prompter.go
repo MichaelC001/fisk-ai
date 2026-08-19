@@ -7,6 +7,7 @@ package a2aendpoint
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -300,9 +301,15 @@ func (p *elicitPrompter) ask(ctx context.Context, question *a2a.ElicitRequest, o
 		case <-window.C:
 			cause = context.DeadlineExceeded
 
+		case <-p.task.stop:
+			// The caller asked the run to stop. A question is not a boundary, so
+			// waiting out the window first would hold the worker for minutes after the
+			// answer stopped mattering.
+			cause = errors.New("the caller asked the run to stop")
+
 		case <-ctx.Done():
-			// The run ended under the question: a peer canceled it, or the worker was
-			// stopped rather than drained.
+			// The run ended under the question: the worker was stopped rather than
+			// drained.
 			cause = ctx.Err()
 		}
 

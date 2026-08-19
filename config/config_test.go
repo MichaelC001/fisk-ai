@@ -1108,6 +1108,34 @@ application_path: /usr/bin/nats
 			Expect(err.Error()).To(ContainSubstring("llm.model is required when expose.agent.a2a.prompts is set"))
 		})
 
+		// On a bus the identity is the subject an agent answers on and the queue group it
+		// joins, so a name arrived at by accident does not fail to resolve: it joins
+		// somebody else's fleet. A basename is such an accident, since a shared
+		// executable whose behavior comes from its directory gives a fleet of unrelated
+		// agents the same one.
+		It("Should fail in serve mode when the identity was not named", func() {
+			for _, expose := range []*ExposeConfig{
+				{Agent: &AgentExpose{A2A: &ExposedA2AConfig{Prompts: &ExposedPromptsConfig{}}}},
+				{Agent: &AgentExpose{A2A: &ExposedA2AConfig{ServeTools: true}}},
+				{Agent: &AgentExpose{Jobs: &ExposedJobsConfig{}}},
+			} {
+				derived := &Config{
+					ApplicationPath: "/usr/bin/abt",
+					SystemPrompt:    "p",
+					NatsContext:     "ctx",
+					LLM:             LLMConfig{Model: "m"},
+					Expose:          expose,
+				}
+				Expect(derived.prepare()).To(Succeed())
+				Expect(derived.Identity).To(Equal("abt"), "the basename is still what it runs as")
+				Expect(derived.IdentityIsNamed()).To(BeFalse())
+
+				err := ValidateForMode(derived, ModeServe)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("identity is required"))
+			}
+		})
+
 		It("Should accept a prompt endpoint with no application at all", func() {
 			cfg.ApplicationPath = ""
 			cfg.NatsContext = "ctx"

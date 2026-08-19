@@ -23,6 +23,12 @@ const (
 	// produces a reply set rather than a reply, so a binding carries it only when it
 	// is also a StreamingTransport.
 	OpTask
+	// OpCancel and OpElicit are the paths belonging to one running task: the cancel
+	// addressed to it and the answers to its questions. Nothing Serves them, since a
+	// StreamingTransport subscribes to them per task rather than registering a handler
+	// for the identity, so they exist here only to be named.
+	OpCancel
+	OpElicit
 )
 
 // Transport is the pluggable binding the a2a engine rides on. One implementation
@@ -48,6 +54,21 @@ type Transport interface {
 	// Close releases the transport's own resources (e.g. its service registration).
 	// It does not close the shared conns.Provider, which the caller owns.
 	Close() error
+}
+
+// SubjectNamer is the optional interface a Transport implements when its addresses are
+// names worth showing somebody.
+//
+// It exists for the wire log: an operator reading what a terminal and an agent said to
+// each other wants the address each message traveled on, because that is what they
+// subscribe to when they go looking with their own tools. A binding whose addressing is
+// not nameable does not implement it and the log simply carries no address.
+//
+// request is the correlating request id for the paths that are per task, and is ignored
+// by the paths that are not.
+type SubjectNamer interface {
+	// Subject renders the address a message on the op path for agent travels on.
+	Subject(op RouteHint, agent, request string) string
 }
 
 // ReplySetTransport is a Transport that can answer one request with several

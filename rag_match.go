@@ -160,18 +160,18 @@ func renderMatch(c *columns.Document, res *rag.EnumerateResult) error {
 	switch res.Status {
 	case rag.EnumIndexNotBuilt:
 		if machine {
-			return fmt.Errorf("the knowledge index has not been built yet; run: fisk-ai knowledge index")
+			return fmt.Errorf("the knowledge index has not been built yet; run: fisk knowledge index")
 		}
-		c.Print("the knowledge index has not been built yet; run: fisk-ai knowledge index")
+		c.Print("the knowledge index has not been built yet; run: fisk knowledge index")
 
 		return nil
 
 	case rag.EnumCorpusEmpty:
 		if machine {
-			return fmt.Errorf("the knowledge index has 0 documents; nothing can be matched; run: fisk-ai knowledge index")
+			return fmt.Errorf("the knowledge index has 0 documents; nothing can be matched; run: fisk knowledge index")
 		}
 		c.Print("the knowledge index has 0 documents; nothing can be matched")
-		c.Print("run: fisk-ai knowledge index")
+		c.Print("run: fisk knowledge index")
 
 		return nil
 

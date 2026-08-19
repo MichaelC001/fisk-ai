@@ -63,6 +63,13 @@ type Usage struct {
 	CacheReadTokens   int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreateTokens int64 `json:"cache_create_tokens,omitempty"`
 
+	// ThinkingTokens is the part of OutputTokens the model spent reasoning, and is
+	// included in it rather than additional to it. Zero is an answer rather than an
+	// absence: reasoning is not rendered, so a caller that omitted the figure when it
+	// was zero would leave a person unable to tell a model that did not reason from one
+	// that reasoned where nothing showed it.
+	ThinkingTokens int64 `json:"thinking_tokens,omitempty"`
+
 	// LLMCalls and ToolCalls describe the shape of the run rather than its cost. For
 	// an agent whose tools are commands, the tool count is the closest thing to a
 	// measure of what was actually done, and the pair together is what distinguishes
@@ -72,8 +79,14 @@ type Usage struct {
 	ToolCalls int64 `json:"tool_calls,omitempty"`
 }
 
-// Budget bounds how much an agent may spend serving a request. The receiver's
-// local configuration is the ceiling; a request may only lower a limit.
+// Budget bounds what an agent may use answering a request. The receiver's local
+// configuration is the ceiling; a request may only lower a limit.
+//
+// The two fields have the scopes the receiver's own configuration gives them, so what a
+// request lowers is those bounds rather than bounds of its own. MaxIterations is per
+// turn. MaxTokens is cumulative over the conversation, which means a request continuing
+// one can be refused at once for tokens earlier turns processed, and lowering it below
+// what a conversation has already used ends that conversation.
 type Budget struct {
 	MaxTokens     int64  `json:"max_tokens,omitempty"`
 	MaxIterations int64  `json:"max_iterations,omitempty"`

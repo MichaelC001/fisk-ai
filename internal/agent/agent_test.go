@@ -1938,3 +1938,139 @@ var _ = Describe("toolSearchDegradation", func() {
 		Expect(w.Count).To(Equal(util.ToolSearchThreshold))
 	})
 })
+
+var _ = Describe("the conversation token budget", func() {
+	// Thinking is documented as a subset of the output rather than an addition to it, so
+	// a cap that added it would stop a reasoning model at roughly half its allowance.
+	It("Should count the four throughput fields and not thinking", func() {
+		r := &runner{maxTokens: 100, stats: &util.RunStats{
+			InTokens: 10, OutTokens: 5, CacheReadTokens: 20, CacheCreateTokens: 4, ThinkingTokens: 1000,
+		}}
+
+		Expect(r.tokensSpent()).To(Equal(int64(39)))
+		Expect(r.overBudget()).To(BeFalse())
+	})
+
+	It("Should treat a cap of zero or less as no bound", func() {
+		r := &runner{maxTokens: 0, stats: &util.RunStats{InTokens: 1e9}}
+		Expect(r.overBudget()).To(BeFalse())
+
+		r.maxTokens = -1
+		Expect(r.overBudget()).To(BeFalse())
+	})
+
+	It("Should be over its budget at the cap rather than past it", func() {
+		r := &runner{maxTokens: 40, stats: &util.RunStats{
+			InTokens: 10, OutTokens: 5, CacheReadTokens: 20, CacheCreateTokens: 4,
+		}}
+
+		Expect(r.overBudget()).To(BeFalse())
+
+		r.stats.OutTokens = 6
+		Expect(r.overBudget()).To(BeTrue())
+	})
+
+	// A rotation opens a new journal, which is a new conversation with an allowance of
+	// its own. The stats keep climbing to report the whole sitting, so the base is what
+	// separates the two.
+	It("Should measure the current conversation rather than the sitting", func() {
+		r := &runner{maxTokens: 100, budgetBase: 500, stats: &util.RunStats{
+			InTokens: 500, OutTokens: 20,
+		}}
+
+		Expect(r.tokensSpent()).To(Equal(int64(20)))
+		Expect(r.overBudget()).To(BeFalse())
+	})
+
+	It("Should name both numbers and the key that raises it", func() {
+		r := &runner{maxTokens: 100, stats: &util.RunStats{InTokens: 150}}
+
+		Expect(r.budgetError()).To(MatchError(ContainSubstring("processed 150 of its 100 token budget")))
+		Expect(r.budgetError()).To(MatchError(ContainSubstring("llm.budget.max_tokens")))
+	})
+
+	// The refusal has to happen above the append and the journal write, or the
+	// conversation keeps a user message the model never saw and the next turn merges
+	// with a prompt nobody answered.
+	It("Should refuse a follow-up turn without journaling its prompt", func() {
+		store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		id := ksuid.New().String()
+
+		j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(j.Close()).To(Succeed()) })
+
+		cfg := &config.Config{}
+		cfg.LLM.Budget.MaxIterations = 10
+
+		r := &runner{
+			cfg: cfg, maxTokens: 100, events: nopEvents{}, journal: j, seq: 1,
+			stats:    &util.RunStats{InTokens: 200},
+			followUp: "and what about the second one",
+			messages: []llm.Message{userMsg("go")},
+			tools:    map[string]toolkit.Tool{},
+			provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+				Fail("the model must not be called for a turn that is refused")
+
+				return nil, nil
+			}),
+		}
+
+		reason, err := r.followUpTurn(context.Background())
+		Expect(reason).To(Equal(runstate.ReasonBudget))
+		Expect(err).To(MatchError(ContainSubstring("token budget")))
+
+		// The caller is told the prompt did not land, and the journal agrees.
+		Expect(r.followUpTaken).To(BeFalse())
+		Expect(r.messages).To(HaveLen(1), "the prompt was not appended to the conversation")
+
+		recs, err := j.Records()
+		Expect(err).NotTo(HaveOccurred())
+		for _, rec := range recs {
+			Expect(rec.Protocol).ToNot(Equal(runstate.UserProtocol), "no user record was written")
+		}
+	})
+})
+
+var _ = Describe("HumanPaced", func() {
+	// A conversation whose next turn is a person's to send re-sends its whole history at
+	// their pace, so the provider needs to know that before it chooses how long to keep
+	// the cache. Under model B each turn is a run of its own with no continuation loop,
+	// so NextPrompt being nil says nothing about whether another turn is coming, and
+	// keying the decision on it alone silently picked the short lifetime for every
+	// terminal conversation.
+	It("Should tell the provider a conversation is paced by somebody", func() {
+		r := &runner{interactive: false, humanPaced: true}
+		Expect(r.interactive || r.humanPaced).To(BeTrue())
+
+		r = &runner{interactive: true, humanPaced: false}
+		Expect(r.interactive || r.humanPaced).To(BeTrue(), "a run holding its own loop still counts")
+
+		r = &runner{interactive: false, humanPaced: false}
+		Expect(r.interactive || r.humanPaced).To(BeFalse(), "a one-shot job re-sends nothing")
+	})
+
+	It("Should reach the request the provider is given", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "test-model"
+		cfg.LLM.Budget.CallTimeoutParsed = time.Second
+
+		var seen []bool
+		r := &runner{
+			cfg: cfg, stats: &util.RunStats{}, maxIter: 2, events: nopEvents{},
+			humanPaced: true,
+			messages:   []llm.Message{userMsg("go")},
+			tools:      map[string]toolkit.Tool{},
+			provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
+				seen = append(seen, req.Interactive)
+
+				return mustResponse(`{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}`), nil
+			}),
+		}
+
+		_, err := r.run(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seen).To(HaveExactElements(true))
+	})
+})

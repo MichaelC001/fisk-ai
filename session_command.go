@@ -18,6 +18,7 @@ import (
 	"github.com/choria-io/ui/table"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/a2a/transcript"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/tui"
@@ -50,12 +51,24 @@ func openSessionStore() (runstate.Store, func(), error) {
 		return nil, noop, err
 	}
 
+	return sessionStoreFor(cfg)
+}
+
+// sessionStoreFor opens the run-journal store a configuration names and returns a
+// cleanup that releases any NATS connection it dialed (always non-nil, safe to defer).
+//
+// A file backend keeps its journals locally and needs no connection; a jetstream
+// backend borrows a short-lived one, released by the returned cleanup. The dialed
+// provider is closed here if store construction then fails, so no connection leaks on
+// an error path.
+//
+// It is shared by the commands that read journals and by a run, which hands the same
+// store to the agent it hosts and to the channel in front of it: two stores would have
+// the channel reading a conversation the run beside it is not writing.
+func sessionStoreFor(cfg *config.Config) (runstate.Store, func(), error) {
+	noop := func() {}
 	backend := cfg.SessionBackend()
 
-	// A file backend keeps its journals locally and needs no connection; a jetstream
-	// backend borrows a short-lived one, released by the returned cleanup. The dialed
-	// provider is closed here if store construction then fails, so no connection leaks
-	// on an error path.
 	env := runstate.RuntimeEnv{}
 	cleanup := noop
 	if runstate.NeedsNats(backend) {
@@ -137,9 +150,31 @@ func sessionAnswerAction(_ *fisk.ParseContext) error {
 	}
 
 	fmt.Printf("Answered %s in session %s\n", sessionAnswerUseID, sessionArgID)
-	fmt.Printf("Resume with: fisk-ai run --resume %s\n", sessionArgID)
+	fmt.Printf("Resume with: fisk run --resume %s\n", sessionArgID)
 
 	return nil
+}
+
+// sessionTokens is what this conversation has processed, against the bound it was
+// running under.
+//
+// The total leads because it is what the token budget counts and what decides whether
+// the conversation can take another turn: every tier, with cache reads and cache writes
+// weighed the same as uncached input. The in and out split follows for anybody reading
+// the shape of the spend rather than its size.
+func sessionTokens(rs *runstate.RunState) string {
+	total := rs.Counters.InTokens + rs.Counters.OutTokens + rs.Counters.CacheReadTokens + rs.Counters.CacheCreateTokens
+
+	split := fmt.Sprintf("%d in / %d out", rs.Counters.InTokens, rs.Counters.OutTokens)
+	if rs.Counters.CacheReadTokens > 0 || rs.Counters.CacheCreateTokens > 0 {
+		split = fmt.Sprintf("%s / %d cache read / %d cache write", split, rs.Counters.CacheReadTokens, rs.Counters.CacheCreateTokens)
+	}
+
+	if rs.Fingerprint.MaxTokens > 0 {
+		return fmt.Sprintf("%d of %d budget (%s)", total, rs.Fingerprint.MaxTokens, split)
+	}
+
+	return fmt.Sprintf("%d (%s)", total, split)
 }
 
 func sessionStatus(reason runstate.TerminalReason) string {
@@ -229,7 +264,7 @@ func sessionShowAction(_ *fisk.ParseContext) error {
 	fmt.Println(c.String())
 
 	fmt.Printf("\n--- transcript ---\n\n")
-	dumpTranscript(os.Stdout, rs, noColor, !noTUI, showThinking)
+	printTranscript(os.Stdout, renderBlocks(transcript.Of(rs).Blocks(), showThinking), noColor, !noTUI)
 
 	return nil
 }
@@ -255,7 +290,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	c.Item("Next iter", rs.NextIteration)
 	c.Item("LLM calls", rs.Counters.LlmCalls)
 	c.Item("Tool calls", fmt.Sprintf("%d (remote %d)", rs.Counters.ToolCalls, rs.Counters.RemoteToolCalls))
-	c.Item("Tokens", fmt.Sprintf("%d in / %d out", rs.Counters.InTokens, rs.Counters.OutTokens))
+	c.Item("Tokens", sessionTokens(rs))
 
 	if rs.Pending != nil {
 		c.ItemUnlessZero("Pending", "an in-flight tool batch will resume first")
@@ -284,7 +319,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 				c.Item(d.ToolUseID, deferralSummary(d))
 			}
 			c.Blank()
-			c.Printf("Answer one with: fisk-ai session answer %s <tool-use-id>", rs.RunID)
+			c.Printf("Answer one with: fisk session answer %s <tool-use-id>", rs.RunID)
 		})
 	}
 
@@ -337,7 +372,7 @@ func showTranscriptTUI(rs *runstate.RunState) (bool, error) {
 	}
 
 	meta := tui.Meta{Title: rs.RunID, Model: rs.Fingerprint.Model, Version: util.Version(), Query: rs.Prompt, InTokens: rs.Counters.InTokens, OutTokens: rs.Counters.OutTokens}
-	err := tui.ShowTranscript(meta, transcriptLines(rs, true, showThinking), noColor, true, true)
+	err := tui.ShowTranscript(meta, renderBlocks(transcript.Of(rs).Blocks(), showThinking), noColor, true, true)
 	if errors.Is(err, tui.ErrNoTTY) {
 		return false, nil
 	}

@@ -200,6 +200,21 @@ var _ = Describe("transcript viewer", func() {
 			Expect(v.breakBefore(7)).To(BeTrue())  // thinking after a tool error
 		})
 
+		// A warning interrupts whatever the run was doing. Without a break under it, it
+		// reads as a heading for the tool call that follows.
+		It("Should set a warning off from what follows, keeping a run of them together", func() {
+			v := newViewer(Meta{}, []Line{
+				{Kind: LineToolCall, Text: "call"},
+				{Kind: LineWarning, Text: "first"},
+				{Kind: LineWarning, Text: "second"},
+				{Kind: LineToolCall, Text: "call2"},
+			}, true, false)
+
+			Expect(v.breakBefore(1)).To(BeFalse(), "a warning arrives where it happened")
+			Expect(v.breakBefore(2)).To(BeFalse(), "two warnings are one interruption")
+			Expect(v.breakBefore(3)).To(BeTrue(), "what follows starts clear of them")
+		})
+
 		// The prompt is what an operator scrolling a long chat is looking for: it marks
 		// where a turn began. A follow-up typed in chat is the same line kind as the
 		// original, so it is set off the same way.
@@ -300,10 +315,9 @@ var _ = Describe("transcript viewer", func() {
 			Expect(h).NotTo(ContainSubstring("fisk-ai "))
 		})
 
-		It("Should show the version and the chat marker", func() {
-			h := headerText(Meta{Version: "v1.2.3", Interactive: true})
+		It("Should show the version", func() {
+			h := headerText(Meta{Version: "v1.2.3"})
 			Expect(h).To(ContainSubstring("fisk-ai v1.2.3"))
-			Expect(h).To(ContainSubstring("chat"))
 		})
 
 		It("Should never carry the query in the header, that leads the body instead", func() {
@@ -572,7 +586,7 @@ var _ = Describe("transcript viewer", func() {
 		// overlay gives way rather than the focus.
 		It("Should dismiss an open overlay when the input row takes focus", func() {
 			sim := tcell.NewSimulationScreen("")
-			v := newViewer(Meta{Title: "s", Interactive: true}, []Line{{Kind: LineNarration, Text: "alpha"}}, true, true)
+			v := newViewer(Meta{Title: "s"}, []Line{{Kind: LineNarration, Text: "alpha"}}, true, true)
 			v.enableInput()
 			v.app.SetScreen(sim)
 			v.app.SetRoot(v.pages, true).SetFocus(v.view)

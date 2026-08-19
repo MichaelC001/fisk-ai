@@ -12,7 +12,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 )
 
 // maxToolErrorLine bounds a failed tool's output on the log line that reports it. The
@@ -77,10 +76,10 @@ func (e *eventRecorder) RemoteHostNotes(notes []remotetools.HostImport) {
 	}
 }
 
-func (e *eventRecorder) ResumeTranscript(rs *runstate.RunState, tools map[string]*fisk.FiskCommandTool) {
+func (e *eventRecorder) ResumeTranscript(rs *runstate.RunState) {
 	replayer, ok := e.inner.(agent.TranscriptReplayer)
 	if ok {
-		replayer.ResumeTranscript(rs, tools)
+		replayer.ResumeTranscript(rs)
 	}
 }
 

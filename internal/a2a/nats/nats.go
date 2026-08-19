@@ -208,7 +208,7 @@ func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHin
 	if err != nil {
 		switch {
 		case errors.Is(err, nats.ErrNoResponders):
-			return nil, fmt.Errorf("%w: no subscription interest on %q", a2a.ErrAgentUnavailable, subject)
+			return nil, fmt.Errorf("%w on %q", a2a.ErrNoResponders, subject)
 
 		case errors.Is(err, context.DeadlineExceeded):
 			return nil, fmt.Errorf("%w: no reply on %q within %s", a2a.ErrAgentUnavailable, subject, waited.Round(time.Second))
@@ -345,6 +345,29 @@ func endpointName(op a2a.RouteHint) (string, error) {
 		return "task", nil
 	default:
 		return "", fmt.Errorf("unknown a2a route hint %d", op)
+	}
+}
+
+// Subject implements a2a.SubjectNamer: the address a message travels on, for a log
+// somebody reads when they want to go and watch the same traffic themselves.
+//
+// It names the per-task paths as well as the served ones, which subject() does not,
+// because those are the ones an operator most wants to subscribe to and neither is
+// registered as an endpoint.
+func (t *Transport) Subject(op a2a.RouteHint, agent, request string) string {
+	switch op {
+	case a2a.OpDiscovery:
+		return DiscoverySubject(agent)
+	case a2a.OpTool:
+		return ToolSubject(agent)
+	case a2a.OpTask:
+		return TaskSubject(agent)
+	case a2a.OpCancel:
+		return CancelSubject(agent, request)
+	case a2a.OpElicit:
+		return ElicitSubject(agent, request)
+	default:
+		return ""
 	}
 }
 

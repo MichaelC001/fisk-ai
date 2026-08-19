@@ -211,7 +211,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	})
 
 	c.Blank()
-	c.Printf("These tools can also be served over MCP with: {bold}fisk-ai mcp --config %s{/bold}", configFile)
+	c.Printf("These tools can also be served over MCP with: {bold}fisk mcp --config %s{/bold}", configFile)
 
 	return nil
 }

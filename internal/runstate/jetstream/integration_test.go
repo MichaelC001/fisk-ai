@@ -73,6 +73,13 @@ func claimRec(by string) runstate.Record {
 	}
 }
 
+func terminalRec(reason runstate.TerminalReason) runstate.Record {
+	return runstate.Record{
+		Protocol: runstate.TerminalProtocol,
+		Terminal: &runstate.TerminalRecord{Reason: reason},
+	}
+}
+
 // goodStream is a stream configuration the backend accepts: a single <prefix>.>
 // wildcard, write-once subjects, and no expiry.
 func goodStream(name string, subjects ...string) jetstream.StreamConfig {
@@ -352,6 +359,75 @@ var _ = Describe("Integration: jetstream session", func() {
 				Expect(in.Created).ToNot(BeZero())
 				Expect(in.Updated).ToNot(BeZero())
 			}
+		})
+
+		It("Should report the ending off the last record", func() {
+			id := newID()
+			j, err := store.Create(id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(2, assistantRec(0))).To(Succeed())
+			Expect(j.Append(3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+		})
+
+		// The one thing a listing reads differently from a fold. A fold keeps the last
+		// terminal record it saw until another replaces it, so a conversation whose next
+		// turn is under way still reads as completed; the last record says what is
+		// actually true of it now.
+		It("Should report a conversation with a turn in flight as open", func() {
+			id := newID()
+			j, err := store.Create(id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(2, assistantRec(0))).To(Succeed())
+			Expect(j.Append(3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			// The next turn starts: a resume claims the journal before anything runs.
+			Expect(j.Append(4, claimRec("worker-a"))).To(Succeed())
+			Expect(j.Append(5, assistantRec(1))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Terminal).To(BeEmpty())
+
+			// The fold still carries the earlier ending, so the two differ on purpose
+			// rather than by one of them losing the record.
+			rs, err := store.Load(id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(rs.Terminal.Reason).To(Equal(runstate.ReasonCompleted))
+		})
+
+		// The listing must not grow a dependency on the middle of a journal again: every
+		// column comes from the first record and the last, so a long conversation lists
+		// exactly as a short one does.
+		It("Should list a long conversation from its two ends", func() {
+			id := newID()
+			j, err := store.Create(id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+
+			seq := uint64(2)
+			for i := range 40 {
+				Expect(j.Append(seq, assistantRec(int64(i), "tu_x"))).To(Succeed())
+				seq++
+				Expect(j.Append(seq, toolResultRec("tu_x"))).To(Succeed())
+				seq++
+			}
+			Expect(j.Append(seq, terminalRec(runstate.ReasonSuspended))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].RunID).To(Equal(id))
+			Expect(infos[0].Prompt).To(Equal("hello"))
+			Expect(infos[0].Model).To(Equal("claude-opus-4-8"))
+			Expect(infos[0].Terminal).To(Equal(runstate.ReasonSuspended))
+			Expect(infos[0].Updated).To(BeTemporally(">=", infos[0].Created))
 		})
 
 		It("Should delete a run idempotently", func() {
