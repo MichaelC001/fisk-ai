@@ -100,7 +100,20 @@ type ServerOptions struct {
 	// and the asymmetry is forced rather than chosen: a handler's context comes from
 	// the transport, which supplies a background context carrying nothing. Removing it
 	// would mean widening Handler so a constructor-supplied context reaches a call.
+	//
+	// It is also what the agent card reports about export, read off the resolved
+	// Provider rather than off a configuration so that a veto or an endpoint that was
+	// refused does not leave the card claiming an export that will not happen.
 	Telemetry *telemetry.Provider
+
+	// DiscoveryOnly registers the discovery route and not the tool route, for an
+	// identity that answers what it is without serving tools to anybody.
+	//
+	// Discovery is one route on one micro service and an identity has one card, so
+	// whoever answers discovery answers it for every endpoint of that identity. An
+	// agent that only takes prompts still has to be discoverable, and it is this that
+	// lets one be built for it without also putting an empty tool set on the network.
+	DiscoveryOnly bool
 }
 
 func (o *ServerOptions) applyDefaults() {
@@ -172,11 +185,15 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 	}
 
 	exposed := s.selectExposed(tools)
-	s.card = buildCard(opts.Identity, opts.Version, exposed)
+	s.card = buildCard(opts.Identity, opts.Version, exposed, opts.Telemetry)
 
 	err = transport.Serve(OpDiscovery, s.handleDiscovery)
 	if err != nil {
 		return nil, fmt.Errorf("registering discovery handler: %w", err)
+	}
+
+	if opts.DiscoveryOnly {
+		return s, nil
 	}
 
 	err = transport.Serve(OpTool, s.handleTool)
@@ -535,11 +552,16 @@ func (s *Server) respond(reply Replier, msg any) {
 }
 
 // buildCard assembles an agent card from the exposed tools.
-func buildCard(identity, version string, tools []toolkit.Tool) AgentCard {
+func buildCard(identity, version string, tools []toolkit.Tool, tel *telemetry.Provider) AgentCard {
 	card := AgentCard{
 		Name:      identity,
 		Version:   versionOrDev(version),
 		Protocols: []string{ProtocolNamespace},
+		// Read off the resolved provider rather than a configuration, so a veto or an
+		// endpoint that was refused does not leave the card promising an export nobody
+		// will make. Both are nil-safe.
+		Telemetry:        tel.Enabled(),
+		TelemetryContent: tel.CaptureEnabled(),
 	}
 
 	for _, t := range tools {

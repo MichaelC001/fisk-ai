@@ -11,7 +11,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 )
 
 // slogMaxOutputBytes caps how much of a tool's result SlogEvents records on a
@@ -113,7 +112,7 @@ func (s *SlogEvents) RemoteHostNotes(imports []remotetools.HostImport) {
 // ResumeTranscript on a structured sink has no transcript to replay for a human, so
 // it records that a resume replayed a prior conversation and how long that prefix
 // was, keeping the lifecycle event visible in the log without rendering the turns.
-func (s *SlogEvents) ResumeTranscript(rs *runstate.RunState, _ map[string]*fisk.FiskCommandTool) {
+func (s *SlogEvents) ResumeTranscript(rs *runstate.RunState) {
 	messages := 0
 	if rs != nil {
 		messages = len(rs.Messages)

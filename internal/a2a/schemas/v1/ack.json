@@ -20,6 +20,11 @@
     },
     "conversation_token": {
       "$ref": "common.json#/$defs/conversation_token"
+    },
+    "max_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Tokens this conversation may use in total, counted the same way the usage fields count them, so a client can show how much of the allowance is left. Omitted or zero when the agent sets no limit. Once a conversation reaches this value it is finished and the next prompt is refused."
     }
   },
   "required": [

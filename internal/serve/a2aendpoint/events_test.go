@@ -6,6 +6,7 @@ package a2aendpoint
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -14,6 +15,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
 // collectingSink records what a reply stream was asked to send, so a spec reads the
@@ -136,31 +138,108 @@ var _ = Describe("The events adapter", func() {
 	// event dropped for size would leave no gap for a caller to notice. Trimming keeps
 	// the event and says what happened to the rest.
 	It("Should trim a tool result that would not fit", func() {
-		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: strings.Repeat("x", a2a.MaxMessageSize)})
+		oversized := strings.Repeat("x", a2a.MaxMessageSize)
+		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: oversized})
 
 		Expect(sink.sent).To(HaveLen(1))
 		output := blocks()[0].Content().(a2a.ToolResultBlock).Output
 		Expect(len(output)).To(BeNumerically("<", a2a.MaxMessageSize))
-		Expect(output).To(HaveSuffix(trimMarker))
+		// The bound belongs to the wire rather than to this sink, so what is asserted
+		// here is that the sink applies it, not what it cuts to.
+		Expect(output).To(Equal(a2a.TrimBlockText(oversized)))
 	})
 
 	It("Should cut on a rune boundary", func() {
-		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: strings.Repeat("é", maxWireText)})
+		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: strings.Repeat("é", a2a.MaxBlockText)})
 
 		output := blocks()[0].Content().(a2a.ToolResultBlock).Output
-		Expect(strings.TrimSuffix(output, trimMarker)).To(BeAssignableToTypeOf(""))
 		Expect(strings.ContainsRune(output, '�')).To(BeFalse(), "half a rune reaches a caller as a replacement character")
 	})
 
-	// No block type carries an advisory and no peer may see a stack, so both stop at
-	// this worker's log.
-	It("Should send nothing for a warning or a panic", func() {
-		events.Warn(agent.Warning{Kind: agent.WarnConfirmNoTerminal, Count: 2})
+	// A warning says something went wrong short of the run failing, so it travels as
+	// what it is rather than as a sentence about it: the kind under its stable name,
+	// and the fields that kind fills.
+	It("Should send a warning as its kind and fields", func() {
+		events.Warn(agent.Warning{Kind: agent.WarnToolTimeout, Name: "stream_rm", Err: errors.New("after 30s")})
+
+		Expect(sink.sent).To(HaveLen(1))
+		warning := blocks()[0].Content().(a2a.WarningBlock)
+		Expect(warning.Kind).To(Equal("tool_timeout"))
+		Expect(warning.Name).To(Equal("stream_rm"))
+		Expect(warning.Error).To(Equal("after 30s"))
+	})
+
+	Describe("Replaying a stored conversation", func() {
+		stored := func() *runstate.RunState {
+			return &runstate.RunState{Messages: []llm.Message{
+				{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "how many streams"}}}},
+				{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "three"}}}},
+				{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "and the first"}}}},
+				{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "ORDERS"}}}},
+			}}
+		}
+
+		// Bracketed, so a client renders what already happened as history rather than as
+		// a turn arriving now.
+		It("Should send the conversation between two status blocks", func() {
+			events.replay = 10
+			events.ResumeTranscript(stored())
+
+			sent := blocks()
+			Expect(sent).To(HaveLen(6))
+
+			opening := sent[0].Content().(a2a.StatusBlock)
+			Expect(opening.Phase).To(Equal(a2a.PhaseReplayStart))
+
+			Expect(sent[1].Content().(a2a.PromptBlock).Text).To(Equal("how many streams"))
+			Expect(sent[2].Content().(a2a.TextBlock).Text).To(Equal("three"))
+
+			closing := sent[5].Content().(a2a.StatusBlock)
+			Expect(closing.Phase).To(Equal(a2a.PhaseReplayEnd))
+			Expect(closing.Count).To(Equal(4))
+			Expect(closing.Truncated).To(BeFalse())
+		})
+
+		// A caller sees where its history begins rather than being left to read a
+		// conversation that seems to have started mid-sentence.
+		It("Should say when older blocks were left behind", func() {
+			events.replay = 2
+			events.ResumeTranscript(stored())
+
+			sent := blocks()
+			closing := sent[len(sent)-1].Content().(a2a.StatusBlock)
+			Expect(closing.Count).To(Equal(2))
+			Expect(closing.Truncated).To(BeTrue())
+		})
+
+		// Zero is what a peer agent gets and what every turn after the first gets: the
+		// answer, not a transcript.
+		It("Should send nothing for a caller that asked for none", func() {
+			events.ResumeTranscript(stored())
+
+			Expect(sink.sent).To(BeEmpty())
+		})
+	})
+
+	// A stack names paths, module layout and frame arguments, and the rest describe a
+	// run to something rendering it locally, so all four stop at this worker.
+	It("Should send nothing for a panic or the local narration", func() {
 		events.Panicked("boom", []byte("goroutine 1 [running]: /home/rip/agent.go:41"))
 		events.Starting(agent.RunInfo{Tools: 3})
 		events.LLMRequest("a summary")
 		events.SessionRotated("session1")
 
 		Expect(sink.sent).To(BeEmpty())
+	})
+
+	// The answer travels twice, as the last text block and as the result, and only the
+	// run knows which message ended it.
+	It("Should mark the text of the terminal turn", func() {
+		events.Message(llm.Response{Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "still working"}}}}, false)
+		events.Message(llm.Response{Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "there are three"}}}}, true)
+
+		sent := blocks()
+		Expect(sent[0].Content().(a2a.TextBlock).Final).To(BeFalse())
+		Expect(sent[len(sent)-1].Content().(a2a.TextBlock).Final).To(BeTrue())
 	})
 })

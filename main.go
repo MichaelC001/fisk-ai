@@ -35,15 +35,12 @@ var (
 	mcpAddress  string
 	verbose     bool
 	noTUI       bool
-	chatMode    bool
 	traceFile   string
 	noTelemetry bool
 
 	showToolOutput bool
 	showThinking   bool
 
-	checkpoint        bool
-	runName           string
 	resumeID          string
 	forceResume       bool
 	stateDirFlag      string

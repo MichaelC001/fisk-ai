@@ -24,34 +24,39 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 )
 
-// The codes a terminal error carries, so a caller decides on a value rather than on
-// prose. A refusal names why it was refused; an ending names how the run ended.
+// The codes a terminal error carries, under local names so the call sites read as they
+// did when the vocabulary lived here. It belongs to the protocol rather than to this
+// endpoint, since a client decides what to do about an ending it did not produce.
 const (
-	codeRejected   = "rejected"
-	codeCapacity   = "capacity"
-	codeDuplicate  = "duplicate_request"
-	codeDraining   = "draining"
-	codeFailed     = "failed"
-	codeCrashed    = "crashed"
-	codeNotStarted = "not_started"
-	codeDeferred   = "deferred"
-	codeSuspended  = "suspended"
-	codeCanceled   = "canceled"
+	codeRejected   = a2a.CodeRejected
+	codeCapacity   = a2a.CodeCapacity
+	codeDuplicate  = a2a.CodeDuplicate
+	codeDraining   = a2a.CodeDraining
+	codeFailed     = a2a.CodeFailed
+	codeCrashed    = a2a.CodeCrashed
+	codeNotStarted = a2a.CodeNotStarted
+	codeDeferred   = a2a.CodeDeferred
+	codeSuspended  = a2a.CodeSuspended
+	codeCanceled   = a2a.CodeCanceled
 
 	// The three endings a follow-up turn has that a first prompt does not, each with a
 	// different answer for the caller: send the prompt as a first turn instead, send it
 	// again once the conversation is free, and send it again once whatever the
 	// conversation is waiting on has been answered.
-	codeUnknownConversation = "unknown_conversation"
-	codeConversationBusy    = "conversation_busy"
-	codeTurnNotTaken        = "turn_not_taken"
+	codeUnknownConversation = a2a.CodeUnknownConversation
+	codeConversationBusy    = a2a.CodeConversationBusy
+	codeTurnNotTaken        = a2a.CodeTurnNotTaken
+
+	// The ending a conversation has once, permanently: its token allowance is spent, so
+	// no caller gets a further turn out of it.
+	codeBudgetExhausted = a2a.CodeBudgetExhausted
 
 	// The endings an answer has. Each is permanent: the call it named is not one this
 	// conversation can take an answer for, so sending it again reaches the same
 	// answer.
-	codeUnknownCall     = "unknown_call"
-	codeAlreadyAnswered = "already_answered"
-	codeAnswerTooLarge  = "answer_too_large"
+	codeUnknownCall     = a2a.CodeUnknownCall
+	codeAlreadyAnswered = a2a.CodeAlreadyAnswered
+	codeAnswerTooLarge  = a2a.CodeAnswerTooLarge
 )
 
 // task is one accepted request: the reply set it answers on, the cancel addressed to
@@ -86,11 +91,36 @@ type task struct {
 	answers  a2a.TaskWatch
 	prompter *elicitPrompter
 
+	// stop is closed when the caller asks this run to stop. Closing it rather than
+	// canceling the run's context is what makes a cancel a request for a boundary: the
+	// loop polls it at the next one and parks somewhere the conversation can be
+	// continued, instead of dying wherever it stood.
+	//
+	// It is a channel as well as a flag because a run blocked on a question is not at
+	// a boundary and would otherwise sit there until the question's window ran out.
+	stop     chan struct{}
+	stopOnce sync.Once
+
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	canceled bool
 	ended    bool
 }
+
+// stopped reports whether a caller has asked this run to stop.
+func (t *task) stopped() bool {
+	select {
+	case <-t.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// suspendRequested is what the run polls at each boundary: this caller's cancel, or
+// the drain that takes the whole channel out of service. Either way the run parks
+// where it can be resumed rather than ending mid-turn.
+func (t *task) suspendRequested() bool { return t.stopped() || t.ch.draining() }
 
 // handle admits one inbound request and returns, leaving the run to the server.
 //
@@ -129,17 +159,30 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 	// A follow-up is a request that adds a turn to a conversation it names. One that
 	// answers a question names a conversation too and adds no turn, so it is not one:
 	// calling it one would report every answered question as a turn that was not
-	// taken.
-	followUp := req.ConversationToken != "" && req.Answer == nil
+	// taken. Nor is one that carries neither, which continues a run that stopped part
+	// way and adds nothing to say.
+	followUp := req.ConversationToken != "" && req.Answer == nil && req.Prompt != ""
 
 	t := &task{
 		ch:       c,
 		req:      req,
 		stream:   stream,
-		session:  sessionFor(c.identity, token),
+		session:  SessionFor(c.identity, token),
 		token:    token,
 		followUp: followUp,
+		stop:     make(chan struct{}),
 		log:      log,
+	}
+
+	// A caller that names a conversation, asks for some of it back, and carries neither
+	// a prompt nor an answer is asking to be told what the conversation holds. It takes
+	// no turn and calls no model, so it is answered from the store here rather than
+	// admitted against the worker count. It is what a client opens a resumed
+	// conversation with, before there is anything to send.
+	if t.reads() {
+		c.serveRead(t)
+
+		return
 	}
 
 	code, reason := c.admit(t)
@@ -181,6 +224,7 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 	// on rather than assuming its token was understood.
 	accept := a2a.NewAck(true)
 	accept.ConversationToken = t.token
+	accept.MaxTokens = t.effectiveMaxTokens()
 
 	err = stream.Ack(accept)
 	if err != nil {
@@ -206,6 +250,72 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 	})
 }
 
+// reads reports whether this request asks to be told what a conversation holds rather
+// than to do anything to it.
+//
+// The replay count is what separates a read from a plain resume, which carries a
+// conversation and nothing else and means continue the run that stopped part way. A
+// caller that wants both asks for the conversation first and then continues it, since
+// the two are different operations and one message cannot be both.
+func (t *task) reads() bool {
+	return t.req.ConversationToken != "" && t.req.Replay > 0 && t.req.Prompt == "" && t.req.Answer == nil
+}
+
+// serveRead answers a read: the conversation as blocks, and a result that reports what
+// it has consumed.
+//
+// It runs on the serving goroutine rather than through the worker, because there is no
+// run to do. Nothing is admitted, so a read is answered while a turn of the same
+// conversation is in flight, which is what a person opening a second terminal on a
+// conversation expects and what a client needs when its own turn is already running.
+func (c *Channel) serveRead(t *task) {
+	if c.sessions == nil {
+		t.log.Warn("Refusing to read a conversation back", "reason", "this worker holds no session store")
+		t.refuse(codeRejected, "this worker cannot read a stored conversation back")
+
+		return
+	}
+
+	accept := a2a.NewAck(true)
+	accept.ConversationToken = t.token
+	accept.MaxTokens = t.effectiveMaxTokens()
+
+	err := t.stream.Ack(accept)
+	if err != nil {
+		t.log.Warn("Accepting a read failed", "error", err)
+		t.end()
+
+		return
+	}
+
+	rs, err := c.sessions.Load(t.session)
+	if err != nil {
+		if errors.Is(err, runstate.ErrNotFound) || errors.Is(err, runstate.ErrInvalidID) {
+			// The same ending a follow-up gets for the same cause, and for the same
+			// reason: the token named no conversation this worker holds.
+			t.terminate(serve.Outcome{}, codeUnknownConversation, "no conversation here is named by that token")
+
+			return
+		}
+
+		t.terminate(serve.Outcome{}, codeFailed, "reading the stored conversation failed")
+
+		return
+	}
+
+	// The same sink a run replays through, so a conversation read back and a
+	// conversation resumed arrive as the same blocks bracketed by the same markers.
+	sink := &eventSink{stream: t.stream, log: t.log, replay: t.req.Replay}
+	sink.ResumeTranscript(rs)
+
+	t.log.Info("Read a stored conversation back", "session", t.session, "asked", t.req.Replay)
+
+	res := a2a.NewResult(a2a.StopEndTurn)
+	res.Usage = a2a.UsageFromCounters(rs.Counters)
+
+	t.finish(func() error { return t.stream.Result(res) })
+}
+
 // intake decides whether a body can be run at all. Its error reaches the caller, so it
 // names what is wrong with the request and nothing about this worker.
 func (c *Channel) intake(body []byte) (*a2a.Request, error) {
@@ -229,9 +339,13 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 	// separate operations on the conversation: one adds a turn and pays for it, the
 	// other finishes a turn that is already there. Carrying both would leave the
 	// worker to decide which the caller meant.
+	//
+	// Carrying neither is the third operation and needs a conversation to name: continue
+	// a run that stopped part way, which is what a caller does after a suspend. Without a
+	// token it asks for nothing at all.
 	switch {
-	case req.Prompt == "" && req.Answer == nil:
-		return nil, fmt.Errorf("the request carries neither a prompt nor an answer")
+	case req.Prompt == "" && req.Answer == nil && req.ConversationToken == "":
+		return nil, fmt.Errorf("the request carries neither a prompt, an answer nor a conversation to continue")
 	case req.Prompt != "" && req.Answer != nil:
 		return nil, fmt.Errorf("the request carries both a prompt and an answer; send one or the other")
 	}
@@ -375,6 +489,10 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	// The token rides along on the turn that creates the journal, and only there, so a
 	// caller that lost it can be handed it back and an operator can say which stored
 	// conversation is which. The run records it; nothing else reads it.
+	// Force belongs to every shape that resumes and to none that creates: a caller
+	// asking to continue across a configuration the conversation no longer matches is
+	// answering for its own conversation, and the run drops the approvals it cannot
+	// vouch for.
 	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true, ConversationToken: t.token}
 
 	switch {
@@ -383,10 +501,16 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 		// deferred takes the answer as its result, since it is never dispatched again;
 		// an approval needs nothing here, the resume dispatching the call it guards and
 		// the gate asking again, which t.prompter answers from the same answer.
-		checkpoint = agent.Checkpoint{ResumeID: t.session, Answer: t.answerFor()}
+		checkpoint = agent.Checkpoint{ResumeID: t.session, Answer: t.answerFor(), Force: t.req.Force}
 
 	case t.followUp:
-		checkpoint = agent.Checkpoint{ResumeID: t.session, FollowUp: true}
+		checkpoint = agent.Checkpoint{ResumeID: t.session, FollowUp: true, Force: t.req.Force}
+
+	case t.req.ConversationToken != "":
+		// Neither a turn nor an answer: continue a run that stopped part way, which is
+		// what a caller sends after a suspend and what the terminal's own resume has
+		// always done.
+		checkpoint = agent.Checkpoint{ResumeID: t.session, Force: t.req.Force}
 	}
 
 	return &serve.Work{
@@ -404,8 +528,14 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 		Events:          t.events(),
 		Prompter:        t.promptsThrough(),
 		PromptsMayBlock: true,
-		RunContext:      t.runContext,
-		Done:            t.done,
+		// The next turn is whoever holds the conversation token's to send, so the gap
+		// before this history is used again is their pace rather than a loop's.
+		HumanPaced: true,
+		// A cancel from this caller and a drain of the whole channel both ask the run
+		// for a boundary, and the loop polls this at each one.
+		SuspendRequested: t.suspendRequested,
+		RunContext:       t.runContext,
+		Done:             t.done,
 	}
 }
 
@@ -511,37 +641,46 @@ func (t *task) events() agent.Events {
 		return nil
 	}
 
-	return &eventSink{stream: t.stream, log: t.log}
+	// Replay is asked for per request rather than declared once, so a caller opening a
+	// conversation gets its history and every turn after that gets none. It has no
+	// meaning on a first turn, which has no history to send.
+	replay := 0
+	if t.req.ConversationToken != "" {
+		replay = t.req.Replay
+	}
+
+	return &eventSink{stream: t.stream, log: t.log, replay: replay}
 }
 
 // runContext derives the context the run executes under: the caller's trace joined so
 // this run's spans sit under the span that asked for the work, and a cancel this task
-// keeps so a peer can stop it.
+// keeps so the run is released when it ends.
 //
-// A cancel that arrived before the run started is honored here. Between the ack and
-// this call there is no context to cancel, so the run is entered on a canceled one and
-// ends in setup rather than being started and stopped.
+// A caller's cancel does not reach here. It asks for a boundary rather than a stop, so
+// it closes t.stop and the loop parks at its next one, which for a cancel that arrived
+// before the first model call is before that call.
 func (t *task) runContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(telemetry.ContextWithRemoteTrace(parent, telemetry.TraceContext{TraceParent: t.req.TraceParent}))
 
 	t.mu.Lock()
 	t.cancel = cancel
-	canceled := t.canceled
 	t.mu.Unlock()
-
-	if canceled {
-		cancel()
-	}
 
 	return ctx, cancel
 }
 
-// handleCancel stops the run this task is holding and answers the cancel.
+// handleCancel asks the run this task is holding to stop at its next boundary, and
+// answers the cancel.
+//
+// It does not cancel the run's context. A caller asking to stop is asking for a
+// conversation it can continue rather than a turn that ended half done, so the run
+// finishes the step in hand, parks where a resume can pick it up, and is answered
+// suspended. Stopping a run where it stands stays with the operator of this worker.
 //
 // The ack is a reply to a plain subscription rather than a message of the reply set, so
 // it is stamped as a single reply and never touches the ReplyStream, which belongs to
-// the run. Canceling a task that has already ended is a no-op on a spent cancel func,
-// which is what the caller is told: the cancel was received.
+// the run. Canceling a task that has already ended changes nothing, which is what the
+// caller is told: the cancel was received.
 func (t *task) handleCancel(_ context.Context, _ a2a.Caller, body []byte, reply a2a.Replier) {
 	msg, err := t.ch.inboundCancel(body)
 	if err != nil {
@@ -553,14 +692,14 @@ func (t *task) handleCancel(_ context.Context, _ a2a.Caller, body []byte, reply 
 
 	t.mu.Lock()
 	t.canceled = true
-	cancel := t.cancel
 	t.mu.Unlock()
 
-	if cancel != nil {
-		cancel()
-	}
+	// A question in flight is not a boundary, so the run would sit on it until the
+	// window ran out. Closing this both asks for the boundary and gives up the
+	// question, which defers or leaves its call unanswered exactly as silence does.
+	t.stopOnce.Do(func() { close(t.stop) })
 
-	t.log.Info("Canceling a run", "reason", msg.Reason)
+	t.log.Info("A caller asked a run to stop", "reason", msg.Reason)
 
 	ack := a2a.NewAck(true)
 	a2a.StampReply(&ack.Header, &msg.Header, t.ch.identity)
@@ -612,16 +751,16 @@ func (t *task) done(_ context.Context, out serve.Outcome) error {
 
 // disposition decides which ending the outcome earns and what the caller is told.
 //
-// The order settles the cases that overlap. A canceled run reports a context error and
-// no terminal reason, so it is recognized before the outcome's own vocabulary; a
-// deferred call and a drain both suspend, and the deferred list separates them. A
-// follow-up that was not taken is answered before the deferral that stopped it, since
-// what the caller does about it is send its own prompt again rather than answer the call.
+// The order settles the cases that overlap. A deferred call and a drain both suspend,
+// and the deferred list separates them. A follow-up that was not taken is answered
+// before the deferral that stopped it, since what the caller does about it is send its
+// own prompt again rather than answer the call.
+//
+// A caller's cancel is not one of these. It asks for a boundary, so the run it stopped
+// ends suspended and is answered as such, with a session to continue from. What still
+// reports canceled is the worker stopping a run under its caller, which reaches here as
+// a context error and no terminal reason.
 func (t *task) disposition(out serve.Outcome) (string, string) {
-	t.mu.Lock()
-	canceled := t.canceled
-	t.mu.Unlock()
-
 	switch {
 	case out.Rejected:
 		return codeRejected, "the work was refused"
@@ -636,8 +775,10 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 	case out.Abandoned:
 		return codeNotStarted, "the work was taken but never started"
 
-	case canceled:
-		return codeCanceled, "the run was canceled"
+	case out.Reason == "" && errors.Is(out.Err, context.Canceled):
+		// Not this caller's doing: an operator stopped this worker rather than draining
+		// it, so the run ended where it stood and left whatever the journal holds.
+		return codeCanceled, "the worker stopped the run"
 
 	case errors.Is(out.Err, runstate.ErrNotDeferred):
 		// The call is not one this conversation is waiting on: it was never deferred,
@@ -655,6 +796,16 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 		// so this is a token that was never minted, or one whose conversation the store no
 		// longer holds.
 		return codeUnknownConversation, "this conversation is not known here; send the prompt without a conversation token to start one"
+
+	case out.Reason == runstate.ReasonBudget:
+		// Above the follow-up case below, which would otherwise claim every budget
+		// refusal was a conversation waiting on a deferred tool result: a refused turn
+		// leaves FollowUpTaken false for both reasons and only one of them is worth
+		// retrying. This ending is permanent for the conversation, so it says so rather
+		// than inviting the caller to send the prompt again.
+		t.log.Info("A conversation reached its token budget", "session", t.session)
+
+		return codeBudgetExhausted, out.Err.Error() + "; it will take no further turn, so continue in a new conversation or raise the budget where the agent runs"
 
 	case t.followUp && !out.FollowUpTaken:
 		// The conversation was waiting on a deferred tool result, so it reached no
@@ -705,18 +856,42 @@ func (t *task) terminate(out serve.Outcome, code, reason string) {
 	t.terminateWith(nil, out, code, reason)
 }
 
+// claimEnding reports whether this call is the one that ends the task. A second ending
+// publishes nothing, since it would write into a set the caller has stopped reading.
+func (t *task) claimEnding() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.ended {
+		return false
+	}
+	t.ended = true
+
+	return true
+}
+
+// finish ends a task that answers for itself, releasing what it holds afterwards. It is
+// terminateWith without an outcome, for the read that has no run behind it to describe.
+func (t *task) finish(send func() error) {
+	if !t.claimEnding() {
+		return
+	}
+
+	defer t.end()
+
+	err := send()
+	if err != nil {
+		t.log.Warn("Ending a read failed", "error", err)
+	}
+}
+
 // terminateWith sends an optional ack, then the terminal message, then gives back the
 // slot and the cancel subscription. It runs once per task: a second call after the
 // stream has ended would publish into a set the caller stopped reading.
 func (t *task) terminateWith(ack func() error, out serve.Outcome, code, reason string) {
-	t.mu.Lock()
-	if t.ended {
-		t.mu.Unlock()
-
+	if !t.claimEnding() {
 		return
 	}
-	t.ended = true
-	t.mu.Unlock()
 
 	defer t.end()
 
@@ -746,6 +921,8 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 		res := a2a.NewResult(a2a.StopReasonFor(out.Reason))
 		res.Text = trimForWire(out.Text)
 		res.Usage = a2a.UsageFrom(out.Stats)
+		res.TraceID = traceOf(out)
+		res.ContentExported = contentExported(out)
 
 		return t.stream.Result(res)
 	}
@@ -755,8 +932,32 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 	msg := a2a.NewError(trimForWire(reason))
 	msg.Code = code
 	msg.StopReason = terminalStopReason(out, code)
+	// What the run spent before it ended. A suspended one did the work of a turn and
+	// is answered here rather than with a result, so without this a caller cannot tell
+	// what it owes for the turn it is about to continue.
+	msg.Usage = a2a.UsageFrom(out.Stats)
+	// An ending that was not an answer is where a caller most wants somewhere to go
+	// and look, and the trace is the only thing this message can point at.
+	msg.TraceID = traceOf(out)
+	msg.ContentExported = contentExported(out)
 
 	return t.stream.Error(msg)
+}
+
+// contentExported reports whether this turn's conversation itself left the worker. The
+// card says what the worker is configured to do; this says what the turn did.
+func contentExported(out serve.Outcome) bool {
+	return out.Stats != nil && out.Stats.ContentExported
+}
+
+// traceOf is the trace the run recorded, or nothing when the worker exports no
+// telemetry or the run never got far enough to open a span.
+func traceOf(out serve.Outcome) string {
+	if out.Stats == nil {
+		return ""
+	}
+
+	return out.Stats.TraceID
 }
 
 // end releases the subscriptions this task owns and the slot. It runs on every ending,
@@ -801,6 +1002,27 @@ func terminalStopReason(out serve.Outcome, code string) a2a.StopReason {
 	}
 }
 
+// effectiveMaxTokens is the cumulative token bound this turn will actually be held to,
+// which is the lower of the configured ceiling and whatever the request asked for.
+//
+// It is computed here rather than read back from the server because the ack goes out
+// before the run starts, and it reports the effective value rather than the configured
+// one so a caller that lowered its own budget is told what it will be held to instead of
+// a larger number it will never reach.
+func (t *task) effectiveMaxTokens() int64 {
+	local := t.ch.maxTokens
+
+	asked := budgetOf(t.req).MaxTokens
+	if asked <= 0 {
+		return local
+	}
+	if local <= 0 || asked < local {
+		return asked
+	}
+
+	return local
+}
+
 // budgetOf carries the limits a request may lower. The server clamps them against the
 // local configuration, which stays the ceiling. A request's call_timeout is dropped:
 // Work has nowhere to put it.
@@ -837,9 +1059,9 @@ func callerName(caller a2a.Caller, req *a2a.Request) string {
 	return c.Name
 }
 
-// sessionFor is the journal a conversation token runs in: the hash of the token under
-// this identity, prefixed so an operator reading a session list sees which surface a
-// journal came from.
+// SessionFor is the journal a conversation token runs in: the hash of the token under
+// the serving identity, prefixed so an operator reading a session list sees which
+// surface a journal came from.
 //
 // The token is hashed rather than used as the key so the only journals a caller can
 // reach are the ones this channel minted a token for. A session id is not a secret: it
@@ -847,7 +1069,12 @@ func callerName(caller a2a.Caller, req *a2a.Request) string {
 // takes a submitter-chosen one as the journal to resume. Handing the store a caller's
 // bytes directly would put every one of those journals within reach of anyone who
 // learned an id.
-func sessionFor(identity, token string) string {
+//
+// It is exported for a caller that also holds the store, which is a terminal talking
+// to a worker it started itself: it names the journal its own token reaches, so it can
+// print an id an operator can look up and read the conversation back without asking
+// anyone. It says nothing about a journal existing.
+func SessionFor(identity, token string) string {
 	sum := sha256.Sum256([]byte(identity + "\x00" + token))
 
 	return "t-" + hex.EncodeToString(sum[:])

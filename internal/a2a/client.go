@@ -26,6 +26,15 @@ type Client struct {
 	sender    string
 	validator *Validator
 	idle      time.Duration
+
+	// wire records what crosses, for a caller that asked to see it. Nil records
+	// nothing, which is every caller that did not.
+	wire *wireLog
+
+	// hooks are the client-side callbacks a caller asked to be invoked at the points
+	// ClientHooks documents. The zero value fires nothing, which is every caller that
+	// set none.
+	hooks ClientHooks
 }
 
 // ClientOption adjusts a Client at construction.
@@ -182,10 +191,14 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 		return nil, err
 	}
 
+	c.wire.send(op, agent, "", data)
+
 	reply, err := c.transport.RoundTrip(ctx, agent, op, data)
 	if err != nil {
 		return nil, err
 	}
+
+	c.wire.recv(op, agent, "", reply)
 
 	if len(reply) > MaxMessageSize {
 		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrToolImport, MaxMessageSize)

@@ -159,6 +159,22 @@ type Options struct {
 	// owns its lifecycle and must shut it down after Serve returns, on a context not
 	// derived from the one Serve was given.
 	Telemetry *telemetry.Provider
+
+	// TraceFile, HTTPDebugOut and Verbose are the debugging surfaces a run has when
+	// somebody is watching it, passed through to every run this server hosts.
+	//
+	// They are here because a process that hosts its own agent is still the process
+	// whose operator asked for them: a terminal that runs its agent behind a channel
+	// would otherwise lose the flags it had when it ran one directly. A worker serving
+	// other people leaves them unset, and should: they write a file per process rather
+	// than per run, and the second run to start would be writing over the first.
+	//
+	// TraceFile names a file every request and response is appended to. HTTPDebugOut
+	// receives the provider's raw bodies, and the caller owns closing it. Verbose asks
+	// the run for its own narration.
+	TraceFile    string
+	HTTPDebugOut io.Writer
+	Verbose      bool
 }
 
 func (o *Options) applyDefaults() {
@@ -635,7 +651,7 @@ func (s *Server) runOptions(work *Work) agent.Options {
 		Checkpoint:       work.Checkpoint,
 		ClaimedBy:        work.ClaimedBy,
 		SuspendRequested: work.SuspendRequested,
-		NextPrompt:       work.Continue,
+		HumanPaced:       work.HumanPaced,
 		Provider:         s.opts.Provider,
 		ToolWorkDir:      s.opts.WorkDir,
 		StoreDir:         s.opts.StoreDir,
@@ -645,6 +661,9 @@ func (s *Server) runOptions(work *Work) agent.Options {
 		SessionStore:     s.opts.SessionStore,
 		A2ATransport:     s.opts.A2ATransport,
 		Telemetry:        s.opts.Telemetry,
+		TraceFile:        s.opts.TraceFile,
+		HTTPDebugOut:     s.opts.HTTPDebugOut,
+		Verbose:          s.opts.Verbose,
 	}
 
 	if work.Context != "" {

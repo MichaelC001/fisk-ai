@@ -162,16 +162,19 @@ func splashInfoLines(meta Meta) []string {
 	if meta.Dir != "" {
 		lines = append(lines, splashInfoLine("dir", escapeSplash(elideLeft(meta.Dir, splashValueMax))))
 	}
-	// Shown only when export is on. A line reporting telemetry as off would be noise on
-	// every run of the many agents that never configure it.
-	if meta.Telemetry {
-		value := "OTEL Enabled"
-		// Content capture is a different thing from export being on, and it is the one
-		// an operator would want to notice from across the room.
-		if meta.TelemetryContent {
-			value += " + content"
-		}
-		lines = append(lines, splashInfoLine("telemetry", value))
+	// Shown when there is something to say. Telemetry off with nothing unknown about it
+	// would be noise on every run of the many agents that never configure it, but an
+	// agent that did not answer is a different thing from one that answered no, and the
+	// distinction is the whole reason a person reads this line.
+	switch {
+	case meta.TelemetryContent == ContentExportUnknown:
+		lines = append(lines, splashInfoLine("telemetry", "unknown, the agent did not answer"))
+
+	case meta.Telemetry && meta.TelemetryContent == ContentExported:
+		lines = append(lines, splashInfoLine("telemetry", "exported, including this conversation"))
+
+	case meta.Telemetry:
+		lines = append(lines, splashInfoLine("telemetry", "exported"))
 	}
 
 	return lines

@@ -10,65 +10,93 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
-	"sync/atomic"
-	"syscall"
 
 	"github.com/choria-io/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/agent"
-	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/fisk-ai/internal/util"
+)
+
+// runNatsContext names the NATS context an agent is reached on, and its presence is
+// what makes this process a client of a worker elsewhere rather than the host of one.
+//
+// The flags beside it record whether a person typed the flag rather than what it
+// resolved to. Several carry environment variables, and a run refused because VERBOSE
+// is exported in a shell profile would be refusing a command nobody wrote.
+var (
+	runNatsContext string
+
+	setAPIKey      bool
+	setBaseURL     bool
+	setTraceFile   bool
+	setHTTPDebug   bool
+	setVerbose     bool
+	setStateDir    bool
+	setNoTelemetry bool
+
+	a2aDebug bool
 )
 
 func registerRunCommand(cmd *fisk.Application) {
 	run := cmd.Command("run", "Runs the agent").Action(runAction)
 	run.Arg("q", "Interactive prompt").StringsVar(&q)
 	run.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
-	run.Flag("api-key", "Anthropic API key to use").Required().Envar("ANTHROPIC_API_KEY").StringVar(&apiKey)
-	run.Flag("base-url", "Anthropic API base URL to use").Envar("ANTHROPIC_BASE_URL").StringVar(&baseURL)
-	run.Flag("http-debug", "Dump Anthropic API request and response bodies to "+httpDebugFilename).Envar("HTTP_DEBUG").UnNegatableBoolVar(&httpDebug)
+	run.Flag("api-key", "Anthropic API key to use (not needed with --nats-context, where the worker holds it)").IsSetByUser(&setAPIKey).Envar("ANTHROPIC_API_KEY").StringVar(&apiKey)
+	run.Flag("base-url", "Anthropic API base URL to use").IsSetByUser(&setBaseURL).Envar("ANTHROPIC_BASE_URL").StringVar(&baseURL)
+	run.Flag("http-debug", "Dump Anthropic API request and response bodies to "+httpDebugFilename).IsSetByUser(&setHTTPDebug).Envar("HTTP_DEBUG").UnNegatableBoolVar(&httpDebug)
+	run.Flag("a2a-debug", "Dump every a2a message between this terminal and the agent to "+a2aDebugFilename).UnNegatableBoolVar(&a2aDebug)
 	run.Flag("no-color", "Disable markdown rendering of the final answer, emitting raw text").Envar("NO_COLOR").UnNegatableBoolVar(&noColor)
-	run.Flag("verbose", "Shows more verbose output").Envar("VERBOSE").UnNegatableBoolVar(&verbose)
+	run.Flag("verbose", "Shows more verbose output").IsSetByUser(&setVerbose).Envar("VERBOSE").UnNegatableBoolVar(&verbose)
 	run.Flag("tool-output", "Show tool output during the run (expanded in the full-screen UI)").Envar("TOOL_OUTPUT").UnNegatableBoolVar(&showToolOutput)
 	run.Flag("thinking", "Show the model's reasoning during the run, when it produces any").Envar("THINKING").UnNegatableBoolVar(&showThinking)
-	run.Flag("no-tui", "Disable the full-screen terminal UI and use the line-by-line output").Envar("NO_TUI").UnNegatableBoolVar(&noTUI)
-	run.Flag("chat", "Keep the full-screen UI open for interactive follow-ups after each turn (requires the TUI)").UnNegatableBoolVar(&chatMode)
-	run.Flag("trace", "Write a JSON-lines trace of every LLM request and response to a file").PlaceHolder("FILE").StringVar(&traceFile)
-	run.Flag("checkpoint", "Journal the run so it can be suspended and resumed, using a generated session id").UnNegatableBoolVar(&checkpoint)
-	run.Flag("name", "Override the generated session id when checkpointing").StringVar(&runName)
-	run.Flag("resume", "Resume a checkpointed session by id instead of starting a new run").PlaceHolder("ID").StringVar(&resumeID)
+	run.Flag("no-tui", "Disable the full-screen terminal UI and answer one prompt with line-by-line output").Envar("NO_TUI").UnNegatableBoolVar(&noTUI)
+	run.Flag("trace", "Write a JSON-lines trace of every LLM request and response to a file").IsSetByUser(&setTraceFile).PlaceHolder("FILE").StringVar(&traceFile)
+	run.Flag("resume", "Continue a stored conversation, by session id or by conversation token").PlaceHolder("ID").StringVar(&resumeID)
 	run.Flag("force", "Resume even if the configuration no longer matches the saved session").UnNegatableBoolVar(&forceResume)
-	run.Flag("state-dir", "Directory for checkpointed sessions (default: XDG state dir)").StringVar(&stateDirFlag)
-	run.Flag("no-telemetry", "Suppress OpenTelemetry export for this run, whatever the configuration says").Envar("NO_TELEMETRY").UnNegatableBoolVar(&noTelemetry)
+	run.Flag("state-dir", "Directory holding the sessions of the agent this process hosts (default: XDG state dir)").IsSetByUser(&setStateDir).StringVar(&stateDirFlag)
+	run.Flag("no-telemetry", "Suppress OpenTelemetry export for this run, whatever the configuration says").IsSetByUser(&setNoTelemetry).Envar("NO_TELEMETRY").UnNegatableBoolVar(&noTelemetry)
+	run.Flag("nats-context", "Talk to an agent on this NATS context instead of running one in this process").PlaceHolder("NAME").StringVar(&runNatsContext)
 }
 
-// runAction maps the run flags into an agent.Options, wires the signal contract,
-// and runs the agent, rendering its events and final Result. All orchestration
-// lives in the agent package; this holds only flag handling and rendering.
+// runAction resolves the run flags, hosts an agent behind the prompts channel, and
+// talks to it.
+//
+// The terminal is a client of that channel and owns no run: a full-screen session holds
+// a conversation of many turns, and --no-tui answers one prompt. Everything either of
+// them shows arrives as blocks on a wire, so a run watched here and a run watched by a
+// peer agent are the same run watched the same way.
 func runAction(_ *fisk.ParseContext) error {
 	err := validateRunFlags()
 	if err != nil {
 		return err
 	}
 
-	// Checkpointing changes the interrupt contract: an interrupt requests a graceful
-	// suspend at the next boundary, a second aborts. The suspend flag is shared; under
-	// the TUI the live view drives it from a leave key and owns signals itself, so the
-	// signal-based handler below is installed only for the line UI (and the TUI
-	// fallback), never fighting the TUI's own handler.
-	checkpointing := checkpoint || resumeID != ""
-	var suspend atomic.Bool
+	// Every run is journaled, since a run without a journal is a conversation nothing
+	// can continue: no token, no follow-up turn, no resume. The interrupt contract
+	// follows from that and depends on no flag: an interrupt asks the run to stop at its
+	// next boundary and a second one gives up on it.
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 
 	cfg, err := config.ParseConfigFile(configFile)
 	if err != nil {
 		return err
+	}
+
+	// Whether this process runs the agent or only talks to one, which is the largest
+	// switch on this command and decides most of what follows.
+	remote := runNatsContext != ""
+
+	err = validateRunTarget(cfg, remote)
+	if err != nil {
+		return err
+	}
+
+	if remote {
+		return runAgainstWorker(runCtx, runCancel, cfg)
 	}
 
 	// Fold --state-dir into the (possibly file-configured) session config, applied
@@ -106,61 +134,68 @@ func runAction(_ *fisk.ParseContext) error {
 		defer closer.Close()
 	}
 
-	opts := agent.Options{
+	// The store the hosted agent journals into and the channel reads a conversation back
+	// from. It is opened here so both are given the same one: two stores would have the
+	// channel reading a conversation the run beside it is not writing.
+	sessions, releaseSessions, err := sessionStoreFor(cfg)
+	if err != nil {
+		return err
+	}
+	defer releaseSessions()
+
+	token, err := resumeToken(cfg, resumeID)
+	if err != nil {
+		return err
+	}
+
+	usesTUI := runUsesTUI(cfg)
+
+	wire, err := resolveA2ADebugOut()
+	if err != nil {
+		return err
+	}
+	if wire != nil {
+		defer wire.Close()
+	}
+
+	// The agent is hosted before the screen is opened, so a worker that cannot start
+	// says so on a terminal a person can read rather than behind an alt-screen. It is
+	// also what keeps the fallback below to one worker instead of two.
+	host, err := hostAgent(runCtx, hostOptions{
 		Config:       cfg,
 		ConfigFile:   configFile,
-		Prompt:       q,
 		APIKey:       apiKey,
 		BaseURL:      baseURL,
-		HTTPDebugOut: httpDebugOut,
-		TraceFile:    traceFile,
-		Verbose:      verbose,
+		Sessions:     sessions,
 		Telemetry:    tel,
-		Checkpoint: agent.Checkpoint{
-			Enabled:  checkpoint,
-			Name:     runName,
-			ResumeID: resumeID,
-			Force:    forceResume,
-		},
+		TraceFile:    traceFile,
+		HTTPDebugOut: httpDebugOut,
+		Verbose:      verbose,
+		Logger:       clientWorkerLogger(usesTUI),
+		WireLog:      wire,
+	})
+	if err != nil {
+		return err
 	}
-	if checkpointing {
-		opts.SuspendRequested = suspend.Load
+	defer func() {
+		closeErr := host.Close()
+		if closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: stopping the agent: %v\n", closeErr)
+		}
+	}()
+
+	// What the agent says about itself, asked while there is still a plain terminal to
+	// report a failure on.
+	card, err := probeAgent(runCtx, host, "")
+	if err != nil {
+		return err
 	}
 
-	// A resumed session already records whether it was a chat session, so its input
-	// bar reopens without the operator re-passing --chat. Peeking the stored flag (a
-	// cheap unlocked read; the resume itself takes the lock) lets the TUI wire the
-	// input bar and the agent wire NextPrompt before the run starts.
-	interactive := chatMode
-	if resumeID != "" {
-		resumed, err := agent.SessionInteractive(cfg, resumeID)
-		if err != nil {
-			return err
-		}
-		interactive = resumed
-	}
-
-	// The full-screen UI is the default on an interactive terminal. It is turned off
-	// by --no-tui (or NO_TUI) or the agent config's no_tui; without a real terminal it
-	// cannot run at all. When it runs it owns the whole run, its own signals, and the
-	// suspend flag, and we return once it exits; otherwise control falls through to the
-	// line UI, which installs its own signal handler below.
-	// A chat run (fresh --chat or a resumed chat session) is full-screen-only: there is
-	// no line-UI equivalent, so refuse it loudly rather than silently ignoring it when
-	// the TUI will not run.
-	if interactive && !runUsesTUI(cfg) {
-		if resumeID != "" {
-			return fmt.Errorf("resuming an interactive chat session requires the full-screen TUI: it needs an interactive terminal and is unavailable with --no-tui, NO_TUI, or no_tui in the config")
-		}
-		return fmt.Errorf("--chat requires the full-screen TUI: it needs an interactive terminal and is unavailable with --no-tui, NO_TUI, or no_tui in the config")
-	}
-
-	if runUsesTUI(cfg) {
-		var requestSuspend func()
-		if checkpointing {
-			requestSuspend = func() { suspend.Store(true) }
-		}
-		err := runWithTUI(runCtx, opts, cfg, interactive, requestSuspend)
+	// The full-screen view is the default on an interactive terminal. It is turned off
+	// by --no-tui (or NO_TUI) or the agent config's no_tui, and without a real terminal
+	// it cannot run at all.
+	if usesTUI {
+		err := runWithTUI(runCtx, host, cfg, token, card)
 		if !errors.Is(err, tui.ErrNoTTY) {
 			return err
 		}
@@ -168,52 +203,156 @@ func runAction(_ *fisk.ParseContext) error {
 		// the line UI silently, since the TUI was not explicitly requested.
 	}
 
-	// Line UI (default, or TUI fallback): install the signal-based suspend/abort
-	// contract now, so it was never active during a live TUI run.
-	if checkpointing {
-		installSuspendHandler(&suspend, runCancel)
-	} else {
-		var stopSignals context.CancelFunc
-		runCtx, stopSignals = signal.NotifyContext(context.Background(), os.Interrupt)
-		defer stopSignals()
+	return runAsClient(runCtx, runCancel, host, token)
+}
+
+// exportsFromCard reads what an agent said about its telemetry.
+//
+// No card is not a no: the agent was reachable and did not answer in time, so what a
+// person is shown has to say that rather than the reassuring half of it.
+func exportsFromCard(card *a2a.AgentCard) (bool, tui.ContentExport) {
+	if card == nil {
+		return false, tui.ContentExportUnknown
 	}
 
-	res, err := agent.Run(runCtx, opts, &cliEvents{verbose: verbose, noColor: noColor, showToolOutput: showToolOutput, showThinking: showThinking}, toolkit.NewSurveyPrompter())
+	if card.TelemetryContent {
+		return card.Telemetry, tui.ContentExported
+	}
 
-	// A crash already printed its stack through cliEvents.Panicked; return the generic
-	// PanicError for a non-zero exit without a normal-looking stats block that would read
-	// as a successful finish.
-	var panicErr *agent.PanicError
-	if errors.As(err, &panicErr) {
+	return card.Telemetry, tui.ContentNotExported
+}
+
+// runAgainstWorker holds a conversation with an agent somebody else is running.
+//
+// Nothing is hosted here: no broker, no server, no model provider, no journal and no
+// telemetry pipeline. What this process is, is a terminal.
+func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.Config) error {
+	wire, err := resolveA2ADebugOut()
+	if err != nil {
+		return err
+	}
+	if wire != nil {
+		defer wire.Close()
+	}
+
+	host, err := dialAgent(cfg, runNatsContext, clientWorkerLogger(runUsesTUI(cfg)), wire)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeErr := host.Close()
+		if closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: disconnecting: %v\n", closeErr)
+		}
+	}()
+
+	// Remotely a session id names a journal this machine does not hold, so the token is
+	// what a person carries. It is sent as it stands and the worker decides.
+	token := resumeID
+
+	card, err := probeAgent(ctx, host, runNatsContext)
+	if err != nil {
 		return err
 	}
 
-	if res != nil {
-		if res.Reason == runstate.ReasonSuspended {
-			// A run waiting on an answer and a run an operator drained both suspend, and
-			// only this says which: without it an operator resuming the first gets the
-			// same suspended line again and nothing telling them why.
-			for _, d := range res.Deferred {
-				fmt.Fprintf(os.Stderr, "\nwaiting on %s (%s): %s\n", d.ToolName, d.ToolUseID, util.SanitizeForTerminal(d.Note, 200))
-				fmt.Fprintf(os.Stderr, "answer it with: fisk-ai session answer %s %s\n", res.SessionID, d.ToolUseID)
-			}
-			fmt.Fprintf(os.Stderr, "\nsuspended; resume with: fisk-ai run --resume %s\n", res.SessionID)
-		}
-		if res.Stats != nil {
-			res.Stats.Print(verbose)
-		}
-		if res.Reason == runstate.ReasonSuspended {
-			return nil
+	if runUsesTUI(cfg) {
+		err := runWithTUI(ctx, host, cfg, token, card)
+		if !errors.Is(err, tui.ErrNoTTY) {
+			return err
 		}
 	}
 
-	return err
+	return runAsClient(ctx, stop, host, token)
+}
+
+// validateRunTarget refuses a combination of flags that describes work this process
+// will not be doing.
+//
+// Each refusal names the same escape, since somebody who typed one of these habitually
+// needs to hear how to get it back rather than only that it is wrong. A flag that
+// arrived from the environment is ignored in silence: refusing a run because VERBOSE is
+// exported in a shell profile would refuse a command nobody wrote.
+func validateRunTarget(cfg *config.Config, remote bool) error {
+	if !remote {
+		// The agent runs here, so its model credentials have to be here.
+		if apiKey == "" {
+			return fmt.Errorf("--api-key is required to run an agent in this process; set it, export ANTHROPIC_API_KEY, or pass --nats-context to talk to an agent that already has one")
+		}
+
+		return nil
+	}
+
+	// The identity is the address on a bus rather than a label, and the transport queue
+	// groups on it, so a name arrived at by accident joins somebody else's fleet rather
+	// than failing to resolve.
+	if !cfg.IdentityIsNamed() {
+		return fmt.Errorf("--nats-context needs an agent to address, and %q names none: set identity in the configuration, since the name is the subject the agent answers on and would otherwise be taken from the application or left at the default", configFile)
+	}
+
+	for _, refusal := range []struct {
+		typed bool
+		flag  string
+		why   string
+	}{
+		{setAPIKey, "--api-key", "the agent's own model credentials, which the worker holds"},
+		{setBaseURL, "--base-url", "the agent's own model endpoint, which the worker chooses"},
+		{setTraceFile, "--trace", "a file written on the machine running the agent, which is not this one"},
+		{setHTTPDebug, "--http-debug", "a file written on the machine running the agent, which is not this one"},
+		{setVerbose, "--verbose", "the agent's own narration, which happens on the worker"},
+		{setStateDir, "--state-dir", "where the agent this process hosts keeps its sessions, and this process hosts none"},
+		{setNoTelemetry, "--no-telemetry", "export by the process running the agent, which is not this one"},
+	} {
+		if refusal.typed {
+			return fmt.Errorf("%s cannot be used with --nats-context: it is %s; run it on the worker, or drop --nats-context to run the agent here", refusal.flag, refusal.why)
+		}
+	}
+
+	return nil
 }
 
 // httpDebugFilename is where --http-debug writes the API body dumps. It is a file
 // (not stderr) so debugging coexists with the full-screen UI, whose alt-screen would
 // otherwise be corrupted by inline dumps.
 const httpDebugFilename = "http-debug.log"
+
+// a2aDebugFilename is where --a2a-debug writes the protocol dump, on the same terms and
+// for the same reason. It is a fixed name this program owns rather than a path somebody
+// gives it, which is what makes removing a stale one safe.
+const a2aDebugFilename = "a2a-debug.log"
+
+// resolveA2ADebugOut opens the a2a dump when --a2a-debug is set, and returns nil when it
+// is not. The caller owns closing it.
+//
+// The file holds the conversation token, the prompts and every tool result, so it gets
+// what the http dump gets: created 0600, and removed before being created exclusively,
+// which drops a symlink somebody may have planted at the fixed name rather than
+// following it.
+func resolveA2ADebugOut() (io.WriteCloser, error) {
+	if !a2aDebug {
+		return nil, nil
+	}
+
+	err := os.Remove(a2aDebugFilename)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("opening a2a-debug file %q: %w", a2aDebugFilename, err)
+	}
+
+	f, err := os.OpenFile(a2aDebugFilename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("opening a2a-debug file %q: %w", a2aDebugFilename, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "%s\n", a2aDebugNotice)
+
+	return f, nil
+}
+
+// a2aDebugNotice says the dump is being written.
+//
+// It is printed to stderr and shown again in the transcript, because under the
+// full-screen view stderr is taken for the whole run and flushed after the terminal is
+// restored, so the first copy is read by nobody until the file is already written.
+var a2aDebugNotice = fmt.Sprintf("Dumping a2a messages to %s", a2aDebugFilename)
 
 // resolveHTTPDebugOut opens the http-debug dump file when --http-debug is set,
 // discarding any previous run's dump, and returns nil when it is not set. The caller
@@ -250,111 +389,91 @@ func runUsesTUI(cfg *config.Config) bool {
 	return !noTUI && !cfg.TUIDisabled() && util.StdinIsTerminal() && util.StdoutIsTerminal()
 }
 
-// runWithTUI drives the run inside the full-screen UI: events render into the
-// viewport and interactive decisions are put to the operator through native
-// widgets. The view stays up after the run so the operator can read the transcript;
-// on exit the terminal is restored and the advisories, final answer and stats are
-// re-printed to the normal buffer so the result survives in scrollback and stays
-// pipe-compatible. It returns ErrNoTTY (wrapped) when the screen cannot be opened,
+// runWithTUI holds a conversation in the full-screen view: the run's blocks draw into
+// the viewport, its questions go to the operator through native widgets, and the input
+// row takes the next turn when one ends.
+//
+// The view stays up after the conversation ends so the transcript can be read. On exit
+// the terminal is restored and the answer, the advisories, the handles and the summary
+// are reprinted to the normal buffer, so the result survives in scrollback and a piped
+// answer stays clean. It returns ErrNoTTY (wrapped) when the screen cannot be opened,
 // so the caller falls back to the line UI.
-func runWithTUI(ctx context.Context, opts agent.Options, cfg *config.Config, interactive bool, requestSuspend func()) error {
+func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, token string, card *a2a.AgentCard) error {
+	renderer := &blockRenderer{showThinking: showThinking}
+	session := &chatSession{host: host, conversation: token}
+
+	exports, content := exportsFromCard(card)
+
 	live, err := tui.NewLive(tui.Meta{
-		Model:       cfg.LLM.Model,
-		Version:     util.Version(),
-		Query:       strings.Join(opts.Prompt, " "),
-		Interactive: interactive,
-		Resume:      opts.Checkpoint.ResumeID != "",
-		Dir:         runDir(),
-		// Read off the provider the run was actually given rather than off the config, so
-		// the card reflects what will be exported: a --no-telemetry veto or a rejected
-		// endpoint leaves this nil with the config still saying enabled.
-		Telemetry:        opts.Telemetry.Enabled(),
-		TelemetryContent: opts.Telemetry.CaptureEnabled(),
-	}, noColor, requestSuspend)
+		Model:   cfg.LLM.Model,
+		Version: util.Version(),
+		Query:   strings.Join(q, " "),
+		Resume:  token != "",
+		Dir:     runDir(),
+		// What the agent says about itself rather than what this process is configured
+		// for. The exporting process is whichever one runs the agent, so a client that
+		// read its own provider would be answering for the wrong machine the moment the
+		// agent is somewhere else.
+		Telemetry:        exports,
+		TelemetryContent: content,
+	}, noColor, session.requestStop)
 	if err != nil {
 		return err
 	}
-	live.SetBell(cfg.BellEnabled())
 
-	// Tool output is always shown in the full-screen UI but starts folded to a
+	session.live = live
+	session.client = &tuiClient{live: live, renderer: renderer}
+
+	live.SetBell(cfg.BellEnabled())
+	// Tool output is always shown in the full-screen view but starts folded to a
 	// placeholder; --tool-output expands it by default so the raw results are visible
 	// inline without pressing Z.
 	if showToolOutput {
 		live.ExpandToolOutput()
 	}
+	// Every full-screen run is a conversation, so the input row is always there. What a
+	// turn ends is the turn, and the row is what takes the next one.
+	live.EnableInteractive()
 
-	// In chat mode the view stays interactive: after each turn the input row opens for a
-	// follow-up, and the run loop continues with the accumulated conversation. This
-	// covers both a fresh --chat run and a resumed chat session (the caller resolved the
-	// flag from the stored session).
-	if interactive {
-		live.EnableInteractive()
+	// The view classifies its terminal state and its closing lines from how the last
+	// turn ended, which it consults only after the run function has returned.
+	live.SetSuspendedFunc(session.suspended)
+	live.SetResumeHintFunc(func() string { return resumeHint(host.identity, host.natsContext, session.conversation) })
+	live.SetTraceHintFunc(session.traceLine)
 
-		next := live.NextPromptFunc()
-		opts.NextPrompt = func(c context.Context) agent.Continuation {
-			text, reset, cont := next(c)
-			return agent.Continuation{Text: text, Reset: reset, Continue: cont}
-		}
-	}
-
-	events := &tcellEvents{live: live, verbose: verbose}
-
-	var res *agent.Result
-	// The live view classifies the terminal state from the run's real outcome, so tell
-	// it how to read a graceful suspend; res is set before the run goroutine returns
-	// and the view only consults this after the run ends.
-	live.SetSuspendedFunc(func() bool {
-		return res != nil && res.Reason == runstate.ReasonSuspended
-	})
-	// Show the resume command on-screen, before the alt-screen is torn down, so a
-	// suspended session's id is visible while the operator is still reading the view
-	// (it is also re-printed to the restored terminal below for scrollback).
-	live.SetResumeHintFunc(func() string {
-		if res == nil || res.SessionID == "" {
-			return ""
-		}
-		return "resume with: fisk-ai run --resume " + res.SessionID
-	})
-	// The trace id, on screen before the alt-screen is torn down. It is empty when
-	// telemetry is off, which shows nothing, and it is the only correlator a chat run
-	// that is not checkpointed has: --chat does not imply --checkpoint.
-	live.SetTraceHintFunc(func() string {
-		if res == nil || res.Stats == nil || res.Stats.TraceID == "" {
-			return ""
-		}
-		return "trace: " + res.Stats.TraceID
-	})
 	runErr := live.Run(ctx, func(runCtx context.Context) error {
-		var e error
-		res, e = agent.Run(runCtx, opts, events, live.Prompter())
-		return e
+		// Said again here because the stderr copy was covered by this screen the moment
+		// it was printed, and stays covered until the run is over and the file is
+		// written. It happens on the run goroutine rather than before Run: appending
+		// marshals onto the tview loop, and the loop is not running until Run starts it,
+		// so a line queued before then blocks forever with the screen already taken.
+		if a2aDebug {
+			live.Append(tui.Line{Kind: tui.LineWarning, Text: a2aDebugNotice})
+		}
+
+		return session.run(runCtx)
 	})
 
-	for _, w := range events.warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	for _, w := range renderer.warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", util.SanitizeForTerminal(w, 400))
 	}
-	// A context reset during the run leaves earlier sessions saved and resumable; re-print
-	// their resume commands to native scrollback so their ids survive the alt-screen teardown.
-	for _, id := range events.rotatedSessions {
-		fmt.Fprintf(os.Stderr, "previous session saved; resume with: fisk-ai run --resume %s\n", id)
+	// A reset during the session left earlier conversations stored and continuable;
+	// reprint their handles so they survive the alt-screen teardown.
+	for _, hint := range session.left {
+		fmt.Fprintf(os.Stderr, "previous conversation saved; %s\n", hint)
 	}
-	// A crash captured during the run is re-printed to the restored terminal (the
-	// alt-screen it happened under is gone), then returned as the generic PanicError.
-	var panicErr *agent.PanicError
-	if errors.As(runErr, &panicErr) {
-		if len(events.panicStack) > 0 {
-			fmt.Fprintf(os.Stderr, "\npanic: %v\n\n%s\n", events.panicValue, events.panicStack)
-		}
-		return runErr
+	if renderer.answer != "" {
+		fmt.Fprintln(os.Stdout, util.RenderAnswer(renderer.answer, noColor))
 	}
-	if events.answer != "" {
-		fmt.Fprintln(os.Stdout, util.RenderAnswer(events.answer, noColor))
+	// Every conversation continues, so the handle prints however this one ended rather
+	// than only when it stopped somewhere it can be resumed from.
+	hint := resumeHint(host.identity, host.natsContext, session.conversation)
+	if hint != "" {
+		fmt.Fprintf(os.Stderr, "\n%s\n", hint)
 	}
-	if res != nil && res.Reason == runstate.ReasonSuspended {
-		fmt.Fprintf(os.Stderr, "\nsuspended; resume with: fisk-ai run --resume %s\n", res.SessionID)
-	}
-	if res != nil && res.Stats != nil {
-		res.Stats.Print(verbose)
+	printUsage(session.usage(), ackMaxTokens(session.outcome))
+	if line := session.traceLine(); line != "" {
+		fmt.Fprintf(os.Stderr, "%s\n", line)
 	}
 
 	return runErr
@@ -386,14 +505,8 @@ func runDir() string {
 // validateRunFlags rejects incompatible combinations of the checkpoint and
 // resume flags before any work is done.
 func validateRunFlags() error {
-	if resumeID != "" && checkpoint {
-		return fmt.Errorf("--resume cannot be combined with --checkpoint")
-	}
 	if resumeID != "" && len(q) > 0 {
 		return fmt.Errorf("--resume does not take a query; the prompt is restored from the session")
-	}
-	if runName != "" && !checkpoint {
-		return fmt.Errorf("--name requires --checkpoint")
 	}
 	if forceResume && resumeID == "" {
 		return fmt.Errorf("--force only applies when resuming")
@@ -407,20 +520,4 @@ func validateRunFlags() error {
 	}
 
 	return nil
-}
-
-// installSuspendHandler wires the graceful-suspend signal contract: the first
-// interrupt or SIGTERM sets the suspend flag, polled by the loop at its next
-// boundary; a second aborts the run.
-func installSuspendHandler(suspend *atomic.Bool, cancelRun context.CancelFunc) {
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-sigs
-		suspend.Store(true)
-		fmt.Fprintln(os.Stderr, "\nsuspend requested; finishing current step, press ^C again to abort")
-		<-sigs
-		cancelRun()
-	}()
 }

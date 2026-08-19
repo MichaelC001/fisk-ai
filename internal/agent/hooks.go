@@ -16,13 +16,24 @@ import (
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
-// Hooks are optional callbacks the run invokes at fixed points. A nil field does not
-// fire. Every hook runs on the single run goroutine, in loop order; it must honor ctx
-// and return promptly; it is trusted in-process code (like CustomTools) and a panic in
-// it aborts the run as a *PanicError. SessionEnd alone is exempt: it fires during
-// teardown, once the outcome is already decided, so an error or a panic from it is
-// downgraded to a warning. One callback per point: compose several behaviors by
-// wrapping them in one func of your own.
+// Hooks are the AGENT-SIDE hooks: they run wherever the agent loop runs, which is inside
+// fisk serve, inside a queue worker, or inside the worker a terminal embeds for a local
+// run. They never run in a caller that reached the agent over a2a, which may be on
+// another machine.
+//
+// The other family is a2a.ClientHooks, the CLIENT-SIDE hooks, which run in the process
+// asking an agent for work and observe the protocol rather than the loop. Which side a
+// thing belongs on follows from what it can see: model calls, tools and a prompt entering
+// a conversation are here, while a person typing, a question waiting to be put to them
+// and a sitting ending are the client's and are invisible from here.
+//
+// Optional callbacks the run invokes at fixed points. A nil field does not fire. Every
+// hook runs on the single run goroutine, in loop order; it must honor ctx and return
+// promptly; it is trusted in-process code (like CustomTools) and a panic in it aborts the
+// run as a *PanicError. SessionEnd alone is exempt: it fires during teardown, once the
+// outcome is already decided, so an error or a panic from it is downgraded to a warning.
+// One callback per point: compose several behaviors by wrapping them in one func of your
+// own.
 //
 // A hook may only observe, terminate (a returned error aborts the run; PreToolUse may
 // also deny one call), or adjust tool data (PreToolUse rewrites the tool and args,

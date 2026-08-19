@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 )
 
 // TaskStream is a caller's view of one task's reply set: an ack, then the events the
@@ -23,6 +24,41 @@ type TaskStream struct {
 	seq       uint64
 	gaps      uint64
 	done      bool
+
+	// idle bounds the wait for each message rather than for the set, since a set has no
+	// length a caller could bound: a run may think for an hour and is not stuck. What it
+	// catches is an agent that has stopped saying anything at all, which is otherwise
+	// indistinguishable from one still working, because the only other end is the
+	// caller's own context.
+	//
+	// Zero waits forever, which is what a caller that set no bound asked for.
+	idle time.Duration
+
+	// agent and wire are who the set is with and where to record it, for a caller that
+	// asked to see what crossed. A body is recorded as it arrives, before the size cap
+	// and the schema have had an opinion, since a message that fails either is the one
+	// somebody turned recording on to look at.
+	agent string
+	wire  *wireLog
+}
+
+// read takes one message, bounded by the idle wait when there is one. The bound is
+// reported as its own error rather than as a canceled context, since a caller that gave
+// up and an agent that went quiet are different things to tell somebody about.
+func (t *TaskStream) read(ctx context.Context) ([]byte, error) {
+	if t.idle <= 0 {
+		return t.reader.Next(ctx)
+	}
+
+	waited, cancel := context.WithTimeout(ctx, t.idle)
+	defer cancel()
+
+	body, err := t.reader.Next(waited)
+	if err != nil && waited.Err() != nil && ctx.Err() == nil {
+		return nil, fmt.Errorf("%w: nothing heard from the agent for %s", ErrAgentUnavailable, t.idle)
+	}
+
+	return body, err
 }
 
 // Next returns the next message of the set, one of *Ack, *Event, *Result or
@@ -34,10 +70,12 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 		return nil, io.EOF
 	}
 
-	body, err := t.reader.Next(ctx)
+	body, err := t.read(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	t.wire.recv(OpTask, t.agent, t.request, body)
 
 	if len(body) > MaxMessageSize {
 		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
@@ -114,12 +152,14 @@ func (c *Client) Task(ctx context.Context, agent string, req *Request) (*TaskStr
 		return nil, err
 	}
 
+	c.wire.send(OpTask, agent, req.Request, data)
+
 	reader, err := c.stream.Stream(ctx, agent, OpTask, data)
 	if err != nil {
 		return nil, err
 	}
 
-	return &TaskStream{reader: reader, validator: c.validator, request: req.Request}, nil
+	return &TaskStream{reader: reader, validator: c.validator, request: req.Request, idle: c.idle, agent: agent, wire: c.wire}, nil
 }
 
 // Cancel asks the agent running the named task to stop, and reports what it
@@ -134,6 +174,12 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 		return nil, fmt.Errorf("%w: %q is not a valid request id", ErrInvalidMessage, request)
 	}
 
+	// Fired before the cancel goes rather than after it is acked, so a caller learns
+	// that somebody asked for a stop even when the agent is not there to answer. The
+	// turn does not end here: a cancel asks for a boundary, and the ending arrives
+	// through the reply set as usual.
+	c.hooks.fireCancelRequested(ctx, CancelRequestedInfo{Agent: agent, Request: request, Reason: reason})
+
 	msg := NewCancel()
 	msg.Reason = reason
 	stampRequest(ctx, &msg.Header, c.sender, agent)
@@ -147,10 +193,14 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 		return nil, err
 	}
 
+	c.wire.send(OpCancel, agent, request, data)
+
 	reply, err := c.stream.SendCancel(ctx, agent, request, data)
 	if err != nil {
 		return nil, err
 	}
+
+	c.wire.recv(OpCancel, agent, request, reply)
 
 	if len(reply) > MaxMessageSize {
 		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)

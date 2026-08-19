@@ -13,6 +13,16 @@ var (
 	// ErrAgentUnavailable indicates no agent answered the request (no responder,
 	// or the request deadline elapsed). A transport returns it from RoundTrip.
 	ErrAgentUnavailable = errors.New("remote agent unavailable")
+	// ErrNoResponders narrows ErrAgentUnavailable to the case where nothing is
+	// listening on the subject at all, as against one where somebody is and did not
+	// answer in time. It wraps ErrAgentUnavailable, so a caller that does not care
+	// which it was keeps matching on that and needs no change.
+	//
+	// The two want different answers. Nothing listening is settled: the agent is not
+	// there, and waiting longer or asking again will not find it. A silent responder
+	// is an agent that exists and is slow, which a caller may reasonably carry on
+	// without rather than treat as a failure.
+	ErrNoResponders = fmt.Errorf("%w: no subscription interest", ErrAgentUnavailable)
 	// ErrToolImport indicates a remote agent answered but its reply could not be
 	// used (a reply over the size cap, an invalid or unexpected body).
 	ErrToolImport = errors.New("remote tool import failed")

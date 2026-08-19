@@ -31,8 +31,20 @@ var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 const defaultIdentity = "fisk-ai"
 
 // Default budget values applied wherever a config leaves a value unset.
+//
+// defaultLLMMaxTokens bounds a whole conversation rather than one turn, so it has to
+// cover a conversation's worth of turns, each of which re-sends the system prompt, the
+// tool schemas and the history.
+//
+// It counts tokens processed and says nothing about money. Cache reads are counted at
+// the same weight as uncached input and are priced at a fraction of it, so two
+// conversations with the same count can cost very different amounts. Tokens are the knob
+// there is; a cost bound would need prices this program does not have.
+//
+// The value is chosen to be out of the way of ordinary use rather than derived from
+// anything. An operator who wants a real bound sets one against their own traffic.
 const (
-	defaultLLMMaxTokens     = 200000
+	defaultLLMMaxTokens     = 500000
 	defaultLLMMaxIterations = 50
 	defaultLLMCallTimeout   = 120 * time.Second
 )
@@ -55,6 +67,18 @@ type Config struct {
 	// Identity is the name used in discovery; it doubles as a queue group so
 	// multiple agents sharing an identity share the work. Optional if MCP.
 	Identity string `json:"identity" yaml:"identity"`
+	// identityDerived records that prepare filled Identity from the application's
+	// basename or the default rather than from this field.
+	//
+	// It is kept because the two are not interchangeable wherever the identity is an
+	// address. A basename looks like a name and is not one: a shared executable whose
+	// behavior comes from the directory it runs in gives a fleet of unrelated agents
+	// the same one, so they would register under it together.
+	//
+	// It records the deriving rather than the naming so that a Config built in code,
+	// which never passes through prepare, reads as named when it carries a name. Read
+	// it through IdentityIsNamed.
+	identityDerived bool
 	// ApplicationPath is the app to run and introspect for tools.
 	ApplicationPath string `json:"application_path" yaml:"application_path"`
 	// NatsContext is the name of a NATS context (as managed by `nats context`
@@ -591,19 +615,27 @@ type ThinkingConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
 }
 
-// LLMBudget bounds how much an agent may spend on the LLM.
+// LLMBudget bounds how much of the LLM an agent may use.
 //
-// MaxTokens is a tokens-processed cap, not a dollar cap: it sums the full input
-// throughput (uncached input plus cache reads and cache writes) and the output,
-// so its magnitude matches the pre-cache world and a resume stays consistent.
-// Prompt caching makes a run far cheaper in dollars than the token count implies
-// (a cache read costs roughly a tenth of an uncached input token), so MaxTokens
-// intentionally over-counts real spend; a cost-weighted budget is a separate
-// future feature.
+// The two bounds have deliberately different scopes. MaxTokens is cumulative over a
+// conversation, so every turn of one spends from the same allowance. MaxIterations is per
+// turn, because a conversation's tenth turn would otherwise begin past a cap set for its
+// first. A conversation is a journal, so starting a new one starts a fresh allowance.
+//
+// MaxTokens counts tokens processed and says nothing about money: it sums the full input
+// throughput (uncached input plus cache reads and cache writes) and the output, weighting
+// a cache read the same as an uncached input token although it is priced at a fraction of
+// one. Tokens are the knob that exists; nothing here knows prices.
 type LLMBudget struct {
-	// MaxTokens is the maximum number of tokens to spend. It is a soft cap: the
-	// running total is checked after each call, so a single call can overshoot it
-	// by up to that call's input plus its max output tokens before the run stops.
+	// MaxTokens is the maximum number of tokens a conversation may process, counted
+	// across all of its turns.
+	//
+	// It is checked in two places, and neither makes it exact. A turn that adds a new
+	// user prompt is refused before it starts once the conversation is already at the
+	// cap, and within a turn the running total is checked after each model call and
+	// before that call's tools, so a single call can overshoot by its own input plus its
+	// maximum output. A turn that ends on an answer delivers it whatever the total says,
+	// since the tokens are already spent and the next turn is where the cap is applied.
 	MaxTokens int64 `json:"max_tokens" yaml:"max_tokens"`
 	// MaxOutputTokens caps the tokens a single response may generate, distinct from
 	// MaxTokens which bounds the whole run. Left 0 it uses a built-in default that is
@@ -981,6 +1013,15 @@ func Validate(cfg *Config) error {
 	return ValidateForMode(cfg, ModeAgent)
 }
 
+// IdentityIsNamed reports whether the identity was written in the configuration, as
+// opposed to derived from the application's basename or left at the default.
+//
+// It is what to check wherever the identity is an address rather than a label. On a bus
+// the identity is the subject an agent answers on and the queue group it joins, so a
+// name arrived at by accident does not fail to resolve, it joins somebody else's fleet.
+// A local run has no such exposure and does not ask.
+func (c *Config) IdentityIsNamed() bool { return c.Identity != "" && !c.identityDerived }
+
 // ValidateForMode checks that the fields required by mode are set. application_path
 // is optional for ModeAgent and ModeMCP, which can run on built-in and remote tools
 // alone. ModeMCP needs nothing more, since it serves tools and uses neither a prompt
@@ -1066,8 +1107,8 @@ func validateServe(cfg *Config) error {
 	// terminal needs. The identity keys the claim a resumed run writes to its journal
 	// and the queue group the worker joins.
 	if cfg.JobsEnabled() {
-		if cfg.Identity == "" {
-			return fmt.Errorf("identity is required when expose.agent.jobs is set")
+		if !cfg.IdentityIsNamed() {
+			return fmt.Errorf("identity is required when expose.agent.jobs is set: it is the queue group this worker joins, so it must be a name you chose rather than one derived from the application or left at the default")
 		}
 		if cfg.SystemPrompt == "" {
 			return fmt.Errorf("prompt is required when expose.agent.jobs is set")
@@ -1107,13 +1148,19 @@ func validateServe(cfg *Config) error {
 	if cfg.A2AServeToolsEnabled() && cfg.ApplicationPath == "" {
 		return fmt.Errorf("application_path is required when expose.agent.a2a.serve_tools is set: no built-in tool declares a2a exposure, so an agent with no wrapped application would have nothing to serve; set application_path to the fisk application whose commands you want to serve, or remove serve_tools")
 	}
+	// Served tools are reached on subjects derived from the identity, so it is an
+	// address here for the same reason it is one below, and the basename this endpoint
+	// always has an application to derive is exactly the name that is not a choice.
+	if cfg.A2AServeToolsEnabled() && !cfg.IdentityIsNamed() {
+		return fmt.Errorf("identity is required when expose.agent.a2a.serve_tools is set: it is the subject peers reach this agent on and the queue group it joins, so it must be a name you chose rather than one derived from the application or left at the default")
+	}
 
 	// Answering a prompt runs the whole agent loop, so it needs what a queued job
 	// needs. The identity keys the subjects peers reach this worker on as well as the
 	// claim a resumed run writes to its journal.
 	if cfg.A2APromptsEnabled() {
-		if cfg.Identity == "" {
-			return fmt.Errorf("identity is required when expose.agent.a2a.prompts is set")
+		if !cfg.IdentityIsNamed() {
+			return fmt.Errorf("identity is required when expose.agent.a2a.prompts is set: it is the subject peers reach this worker on and the queue group it joins, so it must be a name you chose rather than one derived from the application or left at the default")
 		}
 		if cfg.SystemPrompt == "" {
 			return fmt.Errorf("prompt is required when expose.agent.a2a.prompts is set")
@@ -1718,6 +1765,7 @@ func (c *Config) MCPExposesKnowledge() bool {
 // prepare fills in default budgets and parses all duration strings.
 func (c *Config) prepare() error {
 	if c.Identity == "" {
+		c.identityDerived = true
 		if c.ApplicationPath != "" {
 			c.Identity = filepath.Base(c.ApplicationPath)
 		} else {

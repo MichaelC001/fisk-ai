@@ -42,6 +42,16 @@ type runner struct {
 	maxIter         int64
 	maxTokens       int64
 
+	// budgetBase is the token total this conversation started from, subtracted from the
+	// run's cumulative stats to give what the current journal has spent.
+	//
+	// It is zero for the whole of an ordinary run, including a resume, since a resume
+	// seeds the stats from the journal it is continuing and that history is the
+	// conversation's own. A session rotation moves it to the total so far, because the
+	// journal it opens is a new conversation with an allowance of its own, while the
+	// stats keep climbing to report the whole sitting.
+	budgetBase int64
+
 	// toolTimeout bounds one tool call, zero leaving tool execution unbounded, which a
 	// configuration asks for with an explicit 0s. It is resolved once here rather than
 	// read through cfg per call, as the budgets above are.
@@ -62,10 +72,18 @@ type runner struct {
 	// promptCache turns on Anthropic prompt caching: two cache_control breakpoints per
 	// request (one after tools+system, one on the conversation tail). Resolved once at
 	// setup from cfg.PromptCacheEnabled(); kept out of the fingerprint so toggling it
-	// never refuses a resume. interactive selects the cache TTL (1h for a chat run whose
-	// think-time between turns exceeds 5m, 5m for an autonomous loop).
+	// never refuses a resume.
 	promptCache bool
+
+	// interactive says this run holds its own continuation loop, so it reports turns to
+	// telemetry and rests at an input boundary rather than ending.
 	interactive bool
+
+	// humanPaced says the next call on this conversation comes after somebody's think
+	// time, which is what chooses the longer cache lifetime. It is separate from
+	// interactive because a caller taking one turn per run holds no continuation loop and
+	// is still paced by a person between turns.
+	humanPaced bool
 
 	// events receives the run's narration, tool traces and warnings so the caller
 	// owns all wording and rendering.
@@ -511,6 +529,16 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 				reason = runstate.ReasonCompleted
 				continue
 			}
+
+			// A conversation at its token cap takes no further turn. Refused above the
+			// reset below, so a prompt that will not run cannot first rotate the session
+			// and become the Meta.Prompt of a fresh journal that then records only its own
+			// refusal. A reset carrying a prompt is exempt: it opens a new conversation,
+			// and rotateSession gives that one an allowance of its own.
+			if !cont.Reset && r.overBudget() {
+				reason, err = runstate.ReasonBudget, r.budgetError()
+				break
+			}
 		}
 
 		if cont.Reset {
@@ -600,7 +628,8 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 //
 // The turn gets a full iteration budget from where the conversation actually is, so a
 // turn that finished interrupted work first does not spend that work's iterations on
-// the caller's prompt.
+// the caller's prompt. The token budget is the opposite and is spent, so a conversation
+// already at its cap takes no further turn.
 func (r *runner) followUpTurn(ctx context.Context) (runstate.TerminalReason, error) {
 	text := r.followUp
 	r.followUp = ""
@@ -611,6 +640,17 @@ func (r *runner) followUpTurn(ctx context.Context) (runstate.TerminalReason, err
 	}
 	if dec.Deny {
 		return runstate.ReasonError, fmt.Errorf("the follow-up prompt was rejected by a policy hook: %s", dec.DenyReason)
+	}
+
+	// Refused here, above the append and the journal write, so a conversation that cannot
+	// take the turn does not keep a user message the model never saw. Appending it would
+	// leave the next turn to merge with a prompt nobody answered.
+	//
+	// This is the only place the cumulative bound is applied to a served conversation:
+	// the channel gives every turn after the first as a follow-up, so this is the head of
+	// every one of them.
+	if r.overBudget() {
+		return runstate.ReasonBudget, r.budgetError()
 	}
 
 	r.appendUserPrompt(text)
@@ -740,6 +780,9 @@ func (r *runner) rotateSession(prompt string) error {
 	r.seq = newJournal.LastSeq()
 	r.iter = 0
 	r.maxIter = 0
+	// The new journal is a new conversation, so its token allowance is whole. The stats
+	// keep climbing to report the sitting, which is what this subtracts from.
+	r.budgetBase = r.rawTokens()
 	r.messages = []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: prompt}}}}}
 	r.contentFrom = 0
 	// The new journal is a new conversation, separately resumable, and a grant belongs
@@ -752,6 +795,43 @@ func (r *runner) rotateSession(prompt string) error {
 	r.events.SessionRotated(prevID)
 
 	return nil
+}
+
+// tokensSpent is what this conversation has processed: the uncached input, the output,
+// and both cache tiers, which are weighted the same as uncached input because the cap
+// counts tokens rather than money.
+//
+// Thinking is not added. llm.Usage documents it as a subset of the output rather than an
+// addition to it, so summing it here would count reasoning twice.
+func (r *runner) tokensSpent() int64 {
+	return r.rawTokens() - r.budgetBase
+}
+
+// rawTokens is the sitting's running total, before the current conversation's base is
+// taken off it. Nil stats read as zero so a runner assembled without counters, which
+// several of this package's own tests do, is not a panic in a bound nobody set.
+func (r *runner) rawTokens() int64 {
+	if r.stats == nil {
+		return 0
+	}
+
+	return r.stats.InTokens + r.stats.OutTokens + r.stats.CacheReadTokens + r.stats.CacheCreateTokens
+}
+
+// overBudget reports whether this conversation has processed its whole allowance. A
+// MaxTokens of zero or less is no bound at all.
+func (r *runner) overBudget() bool {
+	return r.maxTokens > 0 && r.tokensSpent() >= r.maxTokens
+}
+
+// budgetError is what a run stopped by the token budget reports.
+//
+// It names both numbers because the cap is the operator's own setting and the total is
+// the only evidence that it was reached, and it names the key so somebody who wants a
+// larger allowance knows what to raise. It does not count iterations: the two places
+// this fires are a turn that has run several and a turn that has not started.
+func (r *runner) budgetError() error {
+	return fmt.Errorf("this conversation has processed %d of its %d token budget (llm.budget.max_tokens)", r.tokensSpent(), r.maxTokens)
 }
 
 // recordText keeps the concatenated text of an assistant turn as the run's answer
@@ -817,7 +897,9 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			ReasoningEffort: r.cfg.ReasoningEffort(),
 			MaxOutputTokens: r.maxOutputTokens,
 			PromptCache:     r.promptCache,
-			Interactive:     r.interactive,
+			// Either way of being paced by a person: a run holding its own continuation
+			// loop, or one turn of a conversation whose next turn is somebody's to send.
+			Interactive: r.interactive || r.humanPaced,
 		}
 
 		if r.verbose {
@@ -951,11 +1033,14 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 		// Stop before executing this turn's tools once the token budget is
 		// exhausted, so an over-budget turn does not incur further tool spend or
-		// side effects. The cache tiers are counted alongside InTokens/OutTokens so the
-		// cap measures total throughput, keeping its magnitude the same as the pre-cache
-		// world (where the cache fields were zero) and resume-consistent.
-		if r.maxTokens > 0 && r.stats.InTokens+r.stats.OutTokens+r.stats.CacheReadTokens+r.stats.CacheCreateTokens >= r.maxTokens {
-			return runstate.ReasonBudget, fmt.Errorf("token budget (%d) exhausted after %d iterations", r.maxTokens, i+1)
+		// side effects.
+		//
+		// A turn that ended on an answer has already returned above, which is deliberate:
+		// those tokens are spent and the answer is in hand, so withholding it buys
+		// nothing. What bounds a conversation of such turns is the check at the head of
+		// the next one rather than this.
+		if r.overBudget() {
+			return runstate.ReasonBudget, r.budgetError()
 		}
 
 		if len(toolUses) > 0 {

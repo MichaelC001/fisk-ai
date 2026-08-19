@@ -232,9 +232,14 @@ type Work struct {
 	// can reach an operator but cannot tell whether one is still there.
 	PromptWait time.Duration
 
-	// Continue is called at a turn boundary for the next turn, holding the run open
-	// while it blocks. Nil is one shot.
-	Continue func(context.Context) agent.Continuation
+	// HumanPaced says further turns of this conversation arrive at somebody's pace
+	// rather than a loop's, so the gap before the next call on the same history is think
+	// time. A provider uses it to choose a cache lifetime that is still there for the
+	// next turn.
+	//
+	// A channel fronting a person or an agent that holds the conversation token sets it.
+	// A queue channel does not: a job is answered once and its history is never re-sent.
+	HumanPaced bool
 
 	// RunContext derives the context this work's run executes under from the server's
 	// own. A channel supplies it to stop one run without stopping the server, or to
@@ -257,13 +262,15 @@ type Work struct {
 	Done func(context.Context, Outcome) error
 }
 
-// Budget bounds what one piece of work may spend. A zero field is unset and leaves
-// the configured limit alone; a value above the configured limit is lowered to it,
-// since local configuration is the ceiling.
+// Budget bounds what one piece of work may use. A zero field is unset and leaves the
+// configured limit alone; a value above the configured limit is lowered to it, since
+// local configuration is the ceiling.
 type Budget struct {
-	// MaxTokens caps total tokens across the run.
+	// MaxTokens caps the tokens a whole conversation may process, counted across every
+	// turn of it rather than reset per piece of work. A channel lowering it below what
+	// the conversation has already processed takes no further turn on it.
 	MaxTokens int64
-	// MaxIterations caps how many times the loop may call the model.
+	// MaxIterations caps how many times the loop may call the model in one turn.
 	MaxIterations int64
 }
 

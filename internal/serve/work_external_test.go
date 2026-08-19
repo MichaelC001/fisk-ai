@@ -263,31 +263,10 @@ var _ = Describe("Work", func() {
 		})
 	})
 
-	Describe("Continue", func() {
-		It("Should take another turn when the channel offers one", func() {
-			turns := 0
-
-			out := serveOne(&serve.Work{
-				ID:     "job-1",
-				Prompt: "first",
-				Continue: func(context.Context) agent.Continuation {
-					turns++
-					if turns > 1 {
-						return agent.Continuation{}
-					}
-
-					return agent.Continuation{Continue: true, Text: "second"}
-				},
-			}, serve.Options{
-				Provider: agenttest.NewScriptedProvider(GinkgoTB(),
-					agenttest.TextResponse("one"), agenttest.TextResponse("two")),
-			})
-
-			Expect(out.Err).ToNot(HaveOccurred())
-			Expect(out.Text).To(Equal("two"), "the answer is the last turn's, not the first's")
-		})
-
-		It("Should be one shot when the channel offers none", func() {
+	// Every piece of work is one turn. A conversation is many of them, each a run of its
+	// own, which is what replaced a channel holding a run open across turns.
+	Describe("One turn per piece of work", func() {
+		It("Should answer once and return", func() {
 			out := serveOne(&serve.Work{ID: "job-1", Prompt: "only"}, serve.Options{
 				Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("one")),
 			})

@@ -380,6 +380,14 @@ func (s *store) Load(id string) (*runstate.RunState, error) {
 }
 
 // List implements runstate.Store.
+//
+// A listing is two records per run rather than the whole journal. Everything it names
+// but the ending is on the meta record, which is written first and never removed, and
+// the last record carries the rest: when the run was last touched, and why it stopped.
+//
+// Reading and folding every run to fill six fields made a listing cost the whole store,
+// since a fold reads every assistant turn and every tool result of every conversation to
+// reach two of them.
 func (s *store) List() ([]runstate.RunInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
@@ -399,31 +407,71 @@ func (s *store) List() ([]runstate.RunInfo, error) {
 			continue
 		}
 
-		recs, err := s.records(id)
-		if err != nil || len(recs) == 0 || recs[0].Meta == nil {
-			continue
-		}
-		rs, err := runstate.Fold(recs)
+		ri, err := s.summarize(ctx, id)
 		if err != nil {
 			continue
 		}
 
-		ri := runstate.RunInfo{
-			RunID:   rs.RunID,
-			Created: recs[0].Meta.Created,
-			Model:   rs.Fingerprint.Model,
-			Prompt:  rs.Prompt,
-		}
-		if rs.Terminal != nil {
-			ri.Terminal = rs.Terminal.Reason
-		}
-		if last, err := s.stream.GetLastMsgForSubject(ctx, s.runWildcard(id)); err == nil {
-			ri.Updated = last.Time
-		}
-		out = append(out, ri)
+		out = append(out, *ri)
 	}
 
 	return out, nil
+}
+
+// summarize builds one run's listing entry from its first and last records.
+//
+// A run whose meta record is absent, unreadable, or of a version this build does not
+// support is not summarized, which is what folding it did: meta is written first and
+// never removed, so its absence means there is no run, and a listing that named a run
+// nothing else here can open would be worse than one that leaves it out.
+func (s *store) summarize(ctx context.Context, id string) (*runstate.RunInfo, error) {
+	first, err := s.stream.GetLastMsgForSubject(ctx, s.metaSubject(id))
+	if err != nil {
+		return nil, fmt.Errorf("jetstream session: reading the meta record of run %q: %w", id, err)
+	}
+
+	var meta runstate.Record
+	err = json.Unmarshal(first.Data, &meta)
+	if err != nil {
+		return nil, fmt.Errorf("%w: run %q meta record: %w", runstate.ErrCorrupt, id, err)
+	}
+	if meta.Meta == nil {
+		return nil, fmt.Errorf("%w: run %q has no meta record at its meta subject", runstate.ErrCorrupt, id)
+	}
+	if meta.Meta.Version != runstate.Version {
+		return nil, fmt.Errorf("%w: run %q is version %d, supported %d", runstate.ErrVersion, id, meta.Meta.Version, runstate.Version)
+	}
+
+	ri := &runstate.RunInfo{
+		RunID:   meta.Meta.RunID,
+		Created: meta.Meta.Created,
+		Updated: first.Time,
+		Model:   meta.Meta.Fingerprint.Model,
+		Prompt:  meta.Meta.Prompt,
+	}
+
+	// The last message on the run wildcard is the highest-stream-seq record, which is
+	// the last appended. Its store time is when the run was last touched, and a terminal
+	// payload on it is why the run stopped.
+	//
+	// A run with a turn in flight ends on whatever that turn last wrote, which carries
+	// no terminal payload, so it is reported as open. That is the one thing this reads
+	// differently from a fold, which keeps the previous turn's ending until a new one
+	// replaces it and so calls a running conversation completed.
+	last, err := s.stream.GetLastMsgForSubject(ctx, s.runWildcard(id))
+	if err != nil {
+		return ri, nil
+	}
+
+	ri.Updated = last.Time
+
+	var rec runstate.Record
+	err = json.Unmarshal(last.Data, &rec)
+	if err == nil && rec.Terminal != nil {
+		ri.Terminal = rec.Terminal.Reason
+	}
+
+	return ri, nil
 }
 
 // Delete implements runstate.Store. Purging the run wildcard removes every record of

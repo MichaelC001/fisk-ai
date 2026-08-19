@@ -25,8 +25,17 @@ import (
 func stampRequest(ctx context.Context, h *Header, sender string, recipient string) {
 	id := NewID()
 
-	h.ID = id
-	h.Request = id
+	// A request tag the caller set is kept, so a caller holds the tag its own task
+	// answers to before the task is sent. Canceling a task and answering its questions
+	// both name that tag, and a caller that only learns it when the call returns cannot
+	// name the call it is inside. A malformed one is refused by the schema rather than
+	// minted over, so a caller hears about its own mistake.
+	if h.Request == "" {
+		h.Request = id
+	}
+	// A request message's id is its correlation tag, which is what the header says a
+	// request carries.
+	h.ID = h.Request
 	// A conversation tag the caller set is kept, which is how the turns of one
 	// conversation carry one tag: the field is the caller's own correlation and means
 	// nothing to a receiver, so minting over it would leave it unable to do the one

@@ -177,10 +177,10 @@ func validateWordsFlags() error {
 // wordsStatusError turns an index state into the error the machine modes fail with.
 func wordsStatusError(status rag.EnumerateStatus) error {
 	if status == rag.EnumIndexNotBuilt {
-		return fmt.Errorf("the knowledge index has not been built; run: fisk-ai knowledge index")
+		return fmt.Errorf("the knowledge index has not been built; run: fisk knowledge index")
 	}
 
-	return fmt.Errorf("the knowledge index has 0 documents; run: fisk-ai knowledge index")
+	return fmt.Errorf("the knowledge index has 0 documents; run: fisk knowledge index")
 }
 
 // renderWords adds the whole listing to c.
@@ -384,5 +384,5 @@ func wordsSuggestion(surface string) string {
 		runes = runes[:3]
 	}
 
-	return fmt.Sprintf("fisk-ai knowledge words %s", strings.ToLower(string(runes)))
+	return fmt.Sprintf("fisk knowledge words %s", strings.ToLower(string(runes)))
 }

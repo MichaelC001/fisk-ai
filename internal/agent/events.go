@@ -9,7 +9,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -81,18 +80,22 @@ type RemoteHostReporter interface {
 // prior conversation before it continues. A surface a person is watching implements it,
 // so they see what was already said; nothing else needs to.
 //
-// It is separate from Events because tools is a rendering registry carrying the
-// application-command layer's type, which a sink that renders nothing should not have
-// to name.
+// It is separate from Events because a sink that renders nothing has nothing to do
+// with a resumed conversation, and because what it carries is the whole stored run
+// rather than one event.
 //
-// A sink that implements it receives the whole folded run, which carries the
+// A sink that implements it receives that whole folded run, which carries the
 // conversation's token where a channel recorded one. Implement it on a surface that
 // shows the run to the person who owns it, and not on one that forwards elsewhere.
 type TranscriptReplayer interface {
-	// ResumeTranscript asks the caller to replay the prior conversation of a
-	// resumed run before it continues; tools is the registry used to render tool
-	// calls the way a live run does.
-	ResumeTranscript(rs *runstate.RunState, tools map[string]*fisk.FiskCommandTool)
+	// ResumeTranscript asks the caller to replay the prior conversation of a resumed
+	// run before it continues.
+	//
+	// How a tool call reads is the caller's, from the call's name and arguments,
+	// which is what makes a replayed turn render as the live one did rather than as a
+	// second rendering of the same thing. It used to be handed the tool registry to
+	// resolve a command line with, which no sink outside this program could hold.
+	ResumeTranscript(rs *runstate.RunState)
 }
 
 // WarningKind selects which advisory a Warning carries and which of its fields
@@ -100,11 +103,16 @@ type TranscriptReplayer interface {
 type WarningKind int
 
 const (
-	// WarnHITLNoTerminal: human_in_the_loop is enabled with no interactive
-	// terminal, so its tools will decline rather than prompt.
+	// WarnHITLNoTerminal: human_in_the_loop is enabled and this run has nobody to ask,
+	// so its tools will decline rather than prompt.
+	//
+	// The condition is that the run was given no prompter, not that no terminal exists.
+	// A terminal run has one when it has an interactive terminal; a run serving a
+	// channel has one when the channel supplies it, which the prompts channel does only
+	// when elicitation is configured. The name predates the second case.
 	WarnHITLNoTerminal WarningKind = iota
-	// WarnConfirmNoTerminal: Count confirmation-gated tools cannot be approved
-	// because no terminal is attached.
+	// WarnConfirmNoTerminal: Count confirmation-gated tools cannot be approved, because
+	// this run has nobody to ask. The condition is the one WarnHITLNoTerminal describes.
 	WarnConfirmNoTerminal
 	// WarnConfirmTagUnmatched: the confirm_tags entry Name matches no loaded tool.
 	WarnConfirmTagUnmatched
@@ -197,7 +205,107 @@ const (
 	// can leave a stored conversation incoherent, so a difference is reported rather
 	// than refused; what it changes is how far this run may get.
 	WarnBudgetDrift
+	// WarnRemoteTagFilterIgnored: the include filter for the remote agent in Name
+	// selects by tag, which discovery does not carry, so the filter was ignored and the
+	// host's tools were taken unfiltered.
+	WarnRemoteTagFilterIgnored
+	// WarnRemoteToolsSkipped: the remote agent in Name advertised tools this run did
+	// not take, listed in Params with the reason each was skipped.
+	WarnRemoteToolsSkipped
+	// WarnRemoteNoTools: the remote agent in Name contributed nothing after filtering.
+	// It is the one that catches a mistyped include: the host answered, the run holds
+	// none of its tools, and nothing else would say so.
+	WarnRemoteNoTools
 )
+
+// HostImportWarnings is what importing one peer's tools has to say about it.
+//
+// It is here rather than in either renderer because both need it and neither owns it: a
+// worker sends these to a caller that cannot see its configuration, and a command that
+// inspects an import prints them directly. Only the kind and its fields are decided,
+// the wording belonging to whatever renders the warning.
+func HostImportWarnings(imp remotetools.HostImport) []Warning {
+	var out []Warning
+
+	if imp.IgnoredIncludeTags {
+		out = append(out, Warning{Kind: WarnRemoteTagFilterIgnored, Name: imp.Host.Name})
+	}
+	if len(imp.Skipped) > 0 {
+		out = append(out, Warning{Kind: WarnRemoteToolsSkipped, Name: imp.Host.Name, Params: imp.Skipped})
+	}
+	// The host answered and this run holds none of its tools. Nothing else reports it,
+	// and a mistyped include filter is exactly what it looks like.
+	if len(imp.Tools) == 0 {
+		out = append(out, Warning{Kind: WarnRemoteNoTools, Name: imp.Host.Name})
+	}
+
+	return out
+}
+
+// warningKindNames is the stable name of every kind.
+//
+// The enumeration's values are positions in a list, so inserting a kind renumbers the
+// ones after it. Anything that leaves this process names a kind with one of these
+// instead: a wire, a log line, a stored record. A kind added later is additive, since
+// a reader that does not know a name still has the warning's other fields.
+var warningKindNames = map[WarningKind]string{
+	WarnHITLNoTerminal:         "hitl_no_terminal",
+	WarnConfirmNoTerminal:      "confirm_no_terminal",
+	WarnConfirmTagUnmatched:    "confirm_tag_unmatched",
+	WarnUnknownTool:            "unknown_tool",
+	WarnMissingRequired:        "missing_required",
+	WarnJournalTerminal:        "journal_terminal",
+	WarnJournalUser:            "journal_user",
+	WarnResumePausedTurn:       "resume_paused_turn",
+	WarnMaxIterInteractive:     "max_iterations_interactive",
+	WarnTurnErrorInteractive:   "turn_error_interactive",
+	WarnMemoryIndex:            "memory_index",
+	WarnSessionRotate:          "session_rotate",
+	WarnToolSearchUnsupported:  "tool_search_unsupported",
+	WarnKnowledgeIndexAbsent:   "knowledge_index_absent",
+	WarnTraceClose:             "trace_close",
+	WarnJournalClose:           "journal_close",
+	WarnTraceWrite:             "trace_write",
+	WarnPromptDenied:           "prompt_denied",
+	WarnSessionEndHook:         "session_end_hook",
+	WarnUnknownReservedTag:     "unknown_reserved_tag",
+	WarnBehaviorTagConflict:    "behavior_tag_conflict",
+	WarnToolTimeout:            "tool_timeout",
+	WarnToolDeferred:           "tool_deferred",
+	WarnApprovalsDropped:       "approvals_dropped",
+	WarnRemoteTagFilterIgnored: "remote_tag_filter_ignored",
+	WarnRemoteToolsSkipped:     "remote_tools_skipped",
+	WarnRemoteNoTools:          "remote_no_tools",
+	WarnBudgetDrift:            "budget_drift",
+}
+
+var warningKindsByName = func() map[string]WarningKind {
+	out := make(map[string]WarningKind, len(warningKindNames))
+	for kind, name := range warningKindNames {
+		out[name] = kind
+	}
+
+	return out
+}()
+
+// String is the kind's stable name, or "unknown" for a value that names no kind.
+func (k WarningKind) String() string {
+	name, ok := warningKindNames[k]
+	if !ok {
+		return "unknown"
+	}
+
+	return name
+}
+
+// ParseWarningKind returns the kind a name belongs to. It reports false for a name
+// this build does not know, which is what a peer on a newer version sends, and the
+// caller renders such a warning from its other fields rather than dropping it.
+func ParseWarningKind(name string) (WarningKind, bool) {
+	kind, ok := warningKindsByName[name]
+
+	return kind, ok
+}
 
 // Warning is a typed operator advisory. Kind selects which fields are meaningful;
 // the caller formats the message text.

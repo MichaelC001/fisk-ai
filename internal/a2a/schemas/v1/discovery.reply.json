@@ -34,6 +34,14 @@
       "items": {
         "$ref": "common.json#/$defs/tool_descriptor"
       }
+    },
+    "telemetry": {
+      "type": "boolean",
+      "description": "The agent exports traces of what it does."
+    },
+    "telemetry_content": {
+      "type": "boolean",
+      "description": "Those traces carry the conversation itself, not only its structure and timing, so a prompt sent here reaches the operator's collector."
     }
   },
   "required": [

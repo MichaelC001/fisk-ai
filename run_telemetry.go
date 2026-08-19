@@ -175,7 +175,7 @@ func reportTelemetryOutcome(tel *bootstrap.Telemetry, collected *telemetry.Error
 // An operator who set a collector endpoint host-wide and then sees no traces has no
 // way to tell a broken pipeline from a run that never enabled one. The rule that
 // causes it, that OTEL_* alone never turns export on, is deliberate: a host-wide
-// endpoint must not silently make every fisk-ai process on the box an exporter. A
+// endpoint must not silently make every fisk process on the box an exporter. A
 // deliberate surprise still needs saying out loud.
 //
 // It names which variables were seen and which switch is responsible, because those

@@ -5,13 +5,13 @@
 package main
 
 import (
-	"fmt"
-	"strings"
 	"time"
 
-	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/ui/columns"
+
+	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/remotetools"
 )
 
 // printRemoteToolStatus prints a per-host status block after the tool table so an
@@ -50,11 +50,11 @@ func printRemoteToolStatus(c *columns.Document, cfg *config.Config, imports []re
 func hostNotes(imp remotetools.HostImport) []string {
 	var notes []string
 
-	if imp.IgnoredIncludeTags {
-		notes = append(notes, fmt.Sprintf("remote agent %q include filter uses tags, which discovery does not carry; the tag filter was ignored (filter by tool name instead)", imp.Host.Name))
-	}
-	if len(imp.Skipped) > 0 {
-		notes = append(notes, fmt.Sprintf("remote agent %q: skipped %s", imp.Host.Name, strings.Join(imp.Skipped, "; ")))
+	for _, w := range agent.HostImportWarnings(imp) {
+		msg := warningMessage(w)
+		if msg != "" {
+			notes = append(notes, msg)
+		}
 	}
 
 	return notes

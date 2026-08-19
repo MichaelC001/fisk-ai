@@ -25,22 +25,35 @@ var _ = Describe("splashInfoLines", func() {
 
 		Expect(lines).To(HaveLen(4))
 		Expect(lines[3]).To(ContainSubstring("telemetry"))
-		Expect(lines[3]).To(ContainSubstring("OTEL Enabled"))
+		Expect(lines[3]).To(ContainSubstring("exported"))
 	})
 
 	// The startup note that says this is printed before the UI takes the terminal, so
 	// for the whole of a full-screen run it is covered and unread. This is where an
 	// operator can actually see that their conversation is leaving the machine.
 	It("Should distinguish exporting the conversation from exporting the structure", func() {
-		lines := splashInfoLines(Meta{Version: "1.2.3", Model: "m", Telemetry: true, TelemetryContent: true})
+		lines := splashInfoLines(Meta{Version: "1.2.3", Model: "m", Telemetry: true, TelemetryContent: ContentExported})
 		joined := strings.Join(lines, "\n")
 
-		Expect(joined).To(ContainSubstring("OTEL Enabled + content"))
+		Expect(joined).To(ContainSubstring("including this conversation"))
 
 		// The plain export case must not claim it, or the marker means nothing.
 		plain := strings.Join(splashInfoLines(Meta{Version: "1.2.3", Model: "m", Telemetry: true}), "\n")
-		Expect(plain).To(ContainSubstring("OTEL Enabled"))
-		Expect(plain).ToNot(ContainSubstring("content"))
+		Expect(plain).To(ContainSubstring("exported"))
+		Expect(plain).ToNot(ContainSubstring("conversation"))
+	})
+
+	// Not knowing is a real answer and must not look like no: the process that exports
+	// is the one running the agent, so a terminal talking to a worker that did not
+	// answer has been told nothing rather than told there is nothing.
+	It("Should say so when the agent did not answer", func() {
+		unknown := strings.Join(splashInfoLines(Meta{Version: "1.2.3", Model: "m", TelemetryContent: ContentExportUnknown}), "\n")
+		Expect(unknown).To(ContainSubstring("unknown"))
+
+		// An agent that answered and exports nothing says nothing, which is every run of
+		// the many agents that never configure it.
+		off := strings.Join(splashInfoLines(Meta{Version: "1.2.3", Model: "m"}), "\n")
+		Expect(off).ToNot(ContainSubstring("telemetry"))
 	})
 
 	// An agent that never configures telemetry is the common case, so a line reporting it

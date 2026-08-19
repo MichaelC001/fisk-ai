@@ -106,6 +106,11 @@
           "minimum": 0,
           "description": "Input tokens written into the prompt cache, included in input_tokens."
         },
+        "thinking_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Output tokens the model spent reasoning, included in output_tokens."
+        },
         "llm_calls": {
           "type": "integer",
           "minimum": 0,
@@ -230,6 +235,12 @@
           "$ref": "#/$defs/statusBlock"
         },
         {
+          "$ref": "#/$defs/warningBlock"
+        },
+        {
+          "$ref": "#/$defs/promptBlock"
+        },
+        {
           "$ref": "#/$defs/unknownBlock"
         }
       ]
@@ -251,7 +262,9 @@
               "tool_call",
               "tool_result",
               "agent_call",
-              "status"
+              "status",
+              "warning",
+              "prompt"
             ]
           },
           "description": "Each constraint here answers a body that would otherwise pass: `required` because properties says nothing about an absent key, `string` and `minLength` because a number, a null or an empty string all satisfy a string enum's negation."
@@ -293,6 +306,10 @@
         },
         "text": {
           "type": "string"
+        },
+        "final": {
+          "type": "boolean",
+          "description": "Marks the text of the turn that ended the run, which is the answer rather than narration on the way to it. The same text arrives again in the result."
         }
       }
     },
@@ -385,10 +402,72 @@
         },
         "phase": {
           "type": "string",
-          "description": "e.g. calling-llm, executing-tool."
+          "description": "e.g. calling-llm, executing-tool. replay_start and replay_end bracket a stored conversation a resume was asked to replay."
         },
         "usage": {
-          "$ref": "#/$defs/usage"
+          "$ref": "#/$defs/usage",
+          "description": "On an iteration status, what that one model call consumed. On replay_end, what the stored conversation has consumed in total, so a caller can seed a running count before this turn's own calls arrive. The two are not summed."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "On replay_end, how many blocks of the stored conversation were sent."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "On replay_end, whether older blocks were left behind."
+        }
+      }
+    },
+    "promptBlock": {
+      "type": "object",
+      "description": "A turn somebody asked for: the prompt a conversation opened with, or one added to it later. A live run never sends one; it appears when a stored conversation is replayed.",
+      "required": [
+        "type",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "prompt"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "warningBlock": {
+      "type": "object",
+      "description": "An advisory the run raised. It carries the warning rather than a sentence about it, so the wording belongs to whatever renders it.",
+      "required": [
+        "type",
+        "kind"
+      ],
+      "properties": {
+        "type": {
+          "const": "warning"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What the warning is about, as a string. A receiver that does not know a kind still has the other fields."
+        },
+        "name": {
+          "type": "string",
+          "description": "The tool, key or setting the warning is about."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string",
+          "description": "The failure the warning reports, as display text. Never matched on."
         }
       }
     }

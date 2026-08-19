@@ -5,6 +5,7 @@
 package a2aendpoint
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -208,6 +209,67 @@ var _ = Describe("A2A endpoint", func() {
 				a2a.DescLine{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
 				a2a.DescLine{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
 			), "a channel that asks nothing advertises no answer address")
+		})
+
+		// Discovery is one route on the one micro service an identity registers, so an
+		// agent that only takes prompts still has to answer it or a peer cannot tell it
+		// from an agent that is not there.
+		Describe("Discovery", func() {
+			discover := func(built []serve.Endpoint) a2a.AgentCard {
+				GinkgoHelper()
+
+				DeferCleanup(closeAll, built)
+
+				transport, err := a2a.NewTransport(config.A2ATransportName, provider, a2a.TransportConfig{Identity: "caller1", Timeout: 5 * time.Second})
+				Expect(err).ToNot(HaveOccurred())
+				DeferCleanup(transport.Close)
+
+				client, err := a2a.NewClient(transport, "caller1")
+				Expect(err).ToNot(HaveOccurred())
+
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				DeferCleanup(cancel)
+
+				card, err := client.Discover(ctx, "agent1")
+				Expect(err).ToNot(HaveOccurred())
+
+				return *card
+			}
+
+			It("Should answer for an agent that serves no tools", func() {
+				built, err := NewFromConfig(promptsConfig("        workers: 1\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				card := discover(built)
+				Expect(card.Name).To(Equal("agent1"))
+				Expect(card.Tools).To(BeEmpty(), "it serves none to peers")
+				Expect(card.Protocols).To(ConsistOf(a2a.ProtocolNamespace))
+			})
+
+			// Registering the route twice would not fail: micro subscribes again on the
+			// same subject in the same queue group, and a peer gets whichever card NATS
+			// picked. So an agent with both endpoints answers from the one with tools.
+			It("Should answer once, with tools, when both endpoints are built", func() {
+				cfg := toolsConfig("      prompts: {}\nsystem_prompt: do the thing\nllm:\n  model: claude-sonnet-4-6\n")
+
+				built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				for range 5 {
+					Expect(discover(built).Tools).ToNot(BeEmpty(), "every answer is the card with tools on it")
+				}
+			})
+
+			// A caller should know before it sends a prompt whether the words travel to
+			// somebody's collector, and it can only know by being told.
+			It("Should say nothing about telemetry when the agent exports none", func() {
+				built, err := NewFromConfig(promptsConfig("        workers: 1\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				card := discover(built)
+				Expect(card.Telemetry).To(BeFalse())
+				Expect(card.TelemetryContent).To(BeFalse())
+			})
 		})
 
 		It("Should describe the answer address when it asks its callers questions", func() {

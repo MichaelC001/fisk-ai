@@ -10,6 +10,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/conns"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
@@ -83,6 +84,15 @@ type BuildOptions struct {
 	// that answers calls uses it to open a span per call; the channels do not need it,
 	// since a run is handed one through the server's own options.
 	Telemetry *telemetry.Provider
+
+	// Sessions is the process's run-journal store, or nil when the caller built none.
+	// It is borrowed like the connection: an endpoint may read it and must not close
+	// it, since the runs write to the same one.
+	//
+	// A channel that only produces work never needs it, the run reaching the store
+	// through the server. It is here for an endpoint that answers a caller about a
+	// conversation without running one.
+	Sessions runstate.Store
 }
 
 // Endpoints builds the endpoints a configuration enables, in the order the builders were
