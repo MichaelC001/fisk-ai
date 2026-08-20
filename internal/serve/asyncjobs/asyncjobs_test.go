@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,13 +133,14 @@ var _ = Describe("Intake", func() {
 		Expect(err).To(MatchError(ContainSubstring("over the 16 byte limit")))
 	})
 
-	// The engine's own name rule allows a leading dash, a colon and any length, so a
-	// task id it accepted can still be one no session store will take. Finding that out
-	// here rather than at the create is the whole point of checking it.
-	It("Should refuse a task id no session store would accept", func() {
-		for _, id := range []string{"-leading-dash", "has:colon", string(make([]byte, 200))} {
+	// The engine's own name rule allows a leading dash, a colon and any length, and every
+	// one of those hashes to a session id the store takes, so the queue accepts each id
+	// the engine does.
+	It("Should take every task id the engine accepts", func() {
+		for _, id := range []string{"-leading-dash", "has:colon", strings.Repeat("a", 200)} {
 			_, err := ch.intake(&asyncjobs.Task{ID: id, Payload: encode(newRequest("go"))}, ch.log)
-			Expect(err).To(MatchError(ContainSubstring("cannot name a session")), "id %q", id)
+			Expect(err).ToNot(HaveOccurred(), "id %q", id)
+			Expect(runstate.ValidateID(SessionFor("worker", id))).To(Succeed(), "id %q", id)
 		}
 	})
 
@@ -225,11 +227,13 @@ var _ = Describe("Dispositions", func() {
 		Expect(validator.ValidateMessage(res)).To(Succeed(), "the answer is a published contract")
 	})
 
+	// A job that died part way through an expensive turn is where a queue operator most
+	// wants to know what the attempt cost, so the failure carries what the answer does.
 	It("Should acknowledge a run that failed with an error message", func() {
 		payload, err := ch.disposition(req, serve.Outcome{
 			SessionID: "job1",
 			Reason:    runstate.ReasonMaxIterations,
-			Stats:     &util.RunStats{},
+			Stats:     &util.RunStats{InTokens: 33, OutTokens: 44},
 			Err:       fmt.Errorf("ran out of iterations"),
 		}, ch.log)
 
@@ -240,6 +244,7 @@ var _ = Describe("Dispositions", func() {
 		Expect(msg.StopReason).To(Equal(a2a.StopMaxIterations))
 		Expect(msg.Err).To(Equal("ran out of iterations"))
 		Expect(msg.Request).To(Equal(req.Request))
+		Expect(msg.Usage).To(Equal(&a2a.Usage{InputTokens: 33, OutputTokens: 44}))
 
 		Expect(validator.ValidateMessage(msg)).To(Succeed())
 	})

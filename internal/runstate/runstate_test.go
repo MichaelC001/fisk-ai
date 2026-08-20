@@ -537,11 +537,19 @@ var _ = Describe("runstate", func() {
 			Expect(a.Equal(b)).To(BeFalse())
 		})
 
-		It("reports a changed tool set as drift a resume refuses", func() {
+		// A provider reads a stored conversation whether or not it still holds every
+		// tool the history names, so a changed tool set continues. It is its own diff
+		// because it endangers a standing approval, which is keyed on a tool name.
+		It("reports a changed tool set as drift a resume continues through", func() {
 			a := Fingerprint{Model: "m", ToolsHash: "h1", MaxTokens: 100}
 			b := Fingerprint{Model: "m", ToolsHash: "h2", MaxTokens: 100}
-			Expect(a.BlockingDiff(b)).To(ConsistOf("tool set: changed"))
+			Expect(a.ToolsDiff(b)).To(ConsistOf("tool set: changed"))
+			Expect(a.BlockingDiff(b)).To(BeEmpty())
 			Expect(a.BudgetDiff(b)).To(BeEmpty())
+
+			// Equal is the strict comparison, so it still sees it.
+			Expect(a.Equal(b)).To(BeFalse())
+			Expect(a.Diff(b)).To(ConsistOf("tool set: changed"))
 		})
 
 		It("excludes the provider from Equal and Diff so it stays a separate hard gate", func() {

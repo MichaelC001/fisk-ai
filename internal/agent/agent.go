@@ -137,7 +137,7 @@ type Checkpoint struct {
 	//
 	// One reported value narrows under it. The root span's Resumed attribute is
 	// fixed before the store is reachable, so with CreateIfMissing it reports that a
-	// resume was asked for rather than that one happened. The SessionStart hook's
+	// resume was asked for rather than that one happened. The RunStart hook's
 	// Resumed is unaffected and reports what the store said.
 	CreateIfMissing bool
 
@@ -415,7 +415,7 @@ type Options struct {
 	// single place to observe a run, deny or adjust individual tool calls, and stop a run
 	// from your own code. A nil field does not fire. They are trusted in-process code with
 	// the agent's own privileges, like CustomTools: there is no sandbox, and a panic in a
-	// hook aborts the run as a *PanicError (SessionEnd apart, which fires once the
+	// hook aborts the run as a *PanicError (RunEnd apart, which fires once the
 	// outcome is decided). See the Hooks type for the full contract.
 	Hooks Hooks
 
@@ -855,7 +855,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// (never onto the returned error, which may cross to a remote peer and leaks absolute
 	// paths and frame arguments), and leaves res.Reason unset because a crash is not an
 	// outcome. Being the one point every exit passes through, crash included, it is also
-	// where the SessionEnd hook fires, exactly once.
+	// where the RunEnd hook fires, exactly once.
 	// It catches only this goroutine; the agent package spawns none today, but a
 	// future goroutine would escape it, and it cannot catch a fatal runtime error
 	// (concurrent map write), OOM, or runtime.Goexit, so it is not a substitute for the
@@ -865,7 +865,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		crashed := p != nil
 
 		// The stack is captured first, while the panicking frames are still on this
-		// goroutine, since the SessionEnd hook below runs caller code (which may itself
+		// goroutine, since the RunEnd hook below runs caller code (which may itself
 		// panic) before the stack reaches the events sink.
 		var stack []byte
 		if crashed {
@@ -881,14 +881,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 		}
 
-		// SessionEnd fires from here and nowhere else, so it fires exactly once for
+		// RunEnd fires from here and nowhere else, so it fires exactly once for
 		// every run that reached the runner, whatever ended it: completed, budget,
 		// suspended, error, or this crash. A setup failure before the runner exists
 		// never started a session, so it does not fire for one. It reads opts.Hooks
 		// rather than the runner's copy because the runner may be nil here. On a crash
 		// Err is still nil, the PanicError being set below, so a hook keys off Crashed.
 		if activeRunner != nil && res.Stats != nil {
-			opts.Hooks.fireSessionEnd(ctx, events, SessionEndInfo{
+			opts.Hooks.fireRunEnd(ctx, events, RunEndInfo{
 				SessionID: res.SessionID,
 				Reason:    res.Reason,
 				Crashed:   crashed,
@@ -1442,7 +1442,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	)
 
 	// Resolve the session id up front, before any session is created or opened, so
-	// SessionStart can carry it and an aborting hook leaves no orphan session. A resume
+	// RunStart can carry it and an aborting hook leaves no orphan session. A resume
 	// reuses the id it was asked to continue; a fresh checkpointed run takes its configured
 	// name or a fresh id (generated once here, then reused when the session is created); a
 	// non-checkpointed run has none.
@@ -1463,7 +1463,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	resuming := opts.Checkpoint.ResumeID != ""
 
 	// The store is built, and a resumed session read, before either hook fires. That
-	// ordering is what SessionStart's contract already promises (it fires before any
+	// ordering is what RunStart's contract already promises (it fires before any
 	// session is created or opened), and it is what lets a create-or-resume know which
 	// of the two it is doing. The cost is that a resume naming a session no store has
 	// fails before the hooks rather than after.
@@ -1528,7 +1528,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
-	// SessionStart fires once as the run begins, on a fresh run and a resume alike (Resumed
+	// RunStart fires once as the run begins, on a fresh run and a resume alike (Resumed
 	// distinguishes them), before any session is created or opened and before the first
 	// model call, so an aborting hook leaves nothing behind. ToolNames lists every tool the
 	// model can address, including those deferred behind tool search.
@@ -1538,7 +1538,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	}
 	slices.Sort(toolNames)
 
-	err = opts.Hooks.fireSessionStart(ctx, SessionStartInfo{
+	err = opts.Hooks.fireRunStart(ctx, RunStartInfo{
 		SessionID:   sessionID,
 		Resumed:     resuming,
 		Interactive: interactive,
@@ -1546,11 +1546,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		ToolNames:   toolNames,
 	})
 	if err != nil {
-		return res, fmt.Errorf("SessionStart hook: %w", err)
+		return res, fmt.Errorf("RunStart hook: %w", err)
 	}
 
 	// The initial prompt enters the conversation now, on a fresh run only (a resume
-	// reconstructs its history and does not re-fire the hook), ordered after SessionStart.
+	// reconstructs its history and does not re-fire the hook), ordered after RunStart.
 	// A Deny stops the run before any session is created or any model call is made; it is
 	// surfaced as an error so the caller exits with the reason. To reject the prompt the
 	// hook sets Deny; a returned error instead aborts the run.
@@ -1603,8 +1603,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// Drift the resume must refuse, which is every part of the configuration that
 			// can leave a stored conversation the provider will not accept. The two budget
 			// bounds are not in it and are reported below, since neither can corrupt
-			// history and a served conversation's caller may lower both per turn.
+			// history and a served conversation's caller may lower both per turn. Nor is
+			// the tool set, which a provider reads a history against either way; it is
+			// read separately here because it endangers a grant rather than a
+			// conversation.
 			blocking := rs.Fingerprint.BlockingDiff(fp)
+			toolDrift := rs.Fingerprint.ToolsDiff(fp)
 			if len(blocking) > 0 && !opts.Checkpoint.Force {
 				return res, fmt.Errorf("cannot resume %q, the configuration changed since it was saved:\n  %s\nre-run against the original configuration, or pass --force to continue with the current one",
 					sessionID, strings.Join(blocking, "\n  "))
@@ -1707,14 +1711,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// never persisted.
 			system = append(system, resumeReminder)
 
-			// Standing approvals restore with the conversation, unless --force carried the
-			// resume across a changed configuration: a grant is keyed on a tool name alone,
-			// so a tool set that moved under it may have changed the very command the
-			// operator approved. A one-shot approval is dropped on the same terms, its call
-			// naming a tool that may have moved under it too. It reads the same drift the
-			// gate above did, so a budget difference does not drop a grant.
-			forced := len(blocking) > 0
-			if !forced {
+			// Standing approvals restore with the conversation, unless the tool set moved
+			// or --force carried the resume across a changed configuration: a grant is
+			// keyed on a tool name alone, so a tool set that moved under it may have
+			// changed the very command the operator approved. A one-shot approval is
+			// dropped on the same terms, its call naming a tool that may have moved under
+			// it too. A budget difference drops neither.
+			dropApprovals := len(blocking) > 0 || len(toolDrift) > 0
+			if !dropApprovals {
 				approvals.seed(rs.Approvals, rs.CallApprovals)
 				info.StandingApprovals = rs.Approvals
 			}
@@ -1722,8 +1726,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			info.SessionID = sessionID
 			info.Resumed = true
 			events.Starting(info)
-			if forced && len(rs.Approvals) > 0 {
+			if dropApprovals && len(rs.Approvals) > 0 {
 				events.Warn(Warning{Kind: WarnApprovalsDropped, Count: len(rs.Approvals)})
+			}
+			if len(toolDrift) > 0 {
+				events.Warn(Warning{Kind: WarnToolSetDrift, Params: toolDrift})
 			}
 			budgetDrift := rs.Fingerprint.BudgetDiff(fp)
 			if len(budgetDrift) > 0 {

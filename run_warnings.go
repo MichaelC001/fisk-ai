@@ -51,8 +51,8 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("trace write failed, trace will be incomplete: %v", w.Err)
 	case agent.WarnPromptDenied:
 		return fmt.Sprintf("your prompt was rejected by a policy hook: %s; enter a different prompt, or Ctrl-D to end", w.Name)
-	case agent.WarnSessionEndHook:
-		return fmt.Sprintf("the SessionEnd hook failed: %v; the run's outcome is unaffected", w.Err)
+	case agent.WarnRunEndHook:
+		return fmt.Sprintf("the RunEnd hook failed: %v; the run's outcome is unaffected", w.Err)
 	case agent.WarnUnknownReservedTag:
 		return fmt.Sprintf("tool %q carries unknown reserved tag(s): %s; the ai: prefix is reserved and these do nothing, check the spelling (run 'fisk info' to list the reserved tags)", w.Name, strings.Join(w.Params, ", "))
 	case agent.WarnBehaviorTagConflict:
@@ -67,6 +67,8 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("remote agent %q: skipped %s", w.Name, strings.Join(w.Params, "; "))
 	case agent.WarnRemoteNoTools:
 		return fmt.Sprintf("remote agent %q contributed no tools after filtering; check the include/exclude for that host (run 'fisk info' to see what it advertises)", w.Name)
+	case agent.WarnToolSetDrift:
+		return "this session was saved with a different tool set; it continues under the current one, and the approvals you gave it were dropped since a tool may have moved under them"
 	case agent.WarnBudgetDrift:
 		return fmt.Sprintf("this session was saved with different budget bounds (%s); it continues under the current configuration", strings.Join(w.Params, ", "))
 	default:

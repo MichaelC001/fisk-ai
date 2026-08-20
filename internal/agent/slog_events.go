@@ -229,14 +229,16 @@ func warningKindName(k WarningKind) string {
 		return "trace_write"
 	case WarnPromptDenied:
 		return "prompt_denied"
-	case WarnSessionEndHook:
-		return "session_end_hook"
+	case WarnRunEndHook:
+		return "run_end_hook"
 	case WarnUnknownReservedTag:
 		return "unknown_reserved_tag"
 	case WarnBehaviorTagConflict:
 		return "behavior_tag_conflict"
 	case WarnToolTimeout:
 		return "tool_timeout"
+	case WarnToolSetDrift:
+		return "tool_set_drift"
 	case WarnBudgetDrift:
 		return "budget_drift"
 	default:

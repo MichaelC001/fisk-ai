@@ -56,6 +56,8 @@ func (c *Channel) handle(ctx context.Context, _ asyncjobs.Logger, task *asyncjob
 
 	outcome := make(chan serve.Outcome, 1)
 
+	session := SessionFor(c.identity, task.ID)
+
 	// Fields the request carries that Work has no home for are dropped here, and
 	// deliberately: tool_hints, budget.call_timeout, stream, Header.Parent and
 	// Header.Recipient. Header.Conversation is dropped with the most care, since it is
@@ -65,12 +67,17 @@ func (c *Channel) handle(ctx context.Context, _ asyncjobs.Logger, task *asyncjob
 		ID:      task.ID,
 		Prompt:  req.Prompt,
 		Context: req.Context,
-		// The task id names the session, and the store rather than the delivery count
+		// The task id decides the session and the store rather than the delivery count
 		// decides whether this is a first run or a resume. A worker killed mid-run
 		// persists no count, so the queue cannot answer it; the store knows whether the
 		// journal exists, which is what at-least-once delivery actually asks.
+		//
+		// It decides the session through a hash rather than naming it, so a journal that
+		// exists under this name is one an earlier delivery of this task made. Handing
+		// the store the submitter's own bytes would let a task name any journal on the
+		// worker, the conversations of the prompts channel included.
 		Checkpoint: agent.Checkpoint{
-			ResumeID:        task.ID,
+			ResumeID:        session,
 			CreateIfMissing: true,
 		},
 		// The task id again, because a claim naming this process would name the same
@@ -116,17 +123,7 @@ func (c *Channel) intake(task *asyncjobs.Task, log *slog.Logger) (*a2a.Request, 
 		return nil, fmt.Errorf("the payload is %d bytes, over the %d byte limit", len(task.Payload), c.maxPayload)
 	}
 
-	// The task id names the journal, and the engine's own name rule is looser than the
-	// session store's: it allows a leading dash, a colon, and any length. Checking it
-	// here means an id no store would accept is refused before any setup rather than at
-	// the create, which is after.
-	err := runstate.ValidateID(task.ID)
-	if err != nil {
-		log.Error("A job id cannot name a session", "error", err)
-		return nil, fmt.Errorf("the task id cannot name a session")
-	}
-
-	err = c.validator.Validate(task.Payload)
+	err := c.validator.Validate(task.Payload)
 	if err != nil {
 		log.Error("A job payload failed schema validation", "error", err)
 		return nil, fmt.Errorf("the payload is not a valid v1 message")
@@ -255,6 +252,11 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 
 		msg := a2a.NewError(out.Err.Error())
 		msg.StopReason = reason
+		// What the attempt cost, on the same terms as a run that answered. A job that
+		// died on its token budget, or part way through an expensive turn, is where an
+		// operator most wants the number, and it is the one case that used to store
+		// none.
+		msg.Usage = a2a.UsageFrom(out.Stats)
 		a2a.StampReply(&msg.Header, &req.Header, c.identity)
 
 		return msg, nil
