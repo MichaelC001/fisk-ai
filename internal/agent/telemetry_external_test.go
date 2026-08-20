@@ -513,7 +513,7 @@ func TestTelemetry_StartupKeepsMemoryAttributionWithNoIndexAndNoToolCall(t *test
 //
 // PreModelCall is the hook to observe from. It fires inside the run loop, past the
 // handoff, so seeing the span already exported there proves the explicit End ran.
-// SessionStart looks like the natural choice and is not: it fires during setup, well
+// RunStart looks like the natural choice and is not: it fires during setup, well
 // before the runner is built, so it would see an unended span no matter what.
 func TestTelemetry_StartupSpanEndsAtTheHandoff(t *testing.T) {
 	g := NewWithT(t)

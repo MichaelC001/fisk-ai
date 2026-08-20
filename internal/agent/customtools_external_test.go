@@ -216,12 +216,13 @@ func TestCustomTools_CountTowardDeferralThreshold(t *testing.T) {
 	}
 }
 
-// TestCustomTools_ResumeRefusesWhenChanged proves a custom tool is part of the run
-// fingerprint: a checkpointed run started with one custom tool refuses to resume when a
-// different custom tool is injected, because the tool set changed. This is the contract
-// the Options.CustomTools doc rests on (a custom tool's Definition must be deterministic
-// across restarts).
-func TestCustomTools_ResumeRefusesWhenChanged(t *testing.T) {
+// TestCustomTools_ResumeWarnsWhenChanged proves a custom tool is part of the run
+// fingerprint: a checkpointed run started with one custom tool notices when a different
+// one is injected. It continues and warns rather than refusing, since what a changed tool
+// set endangers is a standing approval rather than the stored conversation. This is the
+// contract the Options.CustomTools doc rests on (a custom tool's Definition must be
+// deterministic across restarts).
+func TestCustomTools_ResumeWarnsWhenChanged(t *testing.T) {
 	g := NewWithT(t)
 	ctx := context.Background()
 
@@ -250,8 +251,10 @@ func TestCustomTools_ResumeRefusesWhenChanged(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
 
-	// Run 2: resume the saved session with a different custom tool set, so the tool-set
-	// fingerprint no longer matches and the resume is refused.
+	// Run 2: resume the saved session with a different custom tool set. The resume
+	// continues, because a provider reads a stored conversation whether or not it still
+	// holds every tool the history names, and says so rather than refusing.
+	events2 := agenttest.NewRecordingEvents()
 	opts2 := agent.Options{
 		Config:      agenttest.Config(t, app),
 		ConfigFile:  "agent.yaml",
@@ -260,7 +263,16 @@ func TestCustomTools_ResumeRefusesWhenChanged(t *testing.T) {
 		Checkpoint:  agent.Checkpoint{ResumeID: res1.SessionID},
 		CustomTools: []toolkit.Tool{toolB},
 	}
-	_, err = agent.Run(ctx, opts2, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).To(MatchError(ContainSubstring("the configuration changed")))
-	g.Expect(err).To(MatchError(ContainSubstring("tool set: changed")))
+	res2, err := agent.Run(ctx, opts2, events2, agenttest.NewScriptedPrompter(t))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+
+	var drift []agent.Warning
+	for _, w := range events2.Warnings() {
+		if w.Kind == agent.WarnToolSetDrift {
+			drift = append(drift, w)
+		}
+	}
+	g.Expect(drift).To(HaveLen(1))
+	g.Expect(drift[0].Params).To(ContainElement("tool set: changed"))
 }

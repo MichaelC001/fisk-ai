@@ -24,6 +24,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
 )
 
 const (
@@ -403,16 +404,55 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 	})
 
 	Describe("At-least-once delivery", func() {
+		// A submitter chooses the task id, so it must not be the journal name. A journal
+		// id is not a secret: it is logged and a deferred run's terminal message carries
+		// it, and the prompts channel writes its conversations to the same store.
+		It("Should not reach a journal the submitter names", func() {
+			client := newQueue(nc, 30*time.Second, 5)
+
+			store := agenttest.NewFakeSessionStore(GinkgoTB())
+
+			// A conversation of the prompts channel, named the way that channel names one.
+			victim := a2aendpoint.SessionFor("worker", "3Hzmp8VqrKL42NmXcPd7bTgWfR1")
+			suspendedSession(store, victim)
+
+			before, err := store.Load(victim)
+			Expect(err).ToNot(HaveOccurred())
+
+			startWorker(nc, workerOpts{
+				provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("ran somewhere of its own")),
+				store:    store,
+			})
+
+			// The submitter spells that conversation's journal id as its task id.
+			enqueue(client, victim, encode(newRequest("what did we say earlier")))
+
+			Eventually(taskState(client, victim), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
+
+			after, err := store.Load(victim)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(after.Messages).To(Equal(before.Messages), "the conversation took no turn")
+
+			// The job ran, in a journal of its own.
+			mine, err := store.Load(SessionFor("worker", victim))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mine.Messages).ToNot(BeEmpty())
+		})
+
 		// The crash case: a journal exists because a previous attempt got part way, and
 		// the task's own try count says nothing because the worker that died never
 		// returned to persist it. The store is the authority, so the job resumes.
 		It("Should resume a session a dead attempt left behind rather than restart it", func() {
 			client := newQueue(nc, 30*time.Second, 5)
 
-			store := agenttest.NewFakeSessionStore(GinkgoTB())
-			suspendedSession(store, "job1")
+			// The journal is seeded where the task id derives it, not under the task id
+			// itself: a job reaches its own session and no other.
+			session := SessionFor("worker", "job1")
 
-			before, err := store.Load("job1")
+			store := agenttest.NewFakeSessionStore(GinkgoTB())
+			suspendedSession(store, session)
+
+			before, err := store.Load(session)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(before.Messages).ToNot(BeEmpty())
 
@@ -431,12 +471,12 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 
 			// A restart would have replaced the journal; a resume continues it, and
 			// announces itself with a claim before it does anything.
-			after, err := store.Load("job1")
+			after, err := store.Load(session)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(len(after.Messages)).To(BeNumerically(">", len(before.Messages)))
 
 			var claims []*runstate.ClaimRecord
-			for _, rec := range openRecords(store, "job1") {
+			for _, rec := range openRecords(store, session) {
 				if rec.Claim != nil {
 					claims = append(claims, rec.Claim)
 				}
@@ -460,7 +500,7 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 				ConfigFile:   "agent.yaml",
 				Prompt:       []string{"go"},
 				Provider:     agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("paid for already")),
-				Checkpoint:   agent.Checkpoint{ResumeID: "job1", CreateIfMissing: true},
+				Checkpoint:   agent.Checkpoint{ResumeID: SessionFor("worker", "job1"), CreateIfMissing: true},
 				SessionStore: store,
 			}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 			Expect(err).ToNot(HaveOccurred())
@@ -498,10 +538,12 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 		It("Should return a job whose session another worker holds", func() {
 			client := newQueue(nc, 30*time.Second, 1)
 
-			store := agenttest.NewFakeSessionStore(GinkgoTB())
-			suspendedSession(store, "job1")
+			session := SessionFor("worker", "job1")
 
-			held, err := store.Open("job1")
+			store := agenttest.NewFakeSessionStore(GinkgoTB())
+			suspendedSession(store, session)
+
+			held, err := store.Open(session)
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(held.Close)
 
@@ -550,9 +592,6 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 					return encode(cancel)
 				},
 				"is not a io.choria.fisk-ai.v1.request.prompt message"),
-			Entry("an id no session store would accept", "-job3",
-				func() []byte { return encode(newRequest("go")) },
-				"cannot name a session"),
 			Entry("a prompt with nothing in it", "job4",
 				func() []byte { return encode(newRequest("")) },
 				"not a valid v1 message"),

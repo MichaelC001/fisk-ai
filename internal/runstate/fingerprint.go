@@ -64,10 +64,19 @@ func (f Fingerprint) Equal(o Fingerprint) bool {
 }
 
 // BlockingDiff returns the differences a resume must refuse: the model, the system
-// prompt, the tool set, the thinking mode and the reasoning effort, each of which can
-// leave a stored conversation the provider will not accept. A stored tool_use may name a
-// tool that is gone, and a thinking signature belongs to the mode and effort that
-// produced it.
+// prompt, the thinking mode and the reasoning effort, each of which can leave a stored
+// conversation the provider will not accept. A thinking signature belongs to the mode and
+// effort that produced it.
+//
+// The tool set is excluded, and was in this list on a claim nothing tested. A stored
+// tool_use naming a tool that is gone was said to break a conversation, and it does not:
+// against the Messages API a history holding a completed tool_use and tool_result for an
+// undeclared tool is accepted, as it is with no tools declared at all, and so is the
+// error result the resume itself produces for the call. The one shape a provider refuses
+// is a message list ending on a tool_use with no result, which is refused whether or not
+// the tool is declared and which a run never sends: completePending dispatches the call
+// and appends its result, unknown tool included, before the next model call. Drift in the
+// tool set is reported through ToolsDiff and drops the standing approvals.
 //
 // MaxTokens and MaxIterations are excluded. Neither can corrupt history: they bound
 // how far a run gets, so a difference finishes a run under limits it did not start
@@ -84,9 +93,6 @@ func (f Fingerprint) BlockingDiff(o Fingerprint) []string {
 	if f.SystemHash != o.SystemHash {
 		out = append(out, "system prompt: changed")
 	}
-	if f.ToolsHash != o.ToolsHash {
-		out = append(out, "tool set: changed")
-	}
 	if f.ThinkingMode != o.ThinkingMode {
 		out = append(out, fmt.Sprintf("thinking: %s -> %s", f.ThinkingMode, o.ThinkingMode))
 	}
@@ -95,6 +101,21 @@ func (f Fingerprint) BlockingDiff(o Fingerprint) []string {
 	}
 
 	return out
+}
+
+// ToolsDiff reports whether the tool set moved, for a resume to warn about while
+// continuing and to drop its standing approvals on.
+//
+// It does not gate the resume, the history being readable either way, and it is separate
+// from BlockingDiff because what it endangers is a grant rather than a conversation: an
+// approval is keyed on a tool name, so a tool set that moved under it may have changed
+// the very command the operator approved.
+func (f Fingerprint) ToolsDiff(o Fingerprint) []string {
+	if f.ToolsHash == o.ToolsHash {
+		return nil
+	}
+
+	return []string{"tool set: changed"}
 }
 
 // BudgetDiff returns the differences in the two bounds BlockingDiff excludes, for a
@@ -115,6 +136,13 @@ func (f Fingerprint) BudgetDiff(o Fingerprint) []string {
 // Diff returns a human-readable line per field that differs between f (the saved
 // fingerprint) and o (the current one). Hashed fields are reported as changed rather
 // than showing their opaque values.
+//
+// It is every field, across all three of the narrower diffs, since Equal is the strict
+// comparison and a resume asks one of those instead.
 func (f Fingerprint) Diff(o Fingerprint) []string {
-	return append(f.BlockingDiff(o), f.BudgetDiff(o)...)
+	out := f.BlockingDiff(o)
+	out = append(out, f.ToolsDiff(o)...)
+	out = append(out, f.BudgetDiff(o)...)
+
+	return out
 }

@@ -2,8 +2,8 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-// These tests exercise the run-entry lifecycle hooks (SessionStart and the initial
-// UserPromptSubmit) and the run-exit one (SessionEnd) through the exported agent.Run API,
+// These tests exercise the run-entry lifecycle hooks (RunStart and the initial
+// UserPromptSubmit) and the run-exit one (RunEnd) through the exported agent.Run API,
 // since they fire from Run's setup and its panic barrier rather than the runner's loop.
 // The continuation-boundary hooks (TurnEnd and the follow-up UserPromptSubmit) are
 // covered at the runner level in agent_test.go.
@@ -25,16 +25,16 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// TestHooks_RunEntryFiresSessionStartThenInitialPrompt proves the run-entry hooks fire
-// once, in order (SessionStart then the initial UserPromptSubmit), and carry the run's
+// TestHooks_RunEntryFiresRunStartThenInitialPrompt proves the run-entry hooks fire
+// once, in order (RunStart then the initial UserPromptSubmit), and carry the run's
 // resolved parameters on a fresh checkpointed run.
-func TestHooks_RunEntryFiresSessionStartThenInitialPrompt(t *testing.T) {
+func TestHooks_RunEntryFiresRunStartThenInitialPrompt(t *testing.T) {
 	g := NewWithT(t)
 
 	app := agenttest.NewFakeApp(t, exampleApp())
 
 	var order []string
-	var start agent.SessionStartInfo
+	var start agent.RunStartInfo
 	var submit agent.UserPromptSubmitInfo
 
 	res, err := agent.Run(context.Background(), agent.Options{
@@ -45,7 +45,7 @@ func TestHooks_RunEntryFiresSessionStartThenInitialPrompt(t *testing.T) {
 		Checkpoint:   agent.Checkpoint{Enabled: true},
 		SessionStore: agenttest.NewFakeSessionStore(t),
 		Hooks: agent.Hooks{
-			SessionStart: func(_ context.Context, in agent.SessionStartInfo) error {
+			RunStart: func(_ context.Context, in agent.RunStartInfo) error {
 				order = append(order, "session-start")
 				start = in
 				return nil
@@ -61,7 +61,7 @@ func TestHooks_RunEntryFiresSessionStartThenInitialPrompt(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	// SessionStart fires before the initial prompt, exactly once each.
+	// RunStart fires before the initial prompt, exactly once each.
 	g.Expect(order).To(Equal([]string{"session-start", "prompt-submit"}))
 
 	g.Expect(start.Resumed).To(BeFalse())
@@ -108,9 +108,9 @@ func TestHooks_InitialPromptDenyAbortsBeforeSessionCreate(t *testing.T) {
 	g.Expect(infos).To(BeEmpty())
 }
 
-// TestHooks_SessionStartErrorAbortsBeforeSessionCreate proves a SessionStart error aborts
+// TestHooks_RunStartErrorAbortsBeforeSessionCreate proves a RunStart error aborts
 // the run before any session is created.
-func TestHooks_SessionStartErrorAbortsBeforeSessionCreate(t *testing.T) {
+func TestHooks_RunStartErrorAbortsBeforeSessionCreate(t *testing.T) {
 	g := NewWithT(t)
 
 	app := agenttest.NewFakeApp(t, exampleApp())
@@ -124,23 +124,23 @@ func TestHooks_SessionStartErrorAbortsBeforeSessionCreate(t *testing.T) {
 		Checkpoint:   agent.Checkpoint{Enabled: true},
 		SessionStore: store,
 		Hooks: agent.Hooks{
-			SessionStart: func(context.Context, agent.SessionStartInfo) error {
+			RunStart: func(context.Context, agent.RunStartInfo) error {
 				return errors.New("boom")
 			},
 		},
 	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
 
-	g.Expect(err).To(MatchError(ContainSubstring("SessionStart hook")))
+	g.Expect(err).To(MatchError(ContainSubstring("RunStart hook")))
 
 	infos, lerr := store.List()
 	g.Expect(lerr).NotTo(HaveOccurred())
 	g.Expect(infos).To(BeEmpty())
 }
 
-// TestHooks_ResumeFiresSessionStartResumedNoInitialPrompt proves a resume fires
-// SessionStart with Resumed true and does NOT re-fire the initial UserPromptSubmit, since
+// TestHooks_ResumeFiresRunStartResumedNoInitialPrompt proves a resume fires
+// RunStart with Resumed true and does NOT re-fire the initial UserPromptSubmit, since
 // the reconstructed history is not a fresh prompt.
-func TestHooks_ResumeFiresSessionStartResumedNoInitialPrompt(t *testing.T) {
+func TestHooks_ResumeFiresRunStartResumedNoInitialPrompt(t *testing.T) {
 	g := NewWithT(t)
 	ctx := context.Background()
 
@@ -162,7 +162,7 @@ func TestHooks_ResumeFiresSessionStartResumedNoInitialPrompt(t *testing.T) {
 	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
 
 	// Run 2: resume the saved session, recording the lifecycle hooks.
-	var starts []agent.SessionStartInfo
+	var starts []agent.RunStartInfo
 	var submits []agent.UserPromptSubmitInfo
 	res2, err := agent.Run(ctx, agent.Options{
 		Config:       agenttest.Config(t, app),
@@ -171,7 +171,7 @@ func TestHooks_ResumeFiresSessionStartResumedNoInitialPrompt(t *testing.T) {
 		Checkpoint:   agent.Checkpoint{ResumeID: res1.SessionID},
 		SessionStore: store,
 		Hooks: agent.Hooks{
-			SessionStart: func(_ context.Context, in agent.SessionStartInfo) error {
+			RunStart: func(_ context.Context, in agent.RunStartInfo) error {
 				starts = append(starts, in)
 				return nil
 			},
@@ -184,18 +184,18 @@ func TestHooks_ResumeFiresSessionStartResumedNoInitialPrompt(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
 
-	// SessionStart re-fires with Resumed true; the initial prompt does not re-fire.
+	// RunStart re-fires with Resumed true; the initial prompt does not re-fire.
 	g.Expect(starts).To(HaveLen(1))
 	g.Expect(starts[0].Resumed).To(BeTrue())
 	g.Expect(starts[0].SessionID).To(Equal(res1.SessionID))
 	g.Expect(submits).To(BeEmpty())
 }
 
-// TestHooks_SessionEndFiresOnEveryOutcome proves SessionEnd fires exactly once for every
+// TestHooks_RunEndFiresOnEveryOutcome proves RunEnd fires exactly once for every
 // way a run that reached the runner can end - a completed answer, an exhausted token
 // budget, a failing turn, and a graceful suspend - carrying that outcome's reason and a
 // stats snapshot, and reporting none of them as a crash.
-func TestHooks_SessionEndFiresOnEveryOutcome(t *testing.T) {
+func TestHooks_RunEndFiresOnEveryOutcome(t *testing.T) {
 	cases := []struct {
 		name string
 		// reason is the outcome both the Result and the hook must report.
@@ -278,9 +278,9 @@ func TestHooks_SessionEndFiresOnEveryOutcome(t *testing.T) {
 			app := agenttest.NewFakeApp(t, exampleApp())
 			opts := tc.build(t, app)
 
-			var ends []agent.SessionEndInfo
+			var ends []agent.RunEndInfo
 			opts.Hooks = agent.Hooks{
-				SessionEnd: func(_ context.Context, in agent.SessionEndInfo) error {
+				RunEnd: func(_ context.Context, in agent.RunEndInfo) error {
 					ends = append(ends, in)
 					return nil
 				},
@@ -308,22 +308,22 @@ func TestHooks_SessionEndFiresOnEveryOutcome(t *testing.T) {
 	}
 }
 
-// TestHooks_SessionEndFiresOnCrash proves the hook fires on the one exit that is not an
+// TestHooks_RunEndFiresOnCrash proves the hook fires on the one exit that is not an
 // outcome: a panic on the run goroutine. Reason is empty and Err is nil there, so a hook
 // keys off Crashed, and the run still returns the PanicError.
-func TestHooks_SessionEndFiresOnCrash(t *testing.T) {
+func TestHooks_RunEndFiresOnCrash(t *testing.T) {
 	g := NewWithT(t)
 
 	app := agenttest.NewFakeApp(t, exampleApp())
 
-	var ends []agent.SessionEndInfo
+	var ends []agent.RunEndInfo
 	res, err := agent.Run(context.Background(), agent.Options{
 		Config:     agenttest.Config(t, app),
 		ConfigFile: "agent.yaml",
 		Prompt:     []string{"go"},
 		Provider:   panicProvider{},
 		Hooks: agent.Hooks{
-			SessionEnd: func(_ context.Context, in agent.SessionEndInfo) error {
+			RunEnd: func(_ context.Context, in agent.RunEndInfo) error {
 				ends = append(ends, in)
 				return nil
 			},
@@ -341,10 +341,10 @@ func TestHooks_SessionEndFiresOnCrash(t *testing.T) {
 	g.Expect(ends[0].Stats.Model).To(Equal("test-model"))
 }
 
-// TestHooks_SessionEndStatsAreIsolated proves the stats snapshot is a copy all the way
+// TestHooks_RunEndStatsAreIsolated proves the stats snapshot is a copy all the way
 // down: it is passed by value, but its by-kind counts are a map the caller still reads
 // after Run returns, so a hook scribbling on them cannot corrupt the run summary.
-func TestHooks_SessionEndStatsAreIsolated(t *testing.T) {
+func TestHooks_RunEndStatsAreIsolated(t *testing.T) {
 	g := NewWithT(t)
 
 	app := agenttest.NewFakeApp(t, exampleApp())
@@ -358,7 +358,7 @@ func TestHooks_SessionEndStatsAreIsolated(t *testing.T) {
 			agenttest.TextResponse("done"),
 		),
 		Hooks: agent.Hooks{
-			SessionEnd: func(_ context.Context, in agent.SessionEndInfo) error {
+			RunEnd: func(_ context.Context, in agent.RunEndInfo) error {
 				g.Expect(in.Stats.ToolCalls).To(Equal(int64(1)))
 				g.Expect(in.Stats.ToolCallsByKind).To(HaveLen(1))
 
@@ -379,15 +379,15 @@ func TestHooks_SessionEndStatsAreIsolated(t *testing.T) {
 	g.Expect(res.Stats.ToolCallsByKind).NotTo(ContainElement(int64(99)))
 }
 
-// TestHooks_SessionEndDoesNotFireBeforeRunner proves a setup failure never fires the hook:
+// TestHooks_RunEndDoesNotFireBeforeRunner proves a setup failure never fires the hook:
 // no session ran, so none ended. The denied-prompt case also fixes the guard on the runner
 // rather than on res.Reason, which that path does set.
-func TestHooks_SessionEndDoesNotFireBeforeRunner(t *testing.T) {
+func TestHooks_RunEndDoesNotFireBeforeRunner(t *testing.T) {
 	fired := func(t *testing.T, opts agent.Options) bool {
 		t.Helper()
 
 		count := 0
-		opts.Hooks.SessionEnd = func(context.Context, agent.SessionEndInfo) error {
+		opts.Hooks.RunEnd = func(context.Context, agent.RunEndInfo) error {
 			count++
 			return nil
 		}
@@ -431,11 +431,11 @@ func TestHooks_SessionEndDoesNotFireBeforeRunner(t *testing.T) {
 	})
 }
 
-// TestHooks_SessionEndFailureIsWarnedNotFatal proves the hook cannot change an outcome
+// TestHooks_RunEndFailureIsWarnedNotFatal proves the hook cannot change an outcome
 // that is already decided: both a returned error and a panic are downgraded to a
-// WarnSessionEndHook advisory, and the completed run still completes.
-func TestHooks_SessionEndFailureIsWarnedNotFatal(t *testing.T) {
-	run := func(t *testing.T, hook agent.SessionEndHook) (*agent.Result, *agenttest.RecordingEvents, error) {
+// WarnRunEndHook advisory, and the completed run still completes.
+func TestHooks_RunEndFailureIsWarnedNotFatal(t *testing.T) {
+	run := func(t *testing.T, hook agent.RunEndHook) (*agent.Result, *agenttest.RecordingEvents, error) {
 		t.Helper()
 
 		app := agenttest.NewFakeApp(t, exampleApp())
@@ -446,7 +446,7 @@ func TestHooks_SessionEndFailureIsWarnedNotFatal(t *testing.T) {
 			ConfigFile: "agent.yaml",
 			Prompt:     []string{"go"},
 			Provider:   agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-			Hooks:      agent.Hooks{SessionEnd: hook},
+			Hooks:      agent.Hooks{RunEnd: hook},
 		}, events, agenttest.NewScriptedPrompter(t))
 
 		return res, events, err
@@ -455,35 +455,35 @@ func TestHooks_SessionEndFailureIsWarnedNotFatal(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		g := NewWithT(t)
 
-		res, events, err := run(t, func(context.Context, agent.SessionEndInfo) error {
+		res, events, err := run(t, func(context.Context, agent.RunEndInfo) error {
 			return errors.New("boom")
 		})
 
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
-		g.Expect(events.HasWarning(agent.WarnSessionEndHook)).To(BeTrue())
+		g.Expect(events.HasWarning(agent.WarnRunEndHook)).To(BeTrue())
 	})
 
 	t.Run("panic", func(t *testing.T) {
 		g := NewWithT(t)
 
-		res, events, err := run(t, func(context.Context, agent.SessionEndInfo) error {
+		res, events, err := run(t, func(context.Context, agent.RunEndInfo) error {
 			panic("boom in the hook")
 		})
 
 		// The panic is contained where it happens: the run is not converted to a crash.
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
-		g.Expect(events.HasWarning(agent.WarnSessionEndHook)).To(BeTrue())
+		g.Expect(events.HasWarning(agent.WarnRunEndHook)).To(BeTrue())
 		g.Expect(events.Panics()).To(BeEmpty())
 	})
 }
 
-// TestHooks_PanickingSessionEndDuringCrashDoesNotEscape drives the worst case: the run
-// crashes, and the SessionEnd hook the barrier then runs panics too. The second panic must
+// TestHooks_PanickingRunEndDuringCrashDoesNotEscape drives the worst case: the run
+// crashes, and the RunEnd hook the barrier then runs panics too. The second panic must
 // not escape the barrier that already recovered the first, which still becomes the
 // returned PanicError.
-func TestHooks_PanickingSessionEndDuringCrashDoesNotEscape(t *testing.T) {
+func TestHooks_PanickingRunEndDuringCrashDoesNotEscape(t *testing.T) {
 	g := NewWithT(t)
 
 	app := agenttest.NewFakeApp(t, exampleApp())
@@ -495,7 +495,7 @@ func TestHooks_PanickingSessionEndDuringCrashDoesNotEscape(t *testing.T) {
 		Prompt:     []string{"go"},
 		Provider:   panicProvider{},
 		Hooks: agent.Hooks{
-			SessionEnd: func(context.Context, agent.SessionEndInfo) error {
+			RunEnd: func(context.Context, agent.RunEndInfo) error {
 				panic("boom in the hook")
 			},
 		},
@@ -509,5 +509,5 @@ func TestHooks_PanickingSessionEndDuringCrashDoesNotEscape(t *testing.T) {
 	panics := events.Panics()
 	g.Expect(panics).To(HaveLen(1))
 	g.Expect(panics[0].Stack).NotTo(BeEmpty())
-	g.Expect(events.HasWarning(agent.WarnSessionEndHook)).To(BeTrue())
+	g.Expect(events.HasWarning(agent.WarnRunEndHook)).To(BeTrue())
 }

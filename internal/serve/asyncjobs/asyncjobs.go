@@ -56,7 +56,8 @@
 //
 // The job is then neither answered on its task nor acknowledged, so its lease lapses
 // and it is delivered again. What it does not cost is the work. Every run is
-// checkpointed under the task id, so the redelivery finds a completed session and is
+// checkpointed under the session its task id derives (see SessionFor), so the redelivery
+// finds a completed session and is
 // answered from its journal without calling a model: see agent.Checkpoint.CreateIfMissing.
 // The price of the window is one delivery cycle, bounded by the queue's run time, not a
 // lost answer and not a second run.
@@ -68,6 +69,8 @@ package asyncjobs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -178,6 +181,27 @@ var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
 )
+
+// SessionFor is the journal a job runs in, derived from the serving identity and the task
+// id rather than taken from the task id itself.
+//
+// A job creates a session or resumes one an earlier delivery of the same task made, and
+// nothing else. Handing the store a submitter's own bytes would let a task name any journal
+// this worker holds, and a journal id is not a secret: it is logged, and a deferred run's
+// terminal message carries it. A submitter that learned the id of a prompts conversation
+// could then run this agent's tools against that conversation's history and its standing
+// approvals, or read its stored answer back without anything running.
+//
+// The hash is deterministic on the task id the submitter already chose, so at-least-once
+// delivery and Client.RetryTaskByID both land in the same journal.
+//
+// It is exported for a caller that also holds the store and wants the journal a job of its
+// own reached. It says nothing about a journal existing.
+func SessionFor(identity, taskID string) string {
+	sum := sha256.Sum256([]byte(identity + "\x00" + taskID))
+
+	return "j-" + hex.EncodeToString(sum[:])
+}
 
 // Channel is a serve.Channel over a Choria asyncjobs work queue.
 type Channel struct {

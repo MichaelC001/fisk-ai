@@ -29,7 +29,7 @@ func TestCheckpointCreate_MissingSessionIsCreated(t *testing.T) {
 	app := agenttest.NewFakeApp(t, exampleApp())
 	store := agenttest.NewFakeSessionStore(t)
 
-	var start agent.SessionStartInfo
+	var start agent.RunStartInfo
 	var submits int
 
 	res, err := agent.Run(context.Background(), agent.Options{
@@ -40,7 +40,7 @@ func TestCheckpointCreate_MissingSessionIsCreated(t *testing.T) {
 		Checkpoint:   agent.Checkpoint{ResumeID: "job-1", CreateIfMissing: true},
 		SessionStore: store,
 		Hooks: agent.Hooks{
-			SessionStart: func(_ context.Context, in agent.SessionStartInfo) error {
+			RunStart: func(_ context.Context, in agent.RunStartInfo) error {
 				start = in
 				return nil
 			},
@@ -88,7 +88,7 @@ func TestCheckpointCreate_ExistingSessionIsResumed(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(first.Reason).To(Equal(runstate.ReasonSuspended))
 
-	var start agent.SessionStartInfo
+	var start agent.RunStartInfo
 	var submits int
 
 	second, err := agent.Run(context.Background(), agent.Options{
@@ -100,7 +100,7 @@ func TestCheckpointCreate_ExistingSessionIsResumed(t *testing.T) {
 		SessionStore: store,
 		ClaimedBy:    "worker-b",
 		Hooks: agent.Hooks{
-			SessionStart: func(_ context.Context, in agent.SessionStartInfo) error {
+			RunStart: func(_ context.Context, in agent.RunStartInfo) error {
 				start = in
 				return nil
 			},
@@ -147,7 +147,7 @@ func TestCheckpointCreate_IsOffByDefault(t *testing.T) {
 		Checkpoint:   agent.Checkpoint{ResumeID: "job-1"},
 		SessionStore: agenttest.NewFakeSessionStore(t),
 		Hooks: agent.Hooks{
-			SessionStart: func(_ context.Context, _ agent.SessionStartInfo) error {
+			RunStart: func(_ context.Context, _ agent.RunStartInfo) error {
 				started++
 				return nil
 			},
@@ -203,7 +203,7 @@ func TestCheckpointCreate_CompletedSessionReportsItsStoredAnswer(t *testing.T) {
 		Checkpoint:   agent.Checkpoint{ResumeID: "job-1", CreateIfMissing: true},
 		SessionStore: store,
 		Hooks: agent.Hooks{
-			SessionStart: func(_ context.Context, _ agent.SessionStartInfo) error {
+			RunStart: func(_ context.Context, _ agent.RunStartInfo) error {
 				started++
 				return nil
 			},

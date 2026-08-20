@@ -169,10 +169,10 @@ const (
 	// Name carries the operator-facing deny reason. The prompt was not run and the input
 	// bar reopens; the session continues.
 	WarnPromptDenied
-	// WarnSessionEndHook: the SessionEnd hook failed with Err. It runs during teardown,
+	// WarnRunEndHook: the RunEnd hook failed with Err. It runs during teardown,
 	// once the run's outcome is already decided, so its failure cannot change that
 	// outcome and is reported as an advisory rather than ending the run.
-	WarnSessionEndHook
+	WarnRunEndHook
 	// WarnUnknownReservedTag: tool Name carries the tags in Params, which claim the
 	// reserved ai: namespace but are not tags the harness knows. They do nothing, which
 	// looks exactly like a correctly tagged command, so a misspelled ai:read_only or
@@ -195,11 +195,17 @@ const (
 	// says which tool is holding it.
 	WarnToolDeferred
 	// WarnApprovalsDropped: Count standing confirm-gate approvals were not restored,
-	// because --force resumed the session across a changed configuration. An approval
-	// is keyed on a tool name, and the tool it names may not be the tool the operator
-	// approved, so the run asks again. Told at the resume rather than at the next
-	// prompt, where it would look like the gate forgetting.
+	// because the tool set moved or --force resumed the session across a changed
+	// configuration. An approval is keyed on a tool name, and the tool it names may not
+	// be the tool the operator approved, so the run asks again. Told at the resume
+	// rather than at the next prompt, where it would look like the gate forgetting.
 	WarnApprovalsDropped
+	// WarnToolSetDrift: the session was saved with a different tool set, and the resume
+	// continues under the current one. A stored conversation reads the same either way,
+	// a provider accepting a history that names a tool it was not sent, so the change is
+	// reported rather than refused. What it costs is the standing approvals, which are
+	// dropped with it.
+	WarnToolSetDrift
 	// WarnBudgetDrift: the session was saved with different token or iteration bounds,
 	// listed in Params, and the resume continues under the current ones. Neither bound
 	// can leave a stored conversation incoherent, so a difference is reported rather
@@ -267,7 +273,7 @@ var warningKindNames = map[WarningKind]string{
 	WarnJournalClose:           "journal_close",
 	WarnTraceWrite:             "trace_write",
 	WarnPromptDenied:           "prompt_denied",
-	WarnSessionEndHook:         "session_end_hook",
+	WarnRunEndHook:             "run_end_hook",
 	WarnUnknownReservedTag:     "unknown_reserved_tag",
 	WarnBehaviorTagConflict:    "behavior_tag_conflict",
 	WarnToolTimeout:            "tool_timeout",
@@ -276,6 +282,7 @@ var warningKindNames = map[WarningKind]string{
 	WarnRemoteTagFilterIgnored: "remote_tag_filter_ignored",
 	WarnRemoteToolsSkipped:     "remote_tools_skipped",
 	WarnRemoteNoTools:          "remote_no_tools",
+	WarnToolSetDrift:           "tool_set_drift",
 	WarnBudgetDrift:            "budget_drift",
 }
 

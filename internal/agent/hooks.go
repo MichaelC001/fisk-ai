@@ -30,7 +30,7 @@ import (
 // Optional callbacks the run invokes at fixed points. A nil field does not fire. Every
 // hook runs on the single run goroutine, in loop order; it must honor ctx and return
 // promptly; it is trusted in-process code (like CustomTools) and a panic in it aborts the
-// run as a *PanicError. SessionEnd alone is exempt: it fires during teardown, once the
+// run as a *PanicError. RunEnd alone is exempt: it fires during teardown, once the
 // outcome is already decided, so an error or a panic from it is downgraded to a warning.
 // One callback per point: compose several behaviors by wrapping them in one func of your
 // own.
@@ -40,10 +40,10 @@ import (
 // PostToolUse replaces output). A hook never injects prompts, continues or extends a
 // turn, or changes token or tool accounting, budgets, or iteration caps.
 type Hooks struct {
-	// SessionStart fires once as a run begins, fresh or resumed, before the first model
+	// RunStart fires once as a run begins, fresh or resumed, before the first model
 	// call. A context reset does not fire it again; that rotation is reported through
 	// Events.SessionRotated.
-	SessionStart SessionStartHook
+	RunStart RunStartHook
 
 	// UserPromptSubmit fires as a prompt enters the conversation: the initial prompt of a
 	// fresh run, then each follow-up, whether an operator typed it at the input bar or a
@@ -70,18 +70,18 @@ type Hooks struct {
 
 	// TurnEnd fires at each interactive continuation boundary, after a completed or
 	// iteration-capped turn and before the next prompt. A one-shot run has no boundary
-	// but its end, which is SessionEnd.
+	// but its end, which is RunEnd.
 	TurnEnd TurnEndHook
 
-	// SessionEnd fires once as a run ends, for any reason including a crash. It runs
+	// RunEnd fires once as a run ends, for any reason including a crash. It runs
 	// during teardown, after the journal and stores are closed, so it must not depend on
 	// them; it gets a stats snapshot instead.
-	SessionEnd SessionEndHook
+	RunEnd RunEndHook
 }
 
-// SessionStartHook observes a run starting (fresh or resumed). A non-nil error aborts
+// RunStartHook observes a run starting (fresh or resumed). A non-nil error aborts
 // the run.
-type SessionStartHook func(context.Context, SessionStartInfo) error
+type RunStartHook func(context.Context, RunStartInfo) error
 
 // PreModelCallHook observes the request about to be sent to the model. A non-nil error
 // aborts the run.
@@ -95,9 +95,9 @@ type PostModelCallHook func(context.Context, PostModelCallInfo) error
 // the run.
 type TurnEndHook func(context.Context, TurnEndInfo) error
 
-// SessionEndHook observes a run ending, including a crash. Its error cannot abort an
+// RunEndHook observes a run ending, including a crash. Its error cannot abort an
 // already-decided outcome, so it is downgraded to a warning.
-type SessionEndHook func(context.Context, SessionEndInfo) error
+type RunEndHook func(context.Context, RunEndInfo) error
 
 // UserPromptSubmitHook observes a prompt entering the conversation and may deny it via
 // the returned Result. A non-nil error aborts the whole run; to reject a single prompt
@@ -114,8 +114,8 @@ type PreToolUseHook func(context.Context, PreToolUseInfo) (PreToolUseResult, err
 // the zero Result to keep the tool's own output.
 type PostToolUseHook func(context.Context, PostToolUseInfo) (PostToolUseResult, error)
 
-// SessionStartInfo is the read-only snapshot handed to SessionStart.
-type SessionStartInfo struct {
+// RunStartInfo is the read-only snapshot handed to RunStart.
+type RunStartInfo struct {
 	// SessionID is the checkpoint session id; empty for a non-checkpointed run.
 	SessionID string
 	// Resumed is true when continuing a stored session (the hook re-fires on resume).
@@ -199,8 +199,8 @@ type TurnEndInfo struct {
 	Iteration int
 }
 
-// SessionEndInfo is the read-only snapshot handed to SessionEnd.
-type SessionEndInfo struct {
+// RunEndInfo is the read-only snapshot handed to RunEnd.
+type RunEndInfo struct {
 	// SessionID is the checkpoint session id; empty for a non-checkpointed run.
 	SessionID string
 	// Reason is why the run ended; empty on a crash, so key off Crashed.
@@ -335,12 +335,12 @@ func (h Hooks) firePostToolUse(ctx context.Context, info PostToolUseInfo) (PostT
 	return h.PostToolUse(ctx, info)
 }
 
-// fireSessionStart invokes the SessionStart hook, a no-op when no hook is set.
-func (h Hooks) fireSessionStart(ctx context.Context, info SessionStartInfo) error {
-	if h.SessionStart == nil {
+// fireRunStart invokes the RunStart hook, a no-op when no hook is set.
+func (h Hooks) fireRunStart(ctx context.Context, info RunStartInfo) error {
+	if h.RunStart == nil {
 		return nil
 	}
-	return h.SessionStart(ctx, info)
+	return h.RunStart(ctx, info)
 }
 
 // fireUserPromptSubmit invokes the UserPromptSubmit hook, returning the zero Result
@@ -360,14 +360,14 @@ func (h Hooks) fireTurnEnd(ctx context.Context, info TurnEndInfo) error {
 	return h.TurnEnd(ctx, info)
 }
 
-// fireSessionEnd invokes the SessionEnd hook, a no-op when no hook is set. Alone among
+// fireRunEnd invokes the RunEnd hook, a no-op when no hook is set. Alone among
 // the invokers it returns nothing: it runs from the panic barrier during teardown, once
 // the run's outcome is already decided, so neither an error nor a panic from the hook can
-// change that outcome and both are reported as a WarnSessionEndHook advisory instead. It
+// change that outcome and both are reported as a WarnRunEndHook advisory instead. It
 // shields itself rather than leaning on the barrier, whose own recover has already run by
 // the time this is called and so cannot catch a second panic.
-func (h Hooks) fireSessionEnd(ctx context.Context, events Events, info SessionEndInfo) {
-	if h.SessionEnd == nil {
+func (h Hooks) fireRunEnd(ctx context.Context, events Events, info RunEndInfo) {
+	if h.RunEnd == nil {
 		return
 	}
 
@@ -380,18 +380,18 @@ func (h Hooks) fireSessionEnd(ctx context.Context, events Events, info SessionEn
 		if p == nil {
 			return
 		}
-		warnSessionEnd(events, fmt.Errorf("SessionEnd hook panicked: %v", p))
+		warnRunEnd(events, fmt.Errorf("RunEnd hook panicked: %v", p))
 	}()
 
-	err := h.SessionEnd(ctx, info)
+	err := h.RunEnd(ctx, info)
 	if err != nil {
-		warnSessionEnd(events, fmt.Errorf("SessionEnd hook: %w", err))
+		warnRunEnd(events, fmt.Errorf("RunEnd hook: %w", err))
 	}
 }
 
-// warnSessionEnd delivers the SessionEnd advisory, shielding the caller-supplied sink so
+// warnRunEnd delivers the RunEnd advisory, shielding the caller-supplied sink so
 // that a panic in it does not escape the panic barrier this runs inside either.
-func warnSessionEnd(events Events, err error) {
+func warnRunEnd(events Events, err error) {
 	defer func() { recover() }()
-	events.Warn(Warning{Kind: WarnSessionEndHook, Err: err})
+	events.Warn(Warning{Kind: WarnRunEndHook, Err: err})
 }
