@@ -104,8 +104,16 @@ func (s *ReplyStream) ToolReply(reply *ToolReply) error {
 // Elicit publishes a question the run is putting to the caller. It is not terminal:
 // the run continues, and the answer arrives on the task's own inbound path rather
 // than on this set.
+//
+// The question's kind stamps its own id, so a question this build does not name is refused
+// here rather than published under a family prefix that names nothing.
 func (s *ReplyStream) Elicit(ask *ElicitRequest) error {
-	ask.Protocol = ElicitRequestProtocol
+	protocol, ok := ElicitRequestProtocolFor(ask.Kind)
+	if !ok {
+		return fmt.Errorf("%w: %q is not a question this agent asks", ErrInvalidMessage, ask.Kind)
+	}
+
+	ask.Protocol = protocol
 
 	return s.send(&ask.Header, ask, false)
 }

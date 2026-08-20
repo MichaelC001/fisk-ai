@@ -47,7 +47,10 @@ func ValidRequestID(id string) bool {
 // each message type so the fields marshal flat into the body, keeping a captured
 // message self describing without the transport.
 type Header struct {
-	// Protocol is the message protocol id, e.g. RequestProtocol.
+	// Protocol is the message protocol id, e.g. RequestPromptProtocol. It names one
+	// shape, so reading it is enough to know what the message is. A constructor stamps
+	// it and MarshalJSON sets it from the message's own kind, so a value set by hand
+	// that disagrees with the body does not reach the wire.
 	Protocol string `json:"protocol"`
 	// ID uniquely identifies this message.
 	ID string `json:"id"`

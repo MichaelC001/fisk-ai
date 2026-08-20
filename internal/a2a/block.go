@@ -7,9 +7,11 @@ package a2a
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
-// BlockType is the type discriminator of an event content block.
+// BlockType is the kind of one content block, carried as the suffix of the event's
+// protocol id rather than as a field of the block itself.
 type BlockType string
 
 const (
@@ -24,11 +26,13 @@ const (
 )
 
 // BlockContent is the content of a single event block. The concrete types are
-// ThinkingBlock, TextBlock, ToolCallBlock, ToolResultBlock, AgentCallBlock,
-// StatusBlock and UnknownBlock, which is what a type this build does not name
-// decodes to. The "type" field is added on the wire by Block during marshaling,
-// taken from the Go type for the six named ones and from the field for
-// UnknownBlock, which is the only one whose type comes off the wire.
+// ThinkingBlock, TextBlock, PromptBlock, WarningBlock, ToolCallBlock,
+// ToolResultBlock, AgentCallBlock, StatusBlock and UnknownBlock, which is what a kind
+// this build does not name decodes to.
+//
+// What kind a block is travels as the protocol id of the event carrying it and is not
+// written into the block, so the content on the wire is the variant's own fields and
+// nothing else.
 type BlockContent interface {
 	blockType() BlockType
 }
@@ -140,17 +144,17 @@ const (
 
 func (StatusBlock) blockType() BlockType { return BlockStatus }
 
-// UnknownBlock is a block whose type this build does not name. Type is the
-// discriminator as it arrived and Raw is the block's original JSON object, so a
-// caller can render a placeholder for it, log it, or forward it verbatim.
+// UnknownBlock is a block of a kind this build does not name. Type is what the event's
+// id called it and Raw is the block's original JSON object, so a caller can render a
+// placeholder for it, log it, or forward it verbatim.
 //
 // Raw is peer supplied and is checked against nothing but the message size cap. It
 // is the peer's own content, so an agent that forwards it never republishes it as
 // its own, the same rule ToolDescriptor.Behavior carries.
 //
-// There is no constructor, because a producer inventing a type it cannot describe
+// There is no constructor, because a producer inventing a kind it cannot describe
 // is a mistake. A forwarding agent relaying a block it did not understand builds
-// the value directly.
+// the value directly, and the event it sends carries the id that named it.
 type UnknownBlock struct {
 	Type BlockType
 	Raw  json.RawMessage
@@ -158,10 +162,8 @@ type UnknownBlock struct {
 
 func (u UnknownBlock) blockType() BlockType { return u.Type }
 
-// MarshalJSON returns the block as it arrived. The bytes go back out as the same
-// JSON value rather than the same byte sequence: Block re-encodes what this returns
-// to stamp the discriminator, which sorts the keys, and encoding/json escapes '<',
-// '>' and '&' on the way.
+// MarshalJSON returns the block as it arrived, which is the peer's own value rather
+// than one re-made here.
 func (u UnknownBlock) MarshalJSON() ([]byte, error) {
 	if len(u.Raw) == 0 {
 		return nil, fmt.Errorf("%w: unknown block %q carries no content", ErrInvalidMessage, u.Type)
@@ -170,9 +172,10 @@ func (u UnknownBlock) MarshalJSON() ([]byte, error) {
 	return u.Raw, nil
 }
 
-// Block wraps a single BlockContent for transport. It marshals to a flat JSON
-// object carrying the variant's fields plus a "type" discriminator, and decodes
-// back to the matching concrete type.
+// Block wraps a single BlockContent for transport. It marshals to a flat JSON object
+// of the variant's own fields, and decodes back to the matching concrete type from the
+// kind its event's protocol id named. It is not a JSON value on its own: a block lifted
+// out of its message says nothing about what it is.
 type Block struct {
 	content BlockContent
 }
@@ -221,58 +224,50 @@ func (b Block) Type() BlockType {
 	return b.content.blockType()
 }
 
-// MarshalJSON renders the block as its content fields plus a "type"
-// discriminator.
+// EventProtocolFor is the protocol id a block of this type is carried under. It is
+// how a sender stamps an event, and Event does it rather than leaving it to a caller.
+func EventProtocolFor(t BlockType) string {
+	return EventProtocol + "." + string(t)
+}
+
+// blockTypeOf is the block an event id carries, and false for an id outside the event
+// family. A type this build does not name still reports true: the id says a block is
+// what arrived, which is what decides how to read the message, and UnknownBlock is
+// what carries one nobody here can render.
+//
+// A suffix carrying a dot of its own is refused. Nothing mints one, so it is a peer
+// naming something else entirely, and reading it as the type before the dot would be
+// this build deciding what somebody else's id meant.
+func blockTypeOf(protocol string) (BlockType, bool) {
+	suffix, found := strings.CutPrefix(protocol, EventProtocol+".")
+	if !found || suffix == "" || strings.Contains(suffix, ".") {
+		return "", false
+	}
+
+	return BlockType(suffix), true
+}
+
+// MarshalJSON renders the block as its content fields alone. What kind of block it is
+// travels as the event's protocol id, so a block lifted out of its message says
+// nothing about itself and only decodes as part of one.
 func (b Block) MarshalJSON() ([]byte, error) {
 	if b.content == nil {
 		return nil, fmt.Errorf("%w: block has no content", ErrInvalidMessage)
 	}
 
-	raw, err := json.Marshal(b.content)
-	if err != nil {
-		return nil, err
-	}
-
-	fields := map[string]json.RawMessage{}
-	err = json.Unmarshal(raw, &fields)
-	if err != nil {
-		return nil, err
-	}
-
-	kind, err := json.Marshal(b.content.blockType())
-	if err != nil {
-		return nil, err
-	}
-	fields["type"] = kind
-
-	return json.Marshal(fields)
+	return json.Marshal(b.content)
 }
 
-// UnmarshalJSON decodes the block into the concrete type named by its "type"
-// discriminator, or into an UnknownBlock when this build does not name it, so an
-// event carrying a block from a newer peer still delivers its header, its sequence
-// number and everything else it held.
-//
-// A block with no discriminator is ErrInvalidMessage rather than an UnknownBlock
-// with an empty type, which would leave Type reporting the empty string for both an
-// empty block and a decoded one.
-func (b *Block) UnmarshalJSON(data []byte) error {
-	var probe struct {
-		Type BlockType `json:"type"`
-	}
+// unmarshalAs decodes the block as the type its event's id named, or into an
+// UnknownBlock when this build does not name it, so an event from a newer peer still
+// delivers its header, its sequence number and everything else it held.
+func (b *Block) unmarshalAs(t BlockType, data []byte) error {
+	var (
+		content BlockContent
+		err     error
+	)
 
-	err := json.Unmarshal(data, &probe)
-	if err != nil {
-		return err
-	}
-
-	if probe.Type == "" {
-		return fmt.Errorf("%w: block carries no type", ErrInvalidMessage)
-	}
-
-	var content BlockContent
-
-	switch probe.Type {
+	switch t {
 	case BlockThinking:
 		var v ThinkingBlock
 		err = json.Unmarshal(data, &v)
@@ -306,7 +301,7 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		err = json.Unmarshal(data, &v)
 		content = v
 	default:
-		content = UnknownBlock{Type: probe.Type, Raw: append(json.RawMessage(nil), data...)}
+		content = UnknownBlock{Type: t, Raw: append(json.RawMessage(nil), data...)}
 	}
 
 	if err != nil {

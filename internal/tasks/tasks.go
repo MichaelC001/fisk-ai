@@ -193,8 +193,10 @@ func RequestID(request json.RawMessage) (string, error) {
 		return "", fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
 
-	if hdr.Protocol != a2a.RequestProtocol {
-		return "", fmt.Errorf("%w: protocol is %q, want %q", ErrInvalidRequest, hdr.Protocol, a2a.RequestProtocol)
+	// Any of the four, since this asks only whether the body is a request it can key a
+	// record from. Which one it is belongs to whoever runs it.
+	if !a2a.IsRequestProtocol(hdr.Protocol) {
+		return "", fmt.Errorf("%w: protocol is %q, want one under %s", ErrInvalidRequest, hdr.Protocol, a2a.RequestProtocol)
 	}
 
 	err = ValidateID(hdr.ID)

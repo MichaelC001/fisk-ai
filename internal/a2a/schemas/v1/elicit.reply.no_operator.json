@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.reply.no_operator.json",
+  "title": "fisk-ai A2A v1 no operator answer",
+  "description": "Answers any of the four questions with the fact that the caller has nobody to ask. It is an answer rather than a failure and it fails closed: a gated command does not run, and the three human-in-the-loop tools answer the model with their own no-operator result. Send it when the person walks away rather than falling silent, which leaves the command unrun too but only after a whole window.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.reply.no_operator"
+    },
+    "choice": false,
+    "confirmed": false,
+    "index": false,
+    "value": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    }
+  }
+}

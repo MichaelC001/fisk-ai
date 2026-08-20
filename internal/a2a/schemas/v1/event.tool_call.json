@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/event.tool_call.json",
+  "title": "fisk-ai A2A v1 tool call event",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.event.tool_call"
+    },
+    "block": {
+      "$ref": "common.json#/$defs/toolCallBlock"
+    }
+  },
+  "required": [
+    "block"
+  ]
+}

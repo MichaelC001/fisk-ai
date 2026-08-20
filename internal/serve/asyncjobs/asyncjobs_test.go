@@ -150,19 +150,34 @@ var _ = Describe("Intake", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("Should refuse a message that is not a request", func() {
+	It("Should refuse a message that is not a prompt", func() {
 		res := a2a.NewResult(a2a.StopEndTurn)
 		stampHeader(&res.Header)
 
 		_, err := ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(res)}, ch.log)
-		Expect(err).To(MatchError(ContainSubstring("is not a io.choria.fisk-ai.v1.request message")))
+		Expect(err).To(MatchError(ContainSubstring("is not a io.choria.fisk-ai.v1.request.prompt message")))
 	})
 
-	It("Should refuse a request with no prompt", func() {
-		req := newRequest("")
+	// A queue has nobody waiting on it, so the three kinds of request that act on a
+	// conversation somebody is watching reach it as a mistake.
+	It("Should refuse a request that is not a prompt", func() {
+		read, err := a2a.NewRead("2Ab3Cd4Ef5Gh", 10)
+		Expect(err).ToNot(HaveOccurred())
+		stampHeader(&read.Header)
 
-		_, err := ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(req)}, ch.log)
-		Expect(err).To(MatchError(ContainSubstring("carries no prompt")))
+		_, err = ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(read)}, ch.log)
+		Expect(err).To(MatchError(ContainSubstring("is not a io.choria.fisk-ai.v1.request.prompt message")))
+
+		resume := a2a.NewResume("2Ab3Cd4Ef5Gh")
+		stampHeader(&resume.Header)
+
+		_, err = ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(resume)}, ch.log)
+		Expect(err).To(MatchError(ContainSubstring("is not a io.choria.fisk-ai.v1.request.prompt message")))
+	})
+
+	It("Should refuse a prompt with nothing in it", func() {
+		_, err := ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(newRequest(""))}, ch.log)
+		Expect(err).To(MatchError(ContainSubstring("not a valid v1 message")))
 	})
 })
 

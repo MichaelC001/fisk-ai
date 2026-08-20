@@ -251,11 +251,18 @@ func runAsClient(ctx context.Context, stop context.CancelFunc, host *hostedAgent
 		}
 	}
 
-	req := a2a.NewRequest(prompt)
+	// With nothing to ask, a token on its own continues the run that stopped part way.
+	var req *a2a.Request
+	if prompt == "" {
+		req = a2a.NewResume(token)
+	} else {
+		req = a2a.NewRequest(prompt)
+		req.ConversationToken = token
+	}
+
 	// Minted here rather than on the way out, so the interrupt handler can name the turn
 	// it is asking to stop before there is anything to name it to.
 	req.Request = a2a.NewID()
-	req.ConversationToken = token
 	req.Force = forceResume
 
 	// The first interrupt asks the run to stop where it can be continued, which is what
@@ -346,11 +353,11 @@ func deliverHeldAnswers(ctx context.Context, host *hostedAgent, token string, ou
 // no turn is taken and no model is called, so it is answered whatever state the
 // conversation is in.
 func readConversation(ctx context.Context, host *hostedAgent, token string, h a2a.TaskHandler, replay int) error {
-	req := a2a.NewRequest("")
+	req, err := a2a.NewRead(token, replay)
+	if err != nil {
+		return err
+	}
 	req.Request = a2a.NewID()
-	req.ConversationToken = token
-	req.Replay = replay
-	req.Force = forceResume
 
 	out, err := host.client.RunTask(ctx, host.identity, req, h)
 	if err != nil {

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/event.prompt.json",
+  "title": "fisk-ai A2A v1 prompt event",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.event.prompt"
+    },
+    "block": {
+      "$ref": "common.json#/$defs/promptBlock"
+    }
+  },
+  "required": [
+    "block"
+  ]
+}

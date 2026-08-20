@@ -15,28 +15,34 @@
 // inside the Choria Protocol.
 //
 // Message bodies are versioned by their protocol id, e.g.
-// "io.choria.fisk-ai.v1.request". The matching JSON schemas live under
-// internal/a2a/schemas/io.choria.fisk-ai.v1.
+// "io.choria.fisk-ai.v1.request.prompt". One id names one shape, so nothing in a body says
+// what kind of message it is: a prompt, an answer, a resume and a read are four ids, and so
+// are the eight kinds of streamed block and the eleven questions and answers of the elicit
+// family. The matching JSON schemas live under internal/a2a/schemas/io.choria.fisk-ai.v1,
+// one per id, each stating what its own shape requires and refusing by name the fields
+// belonging to its siblings.
 //
 // A receiver ignores properties it does not recognize rather than rejecting the
 // message carrying them, so a peer built against an older copy of the schemas
 // interoperates with one that has gained a field. There is no way for a sender to
 // demand the opposite, so an addition must be safe to skip.
 //
-// An event block whose type this build does not name is carried opaquely for the same
-// reason, as an UnknownBlock holding the peer's own bytes. A block is advisory and the
-// run journal is the authoritative transcript, so a receiver that keeps the framing and
-// hands the block on loses less than one that keeps nothing. A block whose type the
-// schema does name is validated as strictly as ever.
-//
 // A stop reason outside the set this build names is carried too, for the same reason
 // stated the other way round: refusing one costs the terminal message that held it,
 // and with it the answer text and the token counts. StopReason.Valid is how a receiver
 // asks whether it recognizes the value.
 //
-// An unrecognized protocol id is still rejected, being the one thing a receiver cannot
-// hold and pass along: it decides what the message means, so a receiver that ignored it
-// would not know what it was ignoring.
+// An unrecognized protocol id is rejected, being the one thing a receiver cannot hold
+// and pass along: it decides what the message means, so a receiver that ignored it would
+// not know what it was ignoring.
+//
+// Streamed blocks are the exception, and they are why every kind of block has an id of
+// its own under io.choria.fisk-ai.v1.event. An id in that family names a block whatever
+// else this build knows about it, so one added since is carried opaquely as an
+// UnknownBlock holding the peer's own bytes. A block is advisory and the run journal is
+// the authoritative transcript, so a receiver that keeps the framing and hands the block
+// on loses less than one that keeps nothing. A kind the schemas do name is validated as
+// strictly as ever, against a schema of its own.
 //
 // Property names are reserved to this project. A peer carrying its own data should
 // nest it under a property assigned to it rather than add a top-level key, since two
@@ -57,18 +63,76 @@ const ProtocolNamespace = "io.choria.fisk-ai.v1"
 // Protocol ids, used as the value of the Header.Protocol field and as the
 // discriminator consumed by Decode.
 const (
+	// RequestProtocol is the family the four things a caller can ask of a worker belong
+	// to rather than an id itself: a request travels as this, a dot, and what it asks
+	// for, so a prompt is io.choria.fisk-ai.v1.request.prompt. Nothing in the body says
+	// which of the four it is.
 	RequestProtocol = ProtocolNamespace + ".request"
-	EventProtocol   = ProtocolNamespace + ".event"
-	ResultProtocol  = ProtocolNamespace + ".result"
-	ErrorProtocol   = ProtocolNamespace + ".error"
-	CancelProtocol  = ProtocolNamespace + ".cancel"
-	AckProtocol     = ProtocolNamespace + ".ack"
 
-	// ElicitRequestProtocol and ElicitReplyProtocol carry a question a running task
-	// puts to its caller, and the caller's answer. The question travels on the
-	// task's reply set and the answer on the task's own inbound path.
-	ElicitRequestProtocol = ProtocolNamespace + ".elicit.request"
-	ElicitReplyProtocol   = ProtocolNamespace + ".elicit.reply"
+	// The id of each. The suffix is the RequestKind it carries, so the two are the same
+	// string and there is no second spelling to keep in step.
+	RequestPromptProtocol = RequestProtocol + "." + string(RequestPrompt)
+	RequestAnswerProtocol = RequestProtocol + "." + string(RequestAnswer)
+	RequestResumeProtocol = RequestProtocol + "." + string(RequestResume)
+	RequestReadProtocol   = RequestProtocol + "." + string(RequestRead)
+
+	ResultProtocol = ProtocolNamespace + ".result"
+	ErrorProtocol  = ProtocolNamespace + ".error"
+	CancelProtocol = ProtocolNamespace + ".cancel"
+	AckProtocol    = ProtocolNamespace + ".ack"
+
+	// EventProtocol is the family a streamed block's id belongs to rather than an id
+	// itself: a block travels as this, a dot, and its type, so a text block is
+	// io.choria.fisk-ai.v1.event.text. Nothing in the body says which kind it is.
+	EventProtocol = ProtocolNamespace + ".event"
+
+	// The id of each kind of block. The suffix is the BlockType it carries, so the two
+	// are the same string and there is no second spelling to keep in step.
+	EventThinkingProtocol   = EventProtocol + "." + string(BlockThinking)
+	EventTextProtocol       = EventProtocol + "." + string(BlockText)
+	EventToolCallProtocol   = EventProtocol + "." + string(BlockToolCall)
+	EventToolResultProtocol = EventProtocol + "." + string(BlockToolResult)
+	EventAgentCallProtocol  = EventProtocol + "." + string(BlockAgentCall)
+	EventStatusProtocol     = EventProtocol + "." + string(BlockStatus)
+	EventWarningProtocol    = EventProtocol + "." + string(BlockWarning)
+	EventPromptProtocol     = EventProtocol + "." + string(BlockPrompt)
+
+	// ElicitProtocol is the family a question a running task puts to its caller, and
+	// the caller's answer, both belong to rather than an id itself. The question
+	// travels on the task's reply set and the answer on the task's own inbound path.
+	ElicitProtocol = ProtocolNamespace + ".elicit"
+
+	// ElicitRequestProtocol is the family a question's id belongs to rather than an id
+	// itself: a question travels as this, a dot, and its kind, so an approve question
+	// is io.choria.fisk-ai.v1.elicit.request.approve. Nothing in the body says which
+	// kind it is.
+	ElicitRequestProtocol = ElicitProtocol + ".request"
+
+	// The id of each kind of question. The suffix is the ElicitKind it carries, so the
+	// two are the same string and there is no second spelling to keep in step.
+	ElicitRequestApproveProtocol = ElicitRequestProtocol + "." + string(ElicitApprove)
+	ElicitRequestConfirmProtocol = ElicitRequestProtocol + "." + string(ElicitConfirm)
+	ElicitRequestSelectProtocol  = ElicitRequestProtocol + "." + string(ElicitSelect)
+	ElicitRequestInputProtocol   = ElicitRequestProtocol + "." + string(ElicitInput)
+
+	// ElicitReplyProtocol is the family an answer's id belongs to rather than an id
+	// itself. Every id under it settles the question, no_operator included, so a caller
+	// routing on this prefix reaches every answer there is.
+	ElicitReplyProtocol = ElicitProtocol + ".reply"
+
+	// The id of each answer, named for the question it answers rather than the field it
+	// carries, so a capture pairs elicit.request.select with elicit.reply.select
+	// without the reader knowing what an index is.
+	ElicitReplyApproveProtocol    = ElicitReplyProtocol + "." + string(ElicitApprove)
+	ElicitReplyConfirmProtocol    = ElicitReplyProtocol + "." + string(ElicitConfirm)
+	ElicitReplySelectProtocol     = ElicitReplyProtocol + "." + string(ElicitSelect)
+	ElicitReplyInputProtocol      = ElicitReplyProtocol + "." + string(ElicitInput)
+	ElicitReplyNoOperatorProtocol = ElicitReplyProtocol + "." + string(AnswerNoOperator)
+
+	// ElicitWaitingProtocol says the question is still in front of a person and nobody
+	// has answered yet, which restarts the window the agent holds it open for. It
+	// answers nothing, so it sits beside the replies rather than under them.
+	ElicitWaitingProtocol = ElicitProtocol + "." + string(AnswerWaiting)
 
 	// ToolRequestProtocol and ToolReplyProtocol carry a direct tool invocation
 	// (request-reply), used to import or export tools between agents without
@@ -110,6 +174,12 @@ func NewID() string {
 // pointer (*Request, *Event, *Result, *ErrorMessage, *Cancel, *Ack, *ToolRequest,
 // *ToolReply, *DiscoveryRequest or *DiscoveryReply), chosen by its protocol id.
 // It returns ErrUnknownProtocol for an unrecognized id.
+//
+// An event id names the block it carries, so io.choria.fisk-ai.v1.event.text decodes
+// into an Event holding a TextBlock. An id in that family this build does not name
+// decodes into an Event holding an UnknownBlock, which keeps the peer's own bytes and
+// the message's header: a block is one line of narration, and losing the message that
+// held it costs more than the line is worth.
 func Decode(data []byte) (any, error) {
 	var probe struct {
 		Protocol string `json:"protocol"`
@@ -120,11 +190,23 @@ func Decode(data []byte) (any, error) {
 		return nil, err
 	}
 
-	switch probe.Protocol {
-	case RequestProtocol:
-		return decodeInto(data, &Request{})
-	case EventProtocol:
+	if _, ok := blockTypeOf(probe.Protocol); ok {
 		return decodeInto(data, &Event{})
+	}
+
+	if _, ok := elicitKindOf(probe.Protocol); ok {
+		return decodeInto(data, &ElicitRequest{})
+	}
+
+	if _, ok := elicitAnswerOf(probe.Protocol); ok {
+		return decodeInto(data, &ElicitReply{})
+	}
+
+	if _, ok := requestKindOf(probe.Protocol); ok {
+		return decodeInto(data, &Request{})
+	}
+
+	switch probe.Protocol {
 	case ResultProtocol:
 		return decodeInto(data, &Result{})
 	case ErrorProtocol:
@@ -133,10 +215,6 @@ func Decode(data []byte) (any, error) {
 		return decodeInto(data, &Cancel{})
 	case AckProtocol:
 		return decodeInto(data, &Ack{})
-	case ElicitRequestProtocol:
-		return decodeInto(data, &ElicitRequest{})
-	case ElicitReplyProtocol:
-		return decodeInto(data, &ElicitReply{})
 	case ToolRequestProtocol:
 		return decodeInto(data, &ToolRequest{})
 	case ToolReplyProtocol:

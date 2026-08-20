@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.request.select.json",
+  "title": "fisk-ai A2A v1 select question",
+  "description": "Asks the caller to choose one of options. Sent on the task's reply set; the header's request names the task and question_id names the question within it. The answer is an elicit reply select, carrying a position in the options sent here.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "question",
+    "options"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.request.select"
+    },
+    "command": false,
+    "display": false,
+    "tag": false,
+    "default": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "tool_use_id": {
+      "$ref": "common.json#/$defs/tool_use_id"
+    },
+    "question": {
+      "$ref": "common.json#/$defs/elicit_question"
+    },
+    "options": {
+      "$ref": "common.json#/$defs/elicit_options"
+    },
+    "wait_ms": {
+      "$ref": "common.json#/$defs/wait_ms"
+    }
+  }
+}

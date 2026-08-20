@@ -7,6 +7,8 @@ package a2a
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 var (
@@ -68,6 +70,31 @@ func ExpectProtocol(data []byte, want string) (any, error) {
 	}
 	if hdr.Protocol != want {
 		return nil, fmt.Errorf("%w: got %q, want %q", ErrProtocolMismatch, hdr.Protocol, want)
+	}
+
+	return msg, nil
+}
+
+// ExpectOneProtocol is ExpectProtocol for a path contracted to carry any of several
+// message ids, which is what a family split across ids leaves: an answer to a question
+// arrives under one of six, chosen by which question it answers.
+//
+// A path takes the ids it can act on rather than a prefix of the family they sit in. The
+// two halves of the elicit family share a prefix and travel in opposite directions, so a
+// prefix would admit a question on the subject a worker reads answers from.
+func ExpectOneProtocol(data []byte, want []string) (any, error) {
+	msg, err := Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrProtocolMismatch, err)
+	}
+
+	hdr := headerOf(msg)
+	if hdr == nil {
+		return nil, fmt.Errorf("%w: message carries no header", ErrProtocolMismatch)
+	}
+
+	if !slices.Contains(want, hdr.Protocol) {
+		return nil, fmt.Errorf("%w: got %q, want one of %s", ErrProtocolMismatch, hdr.Protocol, strings.Join(want, ", "))
 	}
 
 	return msg, nil

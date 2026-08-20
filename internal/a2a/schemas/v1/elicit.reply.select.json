@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.reply.select.json",
+  "title": "fisk-ai A2A v1 select answer",
+  "description": "Answers a select question with a position in the options the question sent. Nothing authenticates it beyond the transport's own permissions: whoever may address a running task may answer its questions.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "index"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.reply.select"
+    },
+    "choice": false,
+    "confirmed": false,
+    "value": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "A position in the options that were sent. An index outside them is treated as no choice. 0 is the first option and is sent as one, which is why the field is required rather than omitted when empty."
+    }
+  }
+}

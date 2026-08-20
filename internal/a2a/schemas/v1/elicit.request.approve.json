@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.request.approve.json",
+  "title": "fisk-ai A2A v1 approve question",
+  "description": "Asks the caller whether a confirmation-gated command may run. Sent on the task's reply set; the header's request names the task and question_id names the question within it. The answer is an elicit reply approve, since approving for the rest of the conversation is a wider claim than approving one call.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "command",
+    "display"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.request.approve"
+    },
+    "question": false,
+    "options": false,
+    "default": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "tool_use_id": {
+      "$ref": "common.json#/$defs/tool_use_id"
+    },
+    "command": {
+      "type": "string",
+      "description": "The command path this question is about, e.g. stream rm."
+    },
+    "display": {
+      "type": "string",
+      "description": "The full command line to show, already sanitized."
+    },
+    "tag": {
+      "type": "string",
+      "description": "The tag that gated the command, e.g. ai:confirm, so the operator sees why they are being asked. Absent when the gate could name no trigger, which is a command rewritten to a tool that carries none."
+    },
+    "wait_ms": {
+      "$ref": "common.json#/$defs/wait_ms"
+    }
+  }
+}

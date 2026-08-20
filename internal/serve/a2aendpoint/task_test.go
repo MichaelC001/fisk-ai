@@ -75,6 +75,17 @@ var _ = Describe("The prompt channel", func() {
 		return stream
 	}
 
+	// read builds a request that asks for a conversation back, whose replay count the
+	// constructor bounds.
+	read := func(token string, replay int) *a2a.Request {
+		GinkgoHelper()
+
+		req, err := a2a.NewRead(token, replay)
+		Expect(err).ToNot(HaveOccurred())
+
+		return req
+	}
+
 	// rawRequest assembles a request by hand, so a spec chooses the correlation id
 	// rather than taking the fresh one the client stamps.
 	rawRequest := func(id, prompt string) []byte {
@@ -436,24 +447,29 @@ var _ = Describe("The prompt channel", func() {
 			Expect(next(second)).To(BeAssignableToTypeOf(&a2a.Result{}))
 		})
 
-		It("Should refuse an answer that carries no token, a prompt beside it, or neither", func() {
+		// Each id states its own shape and refuses the fields belonging to its siblings,
+		// so a body that disagrees with the id it arrived under never reaches the run.
+		It("Should refuse a body that does not fit the id it arrived under", func() {
 			newChannel(1)
 
 			answer := &a2a.Answer{ToolUseID: "toolu_1", Kind: a2a.ElicitInput, Answer: a2a.AnswerValue, Value: "ORDERS"}
 
-			untokened := a2a.NewRequest("")
-			untokened.Answer = answer
+			untokened := a2a.NewAnswerRequest("", answer)
 			Expect(refuse(untokened)).To(ContainSubstring("conversation_token"))
 
 			both := a2a.NewRequest("do the thing")
 			both.ConversationToken = "t1"
 			both.Answer = answer
-			Expect(refuse(both)).To(ContainSubstring("both a prompt and an answer"))
+			Expect(refuse(both)).To(ContainSubstring("answer"))
 
-			// Neither, and no conversation to continue either, so the request asks for
-			// nothing at all.
-			neither := a2a.NewRequest("")
-			Expect(refuse(neither)).To(ContainSubstring("neither a prompt, an answer nor a conversation"))
+			empty := a2a.NewRequest("")
+			Expect(refuse(empty)).To(ContainSubstring("prompt"))
+
+			// A resume carrying a replay count is a read, and the two are separate
+			// operations.
+			replaying := a2a.NewResume("t1")
+			replaying.Replay = 10
+			Expect(refuse(replaying)).To(ContainSubstring("replay"))
 		})
 
 		// A caller that was suspended part way through a turn continues it rather than
@@ -469,9 +485,7 @@ var _ = Describe("The prompt channel", func() {
 			report(opening, serve.Outcome{Reason: runstate.ReasonSuspended})
 			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
 
-			carryOn := a2a.NewRequest("")
-			carryOn.ConversationToken = ack.ConversationToken
-			second := send(carryOn)
+			second := send(a2a.NewResume(ack.ConversationToken))
 			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
 
 			resumed := takeWork()
@@ -502,9 +516,9 @@ var _ = Describe("The prompt channel", func() {
 		It("Should refuse an answer whose value does not fit the question it names", func() {
 			newChannel(1)
 
-			mismatched := a2a.NewRequest("")
-			mismatched.ConversationToken = "t1"
-			mismatched.Answer = &a2a.Answer{ToolUseID: "toolu_1", Kind: a2a.ElicitApprove, Answer: a2a.AnswerValue, Value: "yes"}
+			mismatched := a2a.NewAnswerRequest("t1", &a2a.Answer{
+				ToolUseID: "toolu_1", Kind: a2a.ElicitApprove, Answer: a2a.AnswerValue, Value: "yes",
+			})
 
 			Expect(refuse(mismatched)).To(ContainSubstring("an approval is answered with a choice"))
 		})
@@ -791,10 +805,7 @@ var _ = Describe("The prompt channel", func() {
 		It("Should replay the conversation and answer without running a turn", func() {
 			withStore("tok1")
 
-			req := a2a.NewRequest("")
-			req.ConversationToken = "tok1"
-			req.Replay = 50
-			stream := send(req)
+			stream := send(read("tok1", 50))
 
 			ack, ok := next(stream).(*a2a.Ack)
 			Expect(ok).To(BeTrue())
@@ -840,10 +851,7 @@ var _ = Describe("The prompt channel", func() {
 				Expect(err).To(HaveOccurred())
 			}()
 
-			req := a2a.NewRequest("")
-			req.ConversationToken = "tok2"
-			req.Replay = 50
-			stream := send(req)
+			stream := send(read("tok2", 50))
 
 			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
 
@@ -861,10 +869,7 @@ var _ = Describe("The prompt channel", func() {
 		It("Should say so when the token names no conversation", func() {
 			withStore("tok3")
 
-			req := a2a.NewRequest("")
-			req.ConversationToken = "nosuchtoken"
-			req.Replay = 50
-			stream := send(req)
+			stream := send(read("nosuchtoken", 50))
 
 			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
 
@@ -878,9 +883,7 @@ var _ = Describe("The prompt channel", func() {
 		It("Should leave a plain resume as work for the run", func() {
 			withStore("tok4")
 
-			req := a2a.NewRequest("")
-			req.ConversationToken = "tok4"
-			stream := send(req)
+			stream := send(a2a.NewResume("tok4"))
 
 			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
 
@@ -895,10 +898,7 @@ var _ = Describe("The prompt channel", func() {
 		It("Should refuse a read when the worker holds no store", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("")
-			req.ConversationToken = "tok5"
-			req.Replay = 50
-			stream := send(req)
+			stream := send(read("tok5", 50))
 
 			ack, ok := next(stream).(*a2a.Ack)
 			Expect(ok).To(BeTrue())

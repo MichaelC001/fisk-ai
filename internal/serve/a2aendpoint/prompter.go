@@ -461,6 +461,11 @@ func (t *task) handleElicitReply(_ context.Context, _ a2a.Caller, body []byte, r
 // inboundElicitReply holds an answer to the same cap, schema and protocol rule as a
 // request. The subject carries the request id, so anything else arriving there is
 // refused rather than acted on.
+//
+// It names the six ids an answer arrives under rather than the elicit family, which also
+// holds the four questions: those travel the other way, and admitting one here would put a
+// message of another type on a path contracted for this one. The assertion is checked for
+// the same reason, this being a peer's bytes on a subject that authenticates nobody.
 func (c *Channel) inboundElicitReply(body []byte) (*a2a.ElicitReply, error) {
 	if len(body) > a2a.MaxMessageSize {
 		return nil, fmt.Errorf("the answer is %d bytes, over the %d byte limit", len(body), a2a.MaxMessageSize)
@@ -471,10 +476,15 @@ func (c *Channel) inboundElicitReply(body []byte) (*a2a.ElicitReply, error) {
 		return nil, fmt.Errorf("the answer is not a valid v1 message: %w", err)
 	}
 
-	msg, err := a2a.ExpectProtocol(body, a2a.ElicitReplyProtocol)
+	msg, err := a2a.ExpectOneProtocol(body, a2a.ElicitAnswerProtocols())
 	if err != nil {
-		return nil, fmt.Errorf("the answer path carries %s messages: %w", a2a.ElicitReplyProtocol, err)
+		return nil, fmt.Errorf("the answer path carries answers to questions: %w", err)
 	}
 
-	return msg.(*a2a.ElicitReply), nil
+	reply, ok := msg.(*a2a.ElicitReply)
+	if !ok {
+		return nil, fmt.Errorf("the answer path carries answers to questions, not %T", msg)
+	}
+
+	return reply, nil
 }

@@ -36,18 +36,30 @@ var _ = Describe("ValidateID", func() {
 })
 
 var _ = Describe("RequestID", func() {
+	// Any of the four, since this asks only whether the body is a request it can key a
+	// record from.
 	It("Should take the id from a request message", func() {
-		id, err := RequestID(json.RawMessage(`{"protocol":"io.choria.fisk-ai.v1.request","id":"abc123","request":"abc123"}`))
-		Expect(err).ToNot(HaveOccurred())
-		Expect(id).To(Equal("abc123"))
+		for _, protocol := range []string{
+			"io.choria.fisk-ai.v1.request.prompt",
+			"io.choria.fisk-ai.v1.request.answer",
+			"io.choria.fisk-ai.v1.request.resume",
+			"io.choria.fisk-ai.v1.request.read",
+		} {
+			id, err := RequestID(json.RawMessage(`{"protocol":"` + protocol + `","id":"abc123","request":"abc123"}`))
+			Expect(err).ToNot(HaveOccurred(), protocol)
+			Expect(id).To(Equal("abc123"))
+		}
 	})
 
 	It("Should refuse a body that is not a request", func() {
 		for _, body := range []string{
 			`not json`,
 			`{"protocol":"io.choria.fisk-ai.v1.result","id":"abc123"}`,
-			`{"protocol":"io.choria.fisk-ai.v1.request"}`,
-			`{"protocol":"io.choria.fisk-ai.v1.request","id":"../escape"}`,
+			// The family prefix is not itself an id, and the dot is part of it.
+			`{"protocol":"io.choria.fisk-ai.v1.request","id":"abc123"}`,
+			`{"protocol":"io.choria.fisk-ai.v1.requestfoo","id":"abc123"}`,
+			`{"protocol":"io.choria.fisk-ai.v1.request.prompt"}`,
+			`{"protocol":"io.choria.fisk-ai.v1.request.prompt","id":"../escape"}`,
 		} {
 			_, err := RequestID(json.RawMessage(body))
 			Expect(err).To(MatchError(ErrInvalidRequest), "%q should be refused", body)

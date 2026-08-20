@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.request.confirm.json",
+  "title": "fisk-ai A2A v1 confirm question",
+  "description": "Puts a yes or no question to the caller. Sent on the task's reply set; the header's request names the task and question_id names the question within it. The answer is an elicit reply confirm.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "question"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.request.confirm"
+    },
+    "command": false,
+    "display": false,
+    "tag": false,
+    "options": false,
+    "default": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "tool_use_id": {
+      "$ref": "common.json#/$defs/tool_use_id"
+    },
+    "question": {
+      "$ref": "common.json#/$defs/elicit_question"
+    },
+    "wait_ms": {
+      "$ref": "common.json#/$defs/wait_ms"
+    }
+  }
+}

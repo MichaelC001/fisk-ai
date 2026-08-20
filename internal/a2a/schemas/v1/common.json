@@ -154,6 +154,102 @@
       "maxLength": 128,
       "description": "Handle for a conversation, minted by the answering agent and carried on its ack. A later request carrying it runs its prompt as the next turn of that conversation. It is a credential rather than an id: holding it is the authorization to add a turn, so a receiver neither logs nor displays it."
     },
+    "stream": {
+      "type": "boolean",
+      "default": true,
+      "description": "false means the caller wants only a terminal result, no event stream."
+    },
+    "force": {
+      "type": "boolean",
+      "description": "Continue a conversation whose stored fingerprint no longer matches the worker's configuration, which is otherwise refused. Standing approvals that cannot be vouched for across the change are dropped."
+    },
+    "replay": {
+      "type": "integer",
+      "description": "Open the reply set with this many blocks of the stored conversation, counted back from the end, before the first new event. The worker rounds outwards to a turn boundary and caps what it sends."
+    },
+    "answer": {
+      "type": "object",
+      "description": "What an operator said, for a question whose run has ended. It carries its own kind and answer because it is a field of a request rather than a message with an id of its own.",
+      "required": [
+        "tool_use_id",
+        "kind",
+        "answer"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "$ref": "#/$defs/tool_use_id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "confirm",
+            "select",
+            "input"
+          ],
+          "description": "The question that was asked, taken from the question. It says what the answer means where the answer value alone cannot, since no_operator is the same value for all four."
+        },
+        "answer": {
+          "type": "string",
+          "enum": [
+            "choice",
+            "confirmed",
+            "value",
+            "no_operator"
+          ],
+          "description": "Which field below carries the answer. A selection names the option it chose rather than a position, the run that offered the list having ended, and there is no waiting here: nobody is holding a question open."
+        },
+        "choice": {
+          "$ref": "#/$defs/elicit_choice"
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "value": {
+          "$ref": "#/$defs/elicit_value"
+        }
+      }
+    },
+    "question_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "description": "Correlates a question and its answer. Unique within the task. An answer naming a question the task did not ask is dropped."
+    },
+    "tool_use_id": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "The tool call a question is about, which is what an answer given after the run has ended names: a resume asks the question again under a new question_id, so the call is what both ends agree on. Absent from an agent that takes no answer once its run has ended."
+    },
+    "wait_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How long a question is held open before the agent gives up on it, in milliseconds. A caller with a person in front of the question sends an elicit waiting message every third of it to restart it. Absent is an agent that predates this and takes no such messages, as is a 400 in answer to one; answer inside the window instead."
+    },
+    "elicit_question": {
+      "type": "string",
+      "description": "The text to put to the operator. Model-supplied and sanitized before sending; sanitize again for your own surface."
+    },
+    "elicit_options": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The choices a select question offers, in the order to show them. The reply answers with a position in this list."
+    },
+    "elicit_choice": {
+      "type": "string",
+      "enum": [
+        "no",
+        "once",
+        "always"
+      ],
+      "description": "Answers an approve question. once authorizes the one call that asked; always covers that tool for the rest of the conversation. no leaves the command unrun and tells the model the refusal is final."
+    },
+    "elicit_value": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "A free text answer. An empty string is a valid answer, which is why the protocol id rather than emptiness says what was given. Bounded because it is third-party input that reaches a model and a terminal."
+    },
     "exec_result": {
       "type": "object",
       "description": "Optional command metadata, mirroring CommandResult; absent for non-shell tools.",
@@ -213,74 +309,13 @@
         }
       }
     },
-    "block": {
-      "description": "One content block. Discriminated by `type`. A type this receiver does not name is accepted and carried opaquely, so a peer on a newer schema does not lose the message that held it; a block whose type IS named is validated as strictly as ever.",
-      "oneOf": [
-        {
-          "$ref": "#/$defs/thinkingBlock"
-        },
-        {
-          "$ref": "#/$defs/textBlock"
-        },
-        {
-          "$ref": "#/$defs/toolCallBlock"
-        },
-        {
-          "$ref": "#/$defs/toolResultBlock"
-        },
-        {
-          "$ref": "#/$defs/agentCallBlock"
-        },
-        {
-          "$ref": "#/$defs/statusBlock"
-        },
-        {
-          "$ref": "#/$defs/warningBlock"
-        },
-        {
-          "$ref": "#/$defs/promptBlock"
-        },
-        {
-          "$ref": "#/$defs/unknownBlock"
-        }
-      ]
-    },
-    "unknownBlock": {
-      "type": "object",
-      "description": "A block of a type not named above. It excludes the named types by name so that exactly one branch of the oneOf matches: without that a valid text block would match its own branch and this one, and every event would fail.",
-      "required": [
-        "type"
-      ],
-      "properties": {
-        "type": {
-          "type": "string",
-          "minLength": 1,
-          "not": {
-            "enum": [
-              "thinking",
-              "text",
-              "tool_call",
-              "tool_result",
-              "agent_call",
-              "status",
-              "warning",
-              "prompt"
-            ]
-          },
-          "description": "Each constraint here answers a body that would otherwise pass: `required` because properties says nothing about an absent key, `string` and `minLength` because a number, a null or an empty string all satisfy a string enum's negation."
-        }
-      }
-    },
     "thinkingBlock": {
       "type": "object",
+      "description": "Each block definition below is referenced by the event schema of one protocol id. What kind of block it is travels as that id, so nothing in the block itself names its kind.",
       "required": [
-        "type",
         "text"
       ],
       "properties": {
-        "type": {
-          "const": "thinking"
-        },
         "text": {
           "type": "string"
         },
@@ -297,13 +332,9 @@
     "textBlock": {
       "type": "object",
       "required": [
-        "type",
         "text"
       ],
       "properties": {
-        "type": {
-          "const": "text"
-        },
         "text": {
           "type": "string"
         },
@@ -316,14 +347,10 @@
     "toolCallBlock": {
       "type": "object",
       "required": [
-        "type",
         "id",
         "name"
       ],
       "properties": {
-        "type": {
-          "const": "tool_call"
-        },
         "id": {
           "type": "string"
         },
@@ -339,13 +366,9 @@
     "toolResultBlock": {
       "type": "object",
       "required": [
-        "type",
         "call_id"
       ],
       "properties": {
-        "type": {
-          "const": "tool_result"
-        },
         "call_id": {
           "type": "string",
           "description": "The id of the tool_call this answers."
@@ -365,16 +388,12 @@
     "agentCallBlock": {
       "type": "object",
       "required": [
-        "type",
         "id",
         "name",
         "task"
       ],
-      "description": "A call to another agent (multi-hop), distinct from a local tool_call.",
+      "description": "A call to another agent (multi-hop), distinct from a local tool call.",
       "properties": {
-        "type": {
-          "const": "agent_call"
-        },
         "id": {
           "type": "string"
         },
@@ -389,13 +408,7 @@
     },
     "statusBlock": {
       "type": "object",
-      "required": [
-        "type"
-      ],
       "properties": {
-        "type": {
-          "const": "status"
-        },
         "iteration": {
           "type": "integer",
           "minimum": 0
@@ -423,13 +436,9 @@
       "type": "object",
       "description": "A turn somebody asked for: the prompt a conversation opened with, or one added to it later. A live run never sends one; it appears when a stored conversation is replayed.",
       "required": [
-        "type",
         "text"
       ],
       "properties": {
-        "type": {
-          "const": "prompt"
-        },
         "text": {
           "type": "string"
         }
@@ -439,13 +448,9 @@
       "type": "object",
       "description": "An advisory the run raised. It carries the warning rather than a sentence about it, so the wording belongs to whatever renders it.",
       "required": [
-        "type",
         "kind"
       ],
       "properties": {
-        "type": {
-          "const": "warning"
-        },
         "kind": {
           "type": "string",
           "minLength": 1,

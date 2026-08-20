@@ -406,9 +406,7 @@ var _ = Describe("ClientHooks", func() {
 			releaseOnAnswer()
 
 			client := newClient(rec.hooks(nil))
-			req := NewRequest("")
-			req.ConversationToken = "tok-existing"
-			_, err := client.RunTask(context.Background(), "svc", req, handler)
+			_, err := client.RunTask(context.Background(), "svc", NewResume("tok-existing"), handler)
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(rec.fired()).ToNot(ContainElement("PromptSubmit"))

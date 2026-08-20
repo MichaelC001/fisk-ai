@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/event.json",
-  "title": "fisk-ai A2A v1 stream event",
+  "title": "fisk-ai A2A v1 stream event of an unnamed kind",
+  "description": "An event whose kind this schema set does not name. Each kind has an id and a schema of its own; this one validates the framing of a kind added since, so a receiver still checks the header, the sequence number and that a block is present rather than refusing the message whole.",
   "allOf": [
     {
       "$ref": "common.json#/$defs/header"
@@ -9,10 +10,11 @@
   ],
   "properties": {
     "protocol": {
-      "const": "io.choria.fisk-ai.v1.event"
+      "type": "string",
+      "pattern": "^io\\.choria\\.fisk-ai\\.v1\\.event\\.[^.]+$"
     },
     "block": {
-      "$ref": "common.json#/$defs/block"
+      "type": "object"
     }
   },
   "required": [

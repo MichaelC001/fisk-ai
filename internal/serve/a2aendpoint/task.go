@@ -156,12 +156,11 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 		token = a2a.NewID()
 	}
 
-	// A follow-up is a request that adds a turn to a conversation it names. One that
-	// answers a question names a conversation too and adds no turn, so it is not one:
-	// calling it one would report every answered question as a turn that was not
-	// taken. Nor is one that carries neither, which continues a run that stopped part
-	// way and adds nothing to say.
-	followUp := req.ConversationToken != "" && req.Answer == nil && req.Prompt != ""
+	// A follow-up is a prompt that adds a turn to a conversation it names. A prompt
+	// carrying no token opens a conversation instead, and the other three kinds add no
+	// turn at all: calling an answered question a turn would report every one of them as
+	// a turn that was not taken.
+	followUp := req.Kind == a2a.RequestPrompt && req.ConversationToken != ""
 
 	t := &task{
 		ch:       c,
@@ -253,12 +252,10 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 // reads reports whether this request asks to be told what a conversation holds rather
 // than to do anything to it.
 //
-// The replay count is what separates a read from a plain resume, which carries a
-// conversation and nothing else and means continue the run that stopped part way. A
-// caller that wants both asks for the conversation first and then continues it, since
-// the two are different operations and one message cannot be both.
+// A caller that wants the conversation and then wants it continued sends two messages,
+// since the two are different operations and one message cannot be both.
 func (t *task) reads() bool {
-	return t.req.ConversationToken != "" && t.req.Replay > 0 && t.req.Prompt == "" && t.req.Answer == nil
+	return t.req.Kind == a2a.RequestRead
 }
 
 // serveRead answers a read: the conversation as blocks, and a result that reports what
@@ -328,29 +325,17 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 		return nil, fmt.Errorf("the request is not a valid v1 message: %w", err)
 	}
 
-	msg, err := a2a.ExpectProtocol(body, a2a.RequestProtocol)
+	msg, err := a2a.ExpectOneProtocol(body, a2a.RequestProtocols())
 	if err != nil {
-		return nil, fmt.Errorf("this path carries %s messages: %w", a2a.RequestProtocol, err)
+		return nil, fmt.Errorf("this path carries requests: %w", err)
 	}
 
-	req := msg.(*a2a.Request)
-
-	// A request either asks for something or answers a question, and the two are
-	// separate operations on the conversation: one adds a turn and pays for it, the
-	// other finishes a turn that is already there. Carrying both would leave the
-	// worker to decide which the caller meant.
-	//
-	// Carrying neither is the third operation and needs a conversation to name: continue
-	// a run that stopped part way, which is what a caller does after a suspend. Without a
-	// token it asks for nothing at all.
-	switch {
-	case req.Prompt == "" && req.Answer == nil && req.ConversationToken == "":
-		return nil, fmt.Errorf("the request carries neither a prompt, an answer nor a conversation to continue")
-	case req.Prompt != "" && req.Answer != nil:
-		return nil, fmt.Errorf("the request carries both a prompt and an answer; send one or the other")
+	req, ok := msg.(*a2a.Request)
+	if !ok {
+		return nil, fmt.Errorf("this path carries requests, not %T", msg)
 	}
 
-	if req.Answer != nil {
+	if req.Kind == a2a.RequestAnswer {
 		err = checkAnswer(req)
 		if err != nil {
 			return nil, err
@@ -361,13 +346,12 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 }
 
 // checkAnswer decides whether an answer can be acted on at all, before a task is built
-// around it. Everything here is about the message; whether the call it names is one
-// this conversation is waiting on is the run's to answer, since only the journal knows.
+// around it. It is the one rule the schema does not hold, the answer being a nested object
+// that carries its own kind and answer rather than a message with an id.
+//
+// Everything here is about the message; whether the call it names is one this conversation
+// is waiting on is the run's to answer, since only the journal knows.
 func checkAnswer(req *a2a.Request) error {
-	if req.ConversationToken == "" {
-		return fmt.Errorf("an answer needs the conversation_token of the conversation that asked")
-	}
-
 	a := req.Answer
 	if a.ToolUseID == "" {
 		return fmt.Errorf("the answer names no tool call")
@@ -496,7 +480,7 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true, ConversationToken: t.token}
 
 	switch {
-	case t.req.Answer != nil:
+	case t.req.Kind == a2a.RequestAnswer:
 		// An answer resumes the conversation and adds no turn to it. A call that
 		// deferred takes the answer as its result, since it is never dispatched again;
 		// an approval needs nothing here, the resume dispatching the call it guards and
@@ -506,10 +490,9 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	case t.followUp:
 		checkpoint = agent.Checkpoint{ResumeID: t.session, FollowUp: true, Force: t.req.Force}
 
-	case t.req.ConversationToken != "":
-		// Neither a turn nor an answer: continue a run that stopped part way, which is
-		// what a caller sends after a suspend and what the terminal's own resume has
-		// always done.
+	case t.req.Kind == a2a.RequestResume:
+		// Continue a run that stopped part way, which is what a caller sends after a
+		// suspend and what the terminal's own resume has always done.
 		checkpoint = agent.Checkpoint{ResumeID: t.session, Force: t.req.Force}
 	}
 
