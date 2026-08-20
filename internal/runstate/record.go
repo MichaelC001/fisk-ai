@@ -64,6 +64,9 @@ const (
 	// CallApprovalProtocol records an operator approval for one gated call, which
 	// authorizes the next dispatch of that call and nothing else.
 	CallApprovalProtocol Protocol = protocolNamespace + ".call_approval"
+	// MemoryRevisionsProtocol records the memory revisions the run read, so the
+	// next turn of the conversation may overwrite them without reading again.
+	MemoryRevisionsProtocol Protocol = protocolNamespace + ".memory_revisions"
 	// TerminalProtocol records why the run ended (or that it was suspended).
 	TerminalProtocol Protocol = protocolNamespace + ".terminal"
 	// ClaimProtocol records that a worker took the run over on resume. It is
@@ -91,15 +94,16 @@ type Record struct {
 	// working on.
 	Optional bool `json:"optional,omitempty"`
 
-	Meta         *MetaRecord         `json:"meta,omitempty"`
-	Assistant    *AssistantRecord    `json:"assistant,omitempty"`
-	User         *UserRecord         `json:"user,omitempty"`
-	ToolResult   *ToolResultRecord   `json:"tool_result,omitempty"`
-	Deferred     *DeferredRecord     `json:"deferred,omitempty"`
-	Decision     *DecisionRecord     `json:"decision,omitempty"`
-	CallApproval *CallApprovalRecord `json:"call_approval,omitempty"`
-	Terminal     *TerminalRecord     `json:"terminal,omitempty"`
-	Claim        *ClaimRecord        `json:"claim,omitempty"`
+	Meta            *MetaRecord            `json:"meta,omitempty"`
+	Assistant       *AssistantRecord       `json:"assistant,omitempty"`
+	User            *UserRecord            `json:"user,omitempty"`
+	ToolResult      *ToolResultRecord      `json:"tool_result,omitempty"`
+	Deferred        *DeferredRecord        `json:"deferred,omitempty"`
+	Decision        *DecisionRecord        `json:"decision,omitempty"`
+	CallApproval    *CallApprovalRecord    `json:"call_approval,omitempty"`
+	MemoryRevisions *MemoryRevisionsRecord `json:"memory_revisions,omitempty"`
+	Terminal        *TerminalRecord        `json:"terminal,omitempty"`
+	Claim           *ClaimRecord           `json:"claim,omitempty"`
 }
 
 // ClaimRecord records a worker taking over a run on resume. Writing it is what
@@ -240,6 +244,25 @@ type CallApprovalRecord struct {
 	ToolUseID string `json:"tool_use_id"`
 	// ToolName is the tool that call names, for a person reading the journal.
 	ToolName string `json:"tool_name"`
+}
+
+// MemoryRevisionsRecord is the memory store revisions the run knew when it ended,
+// keyed by memory key. A backend that refuses to overwrite a value the model has not
+// read holds these for the life of a run, and a run is one turn, so a conversation
+// that read a memory on one turn and edited it on the next re-read it every time.
+// Recording them lets the next turn start where this one finished.
+//
+// It holds every key the run knew a revision for, not only the ones that changed, and
+// a later record supersedes an earlier one. A run that dropped a revision after a
+// refused write has no other way to say so.
+//
+// Carrying a revision cannot authorize a wrong write, only an optimistic attempt: the
+// store checks the revision when the write is made, so a value that moved fails there
+// and the model is told to read it again.
+type MemoryRevisionsRecord struct {
+	// Revisions maps a memory key to the revision the run last saw it at. Empty is
+	// not recorded: a run that read no memory writes no record.
+	Revisions map[string]uint64 `json:"revisions"`
 }
 
 // TerminalReason explains why a run stopped.

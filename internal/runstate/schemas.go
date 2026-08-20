@@ -29,15 +29,16 @@ var ErrNoSchema = errors.New("no schema for protocol")
 // protocolSchemaFile maps each record protocol id to the schema that validates
 // it. common.json holds shared definitions and validates no record directly.
 var protocolSchemaFile = map[Protocol]string{
-	MetaProtocol:         "session.meta.json",
-	AssistantProtocol:    "session.assistant.json",
-	UserProtocol:         "session.user.json",
-	ToolResultProtocol:   "session.tool_result.json",
-	DeferredProtocol:     "session.deferred.json",
-	DecisionProtocol:     "session.decision.json",
-	CallApprovalProtocol: "session.call_approval.json",
-	TerminalProtocol:     "session.terminal.json",
-	ClaimProtocol:        "session.claim.json",
+	MetaProtocol:            "session.meta.json",
+	AssistantProtocol:       "session.assistant.json",
+	UserProtocol:            "session.user.json",
+	ToolResultProtocol:      "session.tool_result.json",
+	DeferredProtocol:        "session.deferred.json",
+	DecisionProtocol:        "session.decision.json",
+	CallApprovalProtocol:    "session.call_approval.json",
+	MemoryRevisionsProtocol: "session.memory_revisions.json",
+	TerminalProtocol:        "session.terminal.json",
+	ClaimProtocol:           "session.claim.json",
 }
 
 // Validator validates record bodies against the embedded v1 JSON schemas. A

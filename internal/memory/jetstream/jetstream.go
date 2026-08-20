@@ -61,8 +61,8 @@ type options struct {
 	Prefix *string `json:"prefix,omitempty"`
 
 	// NoRequireReadBeforeUpdate turns off the read-before-update guard. By default
-	// an overwrite must follow a read of the current value in this run and fails
-	// with ErrStale otherwise, so a run cannot clobber a memory it has not seen or
+	// an overwrite must follow a read of the current value in this conversation and
+	// fails with ErrStale otherwise, so a run cannot clobber a memory it has not seen or
 	// that changed under it (real lost-update protection over a shared bucket, which
 	// the KV revision makes atomic). Set this to allow a blind overwrite, matching
 	// the file backend. Like no_index it is a negative switch.
@@ -200,7 +200,7 @@ func (s *store) scope(ctx context.Context) *memory.Scope {
 }
 
 // remember records the revision a key is now known to be at, granting overwrite
-// authority for it this run. forget drops that authority.
+// authority for it for the life of the scope. forget drops that authority.
 func (s *store) remember(ctx context.Context, key string, rev uint64) {
 	s.scope(ctx).Remember(key, rev)
 }
@@ -209,8 +209,8 @@ func (s *store) forget(ctx context.Context, key string) {
 	s.scope(ctx).Forget(key)
 }
 
-// knownRevision returns the revision key was last seen at this run and whether it
-// was seen at all.
+// knownRevision returns the revision key was last seen at in this scope and whether
+// it was seen at all.
 func (s *store) knownRevision(ctx context.Context, key string) (uint64, bool) {
 	return s.scope(ctx).Revision(key)
 }
@@ -238,7 +238,8 @@ func (s *store) Read(ctx context.Context, key string) (string, string, error) {
 		return "", "", fmt.Errorf("reading memory %q: %w", key, err)
 	}
 
-	// Record the revision so a later overwrite can prove the model saw this value.
+	// Record the revision so a later overwrite, on this turn or a later one in the same
+	// conversation, can prove the model saw this value.
 	// Only Read does this: the start-of-run index and List read values to build the
 	// key/description index, not on the model's behalf, so they must not grant
 	// overwrite authority (seeing a key in the index is not the same as reading it).
@@ -287,8 +288,8 @@ func (s *store) Write(ctx context.Context, key, description, content string, ove
 	}
 
 	// Creating a key grants overwrite authority for it: the model just wrote its
-	// value, so it may keep editing it this run without re-reading. It also adds one
-	// to the tracked entry count.
+	// value, so it may keep editing it without re-reading. It also adds one to the
+	// tracked entry count.
 	s.remember(ctx, key, rev)
 	s.adjustCount(1)
 
@@ -296,9 +297,9 @@ func (s *store) Write(ctx context.Context, key, description, content string, ove
 }
 
 // overwrite replaces an existing memory. With the read-before-update guard on it
-// uses a revision-checked Update so it only succeeds when the model read the
-// current value in this run and no writer has changed it since; otherwise it is a
-// blind Put. Either way it records the new revision so the model can keep editing.
+// uses a revision-checked Update so it only succeeds when the scope knows the key's
+// revision and no writer has changed it since; otherwise it is a blind Put. Either
+// way it records the new revision so the model can keep editing.
 func (s *store) overwrite(ctx context.Context, key, sk string, data []byte) error {
 	if !s.requireRead {
 		rev, err := s.kv.Put(ctx, sk, data)
@@ -312,7 +313,7 @@ func (s *store) overwrite(ctx context.Context, key, sk string, data []byte) erro
 
 	prev, ok := s.knownRevision(ctx, key)
 	if !ok {
-		return fmt.Errorf("%w: memory %q was not read in this run; read it before overwriting", memory.ErrStale, key)
+		return fmt.Errorf("%w: no revision is known for memory %q; read it before overwriting", memory.ErrStale, key)
 	}
 
 	rev, err := s.kv.Update(ctx, sk, data, prev)

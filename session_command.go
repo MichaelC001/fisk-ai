@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -109,50 +108,8 @@ func registerSessionCommand(cmd *fisk.Application) {
 	show.Flag("thinking", "Include the model's reasoning in the transcript").Envar("THINKING").UnNegatableBoolVar(&showThinking)
 	show.Flag("no-tui", "Disable the full-screen viewer and print the transcript as line output without tool result output").Envar("NO_TUI").UnNegatableBoolVar(&noTUI)
 
-	answer := session.Command("answer", "Answers a tool call the session is waiting on").Action(sessionAnswerAction)
-	answer.Arg("id", "Session id").Required().StringVar(&sessionArgID)
-	answer.Arg("tool-use-id", "The tool_use id to answer, as shown by session show").Required().StringVar(&sessionAnswerUseID)
-	answer.Flag("result", "The result to give the model (default: read from stdin)").StringVar(&sessionAnswerResult)
-	answer.Flag("error", "Marks the result as a tool failure").UnNegatableBoolVar(&sessionAnswerIsError)
-
 	rm := session.Command("rm", "Removes a checkpointed session").Alias("delete").Action(sessionRmAction)
 	rm.Arg("id", "Session id").Required().StringVar(&sessionArgID)
-}
-
-// sessionAnswerAction supplies the result of a deferred tool call, so the run can be
-// resumed and finish the turn that call belongs to. The tool is not called again: it
-// already started whatever it started, which is why it deferred.
-func sessionAnswerAction(_ *fisk.ParseContext) error {
-	store, cleanup, err := openSessionStore()
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	// Stdin is the path a real answer takes: a ticket system's JSON or a file, neither
-	// of which belongs on a command line where it would reach the shell history.
-	// --result is the convenience for a short one.
-	result := sessionAnswerResult
-	if result == "" {
-		body, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading the result from stdin: %w", err)
-		}
-		result = string(body)
-	}
-	if result == "" {
-		return fmt.Errorf("a result is required; give one with --result or on stdin")
-	}
-
-	err = runstate.SupplyToolResult(store, sessionArgID, sessionAnswerUseID, result, sessionAnswerIsError)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Answered %s in session %s\n", sessionAnswerUseID, sessionArgID)
-	fmt.Printf("Resume with: fisk run --resume %s\n", sessionArgID)
-
-	return nil
 }
 
 // sessionTokens is what this conversation has processed, against the bound it was
@@ -319,7 +276,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 				c.Item(d.ToolUseID, deferralSummary(d))
 			}
 			c.Blank()
-			c.Printf("Answer one with: fisk session answer %s <tool-use-id>", rs.RunID)
+			c.Printf("Answer one on a request carrying this conversation's token.")
 		})
 	}
 

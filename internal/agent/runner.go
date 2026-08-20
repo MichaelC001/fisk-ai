@@ -18,6 +18,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/memory"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
@@ -174,6 +175,10 @@ type runner struct {
 	// leaves the attributes absent rather than blank.
 	memoryTools map[string]bool
 	memory      telemetry.MemoryInfo
+	// memScope is the memory scope this run's tools read and write through, held so the
+	// revisions it accumulated can be journaled as the run ends. A nil scope is a
+	// working scope holding nothing, so a runner assembled without one records nothing.
+	memScope *memory.Scope
 	// approvals holds the confirm gate's standing grants. The runner journals the
 	// ones the operator gives once the call that triggered them is answered, and
 	// clears them at a context reset.
@@ -269,6 +274,30 @@ func (r *runner) journalGrants() error {
 	}
 
 	return r.approvals.flush()
+}
+
+// journalMemoryRevisions records the memory revisions this run read, so the next turn
+// of the conversation can overwrite a value it read on an earlier one. It is written
+// as the run ends, after the terminal record, since a memory read on the last tool
+// call of the run counts as much as the first.
+//
+// A run that read no memory writes nothing, and a failed append warns rather than
+// ending anything: the run is over, and the next turn reads the value again as every
+// turn does today.
+func (r *runner) journalMemoryRevisions() {
+	revs := r.memScope.Snapshot()
+	if len(revs) == 0 {
+		return
+	}
+
+	jerr := r.emit(runstate.Record{
+		Protocol:        runstate.MemoryRevisionsProtocol,
+		Optional:        true,
+		MemoryRevisions: &runstate.MemoryRevisionsRecord{Revisions: revs},
+	})
+	if jerr != nil {
+		r.events.Warn(Warning{Kind: WarnJournalMemoryRevisions, Err: jerr})
+	}
 }
 
 // recordAppend reports one append's duration, classifying a failure as a store error
@@ -612,6 +641,8 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 		if jerr != nil {
 			r.events.Warn(Warning{Kind: WarnJournalTerminal, Err: jerr})
 		}
+
+		r.journalMemoryRevisions()
 	}
 
 	return reason, err

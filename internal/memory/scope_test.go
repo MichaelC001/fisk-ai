@@ -58,9 +58,62 @@ var _ = Describe("Scope", func() {
 
 		Expect(func() { scope.Remember("notes", 7) }).ToNot(Panic())
 		Expect(func() { scope.Forget("notes") }).ToNot(Panic())
+		Expect(func() { scope.Seed(map[string]uint64{"notes": 7}) }).ToNot(Panic())
+		Expect(scope.Snapshot()).To(BeNil())
 
 		_, ok := scope.Revision("notes")
 		Expect(ok).To(BeFalse())
+	})
+
+	It("Should snapshot every revision it holds", func() {
+		scope := NewScope()
+		Expect(scope.Snapshot()).To(BeEmpty())
+
+		scope.Remember("notes", 7)
+		scope.Remember("plans", 9)
+		scope.Forget("plans")
+
+		Expect(scope.Snapshot()).To(Equal(map[string]uint64{"notes": 7}))
+	})
+
+	// The caller owns the map: a host writes it into a journal record, where a scope
+	// still mutating behind it would be a data race on somebody else's memory.
+	It("Should snapshot a copy the caller owns", func() {
+		scope := NewScope()
+		scope.Remember("notes", 7)
+
+		snap := scope.Snapshot()
+		snap["notes"] = 99
+		scope.Remember("plans", 9)
+
+		Expect(snap).To(Equal(map[string]uint64{"notes": 99}))
+
+		rev, _ := scope.Revision("notes")
+		Expect(rev).To(Equal(uint64(7)))
+	})
+
+	It("Should seed revisions an earlier run left behind", func() {
+		scope := NewScope()
+		scope.Seed(map[string]uint64{"notes": 7})
+
+		rev, ok := scope.Revision("notes")
+		Expect(ok).To(BeTrue())
+		Expect(rev).To(Equal(uint64(7)))
+	})
+
+	// Seeding is a merge so a host that seeds late cannot silently drop what this run
+	// has already read, and a key read here wins over the stale value seeded for it.
+	It("Should keep what it already read when seeded", func() {
+		scope := NewScope()
+		scope.Remember("notes", 7)
+		scope.Seed(map[string]uint64{"notes": 3, "plans": 9})
+
+		rev, _ := scope.Revision("notes")
+		Expect(rev).To(Equal(uint64(7)))
+
+		rev, ok := scope.Revision("plans")
+		Expect(ok).To(BeTrue())
+		Expect(rev).To(Equal(uint64(9)))
 	})
 
 	It("Should be safe for concurrent use", func() {

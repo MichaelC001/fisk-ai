@@ -32,14 +32,26 @@ func ValidIdentityName(name string) bool {
 	return schemaNamePattern.MatchString(name)
 }
 
+// MaxRequestIDBytes is the longest a request tag may be. The character set alone left
+// it limited only by the message cap, so a caller could name a turn with several
+// hundred kilobytes and have those bytes become part of a subject. Every id this
+// package mints is 27 characters, and 64 leaves room for a caller that names its turns
+// after something of its own.
+const MaxRequestIDBytes = 64
+
 // ValidRequestID reports whether id is one the v1 schema accepts for a message's ID,
-// Request or Conversation tag: letters, digits, '-' and '_', and not empty.
+// Request or Conversation tag: letters, digits, '-' and '_', not empty, and at most
+// MaxRequestIDBytes long.
 //
 // It is the same character set as ValidIdentityName and is stated separately because
 // the two answer different questions. A request id correlates a reply set, and on the
 // task path it also becomes part of the address the process running that task
 // listens on, so a caller choosing those bytes freely would shape a subscription.
 func ValidRequestID(id string) bool {
+	if len(id) > MaxRequestIDBytes {
+		return false
+	}
+
 	return schemaNamePattern.MatchString(id)
 }
 

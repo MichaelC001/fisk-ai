@@ -122,6 +122,14 @@ type RunState struct {
 	// rather than carried into a later resume. It grants nothing on its own, for the
 	// reason Approvals states.
 	CallApprovals []CallApprovalRecord
+	// MemoryRevisions holds the memory revisions the last run to write them knew,
+	// keyed by memory key. A resume seeds the run's memory scope from it so a memory
+	// read on an earlier turn can be overwritten on this one without reading it again.
+	//
+	// The newest record supersedes the ones before it, so this is what the last run to
+	// record anything held rather than everything every run held. It grants nothing on
+	// its own: the store checks the revision when the write is made.
+	MemoryRevisions map[string]uint64
 	// Terminal is set when a Terminal record was journaled.
 	Terminal *TerminalRecord
 }
@@ -292,6 +300,19 @@ func Fold(records []Record) (*RunState, error) {
 			// Inert against the turn, as a decision is: the call it names is unanswered,
 			// so the batch it belongs to is still open.
 			rs.CallApprovals = append(rs.CallApprovals, *r.CallApproval)
+
+		case MemoryRevisionsProtocol:
+			if r.MemoryRevisions == nil {
+				return nil, fmt.Errorf("%w: memory revisions record with no payload at seq %d", ErrCorrupt, r.Seq)
+			}
+			// Inert against the turn, as a decision is. The record is written as the run
+			// ends, which is after a terminal record on a run that ended mid-batch, so
+			// touching cur here would commit a turn the resume exists to finish.
+			//
+			// The newest wins outright rather than merging: a run that dropped a revision
+			// after a refused write records what it holds now, and merging would restore
+			// what it dropped.
+			rs.MemoryRevisions = r.MemoryRevisions.Revisions
 
 		case TerminalProtocol:
 			if r.Terminal == nil {

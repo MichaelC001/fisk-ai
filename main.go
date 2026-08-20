@@ -47,10 +47,6 @@ var (
 	sessionConfigFile string
 	sessionArgID      string
 	sessionTranscript bool
-
-	sessionAnswerUseID   string
-	sessionAnswerResult  string
-	sessionAnswerIsError bool
 )
 
 // interruptContext returns a context canceled on the first Ctrl-C (SIGINT) or

@@ -45,7 +45,8 @@
         "request": {
           "type": "string",
           "pattern": "^[a-zA-Z0-9_-]+$",
-          "description": "Correlation tag of the originating request; every reply echoes it. On a request it equals id. A task binding may make it part of the address the process running that task listens on, so the character set is constrained."
+          "maxLength": 64,
+          "description": "Correlation tag of the originating request; every reply echoes it. It names one turn and must not be reused for another. A task binding may make it part of the address the process running that task listens on, so the character set and the length are constrained."
         },
         "conversation": {
           "type": "string",

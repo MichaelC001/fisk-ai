@@ -18,6 +18,11 @@ import (
 // run's read would then authorize another run's blind overwrite of the same key. The
 // scope travels on the context so both arrangements say "read in this run".
 //
+// A run is one turn of a conversation, so a host that runs many turns over one
+// conversation carries the scope forward with Snapshot and Seed rather than letting
+// each turn start blind. What a scope holds then spans the conversation, with the run
+// still the unit the host hands it to.
+//
 // A backend with no such gate ignores it. Every method is safe for concurrent use, and
 // a nil *Scope is a working scope that grants nothing, so a backend need not branch on
 // whether a host provided one.
@@ -27,7 +32,8 @@ type Scope struct {
 }
 
 // NewScope returns an empty scope. A host constructs one per run and puts it on the
-// run's context with WithScope.
+// run's context with WithScope, seeding it first where an earlier run over the same
+// conversation left revisions behind.
 func NewScope() *Scope {
 	return &Scope{revs: map[string]uint64{}}
 }
@@ -72,6 +78,60 @@ func (s *Scope) Revision(key string) (uint64, bool) {
 	rev, ok := s.revs[key]
 
 	return rev, ok
+}
+
+// Snapshot returns every key this scope knows a revision for, as a copy the caller
+// owns. A host that persists run state writes it where the run's state goes, so the
+// next run over the same conversation can start from it; a host that persists
+// nothing never calls it.
+func (s *Scope) Snapshot() map[string]uint64 {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.revs) == 0 {
+		return nil
+	}
+
+	out := make(map[string]uint64, len(s.revs))
+	for key, rev := range s.revs {
+		out[key] = rev
+	}
+
+	return out
+}
+
+// Seed records each key at its revision, as if this scope had read it. A host calls
+// it once before the run's first tool call, with what an earlier run over the same
+// conversation left behind, so a memory read on one turn may be overwritten on a
+// later one. It merges rather than replaces, so a scope that has already read
+// something keeps it.
+//
+// Seeding cannot authorize a write of a value that moved: the revision is checked
+// wherever the backend checks it, so a key another writer changed still fails there.
+func (s *Scope) Seed(revs map[string]uint64) {
+	if s == nil || len(revs) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.revs == nil {
+		s.revs = make(map[string]uint64, len(revs))
+	}
+	for key, rev := range revs {
+		// A key this scope has already read holds a newer fact than anything seeded for
+		// it, so the seed does not overwrite one.
+		_, seen := s.revs[key]
+		if seen {
+			continue
+		}
+		s.revs[key] = rev
+	}
 }
 
 type scopeKey struct{}

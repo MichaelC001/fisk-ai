@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,7 +138,7 @@ var _ = Describe("A2A", func() {
 			validator, err := NewValidator()
 			Expect(err).ToNot(HaveOccurred())
 
-			for _, id := range []string{"task.other", "task>", "with space"} {
+			for _, id := range []string{"task.other", "task>", "with space", strings.Repeat("a", MaxRequestIDBytes+1)} {
 				req := NewRequest("go")
 				fillHeader(&req.Header)
 				req.Request = id
@@ -148,6 +149,13 @@ var _ = Describe("A2A", func() {
 				Expect(ValidRequestID(id)).To(BeFalse(), id)
 				Expect(validator.Validate(body)).ToNot(Succeed(), id)
 			}
+		})
+
+		// The character set alone left the tag limited only by the message cap, and it
+		// reaches a subject, so the length is part of the rule rather than a courtesy.
+		It("Should refuse a tag longer than the cap and accept one at it", func() {
+			Expect(ValidRequestID(strings.Repeat("a", MaxRequestIDBytes))).To(BeTrue())
+			Expect(ValidRequestID(strings.Repeat("a", MaxRequestIDBytes+1))).To(BeFalse())
 		})
 	})
 
@@ -424,13 +432,12 @@ var _ = Describe("A2A", func() {
 		It("Should keep a conversation tag the caller set and mint one when it did not", func() {
 			fresh := NewRequest("p")
 			stampRequest(context.Background(), &fresh.Header, "caller1", "svc")
-			Expect(fresh.Conversation).To(Equal(fresh.ID))
+			Expect(fresh.Conversation).ToNot(BeEmpty())
 
 			carried := NewRequest("p")
 			carried.Conversation = "conv1"
 			stampRequest(context.Background(), &carried.Header, "caller1", "svc")
 			Expect(carried.Conversation).To(Equal("conv1"))
-			Expect(carried.Request).To(Equal(carried.ID))
 		})
 
 		// Canceling a task and answering its questions both name the request tag, so a
@@ -438,16 +445,37 @@ var _ = Describe("A2A", func() {
 		// was inside.
 		It("Should keep a request tag the caller set and mint one when it did not", func() {
 			fresh := NewRequest("p")
+			minted := fresh.Request
+			Expect(minted).ToNot(BeEmpty(), "the constructor names the turn")
 			stampRequest(context.Background(), &fresh.Header, "caller1", "svc")
-			Expect(fresh.Request).ToNot(BeEmpty())
-			Expect(fresh.Request).To(Equal(fresh.ID))
+			Expect(fresh.Request).To(Equal(minted), "the send keeps what it finds")
 
 			carried := NewRequest("p")
 			carried.Request = "req1"
 			stampRequest(context.Background(), &carried.Header, "caller1", "svc")
 			Expect(carried.Request).To(Equal("req1"))
-			Expect(carried.ID).To(Equal("req1"), "a request message's id is its correlation tag")
 			Expect(carried.Conversation).ToNot(Equal("req1"), "a conversation the caller did not name is still fresh")
+		})
+
+		// The tag names the turn every reply echoes and the id names one message, so a
+		// turn that sends more than one message can tell them apart.
+		It("Should give the message an id of its own", func() {
+			req := NewRequest("p")
+			req.Request = "req1"
+			stampRequest(context.Background(), &req.Header, "caller1", "svc")
+
+			Expect(req.ID).ToNot(BeEmpty())
+			Expect(req.ID).ToNot(Equal("req1"))
+		})
+
+		// A tool or discovery RPC belongs to no larger task, so nothing minted a tag for
+		// it and the send does, which is what its subject is built from.
+		It("Should mint a request tag for a message that carries none", func() {
+			tool := NewToolRequest("read_file", json.RawMessage(`{}`))
+			stampRequest(context.Background(), &tool.Header, "caller1", "svc")
+
+			Expect(tool.Request).ToNot(BeEmpty())
+			Expect(tool.Conversation).To(Equal(tool.Request))
 		})
 	})
 
@@ -464,8 +492,10 @@ var _ = Describe("A2A", func() {
 			Expect(req.Prompt).To(Equal("and the other one"))
 			Expect(req.ConversationToken).To(Equal("2Ab3Cd4Ef5Gh"))
 			Expect(req.Conversation).To(Equal("conv1"))
-			// The reply set is its own, so the correlation tag is left for the send.
-			Expect(req.Request).To(BeEmpty())
+			// The reply set is its own, so the turn carries the fresh tag its constructor
+			// minted rather than the one the ack answered.
+			Expect(req.Request).ToNot(BeEmpty())
+			Expect(req.Request).ToNot(Equal(ack.Request))
 		})
 
 		It("Should round-trip the token through the schema on both messages", func() {

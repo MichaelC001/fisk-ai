@@ -105,7 +105,6 @@ func (s *chatSession) read(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Request = a2a.NewID()
 
 	out, err := s.host.client.RunTask(ctx, s.host.identity, req, s.client)
 	if err != nil {
@@ -131,9 +130,6 @@ func (s *chatSession) read(ctx context.Context) error {
 // here.
 func (s *chatSession) turn(ctx context.Context, prompt string) (bool, error) {
 	req := a2a.NewRequest(prompt)
-	// The id is minted here rather than on the way out, so the interrupt hook can name
-	// the turn it is asking to stop before there is anything to name it to.
-	req.Request = a2a.NewID()
 	req.ConversationToken = s.conversation
 	req.Force = forceResume
 
@@ -217,7 +213,6 @@ func (s *chatSession) sendAnswer(ctx context.Context, held *a2a.Answer) error {
 		}
 
 		req := a2a.NewAnswerRequest(s.conversation, held)
-		req.Request = a2a.NewID()
 		req.Force = forceResume
 
 		out, err := s.host.client.RunTask(ctx, s.host.identity, req, s.client)

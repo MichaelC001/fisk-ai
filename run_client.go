@@ -260,9 +260,6 @@ func runAsClient(ctx context.Context, stop context.CancelFunc, host *hostedAgent
 		req.ConversationToken = token
 	}
 
-	// Minted here rather than on the way out, so the interrupt handler can name the turn
-	// it is asking to stop before there is anything to name it to.
-	req.Request = a2a.NewID()
 	req.Force = forceResume
 
 	// The first interrupt asks the run to stop where it can be continued, which is what
@@ -333,7 +330,6 @@ func deliverHeldAnswers(ctx context.Context, host *hostedAgent, token string, ou
 		fmt.Fprintln(os.Stderr, "your answer arrived after the run gave the question up; sending it now")
 
 		req := a2a.NewAnswerRequest(token, held)
-		req.Request = a2a.NewID()
 		req.Force = forceResume
 
 		sent, err := host.client.RunTask(ctx, host.identity, req, h)
@@ -357,7 +353,6 @@ func readConversation(ctx context.Context, host *hostedAgent, token string, h a2
 	if err != nil {
 		return err
 	}
-	req.Request = a2a.NewID()
 
 	out, err := host.client.RunTask(ctx, host.identity, req, h)
 	if err != nil {
