@@ -54,8 +54,11 @@ func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 	}
 
 	svc.srv, err = a2a.NewServer(held.transport, toolkit.Tools(tools), a2a.ServerOptions{
-		Identity:    cfg.Identity,
-		Version:     util.Version(),
+		Identity: cfg.Identity,
+		Version:  util.Version(),
+		// Only where this identity answers prompts. Serving tools runs no model, so an
+		// identity that only does that would be publishing one it never calls.
+		Model:       promptModel(cfg),
 		ConfirmTags: cfg.ConfirmTags(),
 		Concurrency: cfg.A2AMaxConcurrentTools(),
 		CallTimeout: cfg.A2AToolTimeout(),

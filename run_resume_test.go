@@ -29,10 +29,12 @@ var _ = Describe("resumeHint", func() {
 	})
 
 	// Remotely there is no store to resolve an id against: it travels as a token, the
-	// worker hashes it again, and it names no journal. So the hint carries the token,
-	// and the context without which the command reaches a different agent.
-	It("Should name the token and the context for an agent somewhere else", func() {
-		Expect(resumeHint(identity, "ngs_user", token)).To(Equal("resume with: fisk run --nats-context ngs_user --resume " + token))
+	// worker hashes it again, and it names no journal. So the hint carries the token, and
+	// the context and identity without which the command reaches a different agent, or
+	// none at all in a directory holding no configuration.
+	It("Should name the token, the context and the agent for one somewhere else", func() {
+		Expect(resumeHint(identity, "ngs_user", token)).To(Equal(
+			"resume with: fisk run --nats-context ngs_user --identity " + identity + " --resume " + token))
 	})
 
 	It("Should not print a session id remotely, which a remote resume refuses", func() {

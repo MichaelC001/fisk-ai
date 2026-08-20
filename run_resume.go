@@ -66,8 +66,12 @@ func resumeHint(identity, natsContext, token string) string {
 		return ""
 	}
 
+	// The identity goes on the remote command because it is what addresses the agent the
+	// conversation happened with. Left off, the command works only where a configuration
+	// file names that same agent, so it is wrong in any other directory and wrong in a
+	// terminal that named the agent on the command line.
 	if natsContext != "" {
-		return fmt.Sprintf("resume with: fisk run --nats-context %s --resume %s", natsContext, token)
+		return fmt.Sprintf("resume with: fisk run --nats-context %s --identity %s --resume %s", natsContext, identity, token)
 	}
 
 	return fmt.Sprintf("resume with: fisk run --resume %s", a2aendpoint.SessionFor(identity, token))

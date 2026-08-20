@@ -127,6 +127,10 @@ type Meta struct {
 	// the whole run: an operator watching this screen for an hour should be able to see
 	// that their prompts are leaving the machine.
 	TelemetryContent ContentExport
+	// Multiplexer names the terminal multiplexer hosting this run, which the top bar
+	// reports at its right end so the operator can see that the pane is being told what
+	// the run is doing. Empty, which is a run nobody is supervising, shows nothing.
+	Multiplexer string
 	// InTokens and OutTokens are the session's accumulated token usage, shown on the
 	// static statusbar the same way the live bar shows its running counter. Both zero
 	// (a view with no usage to report) hides the count rather than showing "0/0".
@@ -338,7 +342,22 @@ func newViewer(meta Meta, lines []Line, noColor, follow bool) *viewer {
 		bar.SetTextColor(tcell.ColorWhite)
 		bar.SetBackgroundColor(tcell.ColorBlue)
 		bar.SetText(header)
-		main.AddItem(bar, 1, 0, false)
+
+		// The band is one row of two halves so the multiplexer sits hard against the
+		// right edge whatever the terminal is wide, rather than at a column computed
+		// from a width that changes when somebody resizes.
+		row := tview.NewFlex().AddItem(bar, 0, 1, false)
+		if label := multiplexerLabel(meta); label != "" {
+			right := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignRight)
+			right.SetTextColor(tcell.ColorWhite)
+			right.SetBackgroundColor(tcell.ColorBlue)
+			// Escaped because the label is bracketed, which the bar's dynamic colors
+			// would otherwise read as a color tag and swallow whole.
+			right.SetText(fmt.Sprintf("[::b]%s[::-]", tview.Escape(label)))
+			row.AddItem(right, utf8.RuneCountInString(label), 0, false)
+		}
+
+		main.AddItem(row, 1, 0, false)
 		v.headerRows = 1
 	}
 	main.
@@ -1552,6 +1571,21 @@ func headerText(meta Meta) string {
 	}
 
 	return fmt.Sprintf(" [::b]%s[::-] ", strings.Join(parts, " "))
+}
+
+// multiplexerLabel is the right end of the top bar, naming the terminal multiplexer this
+// run reports its state to. It returns "" when no multiplexer is hosting the run, which
+// drops the half rather than leaving an empty one.
+//
+// It says detected because that is what the operator wants confirmed: the reporting is
+// invisible from inside the pane, so without it there is no way to tell an integration
+// that is working from one that is not there at all.
+func multiplexerLabel(meta Meta) string {
+	if meta.Multiplexer == "" {
+		return ""
+	}
+
+	return "[" + meta.Multiplexer + " detected] "
 }
 
 // truncateRunes shortens s to at most n runes, appending an ellipsis when it cut. It

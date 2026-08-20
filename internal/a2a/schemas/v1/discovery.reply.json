@@ -22,6 +22,11 @@
     "description": {
       "type": "string"
     },
+    "model": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "The model the agent answers a prompt with, as its own configuration names it. It is the name the agent asks for, often an alias rather than the dated snapshot that serves a call. It is bounded because a receiver displays it. Absent from an agent that answers no prompts."
+    },
     "protocols": {
       "type": "array",
       "items": {

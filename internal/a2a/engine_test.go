@@ -69,9 +69,10 @@ var _ = Describe("buildCard", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ping", "ping it")
 
-		card := buildCard("svc", "v1", toolsFor(app), nil)
+		card := buildCard(ServerOptions{Identity: "svc", Version: "v1", Model: "opus"}, toolsFor(app))
 		Expect(card.Name).To(Equal("svc"))
 		Expect(card.Version).To(Equal("v1"))
+		Expect(card.Model).To(Equal("opus"), "so a caller can see what answers its prompt")
 		Expect(card.Protocols).To(ConsistOf(ProtocolNamespace))
 		Expect(card.Tools).To(HaveLen(1))
 		Expect(card.Tools[0].Name).To(Equal("ping"))
@@ -83,9 +84,16 @@ var _ = Describe("buildCard", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ls", "list things").Tag("ai:read_only").Tag("ai:idempotent")
 
-		card := buildCard("svc", "v1", toolsFor(app), nil)
+		card := buildCard(ServerOptions{Identity: "svc", Version: "v1"}, toolsFor(app))
 		Expect(card.Tools).To(HaveLen(1))
 		Expect(card.Tools[0].Behavior).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
+	})
+
+	// An agent that takes no prompts calls no model, and a card naming one would say
+	// something about this agent that is not true.
+	It("Should name no model where the caller supplied none", func() {
+		card := buildCard(ServerOptions{Identity: "svc", Version: "v1"}, nil)
+		Expect(card.Model).To(BeEmpty())
 	})
 })
 

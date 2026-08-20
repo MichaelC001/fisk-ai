@@ -355,14 +355,29 @@ type ToolDescriptor struct {
 	Behavior toolkit.Behavior `json:"behavior,omitzero"`
 }
 
-// AgentCard is an agent's self description: who it is, its version, and the
-// tools it exposes.
+// AgentCard is an agent's self description: who it is, its version, the model it
+// answers prompts with, and the tools it exposes.
 type AgentCard struct {
 	Name        string           `json:"name"`
 	Version     string           `json:"version"`
 	Description string           `json:"description,omitempty"`
 	Protocols   []string         `json:"protocols,omitempty"`
 	Tools       []ToolDescriptor `json:"tools,omitempty"`
+
+	// Model is the model this agent answers a prompt with, as its own configuration
+	// names it.
+	//
+	// It is published because the configuration that picks it is on the worker: a person
+	// holding a conversation with an agent somebody else runs has no other way to see
+	// what is answering them.
+	//
+	// It is the name the agent asks for, often an alias such as claude-sonnet-5. The
+	// dated snapshot that served a particular call is a different value, which a provider
+	// reports per reply. Empty means the agent did not say, which is an agent that takes
+	// no prompts, one that runs a model only for work arriving another way, or one from
+	// before this field: reading nothing here is knowing nothing rather than knowing
+	// there is no model.
+	Model string `json:"model,omitempty"`
 
 	// Telemetry reports that the agent exports traces of what it does, and
 	// TelemetryContent that those traces carry the conversation itself rather than only

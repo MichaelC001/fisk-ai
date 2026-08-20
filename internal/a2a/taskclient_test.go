@@ -28,6 +28,10 @@ type heldTransport struct {
 	// typing it.
 	refuse bool
 
+	// endEarly stops the set after its prefix instead of carrying a terminal message,
+	// which is what a worker that died mid-turn leaves behind.
+	endEarly bool
+
 	mu      sync.Mutex
 	answers []*ElicitReply
 	// requests is every request the client actually sent, so a spec can tell a prompt
@@ -85,6 +89,7 @@ func (t *heldTransport) Stream(_ context.Context, _ string, _ RouteHint, body []
 		messages: t.prefix(&hdr),
 		terminal: t.terminal(&hdr),
 		release:  t.release,
+		endEarly: t.endEarly,
 	}, nil
 }
 
@@ -127,6 +132,7 @@ type heldReader struct {
 	messages [][]byte
 	terminal []byte
 	release  chan struct{}
+	endEarly bool
 	at       int
 	done     bool
 }
@@ -150,6 +156,10 @@ func (r *heldReader) Next(ctx context.Context) ([]byte, error) {
 	}
 
 	r.done = true
+
+	if r.endEarly {
+		return nil, io.EOF
+	}
 
 	return r.terminal, nil
 }

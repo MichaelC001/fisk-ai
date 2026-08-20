@@ -157,7 +157,12 @@ func (v *viewer) enableSplash(meta Meta) {
 func splashInfoLines(meta Meta) []string {
 	lines := []string{
 		splashInfoLine("version", escapeSplash(meta.Version)),
-		splashInfoLine("model", escapeSplash(truncateRunes(meta.Model, splashValueMax))),
+	}
+	// A run against an agent somebody else hosts may know no model: the model is the
+	// worker's, and this terminal need not have been told one. A label with nothing after
+	// it reads as a card that failed to fill in, so the row is left out instead.
+	if meta.Model != "" {
+		lines = append(lines, splashInfoLine("model", escapeSplash(truncateRunes(meta.Model, splashValueMax))))
 	}
 	if meta.Dir != "" {
 		lines = append(lines, splashInfoLine("dir", escapeSplash(elideLeft(meta.Dir, splashValueMax))))

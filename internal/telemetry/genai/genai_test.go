@@ -396,7 +396,6 @@ var _ = Describe("Content builders", func() {
 				"control\x00\x01\x1f",
 				"é世界",
 				"  ",
-				"invalid \xff\xfe bytes",
 				strings.Repeat("<", 100),
 			} {
 				b, err := json.Marshal(s)
@@ -404,6 +403,26 @@ var _ = Describe("Content builders", func() {
 
 				// The marshaled form carries the two quotes the body does not.
 				Expect(encodedLen(s)).To(Equal(len(b)-2), "mismatch for %q: encoder produced %s", s, b)
+			}
+		})
+
+		// An invalid byte is the one case the toolchains disagree on: it was a
+		// six-character escape and is a three-byte U+FFFD written raw from Go 1.27, so an
+		// exact count can only be right for one of them. Only one direction can hurt, and
+		// that is what is asserted here: a count below what the encoder writes would let
+		// an attribute past the cap it was budgeted against, while one above it truncates
+		// earlier than it needed to.
+		It("never counts an invalid byte as smaller than the encoder writes it", func() {
+			for _, s := range []string{
+				"invalid \xff\xfe bytes",
+				"\xff",
+				strings.Repeat("\xfe", 50),
+			} {
+				b, err := json.Marshal(s)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(encodedLen(s)).To(BeNumerically(">=", len(b)-2),
+					"undercount for %q: encoder produced %s", s, b)
 			}
 		})
 	})

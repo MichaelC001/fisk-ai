@@ -66,6 +66,7 @@ var _ = Describe("Validator", func() {
 
 			discoveryReply := NewDiscoveryReply("agent-a", "1.2.3")
 			discoveryReply.Description = "manages nats auth"
+			discoveryReply.Model = "claude-sonnet-5"
 			discoveryReply.Protocols = []string{ProtocolNamespace}
 			discoveryReply.Tools = []ToolDescriptor{{
 				Name:        "nats_server_info",
@@ -362,6 +363,22 @@ var _ = Describe("Validator", func() {
 			bad := tamper(data, func(m map[string]any) {
 				tools := m["tools"].([]any)
 				tools[0].(map[string]any)["behavior"] = map[string]any{"read_only": "yes"}
+			})
+			Expect(v.Validate(bad)).To(HaveOccurred())
+		})
+
+		// A receiver displays the model, so the card cannot carry an unbounded one.
+		It("Should reject a model longer than a card may carry", func() {
+			reply := NewDiscoveryReply("agent-a", "1.2.3")
+			fillHeader(&reply.Header)
+			reply.Model = "claude-sonnet-5"
+
+			data, err := json.Marshal(reply)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v.Validate(data)).To(Succeed())
+
+			bad := tamper(data, func(m map[string]any) {
+				m["model"] = strings.Repeat("m", 129)
 			})
 			Expect(v.Validate(bad)).To(HaveOccurred())
 		})

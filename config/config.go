@@ -370,6 +370,29 @@ func (c *Config) ApplyStateDir(dir string) error {
 	return nil
 }
 
+// ApplyIdentity folds an operator-supplied identity into a parsed config, so a name
+// typed at the command line wins over the file's. An empty name is a no-op, leaving
+// whatever the file set or prepare derived.
+//
+// The name is validated as a NATS subject token, since the identity is the subject an
+// agent answers on, and it is recorded as chosen rather than derived, which is what
+// IdentityIsNamed reports. Pass only a name a person picked: a value taken from a
+// binary or a directory records as chosen and addresses whatever already answers to it.
+func (c *Config) ApplyIdentity(name string) error {
+	if name == "" {
+		return nil
+	}
+
+	if !identityPattern.MatchString(name) {
+		return fmt.Errorf("identity %q is invalid: it must contain only letters, digits, '-' or '_', since it doubles as a NATS subject token and a queue group", name)
+	}
+
+	c.Identity = name
+	c.identityDerived = false
+
+	return nil
+}
+
 // RAGConfig configures the built-in knowledge_search tool and the backing SQLite
 // index. It is written by the operator as harness.knowledge. The lexical tier is
 // always available when enabled; the vector tier turns on only when Embeddings is

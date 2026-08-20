@@ -92,6 +92,11 @@ var (
 	// refused the prompt. Nothing was sent, so no conversation was opened or
 	// continued and the agent never saw it.
 	ErrPromptDenied = errors.New("prompt denied")
+	// ErrIncompleteStream reports a reply set that ended without a terminal message,
+	// so how the turn ended is not known. It reaches a caller through
+	// ClientTurnEndInfo.Err rather than as a return: what arrived before the set ended
+	// is in the outcome and is worth having.
+	ErrIncompleteStream = errors.New("the reply set ended without a terminal message")
 )
 
 // NewID returns a new KSUID string, used to mint message, request and

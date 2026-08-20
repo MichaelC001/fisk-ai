@@ -337,6 +337,30 @@ var _ = Describe("transcript viewer", func() {
 			Expect(text).To(ContainSubstring("fisk-ai v9"))
 			Expect(text).NotTo(ContainSubstring("see this"))
 		})
+
+		// The reporting a multiplexer gets is invisible from inside the pane, so the bar
+		// is where an operator sees that it found one.
+		Describe("the multiplexer", func() {
+			It("Should say nothing where no multiplexer claimed the run", func() {
+				Expect(multiplexerLabel(Meta{})).To(BeEmpty())
+
+				text := drawViewer(Meta{Version: "v9"}, []Line{{Kind: LineNarration, Text: "hi"}})
+				Expect(text).NotTo(ContainSubstring("detected"))
+			})
+
+			It("Should name the one that did", func() {
+				Expect(multiplexerLabel(Meta{Multiplexer: "herdr"})).To(Equal("[herdr detected] "))
+			})
+
+			It("Should sit at the right of the band, with the version still at the left", func() {
+				text := drawViewer(Meta{Version: "v9", Multiplexer: "herdr"}, []Line{{Kind: LineNarration, Text: "hi"}})
+
+				band := strings.SplitN(text, "\n", 2)[0]
+				Expect(band).To(ContainSubstring("fisk-ai v9"))
+				Expect(strings.TrimRight(band, " ")).To(HaveSuffix("[herdr detected]"),
+					"the brackets survive the bar's color tags, at the far end of the row")
+			})
+		})
 	})
 
 	Describe("prompt line", func() {

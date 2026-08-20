@@ -156,6 +156,17 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 		unsent []*Answer
 	)
 
+	// endErr is why the set stopped when no terminal message arrived, read by the
+	// deferred report below. A set that ended with one leaves it nil.
+	var endErr error
+
+	// Every path out of the loop passes through here, which is what makes TurnEnd a
+	// point a caller can rely on: a turn that was accepted closes exactly once,
+	// whether it answered, failed, was canceled or lost its transport. The questions
+	// this task opened are ended and waited for first, so nothing about a question
+	// lands after the turn that asked it.
+	//
+	// A task whose ack never arrived opened no turn, so it closes none.
 	defer func() {
 		stopAsking()
 		wg.Wait()
@@ -163,14 +174,27 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 		mu.Lock()
 		out.Unsent = unsent
 		mu.Unlock()
+
+		if out.Ack == nil {
+			return
+		}
+
+		// The cancellation is dropped and the values kept: how a turn ended is a fact
+		// rather than work, and the path that most needs reporting is the one where ctx
+		// is already dead.
+		c.reportTurnEnd(context.WithoutCancel(ctx), agent, out, stream.Request(), endErr)
 	}()
 
 	for {
 		msg, err := stream.Next(ctx)
 		if errors.Is(err, io.EOF) {
+			endErr = ErrIncompleteStream
+
 			return out, nil
 		}
 		if err != nil {
+			endErr = err
+
 			return nil, err
 		}
 
@@ -199,39 +223,42 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 			go func() {
 				defer wg.Done()
 
-				held := c.answerQuestion(asking, agent, stream.Request(), m, h)
+				outcome := c.answerQuestion(asking, agent, stream.Request(), m, h)
 
 				// Fired from this goroutine rather than the reader, so it lands when the
-				// question is actually done with rather than when the set moves on.
-				c.hooks.fireQuestionAnswered(ctx, QuestionAnsweredInfo{
+				// question is actually done with rather than when the set moves on. The
+				// turn waits for it: TurnEnd is reported once these goroutines are done.
+				//
+				// The cancellation is dropped for the same reason it is on the turn's own
+				// ending: a run canceled under a person is exactly when a caller needs to
+				// hear that nobody answered.
+				c.hooks.fireQuestionAnswered(context.WithoutCancel(ctx), QuestionAnsweredInfo{
 					Agent:      agent,
 					Request:    stream.Request(),
 					QuestionID: m.QuestionID,
 					ToolUseID:  m.ToolUseID,
-					Answered:   held == nil,
-					Held:       held != nil,
+					Answered:   outcome.answered,
+					Held:       outcome.held != nil,
 				})
 
-				if held == nil {
+				if outcome.held == nil {
 					return
 				}
 
 				mu.Lock()
-				unsent = append(unsent, held)
+				unsent = append(unsent, outcome.held)
 				mu.Unlock()
 			}()
 
 		case *Result:
 			out.Result = m
 			out.Gaps = stream.Gaps()
-			c.reportTurnEnd(ctx, agent, out, stream.Request())
 
 			return out, nil
 
 		case *ErrorMessage:
 			out.Error = m
 			out.Gaps = stream.Gaps()
-			c.reportTurnEnd(ctx, agent, out, stream.Request())
 
 			return out, nil
 		}
@@ -265,9 +292,9 @@ func (c *Client) reportAck(ctx context.Context, agent string, req *Request, ack 
 }
 
 // reportTurnEnd tells the hooks how the turn ended, from whichever of the two terminal
-// messages arrived.
-func (c *Client) reportTurnEnd(ctx context.Context, agent string, out *TaskOutcome, request string) {
-	info := ClientTurnEndInfo{Agent: agent, Request: request}
+// messages arrived, or from endErr when neither did.
+func (c *Client) reportTurnEnd(ctx context.Context, agent string, out *TaskOutcome, request string, endErr error) {
+	info := ClientTurnEndInfo{Agent: agent, Request: request, Err: endErr}
 	if out.Ack != nil {
 		info.Conversation = out.Ack.ConversationToken
 	}
@@ -287,22 +314,36 @@ func (c *Client) reportTurnEnd(ctx context.Context, agent string, out *TaskOutco
 	c.hooks.fireTurnEnd(ctx, info)
 }
 
+// questionOutcome is what became of one question: whether an answer reached the run,
+// and what a person decided that could not be delivered to it.
+//
+// The two are separate because most of what is not delivered is not held either: a
+// question nobody answered, one the operator dismissed, and one answered by a handler
+// with nobody to ask all end with neither.
+type questionOutcome struct {
+	answered bool
+	held     *Answer
+}
+
 // answerQuestion puts one question to the handler and delivers the answer, saying that
 // somebody is still there while it waits.
 //
-// It returns what could not be delivered, so the caller keeps a person's answer when
-// the run gave the question up under them, and nil when there is nothing to keep.
-func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask *ElicitRequest, h TaskHandler) *Answer {
+// What it reports is what happened to the question, so a caller can tell an answered
+// one from a question given up on, and it returns what could not be delivered so a
+// person's decision survives the run having moved on under them.
+func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask *ElicitRequest, h TaskHandler) questionOutcome {
 	reply, err := c.waitForAnswer(ctx, agent, request, ask, func() (*ElicitReply, error) {
 		return h.Question(ctx, ask)
 	})
+	// Nobody answered: the set ended under the question, the run was canceled, or the
+	// operator dismissed it. Nothing reached the run and there is nothing to keep.
 	if err != nil || reply == nil {
-		return nil
+		return questionOutcome{}
 	}
 
 	_, err = c.Answer(ctx, agent, request, reply)
 	if err == nil {
-		return nil
+		return questionOutcome{answered: true}
 	}
 
 	// Only a decision is worth keeping. A no-operator reply is what a handler produces
@@ -311,7 +352,7 @@ func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask 
 	// decline a gated command on their behalf, having never shown them the question, and
 	// delivering it to a question that is already gone changes nothing either way.
 	if reply.Answer == AnswerNoOperator {
-		return nil
+		return questionOutcome{}
 	}
 
 	// The run is not there to hear it. What the person typed is worth keeping: it goes
@@ -319,10 +360,10 @@ func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask 
 	// since a resumed run mints a new question id.
 	held, buildErr := NewAnswer(ask, reply)
 	if buildErr != nil {
-		return nil
+		return questionOutcome{}
 	}
 
-	return held
+	return questionOutcome{held: held}
 }
 
 // waitForAnswer runs get and, while it is running, tells the agent every AckInterval
