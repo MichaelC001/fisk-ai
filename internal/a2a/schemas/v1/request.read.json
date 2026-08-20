@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/request.read.json",
+  "title": "fisk-ai A2A v1 conversation read",
+  "description": "Asks to be told what a conversation holds. The worker sends replay blocks of it, counted back from the end, between replay_start and replay_end status markers, and then ends the reply set. It takes no turn and calls no model, so it is answered whatever state the conversation is in and while a turn of it is in flight.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "conversation_token",
+    "replay"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.request.read"
+    },
+    "prompt": false,
+    "answer": false,
+    "conversation_token": {
+      "$ref": "common.json#/$defs/conversation_token"
+    },
+    "replay": {
+      "$ref": "common.json#/$defs/replay",
+      "minimum": 1,
+      "description": "How many blocks of the stored conversation to send, counted back from the end. At least one: a read of nothing is a resume, and the count is what separates the two. The worker rounds outwards to a turn boundary so a result never arrives without the call it answers, and sends at most 200."
+    }
+  }
+}

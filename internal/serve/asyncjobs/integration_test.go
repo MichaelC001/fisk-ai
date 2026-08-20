@@ -549,13 +549,20 @@ var _ = Describe("Integration: asyncjobs channel", func() {
 					stampHeader(&cancel.Header)
 					return encode(cancel)
 				},
-				"is not a io.choria.fisk-ai.v1.request message"),
+				"is not a io.choria.fisk-ai.v1.request.prompt message"),
 			Entry("an id no session store would accept", "-job3",
 				func() []byte { return encode(newRequest("go")) },
 				"cannot name a session"),
-			Entry("a request with no prompt", "job4",
+			Entry("a prompt with nothing in it", "job4",
 				func() []byte { return encode(newRequest("")) },
-				"carries no prompt"),
+				"not a valid v1 message"),
+			Entry("a request that is not a prompt", "job6",
+				func() []byte {
+					resume := a2a.NewResume("2Ab3Cd4Ef5Gh")
+					stampHeader(&resume.Header)
+					return encode(resume)
+				},
+				"is not a io.choria.fisk-ai.v1.request.prompt message"),
 			Entry("a payload over the size cap", "job5",
 				func() []byte {
 					req := newRequest("go")

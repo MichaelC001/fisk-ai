@@ -25,8 +25,14 @@ const (
 // protocolSchemaFile maps each message protocol id to the schema that validates
 // it. common.json holds shared definitions and validates no message directly.
 var protocolSchemaFile = map[string]string{
-	RequestProtocol:     "request.json",
-	EventProtocol:       "event.json",
+	// One per thing a caller can ask for, since each is a message id of its own. Each
+	// states what its own shape requires and refuses the fields belonging to its
+	// siblings, so a body disagreeing with its id is refused before it is decoded.
+	RequestPromptProtocol: "request.prompt.json",
+	RequestAnswerProtocol: "request.answer.json",
+	RequestResumeProtocol: "request.resume.json",
+	RequestReadProtocol:   "request.read.json",
+
 	ResultProtocol:      "result.json",
 	ErrorProtocol:       "error.json",
 	CancelProtocol:      "cancel.json",
@@ -34,22 +40,55 @@ var protocolSchemaFile = map[string]string{
 	ToolRequestProtocol: "tool.request.json",
 	ToolReplyProtocol:   "tool.reply.json",
 
-	ElicitRequestProtocol: "elicit.request.json",
-	ElicitReplyProtocol:   "elicit.reply.json",
+	// One per kind of question and one per answer, since each is a message id of its
+	// own. A question this build does not name is refused rather than validated on its
+	// framing: a caller that cannot read a question cannot put it to anybody.
+	ElicitRequestApproveProtocol: "elicit.request.approve.json",
+	ElicitRequestConfirmProtocol: "elicit.request.confirm.json",
+	ElicitRequestSelectProtocol:  "elicit.request.select.json",
+	ElicitRequestInputProtocol:   "elicit.request.input.json",
+
+	ElicitReplyApproveProtocol:    "elicit.reply.approve.json",
+	ElicitReplyConfirmProtocol:    "elicit.reply.confirm.json",
+	ElicitReplySelectProtocol:     "elicit.reply.select.json",
+	ElicitReplyInputProtocol:      "elicit.reply.input.json",
+	ElicitReplyNoOperatorProtocol: "elicit.reply.no_operator.json",
+
+	ElicitWaitingProtocol: "elicit.waiting.json",
 
 	DiscoveryRequestProtocol: "discovery.request.json",
 	DiscoveryReplyProtocol:   "discovery.reply.json",
+
+	// One per kind of block, since each is a message id of its own.
+	EventThinkingProtocol:   "event.thinking.json",
+	EventTextProtocol:       "event.text.json",
+	EventToolCallProtocol:   "event.tool_call.json",
+	EventToolResultProtocol: "event.tool_result.json",
+	EventAgentCallProtocol:  "event.agent_call.json",
+	EventStatusProtocol:     "event.status.json",
+	EventWarningProtocol:    "event.warning.json",
+	EventPromptProtocol:     "event.prompt.json",
 }
+
+// eventFallbackSchemaFile validates an event whose kind this build does not name. It
+// is keyed by no id, being what an id with no schema of its own falls back to, and it
+// checks the framing rather than the block: the header, the sequence number and that
+// a block is there at all.
+const eventFallbackSchemaFile = "event.json"
 
 // Validator validates message bodies against the embedded v1 JSON schemas.
 //
-// The schemas accept properties they do not name, an event block whose type they do
-// not name, and a stop reason they do not name, so a peer on a newer schema does not
-// lose a whole message to one thing this build has never heard of. Everything else is
-// enforced as before: required fields, types, patterns, the protocol const, and every
-// block whose type the schemas do name.
+// The schemas accept properties they do not name and a stop reason they do not name, so
+// a peer on a newer schema does not lose a whole message to one thing this build has
+// never heard of. An event of a kind they do not name is accepted on its framing alone,
+// since the kind is the message's protocol id and a schema for it is what is missing.
+// Everything else is enforced as before: required fields, types, patterns, the protocol
+// const, and every kind of block the schemas do name, each against its own file.
 type Validator struct {
 	schemas map[string]*jsonschema.Schema
+	// eventFallback validates an event of a kind this build does not name, which has
+	// no schema of its own to be looked up by.
+	eventFallback *jsonschema.Schema
 }
 
 // NewValidator compiles the embedded schemas. The compiled Validator is
@@ -104,6 +143,11 @@ func NewValidator() (*Validator, error) {
 		v.schemas[protocol] = sch
 	}
 
+	v.eventFallback, err = compiler.Compile(schemaBaseURL + "/" + eventFallbackSchemaFile)
+	if err != nil {
+		return nil, fmt.Errorf("compiling schema %s: %w", eventFallbackSchemaFile, err)
+	}
+
 	return v, nil
 }
 
@@ -125,7 +169,15 @@ func (v *Validator) Validate(data []byte) error {
 
 	sch, ok := v.schemas[probe.Protocol]
 	if !ok {
-		return fmt.Errorf("%w: %q", ErrUnknownProtocol, probe.Protocol)
+		// An event of a kind this build does not name is framing it can still check.
+		// Anything else decides what the message means, so not knowing it is the end
+		// of the matter.
+		_, isEvent := blockTypeOf(probe.Protocol)
+		if !isEvent {
+			return fmt.Errorf("%w: %q", ErrUnknownProtocol, probe.Protocol)
+		}
+
+		sch = v.eventFallback
 	}
 
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))

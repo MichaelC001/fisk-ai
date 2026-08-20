@@ -49,7 +49,8 @@ var _ = Describe("A2A", func() {
 			got, ok := msg.(*Request)
 			Expect(ok).To(BeTrue())
 			Expect(got.Prompt).To(Equal("hello"))
-			Expect(got.Protocol).To(Equal(RequestProtocol))
+			Expect(got.Protocol).To(Equal(RequestPromptProtocol))
+			Expect(got.Kind).To(Equal(RequestPrompt))
 		})
 
 		It("Should reject an unknown protocol", func() {
@@ -248,14 +249,29 @@ var _ = Describe("A2A", func() {
 	})
 
 	Describe("Block", func() {
-		It("Should add a type discriminator on marshal", func() {
-			body, err := json.Marshal(NewTextBlock("hi"))
+		// A block is read as part of the event that named it, so these go through one
+		// rather than through the block alone: on the wire nothing but the id says what
+		// a block is.
+		eventOf := func(b Block) []byte {
+			GinkgoHelper()
+
+			body, err := json.Marshal(NewEvent(b))
 			Expect(err).ToNot(HaveOccurred())
+
+			return body
+		}
+
+		It("Should carry no type of its own on marshal, the event's id naming it", func() {
+			body := eventOf(NewTextBlock("hi"))
 
 			var fields map[string]any
 			Expect(json.Unmarshal(body, &fields)).To(Succeed())
-			Expect(fields["type"]).To(Equal(string(BlockText)))
-			Expect(fields["text"]).To(Equal("hi"))
+			Expect(fields["protocol"]).To(Equal(EventTextProtocol))
+
+			block, ok := fields["block"].(map[string]any)
+			Expect(ok).To(BeTrue())
+			Expect(block).ToNot(HaveKey("type"), "what it is travels once, in the id")
+			Expect(block["text"]).To(Equal("hi"))
 		})
 
 		It("Should round-trip every block type", func() {
@@ -266,26 +282,24 @@ var _ = Describe("A2A", func() {
 				NewToolResultBlock("c1", "output", false),
 				NewBlock(AgentCallBlock{ID: "a1", Name: "remote", Task: "t1"}),
 				NewBlock(StatusBlock{Iteration: 2, Phase: "calling-llm"}),
+				NewBlock(WarningBlock{Kind: "tool_timeout", Name: "ls"}),
+				NewBlock(PromptBlock{Text: "remove the stream"}),
 			}
 
 			for _, b := range blocks {
-				body, err := json.Marshal(b)
-				Expect(err).ToNot(HaveOccurred())
-
-				var got Block
-				Expect(json.Unmarshal(body, &got)).To(Succeed())
-				Expect(got.Type()).To(Equal(b.Type()))
-				Expect(got.AsAny()).To(Equal(b.AsAny()))
+				var got Event
+				Expect(json.Unmarshal(eventOf(b), &got)).To(Succeed())
+				Expect(got.Protocol).To(Equal(EventProtocolFor(b.Type())))
+				Expect(got.Block.Type()).To(Equal(b.Type()))
+				Expect(got.Block.AsAny()).To(Equal(b.AsAny()))
 			}
 		})
 
 		It("Should dispatch via a type switch on AsAny", func() {
-			var got Block
-			body, err := json.Marshal(NewToolResultBlock("c1", "out", true))
-			Expect(err).ToNot(HaveOccurred())
-			Expect(json.Unmarshal(body, &got)).To(Succeed())
+			var got Event
+			Expect(json.Unmarshal(eventOf(NewToolResultBlock("c1", "out", true)), &got)).To(Succeed())
 
-			switch v := got.AsAny().(type) {
+			switch v := got.Block.AsAny().(type) {
 			case ToolResultBlock:
 				Expect(v.CallID).To(Equal("c1"))
 				Expect(v.IsError).To(BeTrue())
@@ -294,47 +308,79 @@ var _ = Describe("A2A", func() {
 			}
 		})
 
-		It("Should carry a type it does not name rather than failing the message", func() {
-			var got Block
-			Expect(json.Unmarshal([]byte(`{"type":"citation","source":"rfc1","page":12}`), &got)).To(Succeed())
+		It("Should carry a kind it does not name rather than failing the message", func() {
+			body := `{"protocol":"io.choria.fisk-ai.v1.event.citation","id":"m1","request":"r1",` +
+				`"sender":{"name":"svc"},"block":{"source":"rfc1","page":12}}`
 
-			Expect(got.Type()).To(Equal(BlockType("citation")))
+			var got Event
+			Expect(json.Unmarshal([]byte(body), &got)).To(Succeed())
 
-			unknown, ok := got.Content().(UnknownBlock)
-			Expect(ok).To(BeTrue(), "an unnamed type decodes to an UnknownBlock")
+			Expect(got.ID).To(Equal("m1"), "the message it held arrives whole")
+			Expect(got.Block.Type()).To(Equal(BlockType("citation")))
+
+			unknown, ok := got.Block.Content().(UnknownBlock)
+			Expect(ok).To(BeTrue(), "a kind nobody here names decodes to an UnknownBlock")
 			Expect(unknown.Type).To(Equal(BlockType("citation")))
-			Expect(unknown.Raw).To(MatchJSON(`{"type":"citation","source":"rfc1","page":12}`))
+			Expect(unknown.Raw).To(MatchJSON(`{"source":"rfc1","page":12}`))
 		})
 
-		It("Should re-marshal an unknown block to the same JSON value", func() {
-			var got Block
-			Expect(json.Unmarshal([]byte(`{"type":"citation","source":"rfc1","page":12}`), &got)).To(Succeed())
+		It("Should send an unknown block back out as the peer's own value", func() {
+			body := `{"protocol":"io.choria.fisk-ai.v1.event.citation","id":"m1","request":"r1",` +
+				`"sender":{"name":"svc"},"block":{"source":"rfc1","page":12}}`
 
-			// The same value rather than the same bytes: stamping the discriminator
-			// re-encodes the object, which sorts its keys.
+			var got Event
+			Expect(json.Unmarshal([]byte(body), &got)).To(Succeed())
+
 			out, err := json.Marshal(got)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(out).To(MatchJSON(`{"type":"citation","source":"rfc1","page":12}`))
+
+			var fields map[string]json.RawMessage
+			Expect(json.Unmarshal(out, &fields)).To(Succeed())
+			Expect(string(fields["protocol"])).To(Equal(`"io.choria.fisk-ai.v1.event.citation"`),
+				"it goes back out under the id it arrived on")
+			Expect(fields["block"]).To(MatchJSON(`{"source":"rfc1","page":12}`),
+				"and with the peer's own value, not one this build re-made")
 		})
 
 		It("Should keep an unknown block distinguishable from an empty one", func() {
-			var got Block
-			Expect(json.Unmarshal([]byte(`{"type":"citation"}`), &got)).To(Succeed())
+			var got Event
+			Expect(json.Unmarshal([]byte(`{"protocol":"io.choria.fisk-ai.v1.event.citation",`+
+				`"id":"m1","request":"r1","sender":{"name":"svc"},"block":{}}`), &got)).To(Succeed())
 
 			Expect(Block{}.Type()).To(BeEmpty())
 			Expect(Block{}.Content()).To(BeNil())
 
-			Expect(got.Type()).ToNot(BeEmpty())
-			Expect(got.Content()).ToNot(BeNil())
+			Expect(got.Block.Type()).ToNot(BeEmpty())
+			Expect(got.Block.Content()).ToNot(BeNil())
 		})
 
-		It("Should refuse a block carrying no type", func() {
-			// All three leave the probe's type empty, so without their own case each would
-			// decode to an UnknownBlock whose type says nothing.
-			for _, body := range []string{`{}`, `{"type":null}`, `{"type":""}`, `{"source":"rfc1"}`} {
-				var got Block
-				Expect(json.Unmarshal([]byte(body), &got)).To(MatchError(ErrInvalidMessage), body)
+		// The id is the only thing that says what a block is, so a message that carries
+		// no usable one carries a block nobody can read.
+		It("Should refuse an event whose id names no block", func() {
+			for _, protocol := range []string{
+				"io.choria.fisk-ai.v1.event",
+				"io.choria.fisk-ai.v1.event.",
+				"io.choria.fisk-ai.v1.event.text.evil",
+				"io.choria.fisk-ai.v1.result",
+			} {
+				body, err := json.Marshal(map[string]any{
+					"protocol": protocol,
+					"id":       "m1",
+					"request":  "r1",
+					"sender":   map[string]any{"name": "svc"},
+					"block":    map[string]any{"text": "hi"},
+				})
+				Expect(err).ToNot(HaveOccurred())
+
+				var got Event
+				Expect(json.Unmarshal(body, &got)).To(MatchError(ErrInvalidMessage), protocol)
 			}
+		})
+
+		It("Should refuse an event carrying no block at all", func() {
+			var got Event
+			Expect(json.Unmarshal([]byte(`{"protocol":"io.choria.fisk-ai.v1.event.text",`+
+				`"id":"m1","request":"r1","sender":{"name":"svc"}}`), &got)).To(MatchError(ErrInvalidMessage))
 		})
 
 		It("Should fail to marshal an empty block, and an unknown one holding nothing", func() {
@@ -414,7 +460,7 @@ var _ = Describe("A2A", func() {
 			ack.ConversationToken = "2Ab3Cd4Ef5Gh"
 
 			req := NewFollowUp(ack, "and the other one")
-			Expect(req.Protocol).To(Equal(RequestProtocol))
+			Expect(req.Protocol).To(Equal(RequestPromptProtocol))
 			Expect(req.Prompt).To(Equal("and the other one"))
 			Expect(req.ConversationToken).To(Equal("2Ab3Cd4Ef5Gh"))
 			Expect(req.Conversation).To(Equal("conv1"))
@@ -482,7 +528,9 @@ var _ = Describe("A2A", func() {
 			reply := NewElicitReplyFromRequest(ask, "caller1", AnswerChoice)
 			reply.Choice = ChoiceOnce
 
-			Expect(reply.Protocol).To(Equal(ElicitReplyProtocol))
+			// The suffix is the question's kind, not the field the answer carries, so a
+			// choice answers approve.
+			Expect(reply.Protocol).To(Equal(ElicitReplyApproveProtocol))
 			Expect(reply.QuestionID).To(Equal("q1"))
 			Expect(reply.Request).To(Equal("task1"))
 			Expect(reply.Conversation).To(Equal("conv1"))

@@ -132,15 +132,17 @@ func (c *Channel) intake(task *asyncjobs.Task, log *slog.Logger) (*a2a.Request, 
 		return nil, fmt.Errorf("the payload is not a valid v1 message")
 	}
 
-	msg, err := a2a.ExpectProtocol(task.Payload, a2a.RequestProtocol)
+	// A queued job is a prompt and nothing else. The other three kinds of request act on
+	// a conversation somebody is watching, and a queue has nobody waiting on it.
+	msg, err := a2a.ExpectProtocol(task.Payload, a2a.RequestPromptProtocol)
 	if err != nil {
-		log.Error("A job payload is not a request", "error", err)
-		return nil, fmt.Errorf("the payload is not a %s message", a2a.RequestProtocol)
+		log.Error("A job payload is not a prompt", "error", err)
+		return nil, fmt.Errorf("the payload is not a %s message", a2a.RequestPromptProtocol)
 	}
-	req := msg.(*a2a.Request)
 
-	if req.Prompt == "" {
-		return nil, fmt.Errorf("the request carries no prompt")
+	req, ok := msg.(*a2a.Request)
+	if !ok {
+		return nil, fmt.Errorf("the payload is not a %s message", a2a.RequestPromptProtocol)
 	}
 
 	return req, nil

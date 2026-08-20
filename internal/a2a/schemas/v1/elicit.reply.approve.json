@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.reply.approve.json",
+  "title": "fisk-ai A2A v1 approve answer",
+  "description": "Answers an approve question with the operator's three-way choice. Nothing authenticates it beyond the transport's own permissions: whoever may address a running task may answer its questions, and this answer approves a confirmation-gated command.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "choice"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.reply.approve"
+    },
+    "confirmed": false,
+    "index": false,
+    "value": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "choice": {
+      "$ref": "common.json#/$defs/elicit_choice"
+    }
+  }
+}

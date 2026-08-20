@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.reply.input.json",
+  "title": "fisk-ai A2A v1 input answer",
+  "description": "Answers an input question with a value, which may be empty. Nothing authenticates it beyond the transport's own permissions: whoever may address a running task may answer its questions.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "value"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.reply.input"
+    },
+    "choice": false,
+    "confirmed": false,
+    "index": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "value": {
+      "$ref": "common.json#/$defs/elicit_value"
+    }
+  }
+}

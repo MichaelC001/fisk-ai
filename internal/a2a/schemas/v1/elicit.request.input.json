@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.request.input.json",
+  "title": "fisk-ai A2A v1 input question",
+  "description": "Asks the caller for a free text value. Sent on the task's reply set; the header's request names the task and question_id names the question within it. The answer is an elicit reply input, where an empty string is a valid answer.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "question"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.request.input"
+    },
+    "command": false,
+    "display": false,
+    "tag": false,
+    "options": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "tool_use_id": {
+      "$ref": "common.json#/$defs/tool_use_id"
+    },
+    "question": {
+      "$ref": "common.json#/$defs/elicit_question"
+    },
+    "default": {
+      "type": "string",
+      "description": "The value to pre-fill for the operator to accept or edit. Absent from a question that pre-fills nothing."
+    },
+    "wait_ms": {
+      "$ref": "common.json#/$defs/wait_ms"
+    }
+  }
+}

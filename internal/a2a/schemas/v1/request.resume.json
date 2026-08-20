@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/request.resume.json",
+  "title": "fisk-ai A2A v1 resume request",
+  "description": "Continues a run that stopped part way, which is what a caller sends after a suspended ending. It carries no prompt and adds no turn. A replay count makes it a read instead, so this refuses one: the two are separate operations and one message cannot be both.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "conversation_token"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.request.resume"
+    },
+    "prompt": false,
+    "answer": false,
+    "replay": false,
+    "conversation_token": {
+      "$ref": "common.json#/$defs/conversation_token"
+    },
+    "budget": {
+      "$ref": "common.json#/$defs/budget"
+    },
+    "stream": {
+      "$ref": "common.json#/$defs/stream"
+    },
+    "force": {
+      "$ref": "common.json#/$defs/force"
+    }
+  }
+}

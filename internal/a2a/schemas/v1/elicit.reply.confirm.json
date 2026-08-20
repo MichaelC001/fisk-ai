@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.reply.confirm.json",
+  "title": "fisk-ai A2A v1 confirm answer",
+  "description": "Answers a confirm question yes or no. Nothing authenticates it beyond the transport's own permissions: whoever may address a running task may answer its questions.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id",
+    "confirmed"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.reply.confirm"
+    },
+    "choice": false,
+    "index": false,
+    "value": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    },
+    "confirmed": {
+      "type": "boolean",
+      "description": "The operator's yes or no. false is an answer and is sent as one, which is why the field is required rather than omitted when empty."
+    }
+  }
+}

@@ -101,11 +101,11 @@ func (s *chatSession) run(ctx context.Context) error {
 
 // read asks the worker for the conversation so far and draws it.
 func (s *chatSession) read(ctx context.Context) error {
-	req := a2a.NewRequest("")
+	req, err := a2a.NewRead(s.conversation, tuiReplay)
+	if err != nil {
+		return err
+	}
 	req.Request = a2a.NewID()
-	req.ConversationToken = s.conversation
-	req.Replay = tuiReplay
-	req.Force = forceResume
 
 	out, err := s.host.client.RunTask(ctx, s.host.identity, req, s.client)
 	if err != nil {

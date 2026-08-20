@@ -85,6 +85,9 @@ var _ = Describe("Validator", func() {
 			approve.Display = "stream rm ORDERS"
 			approve.Tag = "ai:confirm"
 
+			confirmQuestion := NewElicitRequest(ElicitConfirm, "q4")
+			confirmQuestion.Question = "remove it?"
+
 			selectQuestion := NewElicitRequest(ElicitSelect, "q2")
 			selectQuestion.Question = "which cluster?"
 			selectQuestion.Options = []string{"east", "west"}
@@ -116,7 +119,7 @@ var _ = Describe("Validator", func() {
 				NewDiscoveryRequest(),
 				discoveryReply,
 				approve,
-				NewElicitRequest(ElicitConfirm, "q4"),
+				confirmQuestion,
 				selectQuestion,
 				input,
 				choice,
@@ -179,16 +182,78 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
-		It("Should accept an event carrying a block type it does not name", func() {
+		// A kind added since this build has no schema of its own, so the framing is what
+		// is left to check: the header, and that a block is there at all.
+		It("Should accept an event of a kind it does not name", func() {
 			ev := NewEvent(NewTextBlock("hi"))
 			fillHeader(&ev.Header)
 			body, err := json.Marshal(ev)
 			Expect(err).ToNot(HaveOccurred())
 
 			good := tamper(body, func(m map[string]any) {
-				m["block"] = map[string]any{"type": "citation", "source": "rfc1", "page": 12}
+				m["protocol"] = "io.choria.fisk-ai.v1.event.citation"
+				m["block"] = map[string]any{"source": "rfc1", "page": 12}
 			})
 			Expect(v.Validate(good)).To(Succeed())
+		})
+
+		It("Should hold every kind it does name to that kind's own schema", func() {
+			// Every kind but status requires a field of its own, so an empty block is what
+			// its schema refuses. A status carries only optional fields, and a value of
+			// the wrong type is what it has to say no to.
+			for _, tc := range []struct {
+				protocol string
+				block    map[string]any
+				bad      map[string]any
+			}{
+				{EventTextProtocol, map[string]any{"text": "hi", "final": true}, map[string]any{}},
+				{EventThinkingProtocol, map[string]any{"text": "reasoning"}, map[string]any{}},
+				{EventToolCallProtocol, map[string]any{"id": "c1", "name": "ls"}, map[string]any{"id": "c1"}},
+				{EventToolResultProtocol, map[string]any{"call_id": "c1", "output": "out"}, map[string]any{}},
+				{EventAgentCallProtocol, map[string]any{"id": "a1", "name": "peer", "task": "t1"}, map[string]any{"id": "a1"}},
+				{EventStatusProtocol, map[string]any{"iteration": 2, "phase": "calling-llm"}, map[string]any{"iteration": "two"}},
+				{EventWarningProtocol, map[string]any{"kind": "tool_timeout"}, map[string]any{}},
+				{EventPromptProtocol, map[string]any{"text": "remove the stream"}, map[string]any{}},
+			} {
+				ev := NewEvent(NewTextBlock("hi"))
+				fillHeader(&ev.Header)
+				body, err := json.Marshal(ev)
+				Expect(err).ToNot(HaveOccurred())
+
+				good := tamper(body, func(m map[string]any) {
+					m["protocol"] = tc.protocol
+					m["block"] = tc.block
+				})
+				Expect(v.Validate(good)).To(Succeed(), tc.protocol)
+
+				bad := tamper(body, func(m map[string]any) {
+					m["protocol"] = tc.protocol
+					m["block"] = tc.bad
+				})
+				Expect(v.Validate(bad)).To(HaveOccurred(), tc.protocol)
+			}
+		})
+
+		// Every one of the eight is a separate file, which is eight chances to leave the
+		// header out and stop checking who sent it and in what order.
+		It("Should check the header of every kind it names", func() {
+			for _, protocol := range []string{
+				EventTextProtocol, EventThinkingProtocol, EventToolCallProtocol,
+				EventToolResultProtocol, EventAgentCallProtocol, EventStatusProtocol,
+				EventWarningProtocol, EventPromptProtocol,
+			} {
+				ev := NewEvent(NewTextBlock("hi"))
+				fillHeader(&ev.Header)
+				body, err := json.Marshal(ev)
+				Expect(err).ToNot(HaveOccurred())
+
+				bad := tamper(body, func(m map[string]any) {
+					m["protocol"] = protocol
+					m["block"] = map[string]any{"text": "hi", "kind": "k", "call_id": "c1", "id": "i", "name": "n", "task": "t"}
+					delete(m, "id")
+				})
+				Expect(v.Validate(bad)).To(HaveOccurred(), protocol)
+			}
 		})
 
 		It("Should accept every stop reason this build names", func() {
@@ -226,11 +291,44 @@ var _ = Describe("Validator", func() {
 		// An answer arrives from whoever can address the running task, so the values it
 		// can carry are pinned rather than left to the reader.
 		It("Should bound what an elicit reply may answer with", func() {
-			for _, answer := range []ElicitAnswer{AnswerChoice, AnswerConfirmed, AnswerIndex, AnswerValue, AnswerNoOperator, AnswerWaiting} {
+			answers := map[ElicitAnswer]func(*ElicitReply){
+				AnswerChoice:     func(r *ElicitReply) { r.Choice = ChoiceOnce },
+				AnswerConfirmed:  func(r *ElicitReply) { r.Confirmed = true },
+				AnswerIndex:      func(r *ElicitReply) { r.Index = 1 },
+				AnswerValue:      func(r *ElicitReply) { r.Value = "orders.new" },
+				AnswerNoOperator: func(*ElicitReply) {},
+				AnswerWaiting:    func(*ElicitReply) {},
+			}
+
+			for answer, fill := range answers {
 				reply := NewElicitReply("q1", answer)
+				fill(reply)
 				fillHeader(&reply.Header)
 				Expect(v.ValidateMessage(reply)).To(Succeed(), "answer %q", answer)
 			}
+
+			// A confirmation of no, a selection of the first option and an empty input
+			// are answers somebody gave, so each reaches the wire and satisfies the
+			// required field rather than being omitted for being empty.
+			for _, answer := range []ElicitAnswer{AnswerConfirmed, AnswerIndex, AnswerValue} {
+				zero := NewElicitReply("q1", answer)
+				fillHeader(&zero.Header)
+
+				body, err := json.Marshal(zero)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(body).To(ContainSubstring(map[ElicitAnswer]string{
+					AnswerConfirmed: `"confirmed":false`,
+					AnswerIndex:     `"index":0`,
+					AnswerValue:     `"value":""`,
+				}[answer]))
+				Expect(v.Validate(body)).To(Succeed(), "answer %q carrying its zero value", answer)
+			}
+
+			// An approval names one of three, so the value a caller never set is the
+			// one zero that is no answer at all.
+			bare := NewElicitReply("q1", AnswerChoice)
+			fillHeader(&bare.Header)
+			Expect(v.ValidateMessage(bare)).ToNot(Succeed())
 
 			unknown := NewElicitReply("q1", ElicitAnswer("whatever"))
 			fillHeader(&unknown.Header)
@@ -257,12 +355,14 @@ var _ = Describe("Validator", func() {
 		// question rather than being agreed in advance.
 		It("Should carry the window a question is held open for", func() {
 			ask := NewElicitRequest(ElicitConfirm, "q1")
+			ask.Question = "remove it?"
 			ask.WaitMS = 120000
 			fillHeader(&ask.Header)
 			Expect(v.ValidateMessage(ask)).To(Succeed())
 			Expect(ask.AckInterval()).To(Equal(40 * time.Second))
 
 			negative := NewElicitRequest(ElicitConfirm, "q1")
+			negative.Question = "remove it?"
 			negative.WaitMS = -1
 			fillHeader(&negative.Header)
 			Expect(v.ValidateMessage(negative)).ToNot(Succeed())
@@ -277,6 +377,7 @@ var _ = Describe("Validator", func() {
 		It("Should carry an answer to a question whose run has ended", func() {
 			ask := NewElicitRequest(ElicitSelect, "q1")
 			ask.ToolUseID = "toolu_1"
+			ask.Question = "which cluster?"
 			ask.Options = []string{"east", "west"}
 			fillHeader(&ask.Header)
 			Expect(v.ValidateMessage(ask)).To(Succeed())
@@ -425,23 +526,41 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
-		It("Should reject a block with no usable type discriminator", func() {
+		// The id says what the block is, so an id that names nothing usable leaves the
+		// message unreadable however well formed the rest of it is.
+		It("Should reject an event whose id names no kind", func() {
 			ev := NewEvent(NewTextBlock("hi"))
 			fillHeader(&ev.Header)
 			body, err := json.Marshal(ev)
 			Expect(err).ToNot(HaveOccurred())
 
-			for _, block := range []map[string]any{
-				{},
-				{"type": nil},
-				{"type": ""},
-				{"type": 7},
-				{"text": "hi"},
+			for _, protocol := range []any{
+				"io.choria.fisk-ai.v1.event",
+				"io.choria.fisk-ai.v1.event.",
+				"io.choria.fisk-ai.v1.event.text.evil",
+				"io.choria.fisk-ai.v1.citation",
+				nil,
+				7,
 			} {
 				bad := tamper(body, func(m map[string]any) {
-					m["block"] = block
+					m["protocol"] = protocol
 				})
-				Expect(v.Validate(bad)).To(HaveOccurred(), "%v", block)
+				Expect(v.Validate(bad)).To(HaveOccurred(), "%v", protocol)
+			}
+		})
+
+		It("Should reject an event carrying no block", func() {
+			ev := NewEvent(NewTextBlock("hi"))
+			fillHeader(&ev.Header)
+			body, err := json.Marshal(ev)
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, protocol := range []string{EventTextProtocol, "io.choria.fisk-ai.v1.event.citation"} {
+				bad := tamper(body, func(m map[string]any) {
+					m["protocol"] = protocol
+					delete(m, "block")
+				})
+				Expect(v.Validate(bad)).To(HaveOccurred(), protocol)
 			}
 		})
 	})

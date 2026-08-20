@@ -270,7 +270,7 @@ var _ = Describe("Elicitation", func() {
 			stream, work := start()
 
 			done := ask(func() (string, error) {
-				_, err := work.Prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "stream rm"})
+				_, err := work.Prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS"})
 
 				return "", err
 			})
@@ -338,7 +338,7 @@ var _ = Describe("Elicitation", func() {
 			prompter, ok := work.Prompter.(*elicitPrompter)
 			Expect(ok).To(BeTrue())
 
-			_, err := prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "stream rm"})
+			_, err := prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS"})
 			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
 
 			_, err = prompter.Confirm(context.Background(), "Proceed?")
@@ -567,7 +567,7 @@ var _ = Describe("Elicitation", func() {
 			DeferCleanup(endGateRun)
 
 			approved := ask(func() (string, error) {
-				_, err := prompter.ApproveCommand(gateCtx, toolkit.GateRequest{Command: "stream rm"})
+				_, err := prompter.ApproveCommand(gateCtx, toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS"})
 
 				return "", err
 			})

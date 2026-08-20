@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/request.prompt.json",
+  "title": "fisk-ai A2A v1 prompt request",
+  "description": "Asks the agent to run a prompt. With a conversation_token the prompt runs as that conversation's next turn; without one it opens a conversation, and the ack hands back the token.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "prompt"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.request.prompt"
+    },
+    "answer": false,
+    "prompt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "context": {
+      "type": "string",
+      "description": "Optional supporting material."
+    },
+    "tool_hints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "budget": {
+      "$ref": "common.json#/$defs/budget"
+    },
+    "stream": {
+      "$ref": "common.json#/$defs/stream"
+    },
+    "conversation_token": {
+      "$ref": "common.json#/$defs/conversation_token"
+    },
+    "replay": {
+      "$ref": "common.json#/$defs/replay",
+      "minimum": 1,
+      "description": "Send this many blocks of the stored conversation before the first new event. Meaningless without a conversation_token, a first turn having no history."
+    },
+    "force": {
+      "$ref": "common.json#/$defs/force"
+    }
+  }
+}

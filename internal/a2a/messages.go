@@ -12,11 +12,21 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// Request starts a task. It is sent by a caller to an agent.
+// Request is one of the four things a caller asks of an agent: a prompt to run, an answer
+// to a question the conversation is waiting on, a resume of a run that stopped part way, or
+// a read of what a conversation holds.
+//
+// Kind says which, and travels as the protocol id: a prompt is
+// io.choria.fisk-ai.v1.request.prompt. Which fields each kind may carry is stated by that
+// kind's schema rather than worked out here from the fields that are set.
 type Request struct {
 	Header
 
-	Prompt    string   `json:"prompt"`
+	// Kind is what this request asks for. It is the protocol id on the wire rather than
+	// a field of the body, and the constructors set it.
+	Kind RequestKind `json:"-"`
+
+	Prompt    string   `json:"prompt,omitempty"`
 	Context   string   `json:"context,omitempty"`
 	ToolHints []string `json:"tool_hints,omitempty"`
 	Budget    *Budget  `json:"budget,omitempty"`
@@ -125,8 +135,9 @@ func NewAnsweringRequest(token string, ask *ElicitRequest, reply *ElicitReply) (
 		return nil, err
 	}
 
-	r := &Request{ConversationToken: token, Answer: answer}
-	r.Protocol = RequestProtocol
+	r := newRequestOfKind(RequestAnswer)
+	r.ConversationToken = token
+	r.Answer = answer
 
 	return r, nil
 }
@@ -135,16 +146,54 @@ func NewAnsweringRequest(token string, ask *ElicitRequest, reply *ElicitReply) (
 // caller holding one its run gave up on before it could be sent. It carries no prompt,
 // so the conversation is resumed rather than given a turn.
 func NewAnswerRequest(token string, answer *Answer) *Request {
-	r := &Request{ConversationToken: token, Answer: answer}
-	r.Protocol = RequestProtocol
+	r := newRequestOfKind(RequestAnswer)
+	r.ConversationToken = token
+	r.Answer = answer
 
 	return r
 }
 
-// NewRequest builds a Request with the protocol id set.
+// NewRequest builds a request that asks the agent to run prompt.
 func NewRequest(prompt string) *Request {
-	r := &Request{Prompt: prompt}
-	r.Protocol = RequestProtocol
+	r := newRequestOfKind(RequestPrompt)
+	r.Prompt = prompt
+
+	return r
+}
+
+// NewResume builds a request that continues the run that stopped part way in the
+// conversation the token names, which is what a caller sends after a suspended ending. It
+// carries no prompt and adds no turn.
+func NewResume(token string) *Request {
+	r := newRequestOfKind(RequestResume)
+	r.ConversationToken = token
+
+	return r
+}
+
+// NewRead builds a request that asks to be told what a conversation holds: the worker sends
+// replay blocks of it, counted back from the end, and ends the reply set. It takes no turn
+// and calls no model, so it is answered whatever state the conversation is in.
+//
+// A replay below one is refused. A read of nothing is not a read, and the count is what
+// separates one from a resume.
+func NewRead(token string, replay int) (*Request, error) {
+	if replay < 1 {
+		return nil, fmt.Errorf("%w: a read asks for at least one block, not %d", ErrInvalidMessage, replay)
+	}
+
+	r := newRequestOfKind(RequestRead)
+	r.ConversationToken = token
+	r.Replay = replay
+
+	return r, nil
+}
+
+// newRequestOfKind builds a Request of one kind with its protocol id stamped, which is what
+// the five constructors above share.
+func newRequestOfKind(kind RequestKind) *Request {
+	r := &Request{Kind: kind}
+	r.Protocol, _ = RequestProtocolFor(kind)
 
 	return r
 }
@@ -170,6 +219,48 @@ func (r *Request) WantsStream() bool {
 	return r.Stream == nil || *r.Stream
 }
 
+// requestWire is Request without its methods, so marshaling and unmarshaling one can use
+// the struct tags without calling themselves.
+type requestWire Request
+
+// MarshalJSON stamps the id from the kind rather than sending whatever the header holds.
+// The id is the only thing that says what the request asks for, so the two cannot be
+// allowed to disagree.
+//
+// A request naming no kind is one with no id, and is refused here rather than published
+// under a family prefix that names nothing.
+func (r Request) MarshalJSON() ([]byte, error) {
+	protocol, ok := RequestProtocolFor(r.Kind)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q is not something an agent can be asked", ErrInvalidMessage, r.Kind)
+	}
+
+	w := requestWire(r)
+	w.Protocol = protocol
+
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON reads the kind off the id.
+func (r *Request) UnmarshalJSON(data []byte) error {
+	var w requestWire
+
+	err := json.Unmarshal(data, &w)
+	if err != nil {
+		return err
+	}
+
+	kind, ok := requestKindOf(w.Protocol)
+	if !ok {
+		return fmt.Errorf("%w: %q is not the id of a request", ErrInvalidMessage, w.Protocol)
+	}
+
+	*r = Request(w)
+	r.Kind = kind
+
+	return nil
+}
+
 // Event carries one streamed content block from an agent to a caller.
 type Event struct {
 	Header
@@ -177,12 +268,62 @@ type Event struct {
 	Block Block `json:"block"`
 }
 
-// NewEvent builds an Event wrapping the block, with the protocol id set.
+// NewEvent builds an Event wrapping the block, with the protocol id its type answers
+// to: a text block is io.choria.fisk-ai.v1.event.text.
 func NewEvent(block Block) *Event {
 	e := &Event{Block: block}
-	e.Protocol = EventProtocol
+	e.Protocol = EventProtocolFor(block.Type())
 
 	return e
+}
+
+// eventWire is Event without its methods, so marshaling and unmarshaling an Event
+// can use the struct tags without calling themselves.
+type eventWire Event
+
+// MarshalJSON stamps the id from the block rather than sending whatever the header
+// holds. The id is the only thing that says what the block is, so the two cannot be
+// allowed to disagree, and a caller that built an Event by hand has no way to get it
+// wrong.
+func (e Event) MarshalJSON() ([]byte, error) {
+	if e.Block.content == nil {
+		return nil, fmt.Errorf("%w: event carries no block", ErrInvalidMessage)
+	}
+
+	w := eventWire(e)
+	w.Protocol = EventProtocolFor(e.Block.Type())
+
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON reads the block as the type the id names. The block object says
+// nothing about itself, so this is where the two are put back together, which is why
+// an Event decodes through encoding/json as it always did and a Block on its own no
+// longer does.
+func (e *Event) UnmarshalJSON(data []byte) error {
+	var w struct {
+		eventWire
+
+		Block json.RawMessage `json:"block"`
+	}
+
+	err := json.Unmarshal(data, &w)
+	if err != nil {
+		return err
+	}
+
+	kind, ok := blockTypeOf(w.Protocol)
+	if !ok {
+		return fmt.Errorf("%w: %q is not the id of an event", ErrInvalidMessage, w.Protocol)
+	}
+
+	if len(w.Block) == 0 {
+		return fmt.Errorf("%w: event carries no block", ErrInvalidMessage)
+	}
+
+	*e = Event(w.eventWire)
+
+	return e.Block.unmarshalAs(kind, w.Block)
 }
 
 // Result is the terminal success message of a task.
@@ -454,6 +595,9 @@ const (
 // sent on the task's reply set. Header.Request names the task and QuestionID names
 // the question within it, since one task may ask several.
 //
+// Which of the four questions it is travels as the protocol id, so an approve question is
+// io.choria.fisk-ai.v1.elicit.request.approve and the body says nothing about its kind.
+//
 // The text fields are model-supplied and are sanitized before they are sent, as they
 // are before a terminal prompter renders them. A caller displaying one sanitizes
 // again for its own display.
@@ -469,9 +613,9 @@ type ElicitRequest struct {
 	// Empty from an agent that predates it, which is an agent that takes no answer
 	// once its run has ended.
 	ToolUseID string `json:"tool_use_id,omitempty"`
-	// Kind selects which of the four questions this is and which fields below carry
-	// its detail.
-	Kind ElicitKind `json:"kind"`
+	// Kind says which of the four questions this is and which fields below carry its
+	// detail. It is the protocol id on the wire rather than a field of the body.
+	Kind ElicitKind `json:"-"`
 	// Question is the text to put to the operator, for confirm, select and input.
 	Question string `json:"question,omitempty"`
 	// Command is the command path an approve question is about, e.g. "stream rm".
@@ -509,16 +653,67 @@ func (r *ElicitRequest) AckInterval() time.Duration {
 	return time.Duration(r.WaitMS) * time.Millisecond / 3
 }
 
-// NewElicitRequest builds an ElicitRequest with the protocol id and kind set.
+// NewElicitRequest builds an ElicitRequest with the kind set and the protocol id its kind
+// answers to: an approve question is io.choria.fisk-ai.v1.elicit.request.approve. A kind
+// this build does not name leaves the header empty, and marshaling one fails.
 func NewElicitRequest(kind ElicitKind, questionID string) *ElicitRequest {
 	r := &ElicitRequest{QuestionID: questionID, Kind: kind}
-	r.Protocol = ElicitRequestProtocol
+	r.Protocol, _ = ElicitRequestProtocolFor(kind)
 
 	return r
 }
 
+// elicitRequestWire is ElicitRequest without its methods, so marshaling and unmarshaling
+// one can use the struct tags without calling themselves.
+type elicitRequestWire ElicitRequest
+
+// MarshalJSON stamps the id from the kind rather than sending whatever the header holds.
+// The id is the only thing that says which question this is, so the two cannot be allowed
+// to disagree, and a caller that built one by hand has no way to get it wrong.
+//
+// Which fields go out is the struct's own business: every one but QuestionID is omitted
+// when empty, so a question sends what it has. A field belonging to another kind is refused
+// by the receiving schema rather than dropped here.
+func (r ElicitRequest) MarshalJSON() ([]byte, error) {
+	protocol, ok := ElicitRequestProtocolFor(r.Kind)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q is not a question this agent asks", ErrInvalidMessage, r.Kind)
+	}
+
+	w := elicitRequestWire(r)
+	w.Protocol = protocol
+
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON reads the kind off the id. The body says nothing about itself, so this is
+// where the two are put back together.
+func (r *ElicitRequest) UnmarshalJSON(data []byte) error {
+	var w elicitRequestWire
+
+	err := json.Unmarshal(data, &w)
+	if err != nil {
+		return err
+	}
+
+	kind, ok := elicitKindOf(w.Protocol)
+	if !ok {
+		return fmt.Errorf("%w: %q is not the id of a question", ErrInvalidMessage, w.Protocol)
+	}
+
+	*r = ElicitRequest(w)
+	r.Kind = kind
+
+	return nil
+}
+
 // ElicitReply answers one ElicitRequest, addressed to the task that asked and
 // correlated by QuestionID. Answer says which field to read.
+//
+// Which answer it is travels as the protocol id, so a confirmation is
+// io.choria.fisk-ai.v1.elicit.reply.confirm and the body says nothing about its kind. An
+// answer id names the question it answers rather than the field it carries, so the two
+// halves pair in a capture.
 //
 // Nothing authenticates it beyond the transport's own permissions, exactly as with a
 // cancel: whoever may address the running task may answer its questions, and one of
@@ -529,17 +724,90 @@ type ElicitReply struct {
 	// QuestionID is the question this answers.
 	QuestionID string `json:"question_id"`
 	// Answer names the field carrying the answer, or reports that the caller has
-	// nobody to ask.
-	Answer ElicitAnswer `json:"answer"`
+	// nobody to ask. It is the protocol id on the wire rather than a field of the body.
+	Answer ElicitAnswer `json:"-"`
 	// Choice answers an approve question.
-	Choice ElicitChoice `json:"choice,omitempty"`
+	Choice ElicitChoice `json:"-"`
 	// Confirmed answers a confirm question.
-	Confirmed bool `json:"confirmed,omitempty"`
+	Confirmed bool `json:"-"`
 	// Index answers a select question, as a position in the Options that were sent.
-	Index int `json:"index,omitempty"`
+	Index int `json:"-"`
 	// Value answers an input question. An empty string is a valid answer, which is
-	// why Answer rather than emptiness says what was given.
-	Value string `json:"value,omitempty"`
+	// why the id rather than emptiness says what was given.
+	Value string `json:"-"`
+}
+
+// elicitReplyWire carries an answer's one value field as a pointer, so a confirmation of
+// no, a selection of the first option and an empty input reach the wire as confirmed:
+// false, index: 0 and value: "" rather than being omitted for being empty. The four are
+// pointers rather than the struct's own types because each id requires its own field and
+// refuses its siblings', which leaves no room for a value the answer did not carry.
+//
+// It is written out rather than aliased from ElicitReply, which shares the field types this
+// has to change.
+type elicitReplyWire struct {
+	Header
+
+	QuestionID string        `json:"question_id"`
+	Choice     *ElicitChoice `json:"choice,omitempty"`
+	Confirmed  *bool         `json:"confirmed,omitempty"`
+	Index      *int          `json:"index,omitempty"`
+	Value      *string       `json:"value,omitempty"`
+}
+
+// MarshalJSON stamps the id from the answer and writes the one field that answer names.
+func (r ElicitReply) MarshalJSON() ([]byte, error) {
+	protocol, ok := ElicitReplyProtocolFor(r.Answer)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q is not an answer this agent takes", ErrInvalidMessage, r.Answer)
+	}
+
+	w := elicitReplyWire{Header: r.Header, QuestionID: r.QuestionID}
+	w.Protocol = protocol
+
+	switch r.Answer {
+	case AnswerChoice:
+		w.Choice = &r.Choice
+	case AnswerConfirmed:
+		w.Confirmed = &r.Confirmed
+	case AnswerIndex:
+		w.Index = &r.Index
+	case AnswerValue:
+		w.Value = &r.Value
+	}
+
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON reads the answer off the id and takes the value field that answer names,
+// leaving the rest at their zero values.
+func (r *ElicitReply) UnmarshalJSON(data []byte) error {
+	var w elicitReplyWire
+
+	err := json.Unmarshal(data, &w)
+	if err != nil {
+		return err
+	}
+
+	answer, ok := elicitAnswerOf(w.Protocol)
+	if !ok {
+		return fmt.Errorf("%w: %q is not the id of an answer", ErrInvalidMessage, w.Protocol)
+	}
+
+	*r = ElicitReply{Header: w.Header, QuestionID: w.QuestionID, Answer: answer}
+
+	switch {
+	case w.Choice != nil:
+		r.Choice = *w.Choice
+	case w.Confirmed != nil:
+		r.Confirmed = *w.Confirmed
+	case w.Index != nil:
+		r.Index = *w.Index
+	case w.Value != nil:
+		r.Value = *w.Value
+	}
+
+	return nil
 }
 
 // NewElicitReplyFromRequest builds the reply to ask, for a caller that then fills in the
@@ -607,12 +875,13 @@ func NewWaitingAck(ask *ElicitRequest, sender string) *ElicitReply {
 	return NewElicitReplyFromRequest(ask, sender, AnswerWaiting)
 }
 
-// NewElicitReply builds an ElicitReply with the protocol id set. The caller fills the
-// header itself, where NewElicitReplyFromRequest derives it from the question and the
-// five constructors above set an answer and its value together.
+// NewElicitReply builds an ElicitReply with the protocol id its answer travels under. The
+// caller fills the header itself, where NewElicitReplyFromRequest derives it from the
+// question and the five constructors above set an answer and its value together. An answer
+// this build does not name leaves the header empty, and marshaling one fails.
 func NewElicitReply(questionID string, answer ElicitAnswer) *ElicitReply {
 	r := &ElicitReply{QuestionID: questionID, Answer: answer}
-	r.Protocol = ElicitReplyProtocol
+	r.Protocol, _ = ElicitReplyProtocolFor(answer)
 
 	return r
 }

@@ -132,7 +132,7 @@ var _ = Describe("Integration: a2a NATS reply set", func() {
 
 		Expect(protocols).To(Equal([]string{
 			a2a.AckProtocol,
-			a2a.EventProtocol, a2a.EventProtocol, a2a.EventProtocol,
+			a2a.EventTextProtocol, a2a.EventTextProtocol, a2a.EventTextProtocol,
 			a2a.ResultProtocol,
 		}))
 		Expect(sequences).To(Equal([]uint64{1, 2, 3, 4, 5}))

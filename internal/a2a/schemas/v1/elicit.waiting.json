@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/elicit.waiting.json",
+  "title": "fisk-ai A2A v1 question keepalive",
+  "description": "Says the question is in front of a person and nobody has answered yet, which restarts the wait_ms window the question is held open for. It answers nothing and resumes nothing, so it sits beside the answers rather than under them. Send one every third of that window while the question is displayed, and stop before sending the answer: one arriving afterwards reaches a question the agent has finished with and gets a 404.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "question_id"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.elicit.waiting"
+    },
+    "choice": false,
+    "confirmed": false,
+    "index": false,
+    "value": false,
+    "question_id": {
+      "$ref": "common.json#/$defs/question_id"
+    }
+  }
+}

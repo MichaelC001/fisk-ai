@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/request.answer.json",
+  "title": "fisk-ai A2A v1 answer request",
+  "description": "Answers a question the conversation is still waiting on, for a caller that was asked something and could not answer before the run gave up. The run is resumed and the conversation gains no turn. A deferred call takes the answer as its result; an approval is asked again by the resume and answered from here.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "required": [
+    "conversation_token",
+    "answer"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.request.answer"
+    },
+    "prompt": false,
+    "conversation_token": {
+      "$ref": "common.json#/$defs/conversation_token"
+    },
+    "answer": {
+      "$ref": "common.json#/$defs/answer"
+    },
+    "budget": {
+      "$ref": "common.json#/$defs/budget"
+    },
+    "stream": {
+      "$ref": "common.json#/$defs/stream"
+    },
+    "replay": {
+      "$ref": "common.json#/$defs/replay",
+      "minimum": 1,
+      "description": "Send this many blocks of the stored conversation before the first new event, for a caller that wants to see what it is answering into."
+    },
+    "force": {
+      "$ref": "common.json#/$defs/force"
+    }
+  }
+}
