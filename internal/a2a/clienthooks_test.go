@@ -187,21 +187,18 @@ var _ = Describe("ClientHooks", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out.Result).ToNot(BeNil())
 
-		// QuestionAnswered fires from the question's own goroutine, so it may land
-		// either side of TurnEnd; everything else is ordered by the reply set.
-		Expect(rec.fired()).To(ContainElements("PromptSubmit", "ConversationStart", "TurnAccepted", "QuestionAsked", "QuestionAnswered", "TurnEnd"))
 		Expect(rec.fired()).ToNot(ContainElement("ConversationResume"))
 		Expect(rec.fired()).ToNot(ContainElement("TurnRefused"))
 
-		order := rec.fired()
-		Expect(order[0]).To(Equal("PromptSubmit"), "nothing fires before the prompt is cleared to go")
-		Expect(order).To(HaveExactElements(
-			ContainSubstring("PromptSubmit"),
-			ContainSubstring("ConversationStart"),
-			ContainSubstring("TurnAccepted"),
-			ContainSubstring("QuestionAsked"),
-			Or(ContainSubstring("QuestionAnswered"), ContainSubstring("TurnEnd")),
-			Or(ContainSubstring("QuestionAnswered"), ContainSubstring("TurnEnd")),
+		// QuestionAnswered fires from the question's own goroutine, and the turn waits
+		// for it, so TurnEnd is last however long the person took.
+		Expect(rec.fired()).To(HaveExactElements(
+			"PromptSubmit",
+			"ConversationStart",
+			"TurnAccepted",
+			"QuestionAsked",
+			"QuestionAnswered",
+			"TurnEnd",
 		))
 	})
 
@@ -291,6 +288,73 @@ var _ = Describe("ClientHooks", func() {
 			// attempt is worth making.
 			Expect(rec.ended.Answered).To(BeFalse())
 			Expect(rec.ended.Code).To(Equal(CodeCapacity))
+		})
+	})
+
+	// A turn that was accepted has to close, or a caller tracking what the run is doing
+	// is left saying it works forever. These are the two endings no message describes.
+	Describe("A turn that ends with no terminal message", func() {
+		It("Should report the end of a set that stopped early", func() {
+			transport.endEarly = true
+			close(transport.release)
+			handler.answer = func(ask *ElicitRequest) *ElicitReply {
+				return NewApproveReply(ask, "caller1", ChoiceOnce)
+			}
+
+			client := newClient(rec.hooks(nil))
+			out, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(out.Result).To(BeNil())
+			Expect(out.Error).To(BeNil())
+
+			Expect(rec.fired()).To(ContainElement("TurnEnd"))
+			Expect(rec.ended.Answered).To(BeFalse())
+			Expect(rec.ended.Err).To(MatchError(ErrIncompleteStream))
+		})
+
+		It("Should report the end of a run the caller canceled", func() {
+			handler.pause = time.Hour
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			go func() {
+				defer GinkgoRecover()
+				Eventually(handler.asked, time.Second).Should(BeClosed())
+				cancel()
+			}()
+
+			client := newClient(rec.hooks(nil))
+			_, err := client.RunTask(ctx, "svc", NewRequest("remove the stream"), handler)
+			Expect(err).To(MatchError(context.Canceled))
+
+			// The question the run was waiting on closes first, and says nobody answered
+			// it, before the turn that asked it closes.
+			Expect(rec.fired()).To(HaveExactElements(
+				"PromptSubmit",
+				"ConversationStart",
+				"TurnAccepted",
+				"QuestionAsked",
+				"QuestionAnswered",
+				"TurnEnd",
+			))
+			Expect(rec.answered.Answered).To(BeFalse(), "nobody answered it")
+			Expect(rec.answered.Held).To(BeFalse(), "and there is nothing to keep")
+			Expect(rec.ended.Answered).To(BeFalse())
+			Expect(rec.ended.Err).To(MatchError(context.Canceled))
+		})
+
+		// The ack is what says a turn began, so a set that never got one has no turn to
+		// close and the caller learns what happened from the error return.
+		It("Should report nothing for a set that failed before the ack", func() {
+			transport.prefix = func(*Header) [][]byte { return nil }
+			transport.endEarly = true
+			close(transport.release)
+
+			client := newClient(rec.hooks(nil))
+			_, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(rec.fired()).To(HaveExactElements("PromptSubmit"))
 		})
 	})
 

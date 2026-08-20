@@ -16,6 +16,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/multiplex"
 	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/fisk-ai/internal/util"
 )
@@ -28,6 +29,13 @@ import (
 // is exported in a shell profile would be refusing a command nobody wrote.
 var (
 	runNatsContext string
+	// runIdentity names the agent to address, for a terminal that has no configuration
+	// file describing one.
+	runIdentity string
+
+	// setConfigFile records that a person named the configuration file, which is what
+	// makes a missing one an error on a path that does not otherwise need it.
+	setConfigFile bool
 
 	setAPIKey      bool
 	setBaseURL     bool
@@ -43,7 +51,7 @@ var (
 func registerRunCommand(cmd *fisk.Application) {
 	run := cmd.Command("run", "Runs the agent").Action(runAction)
 	run.Arg("q", "Interactive prompt").StringsVar(&q)
-	run.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
+	run.Flag("config", "Path to the agent configuration file").IsSetByUser(&setConfigFile).Default("agent.yaml").StringVar(&configFile)
 	run.Flag("api-key", "Anthropic API key to use (not needed with --nats-context, where the worker holds it)").IsSetByUser(&setAPIKey).Envar("ANTHROPIC_API_KEY").StringVar(&apiKey)
 	run.Flag("base-url", "Anthropic API base URL to use").IsSetByUser(&setBaseURL).Envar("ANTHROPIC_BASE_URL").StringVar(&baseURL)
 	run.Flag("http-debug", "Dump Anthropic API request and response bodies to "+httpDebugFilename).IsSetByUser(&setHTTPDebug).Envar("HTTP_DEBUG").UnNegatableBoolVar(&httpDebug)
@@ -59,6 +67,7 @@ func registerRunCommand(cmd *fisk.Application) {
 	run.Flag("state-dir", "Directory holding the sessions of the agent this process hosts (default: XDG state dir)").IsSetByUser(&setStateDir).StringVar(&stateDirFlag)
 	run.Flag("no-telemetry", "Suppress OpenTelemetry export for this run, whatever the configuration says").IsSetByUser(&setNoTelemetry).Envar("NO_TELEMETRY").UnNegatableBoolVar(&noTelemetry)
 	run.Flag("nats-context", "Talk to an agent on this NATS context instead of running one in this process").PlaceHolder("NAME").StringVar(&runNatsContext)
+	run.Flag("identity", "Identity of the agent to talk to, the subject it answers on; requires --nats-context").PlaceHolder("NAME").StringVar(&runIdentity)
 }
 
 // runAction resolves the run flags, hosts an agent behind the prompts channel, and
@@ -81,14 +90,15 @@ func runAction(_ *fisk.ParseContext) error {
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 
-	cfg, err := config.ParseConfigFile(configFile)
+	// Whether this process runs the agent or only talks to one, which is the largest
+	// switch on this command and decides most of what follows, starting with how much
+	// of a configuration this run needs.
+	remote := runNatsContext != ""
+
+	cfg, err := loadRunConfig(remote)
 	if err != nil {
 		return err
 	}
-
-	// Whether this process runs the agent or only talks to one, which is the largest
-	// switch on this command and decides most of what follows.
-	remote := runNatsContext != ""
 
 	err = validateRunTarget(cfg, remote)
 	if err != nil {
@@ -150,6 +160,19 @@ func runAction(_ *fisk.ParseContext) error {
 
 	usesTUI := runUsesTUI(cfg)
 
+	// A terminal multiplexer hosting this process is told what the run is doing, so its
+	// pane shows this agent as working, idle or waiting on a decision. Whether there is
+	// one to tell is read from the environment here rather than deeper down: outside a
+	// pane nothing claims the process, and a run answering one prompt line by line is
+	// not the session a pane is watching.
+	//
+	// The pane is labeled with the agent's identity, since a person watching several
+	// panes is watching several agents.
+	var reporter multiplex.StateReporter
+	if usesTUI {
+		reporter = multiplex.Detect(os.Getenv, cfg.Identity)
+	}
+
 	wire, err := resolveA2ADebugOut()
 	if err != nil {
 		return err
@@ -173,6 +196,7 @@ func runAction(_ *fisk.ParseContext) error {
 		Verbose:      verbose,
 		Logger:       clientWorkerLogger(usesTUI),
 		WireLog:      wire,
+		Reporter:     reporter,
 	})
 	if err != nil {
 		return err
@@ -206,6 +230,63 @@ func runAction(_ *fisk.ParseContext) error {
 	return runAsClient(runCtx, runCancel, host, token)
 }
 
+// loadRunConfig reads the configuration this run needs, which differs by whether the
+// agent runs in this process.
+//
+// Hosting one needs the file it is described by. Talking to one somebody else runs needs
+// the agent's name and nothing else: the model, the prompt and the credentials are all
+// on the worker, so the file is read in the lenient mode and, where --identity supplied
+// the name, is not required at all.
+func loadRunConfig(remote bool) (*config.Config, error) {
+	if !remote {
+		return config.ParseConfigFile(configFile)
+	}
+
+	cfg, err := clientConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// Before the target is validated, since the name this supplies is what that
+	// validation is looking for.
+	err = cfg.ApplyIdentity(runIdentity)
+	if err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+// clientConfig is the configuration a terminal talking to a remote agent runs on.
+//
+// ModeMCP is the most lenient mode: it asks for neither a prompt nor a model, which
+// belong to the worker rather than to this terminal, and it is what every other command
+// that reads a file it barely uses already parses in.
+//
+// The file is skipped where --identity named the agent and nobody named a file. Reading
+// whichever agent.yaml the working directory happened to hold would take that file's
+// timeouts and its model, and refuse the run over a field this terminal never reads. A
+// file a person named is read, and one that cannot be read is an error however this run
+// was started.
+func clientConfig() (*config.Config, error) {
+	if runIdentity != "" && !setConfigFile {
+		return config.NewConfig(), nil
+	}
+
+	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	// The file was the default rather than a path somebody chose, and all this run wanted
+	// from it was a name, so say how to give one instead. A file a person named is their
+	// path to correct.
+	if errors.Is(err, os.ErrNotExist) && !setConfigFile {
+		return nil, fmt.Errorf("%w: pass --identity NAME to name the agent to talk to", err)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
 // exportsFromCard reads what an agent said about its telemetry.
 //
 // No card is not a no: the agent was reachable and did not answer in time, so what a
@@ -222,6 +303,23 @@ func exportsFromCard(card *a2a.AgentCard) (bool, tui.ContentExport) {
 	return card.Telemetry, tui.ContentNotExported
 }
 
+// modelFromCard reads what an agent said it answers a prompt with.
+//
+// The card is the only source. What this process is configured for describes the wrong
+// machine the moment the agent is somewhere else, and a run that names no model draws
+// neither the status bar's model nor the startup card's row, which is what an operator
+// should see when nobody has told them.
+//
+// It is sanitized here because a peer chose it: the status bar escapes widget markup and
+// stops there, and a long value would push the token count and the key hints off the bar.
+func modelFromCard(card *a2a.AgentCard) string {
+	if card == nil {
+		return ""
+	}
+
+	return util.SanitizeForTerminal(card.Model, 48)
+}
+
 // runAgainstWorker holds a conversation with an agent somebody else is running.
 //
 // Nothing is hosted here: no broker, no server, no model provider, no journal and no
@@ -235,7 +333,17 @@ func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.
 		defer wire.Close()
 	}
 
-	host, err := dialAgent(cfg, runNatsContext, clientWorkerLogger(runUsesTUI(cfg)), wire)
+	usesTUI := runUsesTUI(cfg)
+
+	// The same reporting a hosted run does, for the same reason: what a pane shows is
+	// what this terminal is doing, whoever is running the agent behind it. The label is
+	// the identity too, which remotely is the agent this terminal is addressing.
+	var reporter multiplex.StateReporter
+	if usesTUI {
+		reporter = multiplex.Detect(os.Getenv, cfg.Identity)
+	}
+
+	host, err := dialAgent(cfg, runNatsContext, clientWorkerLogger(usesTUI), wire, reporter)
 	if err != nil {
 		return err
 	}
@@ -255,7 +363,7 @@ func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.
 		return err
 	}
 
-	if runUsesTUI(cfg) {
+	if usesTUI {
 		err := runWithTUI(ctx, host, cfg, token, card)
 		if !errors.Is(err, tui.ErrNoTTY) {
 			return err
@@ -286,7 +394,7 @@ func validateRunTarget(cfg *config.Config, remote bool) error {
 	// groups on it, so a name arrived at by accident joins somebody else's fleet rather
 	// than failing to resolve.
 	if !cfg.IdentityIsNamed() {
-		return fmt.Errorf("--nats-context needs an agent to address, and %q names none: set identity in the configuration, since the name is the subject the agent answers on and would otherwise be taken from the application or left at the default", configFile)
+		return fmt.Errorf("--nats-context needs an agent to address: pass --identity NAME, or set identity in %q, since the name is the subject the agent answers on and would otherwise be taken from the application or left at the default", configFile)
 	}
 
 	for _, refusal := range []struct {
@@ -404,18 +512,27 @@ func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, toke
 
 	exports, content := exportsFromCard(card)
 
+	// The reporting is invisible from inside the pane, so the bar says which multiplexer
+	// is being told about this run rather than leaving the operator to find out from the
+	// pane list whether the integration found anything.
+	var multiplexer string
+	if host.reporter != nil {
+		multiplexer = host.reporter.Name()
+	}
+
 	live, err := tui.NewLive(tui.Meta{
-		Model:   cfg.LLM.Model,
 		Version: util.Version(),
 		Query:   strings.Join(q, " "),
 		Resume:  token != "",
 		Dir:     runDir(),
 		// What the agent says about itself rather than what this process is configured
-		// for. The exporting process is whichever one runs the agent, so a client that
-		// read its own provider would be answering for the wrong machine the moment the
-		// agent is somewhere else.
+		// for. The exporting process is whichever one runs the agent, and so is the one
+		// calling the model, so a client that read its own configuration would be
+		// answering for the wrong machine the moment the agent is somewhere else.
+		Model:            modelFromCard(card),
 		Telemetry:        exports,
 		TelemetryContent: content,
+		Multiplexer:      multiplexer,
 	}, noColor, session.requestStop)
 	if err != nil {
 		return err
@@ -510,6 +627,12 @@ func validateRunFlags() error {
 	}
 	if forceResume && resumeID == "" {
 		return fmt.Errorf("--force only applies when resuming")
+	}
+	// Refused here rather than beside the other --nats-context refusals, which run after
+	// the configuration is read: this flag decides whether that file is needed at all,
+	// so a run that gets as far as reading one has already taken the wrong branch.
+	if runIdentity != "" && runNatsContext == "" {
+		return fmt.Errorf("--identity only applies with --nats-context: it names the agent to address on a bus, and an agent hosted in this process takes its identity from the configuration, which is also what names where its conversations are stored")
 	}
 	// Validate at the CLI boundary so a bad base URL fails on a normal terminal,
 	// before the http-debug file is created or the full-screen UI is launched.

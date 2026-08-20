@@ -260,6 +260,34 @@ var _ = Describe("A2A endpoint", func() {
 				}
 			})
 
+			// The configuration that picks the model is on the worker, so a person holding
+			// a conversation with an agent somebody else runs has no other way to see what
+			// is answering them.
+			It("Should name the model an agent answers a prompt with", func() {
+				built, err := NewFromConfig(promptsConfig("        workers: 1\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(discover(built).Model).To(Equal("claude-sonnet-4-6"))
+			})
+
+			// Serving tools runs no model, so a card naming one would say something about
+			// this agent that is not true.
+			It("Should name no model for an agent that only serves tools", func() {
+				built, err := NewFromConfig(toolsConfig(""), ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(discover(built).Model).To(BeEmpty())
+			})
+
+			It("Should name the model of an agent that both serves tools and takes prompts", func() {
+				cfg := toolsConfig("      prompts: {}\nsystem_prompt: do the thing\nllm:\n  model: claude-sonnet-4-6\n")
+
+				built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(discover(built).Model).To(Equal("claude-sonnet-4-6"))
+			})
+
 			// A caller should know before it sends a prompt whether the words travel to
 			// somebody's collector, and it can only know by being told.
 			It("Should say nothing about telemetry when the agent exports none", func() {

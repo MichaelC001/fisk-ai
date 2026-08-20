@@ -1433,6 +1433,39 @@ harness:
 		})
 	})
 
+	Describe("ApplyIdentity", func() {
+		It("Should be a no-op for an empty name, leaving what was there", func() {
+			cfg := &Config{Identity: "orders"}
+			Expect(cfg.ApplyIdentity("")).To(Succeed())
+			Expect(cfg.Identity).To(Equal("orders"))
+		})
+
+		It("Should override the configured name, the flag winning last", func() {
+			cfg := &Config{Identity: "orders"}
+			Expect(cfg.ApplyIdentity("billing")).To(Succeed())
+			Expect(cfg.Identity).To(Equal("billing"))
+		})
+
+		// A name typed at a command line is one a person chose, which is the whole
+		// question IdentityIsNamed answers for anything using it as an address.
+		It("Should record the name as chosen rather than derived", func() {
+			cfg, err := ParseConfig([]byte("system_prompt: hi\nllm:\n  model: opus\n"))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg.IdentityIsNamed()).To(BeFalse(), "left at the default rather than chosen")
+
+			Expect(cfg.ApplyIdentity("billing")).To(Succeed())
+			Expect(cfg.IdentityIsNamed()).To(BeTrue())
+		})
+
+		It("Should refuse a name that is not a legal subject token, leaving it untouched", func() {
+			cfg := &Config{Identity: "orders"}
+			err := cfg.ApplyIdentity("billing.eu")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("is invalid"))
+			Expect(cfg.Identity).To(Equal("orders"))
+		})
+	})
+
 	Describe("CredentialEnvNames", func() {
 		It("Should carry no operator-named variable when the vector tier is off", func() {
 			cfg := &Config{Harness: HarnessConfig{RAG: &RAGConfig{Enabled: true}}}

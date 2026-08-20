@@ -72,6 +72,10 @@ type ServerOptions struct {
 	Identity string
 	// Version is reported in the agent card.
 	Version string
+	// Model is reported in the agent card as what this agent answers a prompt with.
+	// This server runs no agent loop and calls no model, so it is told rather than
+	// derived. Empty publishes no model, which is what an agent taking no prompts says.
+	Model string
 	// ConfirmTags are the operator-configured tags that, with the always-on
 	// ai:confirm, gate a command behind approval. A served agent has no operator,
 	// so commands carrying any of these are never exposed (hard-deny).
@@ -185,7 +189,7 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 	}
 
 	exposed := s.selectExposed(tools)
-	s.card = buildCard(opts.Identity, opts.Version, exposed, opts.Telemetry)
+	s.card = buildCard(opts, exposed)
 
 	err = transport.Serve(OpDiscovery, s.handleDiscovery)
 	if err != nil {
@@ -552,16 +556,17 @@ func (s *Server) respond(reply Replier, msg any) {
 }
 
 // buildCard assembles an agent card from the exposed tools.
-func buildCard(identity, version string, tools []toolkit.Tool, tel *telemetry.Provider) AgentCard {
+func buildCard(opts ServerOptions, tools []toolkit.Tool) AgentCard {
 	card := AgentCard{
-		Name:      identity,
-		Version:   versionOrDev(version),
+		Name:      opts.Identity,
+		Version:   versionOrDev(opts.Version),
+		Model:     opts.Model,
 		Protocols: []string{ProtocolNamespace},
 		// Read off the resolved provider rather than a configuration, so a veto or an
 		// endpoint that was refused does not leave the card promising an export nobody
 		// will make. Both are nil-safe.
-		Telemetry:        tel.Enabled(),
-		TelemetryContent: tel.CaptureEnabled(),
+		Telemetry:        opts.Telemetry.Enabled(),
+		TelemetryContent: opts.Telemetry.CaptureEnabled(),
 	}
 
 	for _, t := range tools {

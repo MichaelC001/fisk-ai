@@ -73,6 +73,9 @@ func discoverAction(_ *fisk.ParseContext) error {
 	c.Headingf("Agent Card for {bold}%s{/bold}", discoverAgent)
 	c.Item("Agent", card.Name)
 	c.Item("Version", card.Version)
+	// Absent from an agent that takes no prompts, which is a working agent rather than an
+	// incomplete card, so the row is left out instead of printed empty.
+	c.ItemUnlessZero("Model", card.Model)
 	c.ItemUnlessZero("Description", card.Description)
 	c.ItemUnlessZero("Protocols", card.Protocols)
 	// Said only when true, and said in full. Somebody reading a card before they send a

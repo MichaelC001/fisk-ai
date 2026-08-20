@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -166,6 +167,31 @@ var _ = Describe("exportsFromCard", func() {
 		exports, content := exportsFromCard(nil)
 		Expect(exports).To(BeFalse())
 		Expect(content).To(Equal(tui.ContentExportUnknown))
+	})
+})
+
+var _ = Describe("modelFromCard", func() {
+	// The process calling the model is the one running the agent, so this terminal's own
+	// configuration answers for the wrong machine the moment the agent is elsewhere.
+	It("Should report what the agent said", func() {
+		Expect(modelFromCard(&a2a.AgentCard{Model: "claude-sonnet-5"})).To(Equal("claude-sonnet-5"))
+	})
+
+	// Both surfaces that show it leave their row out when it is empty, which is what an
+	// operator should see when nobody has told them what is answering.
+	It("Should report nothing where the agent named none, or answered nothing", func() {
+		Expect(modelFromCard(&a2a.AgentCard{})).To(BeEmpty())
+		Expect(modelFromCard(nil)).To(BeEmpty())
+	})
+
+	// A peer chooses this string, and the status bar escapes widget markup and stops
+	// there. An escape sequence would write to a terminal it does not belong to, and a
+	// long one would push the token count and the key hints off the bar.
+	It("Should sanitize and cut what a peer supplied", func() {
+		Expect(modelFromCard(&a2a.AgentCard{Model: "opus\x1b[31m-5"})).To(Equal("opus-5"))
+
+		long := modelFromCard(&a2a.AgentCard{Model: strings.Repeat("m", 200)})
+		Expect([]rune(long)).To(HaveLen(49), "cut, with the mark that says it was")
 	})
 })
 

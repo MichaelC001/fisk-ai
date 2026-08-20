@@ -157,14 +157,27 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 // endpoint of its own, since it produces no work and has nothing to close.
 func serveCard(cfg *config.Config, held *sharedTransport, opts ConfigOptions) error {
 	_, err := a2a.NewServer(held.transport, nil, a2a.ServerOptions{
-		Identity:      cfg.Identity,
-		Version:       util.Version(),
+		Identity: cfg.Identity,
+		Version:  util.Version(),
+		// Unconditional here: this path is taken when tools are not served, and a
+		// configuration enabling neither endpoint is refused above, so prompts are on.
+		Model:         cfg.LLM.Model,
 		Logger:        opts.Logger,
 		Telemetry:     opts.Telemetry,
 		DiscoveryOnly: true,
 	})
 
 	return err
+}
+
+// promptModel is the model to publish for an identity that also serves tools, which is
+// its own only where it answers prompts.
+func promptModel(cfg *config.Config) string {
+	if !cfg.A2APromptsEnabled() {
+		return ""
+	}
+
+	return cfg.LLM.Model
 }
 
 // sharedTransport is the one transport both endpoints answer on, closed once however

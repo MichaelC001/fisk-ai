@@ -16,6 +16,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/multiplex"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
@@ -58,6 +59,10 @@ type hostedAgent struct {
 	// a rejected endpoint leaves it disabled with the configuration still saying
 	// enabled.
 	telemetry *telemetry.Provider
+
+	// reporter tells the terminal multiplexer hosting this process what the run is
+	// doing, and is nil when no multiplexer does. Closing the handle releases the pane.
+	reporter multiplex.StateReporter
 }
 
 // hostOptions is what a hosted agent needs beyond the configuration: what the process
@@ -98,6 +103,10 @@ type hostOptions struct {
 	// WireLog, when set, receives every a2a message this client sends and reads. The
 	// caller owns the file and the warning about what is in it.
 	WireLog io.Writer
+	// Reporter, when set, is told what the run is doing so the terminal multiplexer
+	// hosting this process can show it. Whether there is one to tell is the terminal's
+	// question rather than the agent's, so it is passed in rather than detected here.
+	Reporter multiplex.StateReporter
 }
 
 // hostAgent starts the broker, the prompts channel and the server, and returns once the
@@ -190,7 +199,10 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 
 	// The caller's own identity on this bus. It reaches nobody outside the process, so
 	// it says what it is rather than claiming to be anyone.
-	client, err := a2a.NewClient(transport, clientSender, a2a.WithWireLog(opts.WireLog))
+	client, err := a2a.NewClient(transport, clientSender,
+		a2a.WithWireLog(opts.WireLog),
+		a2a.WithClientHooks(multiplex.ClientHooks(opts.Reporter)),
+	)
 	if err != nil {
 		broker.Close()
 
@@ -203,6 +215,7 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 		client:    client,
 		identity:  identity,
 		telemetry: opts.Telemetry,
+		reporter:  opts.Reporter,
 		done:      make(chan error, 1),
 	}
 
@@ -216,7 +229,7 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 // Nothing is hosted: no broker, no server, no model provider and no journal on this
 // machine. What comes back is the same handle a hosted agent produces, so a client
 // written against one talks to the other without knowing which it has.
-func dialAgent(cfg *config.Config, natsContext string, logger *slog.Logger, wire io.Writer) (*hostedAgent, error) {
+func dialAgent(cfg *config.Config, natsContext string, logger *slog.Logger, wire io.Writer, reporter multiplex.StateReporter) (*hostedAgent, error) {
 	provider, err := conns.Connect(natsContext, cfg.Identity)
 	if err != nil {
 		return nil, err
@@ -233,7 +246,10 @@ func dialAgent(cfg *config.Config, natsContext string, logger *slog.Logger, wire
 		return nil, err
 	}
 
-	client, err := a2a.NewClient(transport, clientSender, a2a.WithWireLog(wire))
+	client, err := a2a.NewClient(transport, clientSender,
+		a2a.WithWireLog(wire),
+		a2a.WithClientHooks(multiplex.ClientHooks(reporter)),
+	)
 	if err != nil {
 		transport.Close()
 		provider.Close()
@@ -247,6 +263,7 @@ func dialAgent(cfg *config.Config, natsContext string, logger *slog.Logger, wire
 		client:      client,
 		identity:    cfg.Identity,
 		natsContext: natsContext,
+		reporter:    reporter,
 	}, nil
 }
 
@@ -281,8 +298,10 @@ func probeAgent(ctx context.Context, host *hostedAgent, natsContext string) (*a2
 	// and the run cannot happen. A responder that exists and did not answer in time falls
 	// through, since that agent is running and the card is all that was lost.
 	if errors.Is(err, a2a.ErrNoResponders) {
+		// The probe command carries the context, since a terminal that named its agent on
+		// the command line has no configuration file for it to read one from.
 		if natsContext != "" {
-			return nil, fmt.Errorf("no agent answering as %q on NATS context %q: check the identity and that it is running there, which 'fisk discover %s' probes directly", host.identity, natsContext, host.identity)
+			return nil, fmt.Errorf("no agent answering as %q on NATS context %q: check the identity and that it is running there, which 'fisk discover --context %s %s' probes directly", host.identity, natsContext, natsContext, host.identity)
 		}
 
 		return nil, fmt.Errorf("the agent hosted for this run is not answering as %q", host.identity)
@@ -314,6 +333,11 @@ func (h *hostedAgent) Close() error {
 	}
 	if h.conns != nil {
 		h.conns.Close()
+	}
+	// Last, so the pane keeps showing this run until there is nothing left of it to
+	// show, and nothing this handle reports can arrive after the pane is given up.
+	if h.reporter != nil {
+		h.reporter.Close()
 	}
 
 	select {

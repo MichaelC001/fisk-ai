@@ -41,9 +41,17 @@ import (
 // reader. An implementation must be safe for concurrent use: one that writes a map
 // without a lock works on the agent side and races here.
 //
-// Running on the reader is what gives the ordering a state consumer needs. QuestionAsked
-// always precedes TurnEnd, so nothing can observe a turn ending before it learns the turn
-// was waiting on a person. Spawning for the caller would cost that.
+// Running on the reader is what gives the ordering a state consumer needs. Spawning for
+// the caller would cost that. Two guarantees follow from it and a consumer tracking what
+// a run is doing may rely on both:
+//
+// A turn the agent acked closes exactly once. TurnEnd fires for an answer, for a failure,
+// for a canceled run and for a set whose transport died mid-turn, so a consumer that
+// went to working on TurnAccepted always has the report that takes it out again. Err says
+// which of those it was. A task whose ack never arrived fires neither, since no turn began.
+//
+// TurnEnd is last. Both question hooks precede it, including for a question nobody
+// answered, so nothing about a question lands after the turn that asked it has closed.
 //
 // Only PromptSubmit may stop anything, and it is the only one that returns an error.
 // It fires before the request is sent, so a denial costs nothing and is honored. Every
@@ -96,9 +104,10 @@ type ClientHooks struct {
 	// that named the same call.
 	QuestionAnswered QuestionAnsweredHook
 
-	// TurnEnd fires when the terminal message arrives, with what the turn cost and how
-	// it ended. It is the point at which the agent stops working, and it fires for an
-	// ending that is not an answer as well as for one that is.
+	// TurnEnd fires when a turn the agent acked is over, with what it cost and how it
+	// ended. It is the point at which the agent stops working, and it fires for an
+	// ending that is not an answer as well as for one that is, including an ending no
+	// terminal message described.
 	TurnEnd ClientTurnEndHook
 
 	// CancelRequested fires when a cancel is sent, before it goes. The turn does not end
@@ -236,6 +245,11 @@ type ClientTurnEndInfo struct {
 	// Usage is what the conversation has consumed, as the terminal message reports it.
 	// Nil from an ending that carried none.
 	Usage *Usage
+	// Err is why the turn ended when no terminal message said: the set could not be
+	// read, or it ended without one, which is ErrIncompleteStream. A canceled run
+	// arrives here as context.Canceled. Nil for every ending the agent reported, which
+	// is where Code and StopReason say what happened instead.
+	Err error
 }
 
 // CancelRequestedInfo is the snapshot handed to CancelRequested.
