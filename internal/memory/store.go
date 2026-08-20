@@ -86,8 +86,8 @@ var ErrExists = errors.New("memory key already exists")
 var ErrNotExist = errors.New("memory key does not exist")
 
 // ErrStale is returned by Write with overwrite true when the backend enforces
-// read-before-update and the key was not read in this run, or has changed since it
-// was read. It lets the model reason about a lost-update conflict (read the current
+// read-before-update and the scope knows no revision for the key, or the key has
+// changed since it was read. It lets the model reason about a lost-update conflict (read the current
 // value and retry) rather than silently clobbering a concurrent change. Only a
 // backend that can check this atomically returns it; the file backend does not.
 var ErrStale = errors.New("memory changed since it was read")

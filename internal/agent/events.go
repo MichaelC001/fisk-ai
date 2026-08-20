@@ -126,6 +126,10 @@ const (
 	// WarnJournalUser: recording an interactive follow-up (user turn) failed with Err;
 	// the session ends here so the journal stays resumable at the last coherent boundary.
 	WarnJournalUser
+	// WarnJournalMemoryRevisions: recording the memory revisions the run read failed
+	// with Err. The run is over and nothing is lost but the head start: the next turn
+	// of this conversation reads a memory again before overwriting it.
+	WarnJournalMemoryRevisions
 	// WarnResumePausedTurn: resuming at a paused-turn boundary whose server-side
 	// tool state may have expired.
 	WarnResumePausedTurn
@@ -262,6 +266,7 @@ var warningKindNames = map[WarningKind]string{
 	WarnMissingRequired:        "missing_required",
 	WarnJournalTerminal:        "journal_terminal",
 	WarnJournalUser:            "journal_user",
+	WarnJournalMemoryRevisions: "journal_memory_revisions",
 	WarnResumePausedTurn:       "resume_paused_turn",
 	WarnMaxIterInteractive:     "max_iterations_interactive",
 	WarnTurnErrorInteractive:   "turn_error_interactive",

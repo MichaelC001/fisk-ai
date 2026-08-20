@@ -385,6 +385,41 @@ var _ = Describe("Integration: jetstream memory", func() {
 			Expect(shared.Write(run, "k", "d2", "b2", true)).To(Succeed())
 		})
 
+		// A turn is a run, so without the revisions the next turn of one conversation
+		// re-reads a value it already has. A host carries them over with Snapshot and
+		// Seed, which is what the session journal holds them for.
+		It("Should let a later run overwrite what a seeded revision covers", func() {
+			first := memory.NewScope()
+
+			_, _, err := shared.Read(memory.WithScope(ctx, first), "k")
+			Expect(err).ToNot(HaveOccurred())
+
+			second := memory.NewScope()
+			second.Seed(first.Snapshot())
+
+			Expect(shared.Write(memory.WithScope(ctx, second), "k", "d2", "b2", true)).To(Succeed())
+		})
+
+		// The seed is optimistic and never authoritative: a writer that moved the key in
+		// between still fails at the store, and the model is told to read it again.
+		It("Should refuse a seeded revision another writer moved", func() {
+			first := memory.NewScope()
+
+			_, _, err := shared.Read(memory.WithScope(ctx, first), "k")
+			Expect(err).ToNot(HaveOccurred())
+
+			mover := memory.WithScope(ctx, memory.NewScope())
+			_, _, err = shared.Read(mover, "k")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(shared.Write(mover, "k", "d2", "b2", true)).To(Succeed())
+
+			second := memory.NewScope()
+			second.Seed(first.Snapshot())
+
+			err = shared.Write(memory.WithScope(ctx, second), "k", "d3", "b3", true)
+			Expect(err).To(MatchError(memory.ErrStale))
+		})
+
 		It("Should not let one run's create authorize another run's overwrite", func() {
 			creator := memory.WithScope(ctx, memory.NewScope())
 			other := memory.WithScope(ctx, memory.NewScope())

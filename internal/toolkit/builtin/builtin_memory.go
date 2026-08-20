@@ -334,8 +334,8 @@ func memoryWriteHandler(store memory.Store) builtinHandler {
 }
 
 // staleReason builds the message returned when an overwrite is refused because the
-// current value was not read this run, or changed since it was read. Both have the
-// same remedy: read the current value, then write again.
+// current value has not been read, or changed since it was read. Both have the same
+// remedy: read the current value, then write again.
 func staleReason(key string) string {
 	return fmt.Sprintf("cannot overwrite memory %q: read it first with memory_read to get the current value, then call memory_write again with overwrite true. This guards against replacing a memory you have not seen or that changed since you read it.", key)
 }

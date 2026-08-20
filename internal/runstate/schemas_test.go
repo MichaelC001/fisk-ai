@@ -51,6 +51,7 @@ var _ = Describe("Validator", func() {
 				{Seq: 7, Protocol: DecisionProtocol, Optional: true, Decision: &DecisionRecord{Tool: "stream_rm"}},
 				{Seq: 8, Protocol: CallApprovalProtocol, Optional: true, CallApproval: &CallApprovalRecord{ToolUseID: "tu_3", ToolName: "stream_rm"}},
 				{Seq: 9, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Message: "done"}},
+				{Seq: 10, Protocol: MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &MemoryRevisionsRecord{Revisions: map[string]uint64{"team.notes": 7}}},
 			}
 
 			for _, rec := range records {

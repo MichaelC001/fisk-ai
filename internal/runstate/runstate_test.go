@@ -261,6 +261,44 @@ var _ = Describe("runstate", func() {
 			Expect(err).To(MatchError(ErrCorrupt))
 		})
 
+		// The record is written as a run ends, which is after its terminal record, so it
+		// folds behind one and must leave the turn it sits inside alone.
+		It("folds memory revisions and leaves the turn alone", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+				{Seq: 3, Protocol: MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7}}},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.MemoryRevisions).To(Equal(map[string]uint64{"notes": 7}))
+			Expect(rs.Pending).ToNot(BeNil())
+			Expect(rs.Pending.Answered).To(BeEmpty())
+		})
+
+		// A run that dropped a revision after a refused write records what it holds now,
+		// so merging would restore what it deliberately dropped.
+		It("keeps only the newest memory revisions record", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "first answer")},
+				{Seq: 3, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}},
+				{Seq: 4, Protocol: MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7, "plans": 2}}},
+				{Seq: 5, Protocol: UserProtocol, User: userRecord("second question")},
+				{Seq: 6, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "second answer")},
+				{Seq: 7, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}},
+				{Seq: 8, Protocol: MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 9}}},
+			}
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.MemoryRevisions).To(Equal(map[string]uint64{"notes": 9}))
+		})
+
+		It("rejects a memory revisions record with no payload", func() {
+			_, err := Fold([]Record{meta(), {Seq: 2, Protocol: MemoryRevisionsProtocol, Optional: true}})
+			Expect(err).To(MatchError(ErrCorrupt))
+		})
+
 		// A newer build's record kind reaches this one as an unknown protocol. Skipping
 		// is the writer's declaration that a reader without it is more conservative, not
 		// this reader's guess.

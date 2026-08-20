@@ -799,7 +799,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// having read the value needs to know what "this run" read, and a store injected by a
 	// host serving many runs cannot answer that from state of its own. A store built per
 	// run answers it either way, so this changes nothing on the CLI path.
-	ctx = memory.WithScope(ctx, memory.NewScope())
+	//
+	// It is held here as well so a resume can seed it from the journal and the runner can
+	// record it, which is what carries a read across the turns of one conversation.
+	memScope := memory.NewScope()
+	ctx = memory.WithScope(ctx, memScope)
 
 	ctx, runSpan := opts.Telemetry.StartRun(ctx, telemetry.RunInfo{
 		Identity:    cfg.Identity,
@@ -1723,6 +1727,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				info.StandingApprovals = rs.Approvals
 			}
 
+			// The memory revisions restore whatever the fingerprint says, and a tool set
+			// that moved does not drop them: they say what the store held rather than what
+			// an operator agreed to, and the store checks the revision when the write is
+			// made, so one that moved fails there and the model reads the value again.
+			memScope.Seed(rs.MemoryRevisions)
+
 			info.SessionID = sessionID
 			info.Resumed = true
 			events.Starting(info)
@@ -1897,6 +1907,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		identity:        cfg.Identity,
 		memoryTools:     memoryToolNames(memBuiltins),
 		memory:          memoryInfo(memStore),
+		memScope:        memScope,
 
 		resumeAtInputBoundary: resumeAtInputBoundary,
 		followUp:              followUp,

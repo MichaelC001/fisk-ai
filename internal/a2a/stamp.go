@@ -12,12 +12,11 @@ import (
 )
 
 // stampRequest fills in the framing fields of a standalone request header. The
-// message constructors set only the protocol id, so a request still needs an id,
-// the correlation and conversation tags, a timestamp, and the sender before it is
-// schema-valid. A direct tool or discovery RPC is not part of a larger task or
-// session, so id, request and conversation are all the same fresh id, and
-// sequence is unused (the transport reply inbox handles correlation), matching the
-// transport notes for direct tool calls.
+// message constructors set the protocol id, and a task request its own request tag, so a
+// message still needs an id, a conversation tag, a timestamp, and the sender before it is
+// schema-valid. A direct tool or discovery RPC is not part of a larger task or session, so
+// its request and conversation tags are one fresh id, and sequence is unused (the transport
+// reply inbox handles correlation), matching the transport notes for direct tool calls.
 //
 // The trace context of whatever span ctx carries is stamped alongside the rest, so a
 // receiver's spans join this one's trace. It is empty when nothing is tracing, which
@@ -33,9 +32,9 @@ func stampRequest(ctx context.Context, h *Header, sender string, recipient strin
 	if h.Request == "" {
 		h.Request = id
 	}
-	// A request message's id is its correlation tag, which is what the header says a
-	// request carries.
-	h.ID = h.Request
+	// The message gets an id of its own. Request names the turn every reply echoes and ID
+	// names this message, so a turn that sends more than one message can tell them apart.
+	h.ID = NewID()
 	// A conversation tag the caller set is kept, which is how the turns of one
 	// conversation carry one tag: the field is the caller's own correlation and means
 	// nothing to a receiver, so minting over it would leave it unable to do the one

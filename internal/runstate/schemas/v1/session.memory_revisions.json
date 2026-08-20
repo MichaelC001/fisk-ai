@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/session.memory_revisions.json",
+  "title": "fisk-ai session store v1 memory revisions record",
+  "allOf": [
+    {
+      "$ref": "session.common.json#/$defs/envelope"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.session.memory_revisions"
+    },
+    "memory_revisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revisions"
+      ],
+      "properties": {
+        "revisions": {
+          "type": "object",
+          "description": "The store revision each memory key was last seen at when the run ended, so the next turn of the conversation can overwrite a value it read on an earlier one. Every key the run knew is present, not only the ones that changed, and a later record supersedes an earlier one.",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "memory_revisions"
+  ],
+  "unevaluatedProperties": false
+}

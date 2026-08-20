@@ -191,9 +191,16 @@ func NewRead(token string, replay int) (*Request, error) {
 
 // newRequestOfKind builds a Request of one kind with its protocol id stamped, which is what
 // the five constructors above share.
+//
+// The request tag is minted here rather than left to the send, so a caller holds the name
+// of its own turn before the turn exists. Canceling a turn and answering a question it asks
+// both address it by that name, and both are things a caller does while the call it would
+// have learned the name from has not returned. The send keeps whatever it finds, so a
+// caller that wants to choose the name itself still can.
 func newRequestOfKind(kind RequestKind) *Request {
 	r := &Request{Kind: kind}
 	r.Protocol, _ = RequestProtocolFor(kind)
+	r.Request = NewID()
 
 	return r
 }
@@ -203,8 +210,9 @@ func newRequestOfKind(kind RequestKind) *Request {
 // copy the token across, for the reason NewElicitReplyFromRequest states.
 //
 // The conversation tag is carried over as well, so a caller's own correlation across
-// the turns of one conversation survives without being set again. Header.Request is
-// left for the send to stamp, since a follow-up opens a reply set of its own.
+// the turns of one conversation survives without being set again. The request tag is not:
+// a follow-up opens a reply set of its own, so it gets the fresh one its constructor
+// minted.
 func NewFollowUp(ack *Ack, prompt string) *Request {
 	r := NewRequest(prompt)
 	r.ConversationToken = ack.ConversationToken

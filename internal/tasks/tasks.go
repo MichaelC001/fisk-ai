@@ -169,23 +169,24 @@ func ValidateID(id string) error {
 	return nil
 }
 
-// RequestID reads the id a request message carries, which is the id its task is
-// stored under.
+// RequestID reads the request tag a request message carries, which is the id its task
+// is stored under.
 //
-// A request's header sets both id and request to the same value, and the submitter
-// has already chosen it, so taking the id from the message rather than minting one is
-// what keeps a single identifier threading the request, the record, the trace and the
-// session. Minting here would leave the record carrying a second id beside the one
-// the message already had.
+// The tag names the turn, and the submitter chose it before sending, so taking it from
+// the message rather than minting one is what keeps a single identifier threading the
+// request, the record, the trace and the session. Minting here would leave the record
+// carrying a second id beside the one the message already had. The message's own id
+// names one message rather than the turn, so a task keyed from it would move under a
+// resend.
 //
-// It checks that the body is a request message with a usable id, which is what the
+// It checks that the body is a request message with a usable tag, which is what the
 // store needs to key a record. It is not a schema check: validating a message against
 // the v1 schemas belongs to the surface that accepts it from a caller, which is where
 // a rejection can still be reported to whoever sent it.
 func RequestID(request json.RawMessage) (string, error) {
 	var hdr struct {
 		Protocol string `json:"protocol"`
-		ID       string `json:"id"`
+		Request  string `json:"request"`
 	}
 
 	err := json.Unmarshal(request, &hdr)
@@ -199,10 +200,10 @@ func RequestID(request json.RawMessage) (string, error) {
 		return "", fmt.Errorf("%w: protocol is %q, want one under %s", ErrInvalidRequest, hdr.Protocol, a2a.RequestProtocol)
 	}
 
-	err = ValidateID(hdr.ID)
+	err = ValidateID(hdr.Request)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
 
-	return hdr.ID, nil
+	return hdr.Request, nil
 }

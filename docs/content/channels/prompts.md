@@ -86,7 +86,7 @@ A caller publishes a request on `choria.fisk-ai.task.<identity>`:
 ```json
 {
   "protocol": "io.choria.fisk-ai.v1.request.prompt",
-  "id": "docs1",
+  "id": "3Hzmp2RBLG713TfOTU5aJpATRg2",
   "request": "docs1",
   "conversation": "docs1",
   "sequence": 0,
@@ -95,6 +95,15 @@ A caller publishes a request on `choria.fisk-ai.task.<identity>`:
   "prompt": "how many streams are there"
 }
 ```
+
+`request` names the turn. Every reply to it echoes the value, cancelling the turn addresses it by that
+value, and so does answering a question the run asks, so pick it before you send and keep it. It must
+name one turn and one only: two turns sharing a value make their replies indistinguishable, and a
+cancel aimed at one of them stops both. It is at most 64 characters of letters, digits, `-` and `_`,
+because a worker builds subjects from it.
+
+`id` names the message rather than the turn, so it is fresh on every message including a resend, and
+`conversation` is the caller's own tag across the turns of one conversation.
 
 | Protocol                                 | Asks for                                    | Required                        | Also takes                                                             |
 |------------------------------------------|---------------------------------------------|---------------------------------|------------------------------------------------------------------------|
@@ -278,7 +287,7 @@ A caller can send another turn of the same conversation. Every `ack` that accept
 ```json
 {
   "protocol": "io.choria.fisk-ai.v1.request.prompt",
-  "id": "docs2",
+  "id": "3Hzmq7WdPK628XjRVZ8cLmBUTh4",
   "request": "docs2",
   "conversation": "docs1",
   "sequence": 0,
@@ -340,7 +349,7 @@ count. The worker sends that many blocks of the stored conversation and ends the
 ```json
 {
   "protocol": "io.choria.fisk-ai.v1.request.read",
-  "id": "docs3",
+  "id": "3Hzmr9YfRM839ZlTXb0eNoDVUj6",
   "request": "docs3",
   "conversation": "docs1",
   "sequence": 0,
@@ -522,8 +531,8 @@ They send an `io.choria.fisk-ai.v1.request.answer` instead, with the conversatio
 ```json
 {
   "protocol": "io.choria.fisk-ai.v1.request.answer",
-  "id": "docs3",
-  "request": "docs3",
+  "id": "3Hzms0ZgSN940AmUYc1fOpEWVk7",
+  "request": "docs4",
   "conversation": "docs1",
   "sequence": 0,
   "time": "2026-08-16T12:40:03Z",
