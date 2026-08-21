@@ -274,6 +274,11 @@ type HarnessConfig struct {
 	// lexical FTS5 baseline that is always on when enabled, and an opt-in vector tier
 	// active only when the embeddings sub-block is present.
 	RAG *RAGConfig `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+	// PII scans text entering the conversation for personal data and either redacts
+	// it or refuses it. Alone among the harness blocks it acts without being asked
+	// for: an absent block redacts, since a feature that protects data by default is
+	// worth more than one an operator has to know about first.
+	PII *PIIConfig `json:"pii,omitempty" yaml:"pii,omitempty"`
 	// Sessions selects and configures the store that holds checkpointed run
 	// journals. Like the memory and knowledge blocks its options are captured as a
 	// raw block (through the same canonical JSON path, so an unknown option key fails
@@ -498,6 +503,47 @@ const (
 	// approval UI and want to avoid a second prompt.
 	ConfirmOverMCPNever = "never"
 )
+
+// PII modes for PIIConfig.Mode.
+const (
+	// PIIModeRedact replaces the personal data found in a prompt or a tool result
+	// with a placeholder and lets the run continue. It is the default when
+	// harness.pii is unset.
+	PIIModeRedact = "redact"
+	// PIIModeReject refuses the text instead of rewriting it: a prompt is denied and
+	// a tool result is withheld from the model.
+	PIIModeReject = "reject"
+	// PIIModeOff scans nothing.
+	//
+	// Off is a mode rather than a separate enabled key because the feature is on
+	// without being asked for, and config.go states the rule for that case at
+	// TelemetryConfig.NoMetrics: a positive enabled would be the only default-on
+	// positive key in the file, and "enabled: false" would be indistinguishable from
+	// an absent key. One key with three values needs no pointer and cannot be read as
+	// the default-off enabled its sibling blocks carry.
+	PIIModeOff = "off"
+)
+
+// PIIConfig configures scanning for personal data in the text entering a run's
+// conversation: the prompt an operator or a caller submits, and the results tools
+// return. Both are scanned before they are appended to the conversation, journaled,
+// traced or sent, so what is redacted reaches neither the model nor the store nor a
+// telemetry collector.
+//
+// Detection is pattern matching and is best-effort in both directions. It misses real
+// values and it flags text that is no such thing. It lowers what leaks; it does not
+// gate it, and no decision to send data somewhere should rest on it.
+//
+// What it does not see: the system prompt and the memory index it carries, the model's
+// own replies, the arguments the model writes for a tool call, the result a caller
+// supplies for a deferred call, and the history a resume restores. Redaction is also
+// one-way: a placeholder the model reads from a file goes back into that file through
+// the next tool call, since there is no restore path.
+type PIIConfig struct {
+	// Mode selects what happens to the text: redact, reject or off. It is trimmed and
+	// lower-cased at parse time, and anything else fails the config.
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
+}
 
 // KnowledgeSearchToolName is the name of the read-only knowledge_search built-in
 // tool. It is defined here, the lowest layer, so config can validate the
@@ -1620,6 +1666,17 @@ func (c *Config) ConfirmOverMCPMode() string {
 	return c.Expose.Agent.MCP.ConfirmOverMCP
 }
 
+// PIIMode returns the configured PII mode, defaulting to redact when no block or
+// value is set. prepare normalizes and validates the stored value, so this returns one
+// of the three known modes.
+func (c *Config) PIIMode() string {
+	if c.Harness.PII == nil || c.Harness.PII.Mode == "" {
+		return PIIModeRedact
+	}
+
+	return c.Harness.PII.Mode
+}
+
 // A2AEnabled reports whether this agent answers other agents over a2a in any way,
 // which is expose.agent.a2a asking for at least one of its endpoints. Answering is off
 // unless explicitly enabled, so a config that says nothing exposes nothing.
@@ -1799,6 +1856,14 @@ func (c *Config) prepare() error {
 	c.Harness.ConfirmTags = normalizeTags(c.Harness.ConfirmTags)
 	c.GlobalFlags = normalizeGlobalFlags(c.GlobalFlags)
 
+	if c.Harness.PII != nil {
+		mode, err := normalizePIIMode(c.Harness.PII.Mode)
+		if err != nil {
+			return err
+		}
+		c.Harness.PII.Mode = mode
+	}
+
 	effort, err := prepareReasoningEffort(c.LLM.ReasoningEffort)
 	if err != nil {
 		return err
@@ -1908,6 +1973,22 @@ func normalizeConfirmOverMCP(v string) (string, error) {
 		return ConfirmOverMCPNever, nil
 	default:
 		return "", fmt.Errorf("invalid confirm_over_mcp %q: must be auto, always or never", v)
+	}
+}
+
+// normalizePIIMode lower-cases and trims the harness.pii.mode value, defaulting an
+// empty value to redact and rejecting anything else, so a typo fails at parse time
+// rather than leaving a run scanning nothing.
+func normalizePIIMode(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", PIIModeRedact:
+		return PIIModeRedact, nil
+	case PIIModeReject:
+		return PIIModeReject, nil
+	case PIIModeOff:
+		return PIIModeOff, nil
+	default:
+		return "", fmt.Errorf("invalid harness.pii.mode %q: must be redact, reject or off", v)
 	}
 }
 

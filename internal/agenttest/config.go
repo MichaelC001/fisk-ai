@@ -21,6 +21,10 @@ func Config(tb testing.TB, app *FakeApp, opts ...ConfigOption) *config.Config {
 	cfg := &config.Config{ApplicationPath: app.Path, Identity: "agent"}
 	cfg.LLM.Model = "test-model"
 	cfg.LLM.Budget.MaxIterations = 20
+	// PII scanning is on for a real run and off here unless a test asks for it with
+	// WithPII: it would otherwise scan every fixture in every suite, and a detector
+	// firing on a test's own sample text would rewrite what that test asserts on.
+	cfg.Harness.PII = &config.PIIConfig{Mode: config.PIIModeOff}
 
 	for _, opt := range opts {
 		opt(cfg)
@@ -48,6 +52,13 @@ func WithMaxTokens(n int64) ConfigOption {
 // leaves tool execution unbounded, which is the default.
 func WithToolTimeout(d time.Duration) ConfigOption {
 	return func(c *config.Config) { c.Harness.ToolTimeoutParsed = d }
+}
+
+// WithPII sets harness.pii.mode, which Config leaves off. Pass config.PIIModeRedact to
+// have personal data replaced in prompts and tool results, or config.PIIModeReject to
+// have the text refused.
+func WithPII(mode string) ConfigOption {
+	return func(c *config.Config) { c.Harness.PII = &config.PIIConfig{Mode: mode} }
 }
 
 // WithRAG enables the knowledge (RAG) feature with its index directory left at the

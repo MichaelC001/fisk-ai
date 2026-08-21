@@ -117,6 +117,26 @@ var _ = Describe("blockRenderer", func() {
 	})
 })
 
+var _ = Describe("warningLead", func() {
+	// Every warning arrives over a2a whether the agent is behind the embedded broker or
+	// on somebody else's machine, so the wording is what tells a reader which failed.
+	It("Should name a hosted agent", func() {
+		Expect(warningLead("cowsay", "")).To(Equal("warning from agent cowsay"))
+	})
+
+	It("Should mark an agent on a bus as remote", func() {
+		Expect(warningLead("cowsay", "ngs_user")).To(Equal("warning from remote agent cowsay"))
+	})
+
+	It("Should fall back to a bare lead for a run with no identity", func() {
+		Expect(warningLead("", "ngs_user")).To(Equal("warning"))
+	})
+
+	It("Should keep an identity from carrying control characters to the terminal", func() {
+		Expect(warningLead("cow\x1b[31msay", "")).NotTo(ContainSubstring("\x1b"))
+	})
+})
+
 var _ = Describe("liveUsage", func() {
 	// The wire counts cache with the rest of the input, since a caller reading a bill
 	// wants what it was billed for. The status bar shows the uncached remainder beside a

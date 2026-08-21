@@ -9,7 +9,32 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/util"
 )
+
+// warningLead announces a warning the agent raised, naming which agent that was.
+//
+// Every warning a run produces reaches this terminal the same way, over a2a, whether the
+// agent is in this process behind the embedded broker or on somebody else's machine. Read
+// as a bare "warning:" the two are indistinguishable, and a failure on a worker then reads
+// as a failure here: a model call refused for want of a key is the case that showed it,
+// where the terminal holding no key is the normal arrangement and the message looked like
+// it had.
+//
+// A hosted agent is named too rather than only a remote one, so the wording that appears
+// when something is wrong is the wording that appears when nothing is. The nats context is
+// what tells them apart, being empty for an agent hosted here.
+func warningLead(identity string, natsContext string) string {
+	if identity == "" {
+		return "warning"
+	}
+
+	if natsContext == "" {
+		return "warning from agent " + util.SanitizeForTerminal(identity, 120)
+	}
+
+	return "warning from remote agent " + util.SanitizeForTerminal(identity, 120)
+}
 
 // warningMessage is the operator-facing text for a Warning, without the "warning: "
 // prefix, so both the line UI and the full-screen UI render the same wording (the
@@ -71,6 +96,13 @@ func warningMessage(w agent.Warning) string {
 		return "this session was saved with a different tool set; it continues under the current one, and the approvals you gave it were dropped since a tool may have moved under them"
 	case agent.WarnBudgetDrift:
 		return fmt.Sprintf("this session was saved with different budget bounds (%s); it continues under the current configuration", strings.Join(w.Params, ", "))
+	case agent.WarnPIIRedacted:
+		return fmt.Sprintf("personal data was redacted from %s (%d value(s): %s) before the model, the session store or telemetry saw it; further redactions in this run are logged but not repeated here, and harness.pii.mode controls this", w.Name, w.Count, strings.Join(w.Params, ", "))
+	case agent.WarnPIIWithheld:
+		if w.Err != nil {
+			return fmt.Sprintf("text from %s was withheld because it could not be scanned for personal data: %v; set harness.pii.mode to off to run unscanned", w.Name, w.Err)
+		}
+		return fmt.Sprintf("text from %s was withheld because it contains personal data (%d value(s): %s) and harness.pii.mode is reject; set it to redact to have the values replaced instead", w.Name, w.Count, strings.Join(w.Params, ", "))
 	default:
 		return ""
 	}

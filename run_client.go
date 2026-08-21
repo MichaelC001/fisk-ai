@@ -35,6 +35,11 @@ type lineClient struct {
 	showToolOutput bool
 	showThinking   bool
 
+	// warningLead announces a warning the agent raised, naming it. The line view has
+	// nothing standing on screen to say which agent is answering, so without this a
+	// worker's warning reads as this terminal's own.
+	warningLead string
+
 	// answered records that the answer reached stdout as it was produced, so the
 	// terminal message does not print it a second time.
 	answered bool
@@ -72,7 +77,7 @@ func (c *lineClient) Block(block a2a.Block) {
 	case a2a.WarningBlock:
 		msg := blockWarningMessage(b)
 		if msg != "" {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
+			fmt.Fprintf(os.Stderr, "%s: %s\n", c.warningLead, msg)
 		}
 
 	case a2a.StatusBlock:
@@ -237,6 +242,7 @@ func runAsClient(ctx context.Context, stop context.CancelFunc, host *hostedAgent
 		noColor:        noColor,
 		showToolOutput: showToolOutput,
 		showThinking:   showThinking,
+		warningLead:    warningLead(host.identity, host.natsContext),
 	}
 
 	conversation := token

@@ -558,6 +558,12 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 				reason = runstate.ReasonCompleted
 				continue
 			}
+			// Applied to cont.Text itself so every path below reads the rewritten prompt:
+			// the append and the journal record, and the rotation that seeds a fresh
+			// session's Meta.Prompt with it.
+			if dec.Rewrite != "" {
+				cont.Text = dec.Rewrite
+			}
 
 			// A conversation at its token cap takes no further turn. Refused above the
 			// reset below, so a prompt that will not run cannot first rotate the session
@@ -671,6 +677,11 @@ func (r *runner) followUpTurn(ctx context.Context) (runstate.TerminalReason, err
 	}
 	if dec.Deny {
 		return runstate.ReasonError, fmt.Errorf("the follow-up prompt was rejected by a policy hook: %s", dec.DenyReason)
+	}
+	// Applied before the append and the journal write below, which are the only two
+	// readers of the text from here.
+	if dec.Rewrite != "" {
+		text = dec.Rewrite
 	}
 
 	// Refused here, above the append and the journal write, so a conversation that cannot

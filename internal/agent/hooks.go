@@ -27,18 +27,24 @@ import (
 // a conversation are here, while a person typing, a question waiting to be put to them
 // and a sitting ending are the client's and are invisible from here.
 //
-// Optional callbacks the run invokes at fixed points. A nil field does not fire. Every
-// hook runs on the single run goroutine, in loop order; it must honor ctx and return
-// promptly; it is trusted in-process code (like CustomTools) and a panic in it aborts the
-// run as a *PanicError. RunEnd alone is exempt: it fires during teardown, once the
-// outcome is already decided, so an error or a panic from it is downgraded to a warning.
+// Optional callbacks the run invokes at fixed points. Every hook runs on the single run
+// goroutine, in loop order; it must honor ctx and return promptly; it is trusted
+// in-process code (like CustomTools) and a panic in it aborts the run as a *PanicError.
+// RunEnd alone is exempt: it fires during teardown, once the outcome is already decided,
+// so an error or a panic from it is downgraded to a warning.
+//
 // One callback per point: compose several behaviors by wrapping them in one func of your
-// own.
+// own. A nil field does not fire, with one exception the caller does not install and
+// cannot remove: under harness.pii the run wraps UserPromptSubmit and PostToolUse with a
+// scan of its own, which runs after the caller's hook and reads whatever that hook left
+// behind. A nil field still fires that scan.
 //
 // A hook may only observe, terminate (a returned error aborts the run; PreToolUse may
-// also deny one call), or adjust tool data (PreToolUse rewrites the tool and args,
-// PostToolUse replaces output). A hook never injects prompts, continues or extends a
-// turn, or changes token or tool accounting, budgets, or iteration caps.
+// also deny one call), or adjust the data passing through the point: PreToolUse rewrites
+// the tool and args, PostToolUse replaces output, UserPromptSubmit replaces the text of
+// the prompt entering the conversation. A hook never introduces a prompt of its own,
+// continues or extends a turn, or changes token or tool accounting, budgets, or iteration
+// caps.
 type Hooks struct {
 	// RunStart fires once as a run begins, fresh or resumed, before the first model
 	// call. A context reset does not fire it again; that rotation is reported through
@@ -99,9 +105,9 @@ type TurnEndHook func(context.Context, TurnEndInfo) error
 // already-decided outcome, so it is downgraded to a warning.
 type RunEndHook func(context.Context, RunEndInfo) error
 
-// UserPromptSubmitHook observes a prompt entering the conversation and may deny it via
-// the returned Result. A non-nil error aborts the whole run; to reject a single prompt
-// set Result.Deny instead. Return the zero Result to change nothing.
+// UserPromptSubmitHook observes a prompt entering the conversation and may deny or
+// rewrite it via the returned Result. A non-nil error aborts the whole run; to reject a
+// single prompt set Result.Deny instead. Return the zero Result to change nothing.
 type UserPromptSubmitHook func(context.Context, UserPromptSubmitInfo) (UserPromptSubmitResult, error)
 
 // PreToolUseHook observes a tool call before it runs and may deny it or rewrite the tool
@@ -217,10 +223,19 @@ type RunEndInfo struct {
 // nothing.
 type UserPromptSubmitResult struct {
 	// Deny rejects the prompt: an initial prompt stops the run before it does any work,
-	// a follow-up is rejected and the input bar reopens.
+	// an interactive follow-up is rejected and the input bar reopens, and a follow-up a
+	// caller supplied ends the run, there being no input bar to return to.
 	Deny bool
 	// DenyReason is required when Deny; it is shown to the operator.
 	DenyReason string
+
+	// Rewrite replaces the text of the prompt when not empty. What is appended to the
+	// conversation, journaled and sent to the model is this rather than what was
+	// submitted, so a rewrite of the initial prompt is also what a resume reconstructs.
+	// Ignored when Deny.
+	//
+	// It replaces the whole text: to change part of it, start from Info.Text.
+	Rewrite string
 }
 
 // PreToolUseResult carries a PreToolUse decision. The zero value changes nothing.

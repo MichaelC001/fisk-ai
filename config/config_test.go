@@ -273,6 +273,52 @@ expose:
 			Expect(err).To(MatchError(ContainSubstring("invalid confirm_over_mcp")))
 		})
 
+		It("Should default harness.pii.mode to redact when the block is absent", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.PIIMode()).To(Equal(PIIModeRedact))
+		})
+
+		It("Should default harness.pii.mode to redact when the block is present but empty", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  pii: {}
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.PIIMode()).To(Equal(PIIModeRedact))
+		})
+
+		It("Should read every harness.pii.mode value", func() {
+			for _, mode := range []string{PIIModeRedact, PIIModeReject, PIIModeOff} {
+				cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  pii:
+    mode: ` + mode + `
+`))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cfg.PIIMode()).To(Equal(mode))
+			}
+		})
+
+		It("Should normalize harness.pii.mode case and whitespace", func() {
+			cfg, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  pii:
+    mode: "  Reject  "
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.PIIMode()).To(Equal(PIIModeReject))
+		})
+
+		It("Should reject an invalid harness.pii.mode value", func() {
+			_, err := ParseConfig([]byte(minimalAgentConfig + `
+harness:
+  pii:
+    mode: disabled
+`))
+			Expect(err).To(MatchError(ContainSubstring("invalid harness.pii.mode")))
+		})
+
 		It("Should parse the MCP and a2a per-server tool limits", func() {
 			cfg, err := ParseConfig([]byte(`
 identity: agent1

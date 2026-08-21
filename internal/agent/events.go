@@ -226,6 +226,22 @@ const (
 	// It is the one that catches a mistyped include: the host answered, the run holds
 	// none of its tools, and nothing else would say so.
 	WarnRemoteNoTools
+	// WarnPIIRedacted: harness.pii found Count values of the types in Params in the text
+	// from Name (the prompt, or a tool) and replaced them before the model, the journal
+	// or a collector saw them. Without it redaction is silent, and an operator wonders
+	// why the model does not know an address they gave it.
+	//
+	// Raised once per run, on the first redaction, carrying that one's detail. Every
+	// occurrence still reaches the log and the span: a warning per event would print
+	// twice for each (the renderer both shows it inline and repeats it at the end), so a
+	// chat redacting an author address on forty tool calls would bury its own answer.
+	WarnPIIRedacted
+	// WarnPIIWithheld: the text from Name was withheld rather than rewritten, with Count
+	// and Params as above. It is harness.pii.mode reject refusing what it found, or,
+	// with Err set, a scan that could not be completed: redaction that cannot be
+	// performed is not redaction, so the text is withheld rather than passed through.
+	// Raised once per run, like WarnPIIRedacted.
+	WarnPIIWithheld
 )
 
 // HostImportWarnings is what importing one peer's tools has to say about it.
@@ -289,6 +305,8 @@ var warningKindNames = map[WarningKind]string{
 	WarnRemoteNoTools:          "remote_no_tools",
 	WarnToolSetDrift:           "tool_set_drift",
 	WarnBudgetDrift:            "budget_drift",
+	WarnPIIRedacted:            "pii_redacted",
+	WarnPIIWithheld:            "pii_withheld",
 }
 
 var warningKindsByName = func() map[string]WarningKind {
