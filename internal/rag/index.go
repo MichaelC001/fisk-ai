@@ -84,10 +84,15 @@ func (o IndexOptions) note(msg string) {
 
 // Index walks roots and brings the index into line with them: it adds new files,
 // re-ingests changed ones (by content hash), skips unchanged ones, and, on a
-// reconciling full-corpus walk, deletes documents no longer present. The vector
-// tier is prepared upfront (dimension probed and pinned, a mismatch refused before
-// any embedding spend). Embedding happens outside the write transaction so the
-// slow call never holds the single writer slot. It requires a writer store.
+// reconciling full-corpus walk, deletes documents no longer present. The vector tier
+// is prepared upfront and, on a reindex, the schema is rebuilt in the same
+// transaction: see prepareIndex. Embedding happens outside the write transaction so
+// the slow call never holds the single writer slot. It requires a writer store.
+//
+// A cancel during the preparation leaves the index untouched. A cancel during the
+// walk keeps the files already committed, which the next run skips by content hash,
+// except after a reindex, where the old index is gone and re-running without
+// --reindex is what finishes the rebuild.
 func (s *Store) Index(ctx context.Context, roots []string, opts IndexOptions) (*IndexStats, error) {
 	if s.readOnly || s.db == nil {
 		return nil, fmt.Errorf("index requires a writable knowledge store")
@@ -104,16 +109,12 @@ func (s *Store) Index(ctx context.Context, roots []string, opts IndexOptions) (*
 	}
 	stats.FirstBuild = priorDocs == 0
 
-	if opts.Reindex && !opts.DryRun {
-		if err := s.resetForReindex(ctx); err != nil {
+	if !opts.DryRun {
+		if err := s.prepareIndex(ctx, opts.Reindex); err != nil {
 			return nil, err
 		}
-		stats.FirstBuild = true
-	}
-
-	if !opts.DryRun {
-		if err := s.prepareVectorTier(ctx, opts.Reindex); err != nil {
-			return nil, err
+		if opts.Reindex {
+			stats.FirstBuild = true
 		}
 	}
 
@@ -411,21 +412,59 @@ func (s *Store) DeleteDocument(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
-// prepareVectorTier probes the live model's dimension and reconciles it with the
-// manifest before any embedding spend (invariant 1). It creates the vector table
-// and pins the manifest on a fresh or reindexed store, and refuses upfront when the
-// configured embedding identity differs from an existing index, naming the fix. On
-// a lexical-only store it pins just the format version. It contacts the embeddings
-// server (the dimension probe), so a configured-but-unreachable server fails loud
-// here, at index time.
-func (s *Store) prepareVectorTier(ctx context.Context, reindex bool) error {
+// vectorPlan is what prepareIndex resolved before it changed anything: the manifest
+// to pin, and whether the run wants a vector table at the probed dimension.
+type vectorPlan struct {
+	meta   Meta
+	vector bool
+	dim    int
+}
+
+// prepareIndex resolves the vector tier, then applies it and, on a reindex, rebuilds
+// the schema, in one transaction.
+//
+// Resolving runs first and writes nothing. The dimension probe contacts the
+// embeddings server, and the manifest checks refuse a configuration this index cannot
+// serve, so a reindex against an unreachable server leaves the index whole rather than
+// dropping it and then reporting that it cannot rebuild it.
+//
+// One transaction covers the rest. A cancel anywhere in it rolls back to the index
+// that was there before, and no store is left carrying a vector table with nothing
+// pinned, or a schema that is neither the old one nor the new one.
+func (s *Store) prepareIndex(ctx context.Context, reindex bool) error {
+	plan, err := s.planVectorTier(ctx, reindex)
+	if err != nil {
+		return err
+	}
+
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if reindex {
+			if err := rebuildSchema(ctx, tx); err != nil {
+				return fmt.Errorf("resetting index for reindex: %w", err)
+			}
+		}
+
+		return applyVectorPlan(ctx, tx, plan)
+	})
+}
+
+// planVectorTier probes the live model's dimension and reconciles it with the
+// manifest before any embedding spend (invariant 1), refusing upfront when the
+// configured embedding identity differs from an existing index and naming the fix. It
+// writes nothing: a lexical-only store plans the format version alone, and every
+// refusal here leaves the index untouched.
+//
+// The manifest checks run only when reindex is false. A reindex exists to resolve the
+// mismatch they report, so applying them to one would refuse the command that fixes
+// it.
+func (s *Store) planVectorTier(ctx context.Context, reindex bool) (vectorPlan, error) {
 	if s.emb == nil {
-		return s.pinLexicalMeta(ctx)
+		return vectorPlan{meta: Meta{FormatVersion: formatVersion}}, nil
 	}
 
 	dim, err := s.emb.Dim(ctx)
 	if err != nil {
-		return fmt.Errorf("probing embedding dimension: %w", err)
+		return vectorPlan{}, fmt.Errorf("probing embedding dimension: %w", err)
 	}
 
 	desired := Meta{
@@ -436,91 +475,95 @@ func (s *Store) prepareVectorTier(ctx context.Context, reindex bool) error {
 		QueryPrefix:    s.emb.QueryPrefix(),
 		DocumentPrefix: s.emb.DocumentPrefix(),
 	}
+	plan := vectorPlan{meta: desired, vector: true, dim: dim}
+
+	if reindex {
+		return plan, nil
+	}
 
 	meta, err := s.readMeta(ctx)
 	if err != nil {
-		return err
+		return vectorPlan{}, err
 	}
 
-	if !reindex && meta.Model != "" {
+	if meta.Model != "" {
 		if meta.Model != desired.Model || meta.Dimension != desired.Dimension ||
 			meta.QueryPrefix != desired.QueryPrefix || meta.DocumentPrefix != desired.DocumentPrefix || !meta.Normalized {
-			return fmt.Errorf("%w: manifest built with model=%s dim=%d; config requests model=%s dim=%d - run 'fisk-ai knowledge index --reindex'",
+			return vectorPlan{}, fmt.Errorf("%w: manifest built with model=%s dim=%d; config requests model=%s dim=%d - run 'fisk-ai knowledge index --reindex'",
 				ErrMetaMismatch, meta.Model, meta.Dimension, desired.Model, desired.Dimension)
 		}
+
+		return plan, nil
 	}
 
-	if !reindex && meta.Model == "" {
-		chunkCount, err := scanCount(ctx, s.db, `SELECT count(*) FROM chunks`)
-		if err != nil {
-			return err
-		}
-		if chunkCount > 0 {
-			return fmt.Errorf("%w: the existing index is lexical-only but config now requests embeddings model=%s - run 'fisk-ai knowledge index --reindex'", ErrMetaMismatch, desired.Model)
-		}
+	chunkCount, err := scanCount(ctx, s.db, `SELECT count(*) FROM chunks`)
+	if err != nil {
+		return vectorPlan{}, err
+	}
+	if chunkCount > 0 {
+		return vectorPlan{}, fmt.Errorf("%w: the existing index is lexical-only but config now requests embeddings model=%s - run 'fisk-ai knowledge index --reindex'", ErrMetaMismatch, desired.Model)
 	}
 
-	return s.createVectorObjects(ctx, dim, desired)
+	return plan, nil
 }
 
-// createVectorObjects creates the vec0 table (at the given, already-reconciled
-// dimension) and its delete trigger if absent, then pins the manifest. A reindex
-// drops the table first, so IF NOT EXISTS here is safe and never a silent
-// dimension no-op.
-func (s *Store) createVectorObjects(ctx context.Context, dim int, meta Meta) error {
-	stmts := []string{
-		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-			chunk_id  INTEGER PRIMARY KEY,
-			embedding FLOAT[%d]
-		)`, dim),
-		`CREATE TRIGGER IF NOT EXISTS chunks_ad_vec AFTER DELETE ON chunks BEGIN
-			DELETE FROM chunks_vec WHERE chunk_id = old.id;
-		END`,
-	}
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("creating vector table (dimension %d): %w", dim, err)
+// applyVectorPlan creates the vec0 table at the planned dimension and its delete
+// trigger, then pins the manifest, all inside tx. A reindex drops the table earlier in
+// the same transaction, so IF NOT EXISTS here is safe and never a silent dimension
+// no-op.
+//
+// The pin shares the transaction with the CREATEs so the pinned identity and the
+// vectors on disk are committed together. A lexical-only plan pins the format version
+// alone, which is what lets the read path detect a later switch to the vector tier and
+// require a reindex.
+func applyVectorPlan(ctx context.Context, tx *sql.Tx, plan vectorPlan) error {
+	if plan.vector {
+		stmts := []string{
+			fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+				chunk_id  INTEGER PRIMARY KEY,
+				embedding FLOAT[%d]
+			)`, plan.dim),
+			`CREATE TRIGGER IF NOT EXISTS chunks_ad_vec AFTER DELETE ON chunks BEGIN
+				DELETE FROM chunks_vec WHERE chunk_id = old.id;
+			END`,
+		}
+		for _, stmt := range stmts {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("creating vector table (dimension %d): %w", plan.dim, err)
+			}
 		}
 	}
 
-	return s.withTx(ctx, func(tx *sql.Tx) error { return writeMeta(ctx, tx, meta) })
-}
-
-// pinLexicalMeta records just the format version for a lexical-only index, so the
-// read path can validate the format and a later switch to the vector tier detects
-// the lexical-only build (empty model) and requires a reindex.
-func (s *Store) pinLexicalMeta(ctx context.Context) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		return writeMeta(ctx, tx, Meta{FormatVersion: formatVersion})
-	})
+	return writeMeta(ctx, tx, plan.meta)
 }
 
 // Reset wipes all indexed data from an open writer store, leaving a clean empty
 // index: the file and base schema remain, ready for the next knowledge index. It
 // works even against an index whose pinned embedding identity no longer matches the
 // config, and even against one whose full-text index no longer matches its content
-// table.
+// table. An interrupted reset leaves the index it was clearing.
 func (s *Store) Reset(ctx context.Context) error {
-	return s.resetForReindex(ctx)
+	return s.withTx(ctx, func(tx *sql.Tx) error { return rebuildSchema(ctx, tx) })
 }
 
-// resetForReindex drops every schema object and recreates it, leaving a clean empty
-// index for a full rebuild. The vector table is among them, so a later model or
+// rebuildSchema drops every schema object and recreates it inside tx, leaving a clean
+// empty index for a full rebuild. The vector table is among them, so a later model or
 // dimension change is unconstrained without that being a special case; so is the
 // manifest, which is why a reset store has nothing pinned.
 //
-// It drops rather than clearing rows, which is what lets it repair an index whose
-// full-text tables no longer match their content table: see dropSchema. Recreating
-// is ensureBaseSchema and nothing else, so the schema has one definition.
-func (s *Store) resetForReindex(ctx context.Context) error {
-	if err := s.dropSchema(ctx); err != nil {
-		return fmt.Errorf("resetting index for reindex: %w", err)
-	}
-	if err := s.ensureBaseSchema(ctx); err != nil {
-		return fmt.Errorf("resetting index for reindex: %w", err)
+// It drops rather than clearing rows, which lets it repair an index whose full-text
+// tables no longer match their content table: see dropSchema. Recreating is
+// ensureBaseSchema alone, so the schema has one definition.
+//
+// Both halves run on the caller's transaction rather than opening their own. The
+// writer pool holds a single connection, so a nested BeginTx would wait for the
+// connection this transaction is holding.
+func rebuildSchema(ctx context.Context, tx *sql.Tx) error {
+	if err := dropSchema(ctx, tx); err != nil {
+		return err
 	}
 
-	return nil
+	return ensureBaseSchema(ctx, tx)
 }
 
 // withTx runs fn in a transaction, committing on success and rolling back on error.
