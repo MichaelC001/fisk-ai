@@ -60,6 +60,10 @@ type fakeMessage struct {
 	ThreadTS  string
 	Text      string
 	Edits     []string
+
+	// Markdown records that this went as a markdown block for Slack to render, rather than
+	// as text this channel wrote itself.
+	Markdown bool
 }
 
 func newFakeAPI() *fakeAPI {
@@ -104,6 +108,16 @@ func (f *fakeAPI) hold() (release func(), arrivals chan struct{}) {
 }
 
 func (f *fakeAPI) postMessage(_ context.Context, channelID, threadTS, text string) (string, error) {
+	return f.record(channelID, threadTS, text, false)
+}
+
+func (f *fakeAPI) postMarkdown(_ context.Context, channelID, threadTS, markdown string) (string, error) {
+	return f.record(channelID, threadTS, markdown, true)
+}
+
+// record is what both posting paths do, differing only in whether Slack is being asked to
+// render the text.
+func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool) (string, error) {
 	f.mu.Lock()
 	gate, arrivals := f.gate, f.arrivals
 	f.mu.Unlock()
@@ -130,7 +144,7 @@ func (f *fakeAPI) postMessage(_ context.Context, channelID, threadTS, text strin
 	f.nextTS++
 	ts := fmt.Sprintf("%d.000100", 1700000000+f.nextTS)
 
-	f.posted[ts] = &fakeMessage{ChannelID: channelID, ThreadTS: threadTS, Text: text}
+	f.posted[ts] = &fakeMessage{ChannelID: channelID, ThreadTS: threadTS, Text: text, Markdown: markdown}
 	f.order = append(f.order, ts)
 
 	return ts, nil

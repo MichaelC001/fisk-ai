@@ -61,6 +61,9 @@ var _ = Describe("The answer message", func() {
 		Expect(posted[1].ChannelID).To(Equal("C1"))
 		Expect(posted[1].ThreadTS).To(Equal("1700000000.000100"), "in the thread the person asked in")
 		Expect(posted[1].Edits).To(BeEmpty(), "an answer is written once")
+		Expect(posted[1].Markdown).To(BeTrue(), "the model writes markdown and Slack renders it")
+
+		Expect(posted[0].Markdown).To(BeFalse(), "the status message is a sentence this channel wrote itself")
 
 		Eventually(editsIn(api, "C1")).Should(Equal([]string{"Done: <" + answerLink + "|see the answer>"}))
 	})

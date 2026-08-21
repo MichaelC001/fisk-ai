@@ -129,6 +129,10 @@ func (c *Channel) receive(env envelope) {
 	}
 
 	if !wanted {
+		// An app subscribed to events this channel does not read, and one whose mentions
+		// this filter rejects, both leave the bot silent in the thread. The kind and the
+		// payload size separate them.
+		c.log.Debug("Dropping an envelope this channel does not act on", "kind", env.Kind, "bytes", len(env.Payload))
 		c.acknowledge(env)
 
 		return
@@ -313,7 +317,10 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 		t.log.Warn("Reading the conversation around a mention failed", "error", err)
 	}
 
-	work.Context = c.render(ctx, pre)
+	rendered := c.render(ctx, pre)
+	if rendered != "" {
+		work.Context = preloadHeader + rendered
+	}
 
 	return work, nil
 }

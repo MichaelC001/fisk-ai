@@ -47,7 +47,10 @@ func (c *Channel) answer(t *turn, text string) {
 		return
 	}
 
-	ts, err := c.api.postMessage(ctx, t.m.ChannelID, t.m.ThreadTS, text)
+	// The answer is the model's own markdown, so Slack renders it rather than this channel
+	// translating it. Everything else this channel posts is a sentence it wrote itself and
+	// goes as text.
+	ts, err := c.api.postMarkdown(ctx, t.m.ChannelID, t.m.ThreadTS, text)
 	if err != nil {
 		t.log.Warn("Posting an answer failed", "channel", t.m.ChannelID, "thread", t.m.ThreadTS, "error", err)
 

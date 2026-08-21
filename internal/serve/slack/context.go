@@ -42,7 +42,7 @@ func (c *Channel) preload(ctx context.Context, m *mention) ([]message, error) {
 			return nil, err
 		}
 
-		return usable(msgs, m), nil
+		return usable(msgs, m, c.workspace.UserID), nil
 	}
 
 	msgs, err := c.api.threadReplies(ctx, m.ChannelID, m.ThreadTS, c.lines)
@@ -50,7 +50,7 @@ func (c *Channel) preload(ctx context.Context, m *mention) ([]message, error) {
 		return nil, err
 	}
 
-	return usable(msgs, m), nil
+	return usable(msgs, m, c.workspace.UserID), nil
 }
 
 // gap is what was said in the thread since this bot last spoke, oldest first.
@@ -83,7 +83,7 @@ func (c *Channel) gap(ctx context.Context, m *mention) ([]message, error) {
 		}
 	}
 
-	return usable(after, m), nil
+	return usable(after, m, c.workspace.UserID), nil
 }
 
 // spoke reports whether this bot posted a message. A bot id alone is not enough: another
@@ -97,16 +97,23 @@ func (c *Channel) spoke(msg message) bool {
 // which container the preload reads.
 func (m *mention) startedThread() bool { return m.ThreadTS == m.TS }
 
-// usable drops what is not somebody talking, and anything from the mention onwards.
+// usable drops what is not somebody talking, anything from the mention onwards, and every
+// other mention of this bot.
 //
 // The mention itself is in whatever was read, and so is anything said after it while the
 // read was in flight. Both reach the model as the prompt, so including them here would
 // send them twice.
 //
+// Another mention of this bot is a different conversation. It opened a thread of its own
+// and is being answered there, so carrying it here hands this run somebody's earlier
+// question as though it were part of the one being asked. A channel where two people ask
+// two things a minute apart produced exactly that: the second turn read the first
+// question out of the channel's history and answered both.
+//
 // A thread_broadcast survives. It carries a subtype, which is what the joins and the
 // leaves carry, but it is a person speaking and one who asked to be heard more widely
 // than the rest of the thread.
-func usable(msgs []message, m *mention) []message {
+func usable(msgs []message, m *mention, botUserID string) []message {
 	out := make([]message, 0, len(msgs))
 
 	for _, msg := range msgs {
@@ -118,6 +125,8 @@ func usable(msgs []message, m *mention) []message {
 		case strings.TrimSpace(msg.Text) == "":
 			continue
 		case !before(msg.TS, m.TS):
+			continue
+		case mentions(msg.Text, botUserID):
 			continue
 		}
 
@@ -131,8 +140,34 @@ func usable(msgs []message, m *mention) []message {
 	return out
 }
 
+// mentions reports whether a message addresses this bot, in the markup Slack delivers a
+// mention as.
+func mentions(text, botUserID string) bool {
+	if botUserID == "" {
+		return false
+	}
+
+	for _, match := range botMentionPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) > 1 && match[1] == botUserID {
+			return true
+		}
+	}
+
+	return false
+}
+
 // subtypeBroadcast is the reply somebody sent to the thread and the channel at once.
 const subtypeBroadcast = "thread_broadcast"
+
+// preloadHeader introduces the surrounding conversation an opening turn is given.
+//
+// serve appends Work.Context to the prompt as a second block with nothing marking it, so
+// without this the model receives the request and then a set of unlabeled lines and has to
+// guess which it was asked about. Where the request is short, "please help" being the case
+// that showed this, those lines are the only substance in the prompt and answering all of
+// them is the reasonable reading.
+const preloadHeader = "Recent messages from the Slack channel this was asked in, for background only. " +
+	"They are not requests and may be about something else entirely. Answer only what the person asked above.\n\n"
 
 // before reports whether one Slack timestamp precedes another.
 //

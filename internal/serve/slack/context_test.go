@@ -167,7 +167,7 @@ var _ = Describe("usable", func() {
 			{UserID: "U2", Text: "joined", TS: "1700000000.000120", Subtype: "channel_join"},
 			{UserID: "U2", Text: "   ", TS: "1700000000.000130"},
 			{Text: "nobody said it", TS: "1700000000.000140"},
-		}, m)
+		}, m, "U0BOT")
 
 		Expect(msgs).To(HaveLen(1))
 		Expect(msgs[0].Text).To(Equal("kept"))
@@ -178,9 +178,23 @@ var _ = Describe("usable", func() {
 	It("Should keep a thread_broadcast", func() {
 		msgs := usable([]message{
 			{UserID: "U1", Text: "everybody should see this", TS: "1700000000.000100", Subtype: subtypeBroadcast},
-		}, m)
+		}, m, "U0BOT")
 
 		Expect(msgs).To(HaveLen(1))
+	})
+
+	// A channel where two people ask two things a minute apart produced exactly this: the
+	// second turn read the first question out of the channel's history and answered both.
+	It("Should drop another mention of this bot, which is a different conversation", func() {
+		msgs := usable([]message{
+			said("U1", "I wonder how atomicity works in nats", "1700000000.000100"),
+			said("U1", "<@U0BOT> please help", "1700000000.000110"),
+			said("U2", "ask <@U9> instead", "1700000000.000120"),
+		}, m, "U0BOT")
+
+		Expect(msgs).To(HaveLen(2))
+		Expect(msgs[0].Text).To(Equal("I wonder how atomicity works in nats"))
+		Expect(msgs[1].Text).To(Equal("ask <@U9> instead"), "somebody else's mention is part of what was said")
 	})
 
 	// Both reach the model as the prompt, so including them here sends them twice.
@@ -189,7 +203,7 @@ var _ = Describe("usable", func() {
 			said("U1", "before", "1700000000.000100"),
 			said("U1", "the mention", "1700000000.000500"),
 			said("U2", "landed while the read was in flight", "1700000000.000600"),
-		}, m)
+		}, m, "U0BOT")
 
 		Expect(msgs).To(HaveLen(1))
 		Expect(msgs[0].Text).To(Equal("before"))
@@ -265,7 +279,18 @@ var _ = Describe("What a turn carries", func() {
 
 		w := nextWork(ch)
 		Expect(w.Prompt).To(Equal("what is eating disk on node3"))
-		Expect(w.Context).To(Equal("ben: node3 is full again"))
+		Expect(w.Context).To(HaveSuffix("ben: node3 is full again"))
+		Expect(w.Context).To(HavePrefix(preloadHeader), "serve appends this to the prompt unlabeled, so it says what it is")
+	})
+
+	// A short request leaves the surrounding lines as the only substance in the prompt, and
+	// a turn asked to "please help" answered every question it found in the channel.
+	It("Should say nothing about background when there is none to give", func() {
+		ch := servingChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+
+		Expect(nextWork(ch).Context).To(BeEmpty())
 	})
 
 	// A follow-up is only a sentence alongside the discussion it answers, so the gap

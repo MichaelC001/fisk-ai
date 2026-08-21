@@ -261,6 +261,7 @@ func New(opts Options) (*Channel, error) {
 		client: socketmode.New(client),
 		out:    make(chan envelope),
 		fail:   make(chan error, 1),
+		log:    log,
 	}, log)
 	if err != nil {
 		return nil, err

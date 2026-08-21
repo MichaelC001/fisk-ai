@@ -7,6 +7,7 @@ package slack
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	slackgo "github.com/slack-go/slack"
@@ -30,7 +31,23 @@ type api interface {
 	// postMessage posts to a thread and returns the new message's timestamp. threadTS is
 	// the thread to reply in and is never empty here: this bot only ever speaks in
 	// threads.
+	//
+	// The text is sent as mrkdwn, which is what this channel writes for itself: plain
+	// sentences with the occasional emphasis. An answer the model wrote goes through
+	// postMarkdown instead.
 	postMessage(ctx context.Context, channelID, threadTS, text string) (string, error)
+
+	// postMarkdown posts standard markdown and lets Slack render it, returning the new
+	// message's timestamp.
+	//
+	// The model writes markdown and mrkdwn is a different dialect: it has no headings and
+	// no table syntax, and it spells bold and links differently, so an answer sent as text
+	// arrives with its asterisks and brackets showing. The markdown block takes the
+	// dialect the model already writes.
+	//
+	// All markdown blocks in one payload share 12,000 characters, against the 40,000 text
+	// gets, so a long answer has to be split. Nothing here splits one yet.
+	postMarkdown(ctx context.Context, channelID, threadTS, markdown string) (string, error)
 
 	// updateMessage replaces the text of a message this bot posted.
 	updateMessage(ctx context.Context, channelID, ts, text string) error
@@ -170,6 +187,27 @@ func (c *clientAPI) postMessage(ctx context.Context, channelID, threadTS, text s
 	return ts, nil
 }
 
+func (c *clientAPI) postMarkdown(ctx context.Context, channelID, threadTS, markdown string) (string, error) {
+	// The block id is discarded by Slack and nothing reads it back, so it is empty rather
+	// than minted.
+	_, ts, err := c.client.PostMessageContext(ctx, channelID,
+		slackgo.MsgOptionBlocks(slackgo.NewMarkdownBlock("", markdown)),
+		slackgo.MsgOptionTS(threadTS),
+		// A message carrying blocks still takes a text argument, which is what a
+		// notification and a client that cannot render blocks show. Slack warns when it is
+		// missing, and the fallback a person reads on a phone should be the answer rather
+		// than a placeholder.
+		slackgo.MsgOptionText(markdown, false),
+		slackgo.MsgOptionDisableLinkUnfurl(),
+		slackgo.MsgOptionDisableMediaUnfurl(),
+	)
+	if err != nil {
+		return "", fmt.Errorf("posting markdown to %s: %w", channelID, err)
+	}
+
+	return ts, nil
+}
+
 func (c *clientAPI) updateMessage(ctx context.Context, channelID, ts, text string) error {
 	_, _, _, err := c.client.UpdateMessageContext(ctx, channelID, ts,
 		slackgo.MsgOptionText(text, false),
@@ -292,6 +330,7 @@ type clientSocket struct {
 	client *socketmode.Client
 	out    chan envelope
 	fail   chan error
+	log    *slog.Logger
 }
 
 func (s *clientSocket) envelopes() <-chan envelope { return s.out }
@@ -330,6 +369,9 @@ func (s *clientSocket) run(ctx context.Context) error {
 
 // translate turns the library's events into envelopes, reporting an invalid credential
 // through fail so run answers with it rather than with the context's own error.
+//
+// It logs what the connection does as it happens, because a worker whose Slack app is
+// misconfigured and one nobody has mentioned yet both sit there answering nothing.
 func (s *clientSocket) translate(ctx context.Context) {
 	defer close(s.out)
 
@@ -352,6 +394,8 @@ func (s *clientSocket) translate(ctx context.Context) {
 				return
 			}
 
+			s.report(ev)
+
 			env, wanted := envelopeOf(ev)
 			if !wanted {
 				continue
@@ -363,6 +407,29 @@ func (s *clientSocket) translate(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+// report says what the connection is doing, so an operator can tell a worker that never
+// reached Slack from one nobody has mentioned.
+//
+// The client reconnects on its own, so connecting and disconnecting happen often enough
+// to log at Debug. Connected is Info: a worker that never logs it never reached the
+// workspace, and a bot that answers nothing looks the same from a thread either way.
+func (s *clientSocket) report(ev socketmode.Event) {
+	if s.log == nil {
+		return
+	}
+
+	switch ev.Type {
+	case socketmode.EventTypeConnected:
+		s.log.Info("Connected to Slack")
+	case socketmode.EventTypeConnecting:
+		s.log.Debug("Connecting to Slack")
+	case socketmode.EventTypeDisconnect:
+		s.log.Debug("The Slack connection dropped, reconnecting")
+	case socketmode.EventTypeConnectionError, socketmode.EventTypeIncomingError, socketmode.EventTypeErrorWriteFailed, socketmode.EventTypeErrorBadMessage:
+		s.log.Warn("The Slack connection reported an error", "event", string(ev.Type), "data", fmt.Sprint(ev.Data))
 	}
 }
 
