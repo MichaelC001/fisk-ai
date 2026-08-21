@@ -421,7 +421,15 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 			st.Documents, st.Chunks, st.StorePath)
 	}
 
-	if err := store.Reset(ctx); err != nil {
+	err = store.Reset(ctx)
+	// The reset is one transaction, so an interrupt rolls it back and the index is
+	// still there. Say so: this is the command that deletes the corpus, and a bare
+	// cancellation error leaves the operator unable to tell whether it ran.
+	if errors.Is(err, context.Canceled) {
+		fmt.Fprintln(os.Stderr, "\nreset canceled; the index is unchanged")
+		return nil
+	}
+	if err != nil {
 		return err
 	}
 

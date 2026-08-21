@@ -360,7 +360,12 @@ func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
 		s.Close()
 		return nil, err
 	}
-	if err := s.ensureBaseSchema(ctx); err != nil {
+	// In one transaction so a process killed partway through leaves either the schema
+	// this build writes or no schema at all. A half-created schema opens no better than
+	// a half-dropped one: rag_meta is created last, so a store with chunks and no
+	// manifest is what an interrupted creation leaves behind.
+	err = s.withTx(ctx, func(tx *sql.Tx) error { return ensureBaseSchema(ctx, tx) })
+	if err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -597,6 +602,15 @@ var schemaDropStatements = []string{
 	`DROP TABLE IF EXISTS rag_meta`,
 }
 
+// execer is the part of *sql.DB and *sql.Tx the schema statements need. The schema
+// functions take one rather than reaching for s.db so a caller can run the whole
+// sequence inside its transaction: the writer pool holds a single connection, so a
+// function that opened its own transaction while the caller held one would wait for a
+// connection that cannot be released until it returns.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // dropSchema removes every schema object, leaving an empty database for
 // ensureBaseSchema to recreate.
 //
@@ -608,9 +622,9 @@ var schemaDropStatements = []string{
 // leaves ensureBaseSchema as the single definition of the schema, so a table added
 // there needs no matching edit here beyond its own drop, where the alternative is a
 // per-table rebuild list that has to be kept in step forever.
-func (s *Store) dropSchema(ctx context.Context) error {
+func dropSchema(ctx context.Context, ex execer) error {
 	for _, stmt := range schemaDropStatements {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := ex.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("dropping knowledge schema: %w", err)
 		}
 	}
@@ -669,7 +683,7 @@ func (s *Store) tableColumns(ctx context.Context, table string) ([]string, error
 // SQLITE_CORRUPT. And the FTS5 column names must equal the content-table column
 // names: a mismatch still answers MATCH and still passes a bare integrity check,
 // failing only at rebuild, which is why the body rename lands in both DDLs at once.
-func (s *Store) ensureBaseSchema(ctx context.Context) error {
+func ensureBaseSchema(ctx context.Context, ex execer) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS documents (
 			id    INTEGER PRIMARY KEY,
@@ -726,7 +740,7 @@ func (s *Store) ensureBaseSchema(ctx context.Context) error {
 	}
 
 	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := ex.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("creating knowledge schema: %w", err)
 		}
 	}
