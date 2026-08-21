@@ -1532,6 +1532,16 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	// harness.pii wraps the caller's hooks rather than replacing them, and is installed
+	// here so every path into the loop is covered without a wiring site remembering to
+	// ask for it. It is built before the first prompt can enter and closed with the run.
+	guard, err := newPIIGuard(cfg, events)
+	if err != nil {
+		return res, err
+	}
+	defer guard.close()
+	opts.Hooks = guard.wrap(opts.Hooks)
+
 	// RunStart fires once as the run begins, on a fresh run and a resume alike (Resumed
 	// distinguishes them), before any session is created or opened and before the first
 	// model call, so an aborting hook leaves nothing behind. ToolNames lists every tool the
@@ -1569,6 +1579,15 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if dec.Deny {
 			res.Reason = runstate.ReasonError
 			return res, fmt.Errorf("the initial prompt was rejected by a policy hook: %s", dec.DenyReason)
+		}
+		// A rewrite has to reach both the slice and the conversation. messages was seeded
+		// from the same prompt well before this point, and it is what goes to the model
+		// and what content capture exports, while the slice is what Meta.Prompt and a
+		// follow-up turn read. Changing one and not the other would send the model the
+		// text a hook asked to have removed and store the text it asked to keep.
+		if dec.Rewrite != "" {
+			prompt = []string{dec.Rewrite}
+			messages[0] = llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: dec.Rewrite}}}}
 		}
 	}
 

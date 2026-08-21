@@ -793,6 +793,11 @@ func (v *viewer) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			// Clean end from either mode: finish the session without aborting.
 			v.submitInput(false)
 			return nil
+		case ev.Key() == tcell.KeyCtrlL:
+			// Available from either mode, and it leaves the draft alone: clearing the
+			// screen is not abandoning what is half typed into the row below it.
+			v.clearScreen()
+			return nil
 		case typing && ev.Key() == tcell.KeyEnter && ev.Modifiers()&tcell.ModAlt != 0:
 			// Alt-Enter (Option-Enter on macOS) inserts a newline instead of sending, so a
 			// multi-line follow-up can be composed. Ctrl-J is the universal fallback for
@@ -877,6 +882,9 @@ func (v *viewer) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case ev.Rune() == 'n':
 		v.search(v.lastTerm)
+		return nil
+	case ev.Key() == tcell.KeyCtrlL:
+		v.clearScreen()
 		return nil
 	case ev.Rune() == 'y':
 		v.copyTranscript()
@@ -1375,6 +1383,37 @@ func (v *viewer) insertNewline() {
 // the transcript is mostly made of by volume and almost never what someone is copying
 // it for. Open a fold and it is copied; that makes the key the whole of the control,
 // with nothing to configure and nothing to explain.
+// clearScreen empties the transcript, the way Ctrl-L empties a shell.
+//
+// It is the exact counterpart of /clear, and the two are easy to confuse: /clear drops
+// the conversation and keeps the scrollback, this drops the scrollback and keeps the
+// conversation. Nothing here reaches the run, so the agent still holds every turn and the
+// next answer arrives with all of it behind it; what goes is this terminal's record of it,
+// which the journal holds anyway.
+//
+// The startup card goes with it, being part of what is on the screen. Tail-follow is
+// re-armed, so an operator who had scrolled up before clearing gets the next line rather
+// than a view parked above it.
+//
+// Loop-only, like the rest of the transcript state it touches.
+func (v *viewer) clearScreen() {
+	v.hideSplash()
+
+	v.lines = nil
+	v.plain = nil
+	v.rendered = nil
+	// The search cursor indexed lines that no longer exist. The term itself is kept, so
+	// "n" after clearing searches what arrives next for what was being looked for.
+	v.match = -1
+
+	v.view.SetText("")
+	if v.follow {
+		v.view.ScrollToEnd()
+	}
+
+	v.setNotice("screen cleared")
+}
+
 func (v *viewer) copyTranscript() {
 	if v.screen == nil || len(v.plain) == 0 {
 		return
@@ -1638,6 +1677,7 @@ func helpLines(canSuspend, interactive bool) []string {
 		"  / , n               search, next match",
 		"  z / Z               fold thinking / output",
 		"  y                   copy visible transcript",
+		"  Ctrl-L              clear the screen (keeps the conversation)",
 		"  ?                   toggle this help",
 		leave,
 	}

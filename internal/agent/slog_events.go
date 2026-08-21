@@ -241,6 +241,10 @@ func warningKindName(k WarningKind) string {
 		return "tool_set_drift"
 	case WarnBudgetDrift:
 		return "budget_drift"
+	case WarnPIIRedacted:
+		return "pii_redacted"
+	case WarnPIIWithheld:
+		return "pii_withheld"
 	default:
 		return "unknown"
 	}

@@ -571,8 +571,11 @@ func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, toke
 		return session.run(runCtx)
 	})
 
+	// Named the way the line view names them: this lands in scrollback once the screen is
+	// gone, where the pane that said which agent was answering is gone with it.
+	lead := warningLead(host.identity, host.natsContext)
 	for _, w := range renderer.warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", util.SanitizeForTerminal(w, 400))
+		fmt.Fprintf(os.Stderr, "%s: %s\n", lead, util.SanitizeForTerminal(w, 400))
 	}
 	// A reset during the session left earlier conversations stored and continuable;
 	// reprint their handles so they survive the alt-screen teardown.

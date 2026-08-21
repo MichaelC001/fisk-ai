@@ -14,6 +14,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/memory"
+	"github.com/choria-io/fisk-ai/internal/pii"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
@@ -103,6 +104,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	printModelSection(c, cfg, totalTools)
 	printMemorySection(c, cfg)
 	printSessionsSection(c, cfg)
+	printPIISection(c, cfg)
 	printTelemetrySection(c, cfg)
 
 	tbl := table.NewTableWriter("")
@@ -209,9 +211,6 @@ func infoAction(_ *fisk.ParseContext) error {
 			c.Print("No system_prompt defined")
 		}
 	})
-
-	c.Blank()
-	c.Printf("These tools can also be served over MCP with: {bold}fisk mcp --config %s{/bold}", configFile)
 
 	return nil
 }
@@ -350,6 +349,36 @@ func printSessionsSection(c *columns.Document, cfg *config.Config) {
 			}
 			c.Item("Directory", directory)
 		}
+	})
+}
+
+// printPIISection shows what a run would scan for personal data and what it would do
+// with what it found, the parallel of the Memory and Sessions sections and resolved the
+// same way, from config alone.
+//
+// It prints in every mode, including off, where Memory prints in none. PII is the one
+// harness feature that acts without being asked for and the one that changes what the
+// model receives, so "is my data being scanned?" is a question this has to answer rather
+// than leave to a missing section, which is also what a misspelled key looks like.
+//
+// It says plainly what detection is worth. An operator who reads redaction as a guarantee
+// will send data somewhere on the strength of it.
+func printPIISection(c *columns.Document, cfg *config.Config) {
+	c.Section("PII scanning", func(c *columns.Document) {
+		mode := cfg.PIIMode()
+		c.Item("Mode", mode)
+
+		if mode == config.PIIModeOff {
+			c.Item("Scanned", "nothing")
+
+			return
+		}
+
+		c.Item("Scanned", "prompts and tool results, before the model, the session store or telemetry see them")
+		c.Item("Not scanned", "the system prompt, memory, the model's replies, tool arguments and resumed history")
+		c.Item("Checks", strings.Join(pii.DefaultChecks, ", "))
+		c.Item("Credentials", "API keys, bearer tokens and NATS credentials, by shape, wherever they appear")
+		c.Item("Detection", "best-effort pattern matching: it misses real values and flags text that is not personal data")
 	})
 }
 

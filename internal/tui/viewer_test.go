@@ -514,6 +514,50 @@ var _ = Describe("transcript viewer", func() {
 			Eventually(done, time.Second).Should(Receive(BeNil()))
 		})
 
+		// Ctrl-L is the shell gesture and means the same thing here: the record on screen
+		// goes, the conversation behind it does not. What proves the second half is that
+		// the next line still arrives and renders on its own.
+		It("Should empty the transcript on Ctrl-L and keep taking lines after", func() {
+			sim := tcell.NewSimulationScreen("")
+			v := newViewer(Meta{Title: "r"}, []Line{
+				{Kind: LinePrompt, Text: "do a thing"},
+				{Kind: LineToolCall, Text: "stream ls"},
+			}, true, true)
+			v.app.SetScreen(sim)
+			v.app.SetRoot(v.pages, true).SetFocus(v.view)
+
+			done := make(chan error, 1)
+			go func() { done <- v.app.Run() }()
+			v.app.QueueUpdateDraw(func() {})
+
+			readScreen := func() string {
+				var t string
+				v.app.QueueUpdate(func() { t = screenText(sim) })
+				return t
+			}
+			Eventually(readScreen, time.Second).Should(ContainSubstring("stream ls"))
+
+			sim.InjectKey(tcell.KeyCtrlL, 0, tcell.ModNone)
+
+			Eventually(readScreen, time.Second).Should(ContainSubstring("screen cleared"))
+			Expect(readScreen()).NotTo(ContainSubstring("stream ls"))
+			Expect(readScreen()).NotTo(ContainSubstring("do a thing"))
+
+			var lines, plain, rendered int
+			v.app.QueueUpdate(func() {
+				lines, plain, rendered = len(v.lines), len(v.plain), len(v.rendered)
+			})
+			Expect(lines).To(BeZero())
+			Expect(plain).To(BeZero(), "the search index goes with the lines it indexed")
+			Expect(rendered).To(BeZero())
+
+			v.app.QueueUpdateDraw(func() { v.appendLine(Line{Kind: LineNarration, Text: "still talking"}) })
+			Eventually(readScreen, time.Second).Should(ContainSubstring("still talking"))
+
+			v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
 		// Folding is how an operator says a block is not what they are reading, and the
 		// blocks that fold are the ones that would dominate a paste. The placeholder is
 		// not sent either: it is a screen affordance, not content.
@@ -637,6 +681,40 @@ var _ = Describe("transcript viewer", func() {
 			})
 			Expect(front).ToNot(Equal("search"))
 			Expect(focused).To(BeIdenticalTo(tview.Primitive(v.promptInput)))
+
+			v.app.Stop()
+			Eventually(done, time.Second).Should(Receive(BeNil()))
+		})
+
+		// Clearing the screen while composing must not cost the draft: an operator tidying
+		// the view is not abandoning the sentence they are in the middle of.
+		It("Should clear the screen from the input row and keep the draft", func() {
+			sim := tcell.NewSimulationScreen("")
+			v := newViewer(Meta{Title: "s"}, []Line{{Kind: LineNarration, Text: "alpha"}}, true, true)
+			v.enableInput()
+			v.app.SetScreen(sim)
+			v.app.SetRoot(v.pages, true).SetFocus(v.view)
+
+			done := make(chan error, 1)
+			go func() { done <- v.app.Run() }()
+			v.app.QueueUpdateDraw(func() { v.activatePrompt(func(string, bool, bool) {}) })
+
+			v.app.QueueUpdateDraw(func() { v.promptInput.SetText("half a thought", true) })
+
+			sim.InjectKey(tcell.KeyCtrlL, 0, tcell.ModNone)
+
+			var draft string
+			var lines int
+			var focused tview.Primitive
+			Eventually(func() int {
+				v.app.QueueUpdate(func() {
+					draft, lines, focused = v.promptInput.GetText(), len(v.lines), v.app.GetFocus()
+				})
+				return lines
+			}, time.Second).Should(BeZero())
+
+			Expect(draft).To(Equal("half a thought"))
+			Expect(focused).To(BeIdenticalTo(tview.Primitive(v.promptInput)), "focus stays where it was typing")
 
 			v.app.Stop()
 			Eventually(done, time.Second).Should(Receive(BeNil()))
