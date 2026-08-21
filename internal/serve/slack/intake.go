@@ -429,17 +429,34 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 
 	t.log.Info("A turn ended", "reason", out.Reason, "deferred", len(out.Deferred), "folded", len(folded), "returned", len(undelivered))
 
-	// The status message stops here rather than at the run's last event, so the state it
-	// ends on is the one Slack is left with.
-	t.status.stop()
-
 	if follow != nil {
 		c.startStatus(follow.status)
 	}
 
-	if len(undelivered) > 0 {
-		c.reply(t.m, undeliveredNote(linesOf(undelivered)))
-	}
+	c.conclude(t, out.Text, undelivered)
+}
+
+// conclude says everything a turn owes its thread and then ends its status message.
+//
+// The order is what a person reads: the answer, then the pointer to it, then the lines the
+// run never reached. They are on one goroutine rather than three because they are one
+// thread's worth of messages and the allowance is spent in the order they were written.
+//
+// It is a goroutine at all so a run reporting its outcome is not held behind the
+// workspace's allowance, and it is one Close waits for, since what it says is owed to a
+// person whether or not the worker is still serving.
+func (c *Channel) conclude(t *turn, answer string, undelivered []*mention) {
+	c.speak(func() {
+		c.answer(t, answer)
+
+		// The status message stops here rather than at the run's last event, so the state
+		// it ends on is the one Slack is left with.
+		t.status.stop()
+
+		if len(undelivered) > 0 {
+			c.post(t.m, undeliveredNote(linesOf(undelivered)))
+		}
+	})
 }
 
 // releaseLocked gives a thread back and promotes what was queued behind it, which is the
@@ -531,12 +548,18 @@ func undeliveredNote(lines []string) string {
 // channel's rather than a caller's because a refusal has no run to belong to and a person
 // who was refused is owed the reason even while the worker is shutting down, which is why
 // Close waits for these.
-//
-// Once Close has stopped waiting the message is posted on the caller's own goroutine
-// instead. A run reporting its outcome after the drain has moved past that point still
-// owes its thread the lines it never got to, and the socket is not closed until the runs
-// have ended.
 func (c *Channel) reply(m *mention, text string) {
+	c.speak(func() { c.post(m, text) })
+}
+
+// speak runs what this channel is saying for itself on a goroutine Close waits for, so a
+// refusal or an answer is not lost to a shutdown that started while it was in flight.
+//
+// Once Close has stopped waiting it runs on the caller's own goroutine instead. A run
+// reporting its outcome after the drain has moved past that point still owes its thread an
+// answer, the socket is not closed until the runs have ended, and starting a goroutine a
+// WaitGroup has already been waited on is the misuse that panics.
+func (c *Channel) speak(say func()) {
 	c.mu.Lock()
 	closed := c.postsClosed
 	if !closed {
@@ -545,7 +568,7 @@ func (c *Channel) reply(m *mention, text string) {
 	c.mu.Unlock()
 
 	if closed {
-		c.post(m, text)
+		say()
 
 		return
 	}
@@ -553,7 +576,7 @@ func (c *Channel) reply(m *mention, text string) {
 	go func() {
 		defer c.posts.Done()
 
-		c.post(m, text)
+		say()
 	}()
 }
 

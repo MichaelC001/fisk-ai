@@ -73,6 +73,11 @@ type status struct {
 	hint    string
 	repeats int
 
+	// final is what the message ends as, which is the pointer at the answer rather than
+	// a hint. Once it is set nothing the run passed through matters any more, so it wins
+	// over everything above.
+	final string
+
 	// ts names the message once it has been posted and published is the text Slack was
 	// last given, which is what decides whether another call is worth making.
 	ts        string
@@ -255,6 +260,9 @@ func (s *status) wrote(ts string, text string) {
 // which is also what its first event says, so the two agree and no call is spent moving
 // between them.
 func (s *status) textLocked() string {
+	if s.final != "" {
+		return s.final
+	}
 	if s.queued {
 		return hintQueued
 	}
@@ -302,6 +310,25 @@ func (s *status) running() {
 	}
 
 	s.mu.Lock()
+	s.queued = false
+	s.mu.Unlock()
+
+	s.moved()
+}
+
+// ends records the last thing this message says, which is where the turn's answer is
+// rather than where the run got to.
+//
+// It is recorded rather than written: the publisher makes the call, so the last edit is
+// spent from the same allowance as every hint that came before it instead of going around
+// the meter. An empty text records nothing, chat.update refusing a message with none.
+func (s *status) ends(text string) {
+	if s == nil || text == "" {
+		return
+	}
+
+	s.mu.Lock()
+	s.final = text
 	s.queued = false
 	s.mu.Unlock()
 
