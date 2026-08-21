@@ -641,6 +641,15 @@ var _ = Describe("Command execution", func() {
 		Expect(result.Output).To(Equal("LLMFORMAT=1\n"))
 	})
 
+	It("Should set FISK_AI=1 in the command environment", func() {
+		GinkgoT().Setenv("FISK_AI", "")
+		tool := doTool(writeExecutable("#!/bin/sh\nprintf 'FISK_AI=%s\\n' \"$FISK_AI\"\n"))
+
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Output).To(Equal("FISK_AI=1\n"))
+	})
+
 	It("Should strip a linked provider's declared credential variables", func() {
 		// Canary: an empty union means the strip is vacuous, so fail loudly here
 		// rather than let the assertion below pass because nothing was registered.

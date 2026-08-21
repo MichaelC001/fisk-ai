@@ -617,9 +617,10 @@ func (t *FiskCommandTool) RunCommand(ctx context.Context, args json.RawMessage, 
 }
 
 // commandEnv builds the environment for a tool command: the current environment
-// with credential variables removed and LLMFORMAT set. LLMFORMAT signals fisk
-// applications that their output is read by an LLM, so they can render a form
-// suited to that rather than a terminal.
+// with credential variables removed and LLMFORMAT and FISK_AI set. LLMFORMAT
+// signals fisk applications that their output is read by an LLM, so they can render
+// a form suited to that rather than a terminal. FISK_AI tells the command it was
+// started by an agent rather than by a person at a terminal.
 //
 // The stripped set is the union of two name sources, so a tool whose command line
 // the model chooses can never read a named secret from its environment:
@@ -672,7 +673,7 @@ func commandEnv(extra []string, workDir string) []string {
 		out = append(out, "PWD="+workDir)
 	}
 
-	return append(out, "LLMFORMAT=1")
+	return append(out, "LLMFORMAT=1", "FISK_AI=1")
 }
 
 // capWriter is an io.Writer that retains at most the head and tail of everything
