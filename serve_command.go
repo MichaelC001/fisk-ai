@@ -22,6 +22,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
 	ajchannel "github.com/choria-io/fisk-ai/internal/serve/asyncjobs"
+	slackchannel "github.com/choria-io/fisk-ai/internal/serve/slack"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/util"
 )
@@ -101,7 +102,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	if !cfg.JobsEnabled() && !cfg.A2AEnabled() {
+	if !cfg.JobsEnabled() && !cfg.A2AEnabled() && !cfg.SlackEnabled() {
 		return c.noEndpointError()
 	}
 
@@ -161,7 +162,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Logger:           log,
 		Telemetry:        tel,
 		Sessions:         resources.SessionStore,
-	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder()})
+	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder(), slackchannel.Builder()})
 	if err != nil {
 		return err
 	}
@@ -288,7 +289,16 @@ expose:
       prompts: {}
 
 serve_tools answers tool calls from peers, and a prompts block answers prompts by running
-the agent loop over them; either alone is enough`,
+the agent loop over them; either alone is enough.
+
+To answer people in Slack, add a slack block:
+
+expose:
+  agent:
+    slack: {}
+
+Every field under it defaults too. It needs SLACK_APP_TOKEN and SLACK_BOT_TOKEN in the
+environment, which is where its credentials come from rather than this file`,
 		c.configFile, config.DefaultJobsQueue, config.DefaultJobsTaskType)
 }
 
