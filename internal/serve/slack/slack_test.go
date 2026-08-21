@@ -45,11 +45,18 @@ func testOptions() Options {
 	}
 }
 
-// newTestChannel builds a Channel over the fakes, failing the spec if it refuses.
+// newTestChannel builds a Channel over the fakes, failing the spec if it refuses. It takes
+// the logger from the options the way New does, so a spec asserting on what reaches the
+// worker's log supplies one of its own.
 func newTestChannel(opts Options, a api, s socket) *Channel {
 	GinkgoHelper()
 
-	ch, err := newChannel(opts, a, s, quietLogger())
+	log := opts.Logger
+	if log == nil {
+		log = quietLogger()
+	}
+
+	ch, err := newChannel(opts, a, s, log)
 	Expect(err).ToNot(HaveOccurred())
 
 	return ch

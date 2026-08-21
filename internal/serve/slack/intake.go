@@ -63,6 +63,11 @@ type turn struct {
 	// worker is free is known, and started once the mention has been acknowledged.
 	status *status
 
+	// events is what the run reports into: it moves the status message and collects the
+	// advisories the ending puts under the answer. It is built with the turn rather than
+	// with the work, since the ending reads it whether or not the turn ever ran.
+	events *events
+
 	folded []*mention
 }
 
@@ -71,13 +76,16 @@ type turn struct {
 func (c *Channel) newTurn(m *mention, session string) *turn {
 	id := m.ChannelID + "/" + m.TS
 
-	return &turn{
+	t := &turn{
 		ch:      c,
 		m:       m,
 		session: session,
 		id:      id,
 		log:     c.log.With("turn", id, "session", session, "thread", m.ThreadTS),
 	}
+	t.events = newEvents(t)
+
+	return t
 }
 
 // intake reads the socket and acts on what arrives. It is the one goroutine that reads
@@ -328,6 +336,7 @@ func (t *turn) work(checkpoint agent.Checkpoint) *serve.Work {
 		Checkpoint:       checkpoint,
 		ClaimedBy:        t.id,
 		Caller:           callerOf(t.m),
+		Events:           t.events,
 		SuspendRequested: t.ch.suspendRequested,
 		HumanPaced:       true,
 		RunContext:       t.runContext,
@@ -438,9 +447,14 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 
 // conclude says everything a turn owes its thread and then ends its status message.
 //
-// The order is what a person reads: the answer, then the pointer to it, then the lines the
-// run never reached. They are on one goroutine rather than three because they are one
-// thread's worth of messages and the allowance is spent in the order they were written.
+// The order is what a person reads: the answer, then the pointer to it, then what the run
+// had to say about the holes in it, then the lines it never reached. They are on one
+// goroutine rather than four because they are one thread's worth of messages and the
+// allowance is spent in the order they were written.
+//
+// The advisories are their own message rather than a paragraph joined onto the answer, so
+// a turn that raised one and produced no text still says what went wrong, and so the link
+// the status message ends on names the answer rather than a note about it.
 //
 // It is a goroutine at all so a run reporting its outcome is not held behind the
 // workspace's allowance, and it is one Close waits for, since what it says is owed to a
@@ -452,6 +466,11 @@ func (c *Channel) conclude(t *turn, answer string, undelivered []*mention) {
 		// The status message stops here rather than at the run's last event, so the state
 		// it ends on is the one Slack is left with.
 		t.status.stop()
+
+		note := t.events.note()
+		if note != "" {
+			c.post(t.m, note)
+		}
 
 		if len(undelivered) > 0 {
 			c.post(t.m, undeliveredNote(linesOf(undelivered)))
