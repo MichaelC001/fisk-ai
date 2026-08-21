@@ -23,6 +23,12 @@ type mentionEvent struct {
 	Text     string
 	TS       string
 	ThreadTS string
+
+	// EnvelopeID and Retry are the delivery rather than the message. Slack mints a fresh
+	// envelope id for each delivery of one message, which is why a redelivery is
+	// recognized by the message rather than by these.
+	EnvelopeID string
+	Retry      int
 }
 
 func (m mentionEvent) envelope() envelope {
@@ -47,7 +53,12 @@ func (m mentionEvent) envelope() envelope {
 	})
 	Expect(err).ToNot(HaveOccurred())
 
-	return envelope{ID: "Ev1", Kind: envelopeMention, Payload: body}
+	id := m.EnvelopeID
+	if id == "" {
+		id = "Ev1"
+	}
+
+	return envelope{ID: id, Kind: envelopeMention, Payload: body, RetryAttempt: m.Retry}
 }
 
 // aMention is a valid mention a spec varies.

@@ -166,10 +166,36 @@ type Channel struct {
 	// acknowledged and dropped rather than paying for the same turn again.
 	taken *seen
 
-	// work hands one admitted turn to Next. It is unbuffered: admission has already
-	// decided this turn may run, so the wait here is for the server's puller to come
-	// round rather than for capacity.
-	work chan *serve.Work
+	// mu guards everything admission decides on, and every one of those decisions is
+	// made in memory under it, before an envelope is acknowledged.
+	mu sync.Mutex
+
+	// inFlight is the turn holding each thread, which is the only mutual exclusion
+	// between two concurrent resumes of one conversation: runstate writes a claim but
+	// does not enforce one.
+	inFlight map[string]*turn
+
+	// queued holds the turns waiting for a thread another turn is running in, and parked
+	// counts them so the backlog bound covers them as well as the ones waiting for a
+	// worker.
+	queued map[string][]*turn
+	parked int
+
+	// waiting is the admitted turns Next pops from, and wake tells it there may be one.
+	// A queue rather than a handover, so the goroutine reading envelopes never blocks on
+	// the server's puller: what it bounds is the backlog, not who waits for whom, the
+	// puller being serial either way.
+	waiting []*turn
+	wake    chan struct{}
+
+	// posts counts the goroutines this channel started for the messages it posts for
+	// itself, which Close waits for so a refusal is not lost to a shutdown. postsClosed
+	// says it has stopped waiting, after which a message is posted on the goroutine that
+	// asked for it: a run reporting its outcome after the drain has moved on still owes
+	// its thread an explanation, and starting a goroutine the wait has passed is the
+	// misuse that panics.
+	posts       sync.WaitGroup
+	postsClosed bool
 
 	// faults carries the report that this bot has stopped answering. It is buffered by
 	// one and written once, the first fault being what ends the worker.
@@ -188,6 +214,10 @@ type Channel struct {
 	socketOff context.CancelFunc
 	socketEnd chan struct{}
 	socketErr error
+
+	// intakeEnd is closed when the goroutine reading envelopes has stopped, which Close
+	// waits for before anything else: nothing else may be taken once a drain begins.
+	intakeEnd chan struct{}
 }
 
 // New builds a Channel and identifies the credential it was given, which reaches the
@@ -249,12 +279,26 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		socket:    s,
 		sessions:  opts.Sessions,
 		taken:     newSeen(0),
-		work:      make(chan *serve.Work),
+		inFlight:  map[string]*turn{},
+		queued:    map[string][]*turn{},
+		wake:      make(chan struct{}, 1),
 		faults:    make(chan error, 1),
 		shutdown:  make(chan struct{}),
 		socketCtx: ctx,
 		socketOff: cancel,
 		socketEnd: make(chan struct{}),
+		intakeEnd: make(chan struct{}),
+	}
+
+	// Both bounds are defaulted here as well as in the configuration, because a Config
+	// an embedder builds in process never runs prepare and an Options an embedder builds
+	// directly never sees the configuration at all. A zero would read as a bound of none
+	// rather than as unset: no mention would be admitted, and no folded line delivered.
+	if c.maxWait <= 0 {
+		c.maxWait = opts.Workers * waitingPerWorker
+	}
+	if c.maxCoal <= 0 {
+		c.maxCoal = defaultMaxCoalesced
 	}
 
 	// The identity check is the last thing that can fail, so the cancel above is
@@ -285,16 +329,44 @@ func (c *Channel) Concurrency() int { return c.workers }
 // It opens the socket on its first call, so nothing is accepted before the server is
 // ready to run it. It returns serve.ErrChannelDone once the channel has been closed, so
 // the server stops asking an endpoint that no longer answers.
+//
+// The turn's checkpoint is decided here rather than at admission, which is a read of the
+// session store: a thread this worker already holds continues its conversation, and one
+// it does not opens a new one. A store that cannot answer refuses that one turn, tells
+// the thread so, and hands over whatever is behind it, since the rest of the workspace
+// has done nothing wrong.
 func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 	c.start()
 
-	select {
-	case w := <-c.work:
-		return w, nil
-	case <-c.shutdown:
-		return nil, serve.ErrChannelDone
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	for {
+		if c.draining() {
+			return nil, serve.ErrChannelDone
+		}
+
+		t := c.takeWaiting()
+		if t != nil {
+			w, err := c.workFor(t)
+			if err != nil {
+				t.log.Error("Refusing a mention whose conversation could not be read", "error", err)
+				c.reply(t.m, storeRefusal)
+
+				c.mu.Lock()
+				c.releaseLocked(t)
+				c.mu.Unlock()
+
+				continue
+			}
+
+			return w, nil
+		}
+
+		select {
+		case <-c.wake:
+		case <-c.shutdown:
+			return nil, serve.ErrChannelDone
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -322,8 +394,16 @@ func (c *Channel) Close() error {
 
 		if !c.started {
 			c.socketOff()
+			c.awaitPosts()
+
 			return
 		}
+
+		// The intake goroutine stops first and the messages it started are waited for
+		// next, so nothing is still deciding on a mention or still telling somebody they
+		// were refused when the connection those answers travel over is taken away.
+		<-c.intakeEnd
+		c.awaitPosts()
 
 		c.socketOff()
 		<-c.socketEnd
@@ -334,10 +414,14 @@ func (c *Channel) Close() error {
 }
 
 // start opens the socket once, on the channel's own context rather than a caller's, so it
-// outlives the server's and Close decides when it ends.
+// outlives the server's and Close decides when it ends. The goroutine that reads what
+// arrives on it starts with it, since an envelope read before there is a server to run it
+// is an envelope acknowledged and lost.
 func (c *Channel) start() {
 	c.startOnce.Do(func() {
 		c.started = true
+
+		go c.intake()
 
 		go func() {
 			defer close(c.socketEnd)

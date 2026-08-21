@@ -40,6 +40,12 @@ type fakeAPI struct {
 	// refuses.
 	postErr   error
 	updateErr error
+
+	// gate holds every post until a spec releases it and arrivals reports each one
+	// reaching that hold, which is how a spec keeps a message in flight while it asserts
+	// on what waits for it.
+	gate     chan struct{}
+	arrivals chan struct{}
 }
 
 // fakeMessage is one message this bot posted, with every edit it received.
@@ -78,7 +84,33 @@ func (f *fakeAPI) authTest(context.Context) (workspace, error) {
 	return f.ws, nil
 }
 
+// hold makes every post wait, returning the release and the arrivals to wait on.
+func (f *fakeAPI) hold() (release func(), arrivals chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.gate = make(chan struct{})
+	f.arrivals = make(chan struct{}, 8)
+
+	gate := f.gate
+
+	return func() { close(gate) }, f.arrivals
+}
+
 func (f *fakeAPI) postMessage(_ context.Context, channelID, threadTS, text string) (string, error) {
+	f.mu.Lock()
+	gate, arrivals := f.gate, f.arrivals
+	f.mu.Unlock()
+
+	if gate != nil {
+		select {
+		case arrivals <- struct{}{}:
+		default:
+		}
+
+		<-gate
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -148,6 +180,19 @@ func (f *fakeAPI) userDisplayName(_ context.Context, userID string) (string, err
 	return name, nil
 }
 
+// messages is every message this bot posted, in the order it posted them.
+func (f *fakeAPI) messages() []fakeMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]fakeMessage, 0, len(f.order))
+	for _, ts := range f.order {
+		out = append(out, *f.posted[ts])
+	}
+
+	return out
+}
+
 // capped keeps the last n of a slice, which is what both read calls do with a limit.
 func capped(msgs []message, n int) []message {
 	if n <= 0 || len(msgs) <= n {
@@ -204,6 +249,19 @@ func (f *fakeSocket) ack(id string) error {
 	}
 
 	return nil
+}
+
+// deliver hands one envelope to whoever is reading, returning once it has been taken.
+func (f *fakeSocket) deliver(env envelope) {
+	f.out <- env
+}
+
+// acked is the envelopes that were acknowledged, in order.
+func (f *fakeSocket) acked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.acks...)
 }
 
 // fail makes run answer with err rather than waiting for its context.
