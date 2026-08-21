@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
@@ -21,6 +22,7 @@ func Builder() serve.EndpointBuilder {
 		Enabled: func(cfg *config.Config) bool { return cfg.SlackEnabled() },
 		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 			ch, err := NewFromConfig(cfg, ConfigOptions{
+				Sessions:         opts.Sessions,
 				SuspendRequested: opts.SuspendRequested,
 				Logger:           opts.Logger,
 			})
@@ -36,6 +38,11 @@ func Builder() serve.EndpointBuilder {
 // ConfigOptions are what a configured channel needs that no configuration can state: what
 // the process decided, and what it is holding.
 type ConfigOptions struct {
+	// Sessions is the process's run-journal store, borrowed and never closed here. It is
+	// required: a thread is a conversation, and this channel reads the store to tell a
+	// thread it holds from one it is opening.
+	Sessions runstate.Store
+
 	// SuspendRequested is handed to every run, so a worker draining stops its turns where
 	// they can be resumed from.
 	SuspendRequested func() bool
@@ -71,6 +78,10 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 		return nil, fmt.Errorf("expose.agent.slack needs a bot token in %s, which is where its credentials come from rather than the configuration file", BotTokenVar)
 	}
 
+	if opts.Sessions == nil {
+		return nil, fmt.Errorf("expose.agent.slack needs a session store: a thread is a conversation, so a worker with nowhere to journal one would answer a first mention and nothing after it")
+	}
+
 	return New(Options{
 		AppToken:         appToken,
 		BotToken:         botToken,
@@ -81,6 +92,7 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 		AnswerGrace:      cfg.SlackAnswerGrace(),
 		MaxWaiting:       cfg.SlackMaxWaiting(),
 		MaxCoalesced:     cfg.SlackMaxCoalesced(),
+		Sessions:         opts.Sessions,
 		SuspendRequested: opts.SuspendRequested,
 		Logger:           opts.Logger,
 	})

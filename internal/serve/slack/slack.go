@@ -50,6 +50,7 @@ import (
 	slackgo "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
@@ -110,6 +111,11 @@ type Options struct {
 	MaxWaiting   int
 	MaxCoalesced int
 
+	// Sessions is the run-journal store, borrowed and never closed here since the runs
+	// write to the same one. It is required: a thread is a conversation, and this channel
+	// reads the store to tell a thread it already holds from one it is opening.
+	Sessions runstate.Store
+
 	// SuspendRequested is handed to every run and polled at a loop boundary, so a worker
 	// draining stops its turns where they can be resumed from. Nil never suspends.
 	SuspendRequested func() bool
@@ -132,6 +138,9 @@ func (o *Options) validate() error {
 	if o.Workers <= 0 {
 		return fmt.Errorf("workers must be greater than zero")
 	}
+	if o.Sessions == nil {
+		return fmt.Errorf("a session store is required: a thread is a conversation, so a worker with nowhere to journal one could answer a first mention and nothing after it")
+	}
 
 	return nil
 }
@@ -149,8 +158,13 @@ type Channel struct {
 	workspace workspace
 	log       *slog.Logger
 
-	api    api
-	socket socket
+	api      api
+	socket   socket
+	sessions runstate.Store
+
+	// taken recognizes a message this worker already acted on, so a redelivery is
+	// acknowledged and dropped rather than paying for the same turn again.
+	taken *seen
 
 	// work hands one admitted turn to Next. It is unbuffered: admission has already
 	// decided this turn may run, so the wait here is for the server's puller to come
@@ -233,6 +247,8 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		log:       log,
 		api:       a,
 		socket:    s,
+		sessions:  opts.Sessions,
+		taken:     newSeen(0),
 		work:      make(chan *serve.Work),
 		faults:    make(chan error, 1),
 		shutdown:  make(chan struct{}),

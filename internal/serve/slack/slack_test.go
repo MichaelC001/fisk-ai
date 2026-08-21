@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
@@ -39,6 +40,7 @@ func testOptions() Options {
 		AnswerGrace:  30 * time.Second,
 		MaxWaiting:   10,
 		MaxCoalesced: 5,
+		Sessions:     agenttest.NewFakeSessionStore(GinkgoTB()),
 		Logger:       quietLogger(),
 	}
 }
@@ -69,6 +71,7 @@ var _ = Describe("Options", func() {
 		Expect(missing(func(o *Options) { o.BotToken = "" })).To(ContainSubstring(BotTokenVar))
 		Expect(missing(func(o *Options) { o.Identity = "" })).To(ContainSubstring("identity is required"))
 		Expect(missing(func(o *Options) { o.Workers = 0 })).To(ContainSubstring("greater than zero"))
+		Expect(missing(func(o *Options) { o.Sessions = nil })).To(ContainSubstring("session store is required"))
 	})
 
 	It("Should accept options that name everything required", func() {
