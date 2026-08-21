@@ -41,6 +41,12 @@ type fakeAPI struct {
 	postErr   error
 	updateErr error
 
+	// historyErr, repliesErr and nameErr fail every call of each, for the reads a turn
+	// makes before it runs.
+	historyErr error
+	repliesErr error
+	nameErr    error
+
 	// gate holds every post until a spec releases it and arrivals reports each one
 	// reaching that hold, which is how a spec keeps a message in flight while it asserts
 	// on what waits for it.
@@ -156,12 +162,20 @@ func (f *fakeAPI) threadReplies(_ context.Context, channelID, threadTS string, l
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.repliesErr != nil {
+		return nil, f.repliesErr
+	}
+
 	return capped(f.replies[channelID+"/"+threadTS], limit), nil
 }
 
 func (f *fakeAPI) channelHistory(_ context.Context, channelID string, limit int) ([]message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
 
 	return capped(f.history[channelID], limit), nil
 }
@@ -171,6 +185,10 @@ func (f *fakeAPI) userDisplayName(_ context.Context, userID string) (string, err
 	defer f.mu.Unlock()
 
 	f.lookups++
+
+	if f.nameErr != nil {
+		return "", f.nameErr
+	}
 
 	name, ok := f.names[userID]
 	if !ok {

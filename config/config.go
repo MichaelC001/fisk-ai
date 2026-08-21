@@ -1022,8 +1022,9 @@ type ExposedSlackConfig struct {
 	MaxWaiting int `json:"max_waiting,omitempty" yaml:"max_waiting,omitempty"`
 
 	// MaxCoalesced is how many messages arriving from the same person during their own
-	// running turn are folded into one follow-up turn. Lines past it are reported back
-	// rather than sent to the model.
+	// running turn are folded into one follow-up turn. A mention past it is queued behind
+	// as a turn of its own: the cap bounds what one follow-up carries rather than
+	// licensing the loss of what somebody wrote.
 	MaxCoalesced int `json:"max_coalesced,omitempty" yaml:"max_coalesced,omitempty"`
 }
 

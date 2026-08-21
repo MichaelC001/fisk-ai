@@ -242,13 +242,45 @@ func (c *Channel) takeWaiting() *turn {
 // It is also read as late as it can be, immediately before the handover, so a turn queued
 // behind another one asks about the journal the turn in front of it left rather than the
 // one it found on arrival.
-func (c *Channel) workFor(t *turn) (*serve.Work, error) {
+func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 	held, err := c.held(t.session)
 	if err != nil {
 		return nil, err
 	}
 
-	return t.work(checkpointFor(t.session, held)), nil
+	work := t.work(checkpointFor(t.session, held))
+
+	// The two reads answer to the same allowance and reach the run by different routes. An
+	// opening turn's surrounding conversation is supporting material, which is what
+	// Work.Context is for. A follow-up's gap is part of what the person is saying, since
+	// "ok do that then" is only a sentence alongside the discussion it answers, so it goes
+	// in the prompt above their words.
+	//
+	// A read that fails does not fail the turn. The answer is worse for missing its
+	// context and a person who asked a question would rather have it answered narrowly
+	// than not at all, so the failure is logged and the run goes ahead.
+	if held {
+		gap, err := c.gap(ctx, t.m)
+		if err != nil {
+			t.log.Warn("Reading what was said since this bot last spoke failed", "error", err)
+		}
+
+		rendered := c.render(ctx, gap)
+		if rendered != "" {
+			work.Prompt = "Said in this thread since I last replied:\n" + rendered + "\n\n" + work.Prompt
+		}
+
+		return work, nil
+	}
+
+	pre, err := c.preload(ctx, t.m)
+	if err != nil {
+		t.log.Warn("Reading the conversation around a mention failed", "error", err)
+	}
+
+	work.Context = c.render(ctx, pre)
+
+	return work, nil
 }
 
 // work is the unit the server runs.

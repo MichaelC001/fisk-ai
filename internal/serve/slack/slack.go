@@ -166,6 +166,10 @@ type Channel struct {
 	// acknowledged and dropped rather than paying for the same turn again.
 	taken *seen
 
+	// names resolves the speakers in a preload or a gap read to what a person reading the
+	// thread sees, once per user rather than once per line.
+	names *names
+
 	// mu guards everything admission decides on, and every one of those decisions is
 	// made in memory under it, before an envelope is acknowledged.
 	mu sync.Mutex
@@ -279,6 +283,7 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		socket:    s,
 		sessions:  opts.Sessions,
 		taken:     newSeen(0),
+		names:     newNames(),
 		inFlight:  map[string]*turn{},
 		queued:    map[string][]*turn{},
 		wake:      make(chan struct{}, 1),
@@ -345,7 +350,7 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 
 		t := c.takeWaiting()
 		if t != nil {
-			w, err := c.workFor(t)
+			w, err := c.workFor(ctx, t)
 			if err != nil {
 				t.log.Error("Refusing a mention whose conversation could not be read", "error", err)
 				c.reply(t.m, storeRefusal)

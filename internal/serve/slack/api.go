@@ -35,7 +35,16 @@ type api interface {
 	// updateMessage replaces the text of a message this bot posted.
 	updateMessage(ctx context.Context, channelID, ts, text string) error
 
-	// threadReplies returns up to limit messages of a thread, oldest first.
+	// threadReplies returns the last limit messages of a thread, oldest first, the parent
+	// among them.
+	//
+	// The tail rather than the head, which costs the implementation something: Slack pages
+	// a thread chronologically from its start, so reading the most recent messages of a
+	// long one means paging to the end. The alternative is asking for a window with
+	// latest, whose interaction with limit is not something this repository can verify
+	// without a workspace to try it against, and a preload that silently read the wrong
+	// end of an incident thread would be invisible until somebody noticed the bot
+	// answering about an hour ago.
 	threadReplies(ctx context.Context, channelID, threadTS string, limit int) ([]message, error)
 
 	// channelHistory returns up to limit of a channel's most recent messages, oldest
@@ -174,22 +183,56 @@ func (c *clientAPI) updateMessage(ctx context.Context, channelID, ts, text strin
 	return nil
 }
 
+// threadPageSize is how many messages one page of a thread asks for, and threadMaxPages
+// how many pages are read before the walk gives up and answers with what it has.
+//
+// The page bound exists so a thread nobody will stop growing cannot hold a turn open. A
+// thread past it answers from the messages the last pages held, which is older than the
+// true tail and still the right end of the conversation.
+const (
+	threadPageSize = 200
+	threadMaxPages = 10
+)
+
 func (c *clientAPI) threadReplies(ctx context.Context, channelID, threadTS string, limit int) ([]message, error) {
-	msgs, _, _, err := c.client.GetConversationRepliesContext(ctx, &slackgo.GetConversationRepliesParameters{
-		ChannelID: channelID,
-		Timestamp: threadTS,
-		Limit:     limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("reading thread %s in %s: %w", threadTS, channelID, err)
+	if limit <= 0 {
+		return nil, nil
 	}
 
-	out := make([]message, 0, len(msgs))
-	for _, m := range msgs {
-		out = append(out, messageOf(m.Msg))
+	var (
+		tail   []message
+		cursor string
+	)
+
+	for range threadMaxPages {
+		msgs, _, next, err := c.client.GetConversationRepliesContext(ctx, &slackgo.GetConversationRepliesParameters{
+			ChannelID: channelID,
+			Timestamp: threadTS,
+			Limit:     threadPageSize,
+			Cursor:    cursor,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reading thread %s in %s: %w", threadTS, channelID, err)
+		}
+
+		for _, m := range msgs {
+			tail = append(tail, messageOf(m.Msg))
+		}
+
+		// Only the last limit are wanted, so the head is dropped as the walk goes rather
+		// than held to the end. A thread of ten thousand messages costs the pages and
+		// nothing else.
+		if len(tail) > limit {
+			tail = append(tail[:0], tail[len(tail)-limit:]...)
+		}
+
+		if next == "" {
+			break
+		}
+		cursor = next
 	}
 
-	return out, nil
+	return tail, nil
 }
 
 func (c *clientAPI) channelHistory(ctx context.Context, channelID string, limit int) ([]message, error) {
