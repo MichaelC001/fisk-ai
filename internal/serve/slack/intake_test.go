@@ -75,6 +75,12 @@ var _ = Describe("Intake", func() {
 		api = newFakeAPI()
 		socket = newFakeSocket()
 		opts = testOptions()
+
+		// Without it every admitted turn posts a status message, and what these specs
+		// assert on is what the channel says for itself: the refusals, the note about
+		// lines a run never reached, and the silence around a mention it folded in. The
+		// status message has its own specs.
+		opts.Progress = false
 	})
 
 	It("Should acknowledge a mention and hand it over as work", func() {

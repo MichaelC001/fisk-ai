@@ -58,6 +58,11 @@ type turn struct {
 	id      string
 	log     *slog.Logger
 
+	// status is the message this turn narrates itself with, nil where the channel posts
+	// no running commentary. It is set at admission, since that is where whether a
+	// worker is free is known, and started once the mention has been acknowledged.
+	status *status
+
 	folded []*mention
 }
 
@@ -128,14 +133,18 @@ func (c *Channel) receive(env envelope) {
 		return
 	}
 
-	refusal := c.admit(m)
+	refusal, narration := c.admit(m)
 
 	c.acknowledge(env)
 
 	if refusal != "" {
 		c.log.Warn("Refusing a mention", "channel", m.ChannelID, "thread", m.ThreadTS, "reason", refusal)
 		c.reply(m, refusal)
+
+		return
 	}
+
+	c.startStatus(narration)
 }
 
 // acknowledge answers one envelope. A failure is logged and nothing else: the answer to
@@ -148,8 +157,9 @@ func (c *Channel) acknowledge(env envelope) {
 	}
 }
 
-// admit decides what becomes of a mention, and returns the refusal to post back or an
-// empty string when the mention was taken.
+// admit decides what becomes of a mention. It returns the refusal to post back, or an
+// empty string and the status message of the turn it took, which the caller starts once
+// the envelope has been acknowledged. A mention folded into a running turn takes neither.
 //
 // There are four answers. A thread nothing is running in takes the mention as a turn and
 // waits for a worker. A thread running a turn for the same person folds it into that
@@ -166,14 +176,14 @@ func (c *Channel) acknowledge(env envelope) {
 // It decides in memory and holds no I/O of any kind, which is what lets it run before the
 // acknowledgement. That placement is the point: it is the only mutual exclusion between
 // two concurrent resumes of one thread.
-func (c *Channel) admit(m *mention) string {
+func (c *Channel) admit(m *mention) (string, *status) {
 	session := SessionFor(c.identity, m.TeamID, m.ChannelID, m.ThreadTS)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.draining() {
-		return drainingRefusal
+		return drainingRefusal, nil
 	}
 
 	running, inFlight := c.inFlight[session]
@@ -181,22 +191,28 @@ func (c *Channel) admit(m *mention) string {
 		running.folded = append(running.folded, m)
 		running.log.Info("Folding a mention into the turn already running for this person", "message", m.TS, "folded", len(running.folded))
 
-		return ""
+		return "", nil
 	}
 
 	if len(c.waiting)+c.parked >= c.maxWait {
-		return backlogRefusal
+		return backlogRefusal, nil
 	}
 
 	t := c.newTurn(m, session)
 
 	if inFlight {
+		// A turn behind another in its own thread waits for that turn rather than for a
+		// worker, so it is queued whatever the workers are doing.
+		t.status = c.newStatus(t, true)
+
 		c.queued[session] = append(c.queued[session], t)
 		c.parked++
 		t.log.Info("Queueing a mention behind the turn running in its thread", "user", m.UserID)
 
-		return ""
+		return "", t.status
 	}
+
+	t.status = c.newStatus(t, !c.workerFreeLocked())
 
 	c.inFlight[session] = t
 	c.waiting = append(c.waiting, t)
@@ -204,7 +220,18 @@ func (c *Channel) admit(m *mention) string {
 
 	t.log.Info("Admitted a mention", "user", m.UserID, "waiting", len(c.waiting))
 
-	return ""
+	return "", t.status
+}
+
+// workerFreeLocked reports whether a turn admitted now starts rather than waits, which is
+// what decides between a first hint and the queued line.
+//
+// It counts what has been handed over and what is ahead of this mention in the queue
+// against the concurrency the server bounds this channel by. serve's puller is serial and
+// takes them in order, so a turn with a worker's worth of work in front of it is waiting
+// whatever else happens.
+func (c *Channel) workerFreeLocked() bool {
+	return c.handed+len(c.waiting) < c.workers
 }
 
 // wakeNext tells Next there may be something to take. It is a signal rather than a
@@ -303,8 +330,23 @@ func (t *turn) work(checkpoint agent.Checkpoint) *serve.Work {
 		Caller:           callerOf(t.m),
 		SuspendRequested: t.ch.suspendRequested,
 		HumanPaced:       true,
+		RunContext:       t.runContext,
 		Done:             t.done,
 	}
+}
+
+// runContext is called once, when the server has a slot for this turn and immediately
+// before the run starts. Nothing else tells a channel that its work stopped waiting, and
+// the queued line has to end somewhere: work handed over is not work running, serve's
+// puller taking an item before a worker is free.
+//
+// The run is left on the server's own context. This channel cancels no run of its own: a
+// turn is stopped by suspending it at a boundary it can be resumed from, never by pulling
+// the context out from under it.
+func (t *turn) runContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	t.status.running()
+
+	return ctx, nil
 }
 
 // prompt is what the person asked, with anything that folded in before the handover
@@ -357,17 +399,23 @@ func (t *turn) done(_ context.Context, out serve.Outcome) error {
 func (c *Channel) finish(t *turn, out serve.Outcome) {
 	c.mu.Lock()
 
+	c.handed--
+
 	folded := t.folded
 	t.folded = nil
 
-	var undelivered []*mention
+	var (
+		undelivered []*mention
+		follow      *turn
+	)
 
 	if len(folded) > 0 {
 		if reachedUserBoundary(out) {
 			// In front of anything queued behind, since it continues the turn that has
 			// just ended rather than starting a new one, and its lines were written to
 			// that run.
-			follow := c.newTurn(joined(folded), t.session)
+			follow = c.newTurn(joined(folded), t.session)
+			follow.status = c.newStatus(follow, !c.workerFreeLocked())
 			c.queued[t.session] = append([]*turn{follow}, c.queued[t.session]...)
 			c.parked++
 		} else {
@@ -380,6 +428,14 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 	c.mu.Unlock()
 
 	t.log.Info("A turn ended", "reason", out.Reason, "deferred", len(out.Deferred), "folded", len(folded), "returned", len(undelivered))
+
+	// The status message stops here rather than at the run's last event, so the state it
+	// ends on is the one Slack is left with.
+	t.status.stop()
+
+	if follow != nil {
+		c.startStatus(follow.status)
+	}
 
 	if len(undelivered) > 0 {
 		c.reply(t.m, undeliveredNote(linesOf(undelivered)))
@@ -508,7 +564,17 @@ func (c *Channel) post(m *mention, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultReplyDeadline)
 	defer cancel()
 
-	_, err := c.api.postMessage(ctx, m.ChannelID, m.ThreadTS, text)
+	// The same allowance the running commentary answers to. A refusal and a status edit
+	// are the same Tier 3 budget as far as Slack is concerned, so they queue behind one
+	// another rather than beside one another.
+	err := c.limit.take(ctx)
+	if err != nil {
+		c.log.Warn("Waiting for the allowance to post a reply failed", "channel", m.ChannelID, "thread", m.ThreadTS, "error", err)
+
+		return
+	}
+
+	_, err = c.api.postMessage(ctx, m.ChannelID, m.ThreadTS, text)
 	if err != nil {
 		c.log.Warn("Posting a reply failed", "channel", m.ChannelID, "thread", m.ThreadTS, "error", err)
 	}

@@ -162,6 +162,12 @@ type Channel struct {
 	socket   socket
 	sessions runstate.Store
 
+	// limit is the allowance every call this channel makes to Slack is spent from. It
+	// is one bucket for the whole channel because that is what Slack meters: the Tier 3
+	// methods a status message, an answer, a question and a refusal all use are counted
+	// for the app across the workspace rather than per channel or per message.
+	limit *limiter
+
 	// taken recognizes a message this worker already acted on, so a redelivery is
 	// acknowledged and dropped rather than paying for the same turn again.
 	taken *seen
@@ -191,6 +197,13 @@ type Channel struct {
 	// puller being serial either way.
 	waiting []*turn
 	wake    chan struct{}
+
+	// handed counts the turns given to the server that have not yet reported an
+	// outcome, which is how a turn being admitted tells a worker it can start on from
+	// one it has to wait for. That is the difference between a first hint and the
+	// queued line, and nothing else in this channel knows it: the server bounds this
+	// channel by Concurrency and reports nothing back about how much of it is spent.
+	handed int
 
 	// posts counts the goroutines this channel started for the messages it posts for
 	// itself, which Close waits for so a refusal is not lost to a shutdown. postsClosed
@@ -282,6 +295,7 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		api:       a,
 		socket:    s,
 		sessions:  opts.Sessions,
+		limit:     newLimiter(defaultRateInterval, defaultRateBurst, nil),
 		taken:     newSeen(0),
 		names:     newNames(),
 		inFlight:  map[string]*turn{},
@@ -353,6 +367,7 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 			w, err := c.workFor(ctx, t)
 			if err != nil {
 				t.log.Error("Refusing a mention whose conversation could not be read", "error", err)
+				t.status.stop()
 				c.reply(t.m, storeRefusal)
 
 				c.mu.Lock()
@@ -361,6 +376,10 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 
 				continue
 			}
+
+			c.mu.Lock()
+			c.handed++
+			c.mu.Unlock()
 
 			return w, nil
 		}
