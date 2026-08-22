@@ -36,6 +36,11 @@ type fakeAPI struct {
 	names   map[string]string
 	lookups int
 
+	// views is every dialog this bot asked Slack to open, and viewErr fails every call
+	// that asks for one.
+	views   []fakeView
+	viewErr error
+
 	// postErr and updateErr fail the next call of each, so a spec covers a Slack that
 	// refuses.
 	postErr   error
@@ -58,12 +63,17 @@ type fakeAPI struct {
 type fakeMessage struct {
 	ChannelID string
 	ThreadTS  string
+	TS        string
 	Text      string
 	Edits     []string
 
 	// Markdown records that this went as a markdown block for Slack to render, rather than
 	// as text this channel wrote itself.
 	Markdown bool
+
+	// Buttons is what a person can press on it, empty for the messages that carry none and
+	// for a question whose answer has been recorded.
+	Buttons []button
 }
 
 func newFakeAPI() *fakeAPI {
@@ -108,16 +118,20 @@ func (f *fakeAPI) hold() (release func(), arrivals chan struct{}) {
 }
 
 func (f *fakeAPI) postMessage(_ context.Context, channelID, threadTS, text string) (string, error) {
-	return f.record(channelID, threadTS, text, false)
+	return f.record(channelID, threadTS, text, false, nil)
 }
 
 func (f *fakeAPI) postMarkdown(_ context.Context, channelID, threadTS, markdown string) (string, error) {
-	return f.record(channelID, threadTS, markdown, true)
+	return f.record(channelID, threadTS, markdown, true, nil)
 }
 
-// record is what both posting paths do, differing only in whether Slack is being asked to
-// render the text.
-func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool) (string, error) {
+func (f *fakeAPI) postBlocks(_ context.Context, channelID, threadTS string, msg blockMessage) (string, error) {
+	return f.record(channelID, threadTS, msg.Text, false, msg.Buttons)
+}
+
+// record is what every posting path does, differing only in whether Slack is being asked to
+// render the text and in what a person can press on the result.
+func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool, buttons []button) (string, error) {
 	f.mu.Lock()
 	gate, arrivals := f.gate, f.arrivals
 	f.mu.Unlock()
@@ -144,13 +158,23 @@ func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool) (strin
 	f.nextTS++
 	ts := fmt.Sprintf("%d.000100", 1700000000+f.nextTS)
 
-	f.posted[ts] = &fakeMessage{ChannelID: channelID, ThreadTS: threadTS, Text: text, Markdown: markdown}
+	f.posted[ts] = &fakeMessage{ChannelID: channelID, ThreadTS: threadTS, TS: ts, Text: text, Markdown: markdown, Buttons: buttons}
 	f.order = append(f.order, ts)
 
 	return ts, nil
 }
 
 func (f *fakeAPI) updateMessage(_ context.Context, channelID, ts, text string) error {
+	return f.edit(channelID, ts, text, nil)
+}
+
+func (f *fakeAPI) updateBlocks(_ context.Context, channelID, ts string, msg blockMessage) error {
+	return f.edit(channelID, ts, msg.Text, msg.Buttons)
+}
+
+// edit is what both update paths do. The buttons are replaced rather than added to, so a
+// question that has been answered records what it lost.
+func (f *fakeAPI) edit(channelID, ts, text string, buttons []button) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -168,8 +192,52 @@ func (f *fakeAPI) updateMessage(_ context.Context, channelID, ts, text string) e
 
 	m.Edits = append(m.Edits, text)
 	m.Text = text
+	m.Buttons = buttons
 
 	return nil
+}
+
+// openView records the dialog this bot asked Slack to put in front of somebody, and holds
+// like a post does so a spec can keep one in flight.
+func (f *fakeAPI) openView(_ context.Context, triggerID string, v modalView) error {
+	f.mu.Lock()
+	gate, arrivals := f.gate, f.arrivals
+	err := f.viewErr
+	f.mu.Unlock()
+
+	if gate != nil {
+		select {
+		case arrivals <- struct{}{}:
+		default:
+		}
+
+		<-gate
+	}
+
+	if err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.views = append(f.views, fakeView{TriggerID: triggerID, View: v})
+
+	return nil
+}
+
+// fakeView is one dialog this bot asked Slack to open.
+type fakeView struct {
+	TriggerID string
+	View      modalView
+}
+
+// opened is every dialog this bot asked for, in order.
+func (f *fakeAPI) opened() []fakeView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]fakeView(nil), f.views...)
 }
 
 func (f *fakeAPI) threadReplies(_ context.Context, channelID, threadTS string, limit int) ([]message, error) {

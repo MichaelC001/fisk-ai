@@ -53,6 +53,26 @@ type api interface {
 	// updateMessage replaces the text of a message this bot posted.
 	updateMessage(ctx context.Context, channelID, ts, text string) error
 
+	// postBlocks posts a message built from blocks into a thread and returns its
+	// timestamp. It is how a question reaches a thread with buttons somebody can press.
+	//
+	// The body travels as the message's own text as well, which is what a notification
+	// and a client that cannot render blocks show.
+	postBlocks(ctx context.Context, channelID, threadTS string, msg blockMessage) (string, error)
+
+	// updateBlocks replaces a message this bot posted with blocks. A question that has
+	// been answered is rewritten through it: the words stay, the answer is written under
+	// them, and the buttons come off so a second person cannot answer it again.
+	updateBlocks(ctx context.Context, channelID, ts string, msg blockMessage) error
+
+	// openView opens a dialog in front of the person who clicked, which is how a free-text
+	// answer is typed: a button minted before anybody typed cannot carry one.
+	//
+	// triggerID comes from their click, expires three seconds after it and may be used
+	// once, so a caller opens the dialog straight off the interaction rather than after any
+	// other work.
+	openView(ctx context.Context, triggerID string, v modalView) error
+
 	// threadReplies returns the last limit messages of a thread, oldest first, the parent
 	// among them.
 	//
@@ -121,6 +141,82 @@ type message struct {
 	// Subtype is Slack's own classification: empty for an ordinary message, and set for
 	// the joins, the leaves and the broadcasts.
 	Subtype string
+}
+
+// blockMessage is a message this channel builds out of blocks rather than text: the words,
+// and the buttons under them. It is the reduced shape the api interface takes, so nothing
+// above that boundary builds Slack's own block structures.
+type blockMessage struct {
+	// Text is the body, written as mrkdwn. Slack caps one section's text at maxSectionText
+	// characters and refuses a longer message rather than trimming it, so the caller cuts
+	// it to fit.
+	Text string
+
+	// Buttons are what a person may press. A message with none is a question that has been
+	// answered: the words stay and the buttons come off.
+	Buttons []button
+}
+
+// button is one thing a person may press on a message this bot posted.
+type button struct {
+	// ActionID names the button within its block. It is unique within one message, which
+	// Slack requires, and the click reports it alongside the value.
+	ActionID string
+
+	// Label is what the button says, capped at maxButtonLabel characters.
+	Label string
+
+	// Value travels back with the click. Everything this bot chose about the question
+	// reaches the click through it; everything about the conversation is read from the
+	// interaction envelope's own authenticated fields instead.
+	Value string
+
+	// Style is Slack's own emphasis: buttonPrimary, buttonDanger, or empty for the plain
+	// button.
+	Style string
+}
+
+// The two emphases Slack draws a button with. Everything else is the plain button.
+const (
+	buttonPrimary = "primary"
+	buttonDanger  = "danger"
+)
+
+// What Slack takes: the characters in one section block's text, and in one button's label.
+const (
+	maxSectionText = 3000
+	maxButtonLabel = 75
+)
+
+// modalView is the dialog views.open puts in front of one person, reduced to the single
+// text field this channel asks for.
+type modalView struct {
+	// Title heads the dialog, Submit labels the button that sends it and Close the one
+	// that abandons it.
+	Title  string
+	Submit string
+	Close  string
+
+	// CallbackID names what the dialog is for and comes back on the submission, so a
+	// submission of somebody else's dialog is not taken for an answer.
+	CallbackID string
+
+	// Metadata is stamped into private_metadata and returned unchanged on submission. A
+	// view_submission payload carries neither the value of the button that opened the
+	// dialog nor the channel and thread it was opened from, so everything the answer has to
+	// be placed by travels here.
+	Metadata string
+
+	// BlockID and ActionID name the one input, which is where the typed value is read from
+	// on submission.
+	BlockID  string
+	ActionID string
+
+	// Label is what the field is called, Placeholder what an empty one shows and Initial
+	// what it arrives pre-filled with.
+	Label       string
+	Placeholder string
+	Initial     string
 }
 
 // envelopeKind is what one socket mode envelope carries.
@@ -221,6 +317,94 @@ func (c *clientAPI) updateMessage(ctx context.Context, channelID, ts, text strin
 
 	return nil
 }
+
+func (c *clientAPI) postBlocks(ctx context.Context, channelID, threadTS string, msg blockMessage) (string, error) {
+	_, ts, err := c.client.PostMessageContext(ctx, channelID,
+		slackgo.MsgOptionBlocks(blocksOf(msg)...),
+		slackgo.MsgOptionTS(threadTS),
+		// A message carrying blocks still takes a text argument, which is what a
+		// notification shows. A question somebody is being asked should read as the question
+		// on a phone rather than as a placeholder.
+		slackgo.MsgOptionText(msg.Text, false),
+		slackgo.MsgOptionDisableLinkUnfurl(),
+		slackgo.MsgOptionDisableMediaUnfurl(),
+	)
+	if err != nil {
+		return "", fmt.Errorf("posting blocks to %s: %w", channelID, err)
+	}
+
+	return ts, nil
+}
+
+func (c *clientAPI) updateBlocks(ctx context.Context, channelID, ts string, msg blockMessage) error {
+	_, _, _, err := c.client.UpdateMessageContext(ctx, channelID, ts,
+		slackgo.MsgOptionBlocks(blocksOf(msg)...),
+		slackgo.MsgOptionText(msg.Text, false),
+		slackgo.MsgOptionDisableLinkUnfurl(),
+		slackgo.MsgOptionDisableMediaUnfurl(),
+	)
+	if err != nil {
+		return fmt.Errorf("updating the blocks of %s in %s: %w", ts, channelID, err)
+	}
+
+	return nil
+}
+
+func (c *clientAPI) openView(ctx context.Context, triggerID string, v modalView) error {
+	_, err := c.client.OpenViewContext(ctx, triggerID, slackgo.ModalViewRequest{
+		Type:            slackgo.VTModal,
+		Title:           slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Title, false, false),
+		Submit:          slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Submit, false, false),
+		Close:           slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Close, false, false),
+		CallbackID:      v.CallbackID,
+		PrivateMetadata: v.Metadata,
+		Blocks: slackgo.Blocks{BlockSet: []slackgo.Block{
+			slackgo.NewInputBlock(v.BlockID,
+				slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Label, false, false),
+				nil,
+				slackgo.NewPlainTextInputBlockElement(
+					slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Placeholder, false, false),
+					v.ActionID,
+				).WithInitialValue(v.Initial),
+			),
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("opening a dialog: %w", err)
+	}
+
+	return nil
+}
+
+// blocksOf renders one reduced message as the blocks Slack takes: the words as a section,
+// and the buttons under them as one actions block.
+//
+// The block ids are fixed rather than minted. Nothing reads them back, a click being routed
+// by the value its button carries, and Slack requires only that they do not repeat within
+// one message.
+func blocksOf(msg blockMessage) []slackgo.Block {
+	out := []slackgo.Block{
+		slackgo.NewSectionBlock(slackgo.NewTextBlockObject(slackgo.MarkdownType, msg.Text, false, false), nil, nil),
+	}
+
+	if len(msg.Buttons) == 0 {
+		return out
+	}
+
+	elements := make([]slackgo.BlockElement, 0, len(msg.Buttons))
+	for _, b := range msg.Buttons {
+		el := slackgo.NewButtonBlockElement(b.ActionID, b.Value,
+			slackgo.NewTextBlockObject(slackgo.PlainTextType, b.Label, false, false))
+		el.Style = slackgo.Style(b.Style)
+
+		elements = append(elements, el)
+	}
+
+	return append(out, slackgo.NewActionBlock(actionsBlockID, elements...))
+}
+
+// actionsBlockID names the block the buttons of one message sit in.
+const actionsBlockID = "answers"
 
 // threadPageSize is how many messages one page of a thread asks for, and threadMaxPages
 // how many pages are read before the walk gives up and answers with what it has.

@@ -29,6 +29,10 @@ const (
 	// hintTools covers every other tool, which is what keeps a tool this bot gained
 	// yesterday from naming itself in a channel.
 	hintTools = "Calling tools..."
+	// hintWaiting is what a turn shows while a question of its own is open in the thread.
+	// The question is its own message with the buttons on it; this says why the turn has
+	// stopped moving.
+	hintWaiting = "Waiting for an answer..."
 )
 
 // hintFor is what a thread is told about one tool call.
@@ -67,6 +71,11 @@ type status struct {
 	// queued is set for a turn admitted with no worker free, which is the one state
 	// that is the channel's rather than the run's.
 	queued bool
+
+	// waiting is set while a question this turn asked is open in the thread. The run
+	// blocks in the prompter for as long as it is, so no hint arrives to displace it and
+	// the hint the turn was on is where it goes back to.
+	waiting bool
 
 	// hint is the last hint recorded and repeats how many records in a row reached it,
 	// so a long run visibly moves without saying what it is moving through.
@@ -263,6 +272,9 @@ func (s *status) textLocked() string {
 	if s.final != "" {
 		return s.final
 	}
+	if s.waiting {
+		return hintWaiting
+	}
 	if s.queued {
 		return hintQueued
 	}
@@ -297,6 +309,27 @@ func (s *status) note(hint string) {
 	// Anything the run reports is the run having started, whatever the channel believed
 	// about free workers when it admitted the turn.
 	s.queued = false
+	s.mu.Unlock()
+
+	s.moved()
+}
+
+// asking records whether a question this turn put to the thread is open.
+//
+// It is recorded rather than written, as every other state here is, so the message says the
+// turn is waiting through the same publisher and the same allowance as the hints around it.
+// A question answered inside the grace window may cost no call at all, the publisher writing
+// whatever the state is by the time it gets through.
+func (s *status) asking(open bool) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.waiting = open
+	if open {
+		s.queued = false
+	}
 	s.mu.Unlock()
 
 	s.moved()

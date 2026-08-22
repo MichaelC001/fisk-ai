@@ -26,6 +26,12 @@ const (
 	defaultMaxCoalesced = 5
 )
 
+// defaultAnswerGrace is how long a question is held while the run that asked it is still
+// loaded, for a channel built without an AnswerGrace. It is defaulted here as well as in the
+// configuration accessor, because Options an embedder assembles in process reaches neither:
+// a zero window would defer every question the instant it was asked.
+const defaultAnswerGrace = 30 * time.Second
+
 // defaultReplyDeadline bounds one message this channel posts for itself. It is not a
 // run's deadline: what these messages say is owed to a person whether or not the run they
 // concern is still alive.
@@ -68,6 +74,10 @@ type turn struct {
 	// with the work, since the ending reads it whether or not the turn ever ran.
 	events *events
 
+	// prompter is what the run puts its questions to. It is built with the turn for the
+	// same reason: the ending drops whatever it is still holding.
+	prompter *prompter
+
 	folded []*mention
 }
 
@@ -84,6 +94,7 @@ func (c *Channel) newTurn(m *mention, session string) *turn {
 		log:     c.log.With("turn", id, "session", session, "thread", m.ThreadTS),
 	}
 	t.events = newEvents(t)
+	t.prompter = newPrompter(t)
 
 	return t
 }
@@ -121,6 +132,12 @@ func (c *Channel) intake() {
 // and runs first, the acknowledgement follows, and anything that talks to Slack or to the
 // store happens after it and somewhere else.
 func (c *Channel) receive(env envelope) {
+	if env.Kind == envelopeInteractive {
+		c.clicked(env)
+
+		return
+	}
+
 	m, wanted, err := mentionOf(env, c.workspace.UserID)
 	if err != nil {
 		// An envelope this channel cannot read is still an envelope Slack expects an
@@ -336,6 +353,11 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 // HumanPaced is set because a Slack thread is a person's pace by definition: the next
 // turn arrives when somebody types it, so the gap before this history is used again is
 // think time rather than a loop's.
+//
+// PromptsMayBlock is set and PromptWait is left unset, so the server bounds none of this
+// run's questions and the prompter bounds them itself. A person answers in a minute or on
+// Thursday, and no number fits both; answer_grace is how long the run is held before it
+// defers and gives the worker back.
 func (t *turn) work(checkpoint agent.Checkpoint) *serve.Work {
 	return &serve.Work{
 		ID:               t.id,
@@ -344,6 +366,8 @@ func (t *turn) work(checkpoint agent.Checkpoint) *serve.Work {
 		ClaimedBy:        t.id,
 		Caller:           callerOf(t.m),
 		Events:           t.events,
+		Prompter:         t.prompter,
+		PromptsMayBlock:  true,
 		SuspendRequested: t.ch.suspendRequested,
 		HumanPaced:       true,
 		RunContext:       t.runContext,
@@ -442,6 +466,11 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 	c.releaseLocked(t)
 
 	c.mu.Unlock()
+
+	// Whatever this turn asked stops being a question this worker is holding: the run that
+	// would have taken an answer has ended, so a click arriving now reaches the conversation
+	// as a resume rather than a run nobody is waiting on.
+	c.asked.dropTurn(t.id)
 
 	t.log.Info("A turn ended", "reason", out.Reason, "deferred", len(out.Deferred), "folded", len(folded), "returned", len(undelivered))
 

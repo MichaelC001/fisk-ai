@@ -168,6 +168,16 @@ type Channel struct {
 	// for the app across the workspace rather than per channel or per message.
 	limit *limiter
 
+	// clock is the time this channel measures a question's grace window with, so a spec
+	// drives that window rather than waiting out one. The limiter holds one of its own for
+	// the same reason.
+	clock clock
+
+	// asked is every question this worker is holding. It belongs here rather than to a
+	// run because the goroutine reading envelopes has to find one without knowing which
+	// turn asked it.
+	asked *questions
+
 	// taken recognizes a message this worker already acted on, so a redelivery is
 	// acknowledged and dropped rather than paying for the same turn again.
 	taken *seen
@@ -297,6 +307,8 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		socket:    s,
 		sessions:  opts.Sessions,
 		limit:     newLimiter(defaultRateInterval, defaultRateBurst, nil),
+		clock:     wallClock{},
+		asked:     newQuestions(),
 		taken:     newSeen(0),
 		names:     newNames(),
 		inFlight:  map[string]*turn{},
@@ -319,6 +331,9 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 	}
 	if c.maxCoal <= 0 {
 		c.maxCoal = defaultMaxCoalesced
+	}
+	if c.grace <= 0 {
+		c.grace = defaultAnswerGrace
 	}
 
 	// The identity check is the last thing that can fail, so the cancel above is
