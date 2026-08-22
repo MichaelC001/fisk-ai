@@ -407,10 +407,51 @@ func (qs *questions) taken(q *question) *given {
 type prompter struct {
 	t  *turn
 	ch *Channel
+
+	// mu guards the held approval. It is written when the turn is built, on the goroutine
+	// reading envelopes, and read on the run's own goroutine.
+	mu sync.Mutex
+
+	// heldCall and heldChoice are the approval a press carried, for a thread that was asked
+	// before its run gave up and answered afterwards. The resume dispatches the call the
+	// gate guards and the gate asks about it again, and that question is answered from here
+	// rather than put back to a thread that has already answered it.
+	//
+	// It is spent on the first question about that call. A later call of the same tool
+	// carries its own arguments, so the thread decides on that one too.
+	//
+	// It lives on this turn and nowhere else. Nothing writes it to the journal, so a resume
+	// that ends before the gate asks loses it and the next press is asked about again.
+	heldCall   string
+	heldChoice toolkit.ConfirmChoice
 }
 
 func newPrompter(t *turn) *prompter {
 	return &prompter{t: t, ch: t.ch}
+}
+
+// hold takes the approval a press carried, to answer the question the resumed run puts
+// about that call.
+func (p *prompter) hold(toolUseID string, choice toolkit.ConfirmChoice) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.heldCall = toolUseID
+	p.heldChoice = choice
+}
+
+// heldFor reports the approval this turn is holding for the named call, and spends it.
+func (p *prompter) heldFor(toolUseID string) (toolkit.ConfirmChoice, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if toolUseID == "" || p.heldCall != toolUseID {
+		return toolkit.ConfirmNo, false
+	}
+
+	p.heldCall = ""
+
+	return p.heldChoice, true
 }
 
 // CanPrompt reports true: everybody in the thread can be asked, and any one of them may
@@ -425,7 +466,18 @@ func (p *prompter) CanPrompt() bool { return true }
 // is never dispatched again, and somebody approving on Thursday would find nothing left to
 // approve. The abort leaves the call unanswered, so the resume dispatches it and the gate
 // asks again.
+//
+// That second question is answered from the press that produced the resume, where this turn
+// is holding one for the call. Somebody who pressed Allow gets the command they approved,
+// not the same question in the thread again.
 func (p *prompter) ApproveCommand(ctx context.Context, req toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
+	choice, held := p.heldFor(req.ToolUseID)
+	if held {
+		p.t.log.Info("Answering an approval from the press that resumed this thread", "tool_use", req.ToolUseID, "command", req.Command)
+
+		return choice, nil
+	}
+
 	q, err := p.newQuestion(kindApprove, req.ToolUseID, gateText(req), nil)
 	if err != nil {
 		return toolkit.ConfirmNo, err

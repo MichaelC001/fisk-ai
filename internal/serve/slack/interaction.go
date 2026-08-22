@@ -13,6 +13,7 @@ import (
 	slackgo "github.com/slack-go/slack"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 )
 
@@ -381,7 +382,7 @@ func (c *Channel) resume(in *click, q *question, g *given) {
 		askedBy = q.turn
 	}
 
-	refusal, narration := c.admitResume(m, in.Value.ToolUse, askedBy, answer)
+	refusal, narration := c.admitResume(m, in, askedBy, answer)
 	if refusal != "" {
 		c.log.Warn("Refusing an answer", "channel", in.ChannelID, "thread", in.ThreadTS, "reason", refusal)
 		c.declinePress(m, q, refusal)
@@ -439,7 +440,7 @@ func clickMention(in *click) *mention {
 // answers as completely as the one that asked.
 //
 // The confirm gate has none. Its call was never dispatched, so the resume dispatches it
-// and the gate asks again.
+// and the gate asks again, answered by approvalFrom rather than by anything here.
 func answerFor(in *click) (*agent.DeferredAnswer, error) {
 	if in.Value.Kind == kindApprove {
 		return nil, nil
@@ -451,6 +452,26 @@ func answerFor(in *click) (*agent.DeferredAnswer, error) {
 	}
 
 	return &agent.DeferredAnswer{ToolUseID: in.Value.ToolUse, Content: content}, nil
+}
+
+// approvalFrom reads the gate's approval off a press, reporting false for a press that
+// answers one of the three tools instead.
+//
+// Anything that is not an explicit allow is a refusal, which is the direction the gate
+// defaults in, so a value carrying a choice this bot never minted declines the command.
+func approvalFrom(in *click) (toolkit.ConfirmChoice, bool) {
+	if in.Value.Kind != kindApprove {
+		return toolkit.ConfirmNo, false
+	}
+
+	switch in.Value.Choice {
+	case choiceOnce:
+		return toolkit.ConfirmOnce, true
+	case choiceAlways:
+		return toolkit.ConfirmAlways, true
+	default:
+		return toolkit.ConfirmNo, true
+	}
 }
 
 // renderAnswer produces the result of the built-in that asked the question.

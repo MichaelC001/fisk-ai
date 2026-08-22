@@ -87,7 +87,9 @@ type turn struct {
 	events *events
 
 	// prompter is what the run puts its questions to. It is built with the turn for the
-	// same reason: the ending drops whatever it is still holding.
+	// same reason: the ending drops whatever it is still holding. A resume from a press on
+	// the gate builds it holding that approval, which is what answers the gate when the
+	// resumed run dispatches the call and asks about it again.
 	prompter *prompter
 
 	// resume says this turn came from a click rather than a mention. It carries no words
@@ -111,10 +113,19 @@ func (c *Channel) newTurn(m *mention, session string) *turn {
 //
 // The call names it rather than a message. A dialog submission carries no message of its
 // own, and one call is one turn's worth of work however many times somebody presses.
-func (c *Channel) newResume(m *mention, session, toolUseID string, answer *agent.DeferredAnswer) *turn {
-	t := c.buildTurn(m, session, m.ChannelID+"/"+toolUseID)
+//
+// A press on the gate carries no result for the call, which was never dispatched. Its
+// approval goes to this turn's prompter instead, and the gate's question about that call on
+// this run is answered from it.
+func (c *Channel) newResume(m *mention, session string, in *click, answer *agent.DeferredAnswer) *turn {
+	t := c.buildTurn(m, session, m.ChannelID+"/"+in.Value.ToolUse)
 	t.resume = true
 	t.answer = answer
+
+	choice, approves := approvalFrom(in)
+	if approves {
+		t.prompter.hold(in.Value.ToolUse, choice)
+	}
 
 	return t
 }
@@ -299,8 +310,9 @@ func (c *Channel) admit(m *mention) (string, *status) {
 //
 // Like admit it decides in memory and does no I/O, so a click is answered inside Slack's
 // three-second window whatever the store and the workspace are doing.
-func (c *Channel) admitResume(m *mention, toolUseID, askedBy string, answer *agent.DeferredAnswer) (string, *status) {
+func (c *Channel) admitResume(m *mention, in *click, askedBy string, answer *agent.DeferredAnswer) (string, *status) {
 	session := SessionFor(c.identity, m.TeamID, m.ChannelID, m.ThreadTS)
+	toolUseID := in.Value.ToolUse
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -318,7 +330,7 @@ func (c *Channel) admitResume(m *mention, toolUseID, askedBy string, answer *age
 		return backlogPressRefusal, nil
 	}
 
-	t := c.newResume(m, session, toolUseID, answer)
+	t := c.newResume(m, session, in, answer)
 
 	if inFlight {
 		// It waits for the turn that asked rather than for a worker, so it is queued

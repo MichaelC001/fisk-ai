@@ -74,6 +74,28 @@ func clickFrom(p pressEvent) *click {
 	return in
 }
 
+// gateFor is the approval request the gate puts for one call, the command being the same
+// one across a run that gave up and the resume that dispatches the call again.
+func gateFor(toolUseID string) toolkit.GateRequest {
+	return toolkit.GateRequest{ToolUseID: toolUseID, Command: "stream rm", Display: "stream rm ORDERS", Tag: "ai:confirm"}
+}
+
+// questionsIn is how many messages this bot is still carrying buttons on, which is how a
+// spec says a resumed run asked the thread again rather than answering from what it held.
+func questionsIn(a *fakeAPI) func() int {
+	return func() int {
+		n := 0
+
+		for _, m := range a.messages() {
+			if len(m.Buttons) > 0 {
+				n++
+			}
+		}
+
+		return n
+	}
+}
+
 // postedLine reports whether this bot said one thing in a thread, whichever message it said
 // it on.
 func postedLine(a *fakeAPI, text string) func() bool {
@@ -516,6 +538,135 @@ var _ = Describe("Interactions", func() {
 
 			_, _, out := ch.asked.deliver(clickFrom(pressing(q, choiceYes, "U7")))
 			Expect(out).To(Equal(deliveryResume), "the question is where the click found it")
+		})
+	})
+
+	Describe("The approval a late press carried", func() {
+		var session string
+
+		BeforeEach(func() {
+			session = SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")
+		})
+
+		// The resume dispatches the call the gate guards and the gate asks about it again.
+		// Somebody who pressed Allow gets the command they approved rather than the same
+		// question a second time.
+		DescribeTable("Should answer the resumed run's gate from the press",
+			func(choice string, expected toolkit.ConfirmChoice) {
+				ch := promptingChannel(opts, api, socket, clock)
+				w := runningTurn(ch, socket)
+
+				q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+					_, err := p.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+
+					return err
+				})
+
+				ended(w)
+				forgotten(ch, "tu1")
+
+				socket.deliver(pressing(q, choice, "U7").envelope())
+
+				resumed := nextWork(ch)
+				Expect(resumed.Checkpoint).To(Equal(agent.Checkpoint{ResumeID: session, Force: true}),
+					"the gate's call has no result to supply; the resume dispatches it")
+
+				answers := make(chan toolkit.ConfirmChoice, 1)
+				failures := make(chan error, 1)
+
+				go func() {
+					got, err := resumed.Prompter.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+					failures <- err
+					answers <- got
+				}()
+
+				Eventually(failures).Should(Receive(BeNil()))
+				Eventually(answers).Should(Receive(Equal(expected)))
+				Expect(questionsIn(api)()).To(Equal(1), "the thread was asked once and answered once")
+			},
+			Entry("allowed once", choiceOnce, toolkit.ConfirmOnce),
+			Entry("allowed for the rest of the conversation", choiceAlways, toolkit.ConfirmAlways),
+			Entry("declined", choiceNo, toolkit.ConfirmNo),
+		)
+
+		// The press approved one command. A later call of the same tool carries its own
+		// arguments, so the thread decides on that one too.
+		It("Should ask about a later call of the same tool, the approval being spent on the first", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+				_, err := p.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+
+				return err
+			})
+
+			ended(w)
+			forgotten(ch, "tu1")
+
+			socket.deliver(pressing(q, choiceOnce, "U7").envelope())
+
+			resumed := nextWork(ch)
+
+			got, err := resumed.Prompter.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got).To(Equal(toolkit.ConfirmOnce))
+
+			failures := make(chan error, 1)
+			go func() {
+				_, err := resumed.Prompter.ApproveCommand(callCtx("tu2"), gateFor("tu2"))
+				failures <- err
+			}()
+
+			Eventually(questionsIn(api)).Should(Equal(2), "a second command is a second question")
+			Eventually(clock.waiting).Should(Equal(1))
+
+			clock.advance(opts.AnswerGrace)
+			Eventually(failures).Should(Receive(MatchError(toolkit.ErrPromptAborted)))
+		})
+
+		// The approval is on the turn the press produced and reaches no journal, so a run
+		// that ended before the gate asked leaves the next one to ask the thread.
+		It("Should hold the approval no longer than the resume it arrived on", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+				_, err := p.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+
+				return err
+			})
+
+			ended(w)
+			forgotten(ch, "tu1")
+
+			socket.deliver(pressing(q, choiceOnce, "U7").envelope())
+
+			resumed := nextWork(ch)
+			ended(resumed)
+
+			again := aMention()
+			again.EnvelopeID = "Ev2"
+			again.ThreadTS = "1700000000.000100"
+			again.TS = "1700000020.000100"
+			again.Text = "<@U0BOT> try that again"
+
+			socket.deliver(again.envelope())
+			Eventually(socket.acked).Should(HaveLen(3))
+
+			next := nextWork(ch)
+
+			failures := make(chan error, 1)
+			go func() {
+				_, err := next.Prompter.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+				failures <- err
+			}()
+
+			Eventually(questionsIn(api)).Should(Equal(2), "nothing outlived the resume, so the thread is asked again")
+			Eventually(clock.waiting).Should(Equal(1))
+
+			clock.advance(opts.AnswerGrace)
+			Eventually(failures).Should(Receive(MatchError(toolkit.ErrPromptAborted)))
 		})
 	})
 })
