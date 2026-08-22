@@ -5,13 +5,16 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
@@ -35,12 +38,23 @@ func deferredQuestion(w *serve.Work, api *fakeAPI, clock *testClock, grace time.
 	return q
 }
 
-// forgotten waits until this worker holds no question for one call, which is what the turn
-// that asked it reporting its outcome does.
-func forgotten(ch *Channel, toolUseID string) {
+// abandoned waits until no run is waiting on one question, which is what the turn that asked
+// it reporting its outcome does. The question itself stands: the thread is still waiting on
+// it, so a press from here on becomes a resume.
+func abandoned(ch *Channel, toolUseID string) {
 	GinkgoHelper()
 
-	Eventually(func() *question { return heldQuestion(ch, toolUseID) }).Should(BeNil())
+	Eventually(func() questionState {
+		q := heldQuestion(ch, toolUseID)
+		if q == nil {
+			return questionAnswered
+		}
+
+		ch.asked.mu.Lock()
+		defer ch.asked.mu.Unlock()
+
+		return q.state
+	}).Should(Equal(questionAbandoned))
 }
 
 // pressFor is the press of one button on a question this worker no longer holds, built the
@@ -94,6 +108,58 @@ func questionsIn(a *fakeAPI) func() int {
 
 		return n
 	}
+}
+
+// questionFor is the message this bot asked one call's question on, for the specs that have
+// more than one open at a time.
+func questionFor(a *fakeAPI, toolUseID string) func() *fakeMessage {
+	return func() *fakeMessage {
+		msgs := a.messages()
+
+		for i := range msgs {
+			if !asks(msgs[i]) {
+				continue
+			}
+
+			v, err := decodeValue(msgs[i].Buttons[0].Value)
+			if err != nil || v.ToolUse != toolUseID {
+				continue
+			}
+
+			return &msgs[i]
+		}
+
+		return nil
+	}
+}
+
+// inThread is a mention somebody makes in the thread this bot has been asking questions in.
+// ts names the message, which is what a redelivery is recognized by, so two of them in one
+// spec are two mentions.
+func inThread(ts, text string) mentionEvent {
+	m := aMention()
+	m.EnvelopeID = "Ev-" + ts
+	m.ThreadTS = "1700000000.000100"
+	m.TS = ts
+	m.User = "U7"
+	m.Text = "<@U0BOT> " + text
+
+	return m
+}
+
+// deferring reports a turn that ended waiting on answers, which is what leaves a question
+// standing in a thread.
+func deferring(w *serve.Work, ids ...string) {
+	GinkgoHelper()
+
+	calls := make([]agent.DeferredCall, 0, len(ids))
+	for _, id := range ids {
+		calls = append(calls, agent.DeferredCall{ToolUseID: id})
+	}
+
+	Expect(w.Done(context.Background(), serve.Outcome{
+		ID: w.ID, Reason: runstate.ReasonSuspended, Deferred: calls,
+	})).To(Succeed())
 }
 
 // postedLine reports whether this bot said one thing in a thread, whichever message it said
@@ -322,7 +388,7 @@ var _ = Describe("Interactions", func() {
 			})
 
 			ended(w)
-			forgotten(ch, "tu1")
+			abandoned(ch, "tu1")
 
 			socket.deliver(pressing(q, choiceYes, "U7").envelope())
 
@@ -382,7 +448,7 @@ var _ = Describe("Interactions", func() {
 			})
 
 			ended(w)
-			forgotten(ch, "tu1")
+			abandoned(ch, "tu1")
 
 			socket.deliver(pressing(q, "1", "U7").envelope())
 
@@ -406,7 +472,7 @@ var _ = Describe("Interactions", func() {
 			})
 
 			ended(w)
-			forgotten(ch, "tu1")
+			abandoned(ch, "tu1")
 
 			socket.deliver(pressing(q, choiceReply, "U7").envelope())
 			Eventually(api.opened).Should(HaveLen(1))
@@ -437,7 +503,7 @@ var _ = Describe("Interactions", func() {
 			})
 
 			ended(w)
-			forgotten(ch, "tu1")
+			abandoned(ch, "tu1")
 
 			socket.deliver(pressing(q, choiceOnce, "U7").envelope())
 
@@ -534,7 +600,7 @@ var _ = Describe("Interactions", func() {
 
 			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring(backlogPressRefusal))
 			Expect(bodyOf(api, q.TS)()).ToNot(ContainSubstring("Answered by"), "no answer was recorded, none having reached a run")
-			Expect(buttonsOf(api, q.TS)()).To(HaveLen(2), "the press somebody was asked to make again has a button to be made on")
+			Expect(buttonsOf(api, q.TS)()).To(HaveLen(3), "the press somebody was asked to make again has a button to be made on")
 
 			_, _, out := ch.asked.deliver(clickFrom(pressing(q, choiceYes, "U7")))
 			Expect(out).To(Equal(deliveryResume), "the question is where the click found it")
@@ -563,7 +629,7 @@ var _ = Describe("Interactions", func() {
 				})
 
 				ended(w)
-				forgotten(ch, "tu1")
+				abandoned(ch, "tu1")
 
 				socket.deliver(pressing(q, choice, "U7").envelope())
 
@@ -582,7 +648,7 @@ var _ = Describe("Interactions", func() {
 
 				Eventually(failures).Should(Receive(BeNil()))
 				Eventually(answers).Should(Receive(Equal(expected)))
-				Expect(questionsIn(api)()).To(Equal(1), "the thread was asked once and answered once")
+				Expect(questionsIn(api)()).To(BeZero(), "the thread was asked once, and the answer took that question's buttons off")
 			},
 			Entry("allowed once", choiceOnce, toolkit.ConfirmOnce),
 			Entry("allowed for the rest of the conversation", choiceAlways, toolkit.ConfirmAlways),
@@ -602,7 +668,7 @@ var _ = Describe("Interactions", func() {
 			})
 
 			ended(w)
-			forgotten(ch, "tu1")
+			abandoned(ch, "tu1")
 
 			socket.deliver(pressing(q, choiceOnce, "U7").envelope())
 
@@ -618,7 +684,7 @@ var _ = Describe("Interactions", func() {
 				failures <- err
 			}()
 
-			Eventually(questionsIn(api)).Should(Equal(2), "a second command is a second question")
+			Eventually(questionsIn(api)).Should(Equal(1), "a second command is a second question, the first having been answered")
 			Eventually(clock.waiting).Should(Equal(1))
 
 			clock.advance(opts.AnswerGrace)
@@ -638,7 +704,7 @@ var _ = Describe("Interactions", func() {
 			})
 
 			ended(w)
-			forgotten(ch, "tu1")
+			abandoned(ch, "tu1")
 
 			socket.deliver(pressing(q, choiceOnce, "U7").envelope())
 
@@ -662,11 +728,339 @@ var _ = Describe("Interactions", func() {
 				failures <- err
 			}()
 
-			Eventually(questionsIn(api)).Should(Equal(2), "nothing outlived the resume, so the thread is asked again")
+			Eventually(questionsIn(api)).Should(Equal(1), "nothing outlived the resume, so the thread is asked again")
 			Eventually(clock.waiting).Should(Equal(1))
 
 			clock.advance(opts.AnswerGrace)
 			Eventually(failures).Should(Receive(MatchError(toolkit.ErrPromptAborted)))
+		})
+	})
+
+	Describe("A mention while a question is open", func() {
+		var session string
+
+		BeforeEach(func() {
+			session = SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")
+		})
+
+		// A conversation waiting on a deferred tool result reaches no boundary a user message
+		// can join, so an ordinary turn there would be journaled as nothing. What the person
+		// wrote is the answer instead, from anybody in the thread, which is who may press the
+		// buttons.
+		It("Should take a mention as the answer to a free-text question the run is waiting on", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			answers := make(chan string, 1)
+			failures := make(chan error, 1)
+
+			go func() {
+				text, err := w.Prompter.Input(callCtx("tu1"), "which node should I drain?", "")
+				failures <- err
+				answers <- text
+			}()
+
+			var q *fakeMessage
+			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+			socket.deliver(inThread("1700000020.000100", "node4").envelope())
+
+			Eventually(failures).Should(Receive(BeNil()))
+			Eventually(answers).Should(Receive(Equal("node4")))
+			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: node4"))
+			noWork(ch)
+		})
+
+		// The run gave up hours ago, so the answer reaches the conversation the way a press
+		// does: as a resume carrying the result of the call that deferred.
+		It("Should resume a thread from a mention answering a free-text question that deferred", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+				_, err := p.Input(callCtx("tu1"), "which node should I drain?", "")
+
+				return err
+			})
+
+			deferring(w, "tu1")
+			abandoned(ch, "tu1")
+
+			socket.deliver(inThread("1700000020.000100", "node4").envelope())
+
+			content, err := builtin.InputResult("node4", "")
+			Expect(err).ToNot(HaveOccurred())
+
+			resumed := nextWork(ch)
+
+			Expect(resumed.Checkpoint).To(Equal(agent.Checkpoint{
+				ResumeID: session,
+				Answer:   &agent.DeferredAnswer{ToolUseID: "tu1", Content: content},
+				Force:    true,
+			}))
+			Expect(resumed.Caller).To(Equal(serve.Caller{Name: "cara/U7", Verified: true}), "whoever wrote it")
+			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: node4"))
+		})
+
+		// A confirm, a selection and a gate each have a fixed set of answers, and prose cannot
+		// be matched to one of them.
+		DescribeTable("Should refuse a mention while a question it cannot answer is open",
+			func(ask func(toolkit.Prompter) error) {
+				ch := promptingChannel(opts, api, socket, clock)
+				w := runningTurn(ch, socket)
+
+				q := deferredQuestion(w, api, clock, opts.AnswerGrace, ask)
+
+				deferring(w, "tu1")
+				abandoned(ch, "tu1")
+
+				socket.deliver(inThread("1700000020.000100", "just do it").envelope())
+
+				link, ok := ch.permalink("C1", "1700000000.000100", q.TS)
+				Expect(ok).To(BeTrue())
+
+				pointer := fmt.Sprintf(openQuestionRefusal, fmt.Sprintf(openQuestionLinked, link))
+
+				Eventually(postedLine(api, pointer)).Should(BeTrue(), "the refusal says where the question is")
+				noWork(ch)
+				Expect(buttonsOf(api, q.TS)()).ToNot(BeEmpty(), "the question the person was pointed at is still pressable")
+			},
+			Entry("a yes/no question", func(p toolkit.Prompter) error {
+				_, err := p.Confirm(callCtx("tu1"), "restart node3?")
+
+				return err
+			}),
+			Entry("a selection", func(p toolkit.Prompter) error {
+				_, err := p.Select(callCtx("tu1"), "which node?", []string{"node3", "node4"})
+
+				return err
+			}),
+			Entry("the confirm gate", func(p toolkit.Prompter) error {
+				_, err := p.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+
+				return err
+			}),
+		)
+
+		// Two questions cannot be told apart by prose either, whichever kinds they are, so the
+		// refusal names them together.
+		It("Should refuse a mention while more than one question is open", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			failures := make(chan error, 2)
+			for _, id := range []string{"tu1", "tu2"} {
+				go func() {
+					_, err := w.Prompter.Input(callCtx(id), "which node for "+id+"?", "")
+					failures <- err
+				}()
+			}
+
+			Eventually(questionsIn(api)).Should(Equal(2))
+			Eventually(clock.waiting).Should(Equal(2))
+
+			clock.advance(opts.AnswerGrace)
+			Eventually(failures).Should(Receive(MatchError(toolkit.ErrDeferredResult)))
+			Eventually(failures).Should(Receive(MatchError(toolkit.ErrDeferredResult)))
+
+			deferring(w, "tu1", "tu2")
+			abandoned(ch, "tu1")
+			abandoned(ch, "tu2")
+
+			socket.deliver(inThread("1700000020.000100", "node4").envelope())
+
+			Eventually(postedLine(api, openQuestionsRefusal)).Should(BeTrue())
+			noWork(ch)
+		})
+
+		// The thread is answered and free, so the mention is the ordinary turn it would have
+		// been had nothing ever been asked.
+		It("Should take a mention in a thread with nothing open as an ordinary turn", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+				_, err := p.Confirm(callCtx("tu1"), "restart node3?")
+
+				return err
+			})
+
+			deferring(w, "tu1")
+			abandoned(ch, "tu1")
+
+			socket.deliver(pressing(q, choiceYes, "U7").envelope())
+			ended(nextWork(ch))
+
+			socket.deliver(inThread("1700000030.000100", "and now node4").envelope())
+
+			next := nextWork(ch)
+			Expect(next.Prompt).To(ContainSubstring("and now node4"))
+			Expect(next.Checkpoint.Answer).To(BeNil())
+		})
+	})
+
+	Describe("Dismissing a question the run gave up on", func() {
+		var session string
+
+		BeforeEach(func() {
+			session = SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")
+		})
+
+		// The conversation is waiting on the call, so what unblocks it is a result for that
+		// call. Each tool has one for an operator who was reached and gave no answer, and the
+		// dismissal supplies it with the reason.
+		DescribeTable("Should answer the deferred call with its tool's own null result",
+			func(tool string, ask func(toolkit.Prompter) error) {
+				ch := promptingChannel(opts, api, socket, clock)
+				w := runningTurn(ch, socket)
+
+				q := deferredQuestion(w, api, clock, opts.AnswerGrace, ask)
+
+				deferring(w, "tu1")
+				abandoned(ch, "tu1")
+
+				socket.deliver(pressing(q, choiceDismiss, "U7").envelope())
+
+				content, err := builtin.NoAnswerResult(tool, dismissedReason)
+				Expect(err).ToNot(HaveOccurred())
+
+				resumed := nextWork(ch)
+
+				Expect(resumed.Checkpoint).To(Equal(agent.Checkpoint{
+					ResumeID: session,
+					Answer:   &agent.DeferredAnswer{ToolUseID: "tu1", Content: content},
+					Force:    true,
+				}))
+				Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: " + answerDismissed))
+
+				// The thread is answered and free, which is the whole point of dismissing.
+				ended(resumed)
+
+				socket.deliver(inThread("1700000030.000100", "carry on then").envelope())
+				Expect(nextWork(ch).Prompt).To(ContainSubstring("carry on then"))
+			},
+			Entry("a yes/no question", builtin.AskHumanConfirmName, func(p toolkit.Prompter) error {
+				_, err := p.Confirm(callCtx("tu1"), "restart node3?")
+
+				return err
+			}),
+			Entry("a selection", builtin.AskHumanSelectName, func(p toolkit.Prompter) error {
+				_, err := p.Select(callCtx("tu1"), "which node?", []string{"node3", "node4"})
+
+				return err
+			}),
+			Entry("a free-text question", builtin.AskHumanInputName, func(p toolkit.Prompter) error {
+				_, err := p.Input(callCtx("tu1"), "which node?", "")
+
+				return err
+			}),
+		)
+
+		// The gate's call was never dispatched, so there is nothing to supply a result to.
+		// Declining it is what ends it: the resume dispatches the call, the gate is answered
+		// from the press, and the guarded command does not run.
+		It("Should end a gate question on Decline and leave the thread able to take a turn", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+				_, err := p.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+
+				return err
+			})
+
+			deferring(w, "tu1")
+			abandoned(ch, "tu1")
+
+			socket.deliver(pressing(q, choiceNo, "U7").envelope())
+
+			resumed := nextWork(ch)
+			Expect(resumed.Checkpoint).To(Equal(agent.Checkpoint{ResumeID: session, Force: true}))
+
+			got, err := resumed.Prompter.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got).To(Equal(toolkit.ConfirmNo), "answered from the press rather than asked again")
+
+			ended(resumed)
+
+			socket.deliver(inThread("1700000030.000100", "carry on then").envelope())
+			Expect(nextWork(ch).Prompt).To(ContainSubstring("carry on then"))
+		})
+	})
+
+	// The first post is held back and no edit after it is, so a press that resumes a run
+	// with work left in it narrates that work as any other turn does.
+	It("Should narrate a resume that gets somewhere", func() {
+		ch := promptingChannel(opts, api, socket, clock)
+		w := runningTurn(ch, socket)
+
+		q := deferredQuestion(w, api, clock, opts.AnswerGrace, func(p toolkit.Prompter) error {
+			_, err := p.Confirm(callCtx("tu1"), "restart node3?")
+
+			return err
+		})
+
+		deferring(w, "tu1")
+		abandoned(ch, "tu1")
+
+		socket.deliver(pressing(q, choiceYes, "U7").envelope())
+
+		resumed := nextWork(ch)
+		resumed.Events.ToolCall(agent.ToolTrace{Name: "shell"})
+
+		Eventually(postedLine(api, hintTools)).Should(BeTrue())
+	})
+
+	Describe("Two questions open at once", func() {
+		// Outcome.Deferred is a list and Checkpoint.Answer is one answer, so answering the
+		// first resumes, finds the second outstanding and defers again without asking
+		// anything. A thread that collected a "Thinking..." for every answer somebody gave
+		// would be unreadable, and both questions have to survive until both are answered.
+		It("Should bank one answer without a new status message and leave the other pressable", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			failures := make(chan error, 2)
+			for _, id := range []string{"tu1", "tu2"} {
+				go func() {
+					_, err := w.Prompter.Confirm(callCtx(id), "restart the node for "+id+"?")
+					failures <- err
+				}()
+			}
+
+			Eventually(questionsIn(api)).Should(Equal(2))
+			Eventually(clock.waiting).Should(Equal(2))
+
+			clock.advance(opts.AnswerGrace)
+			Eventually(failures).Should(Receive(MatchError(toolkit.ErrDeferredResult)))
+			Eventually(failures).Should(Receive(MatchError(toolkit.ErrDeferredResult)))
+
+			deferring(w, "tu1", "tu2")
+			abandoned(ch, "tu1")
+			abandoned(ch, "tu2")
+
+			first := questionFor(api, "tu1")()
+			second := questionFor(api, "tu2")()
+			Expect(first).ToNot(BeNil())
+			Expect(second).ToNot(BeNil())
+
+			said := len(api.messages())
+
+			socket.deliver(pressing(first, choiceYes, "U7").envelope())
+
+			resumed := nextWork(ch)
+			Expect(resumed.Checkpoint.Answer.ToolUseID).To(Equal("tu1"))
+
+			deferring(resumed, "tu2")
+
+			Consistently(func() int { return len(api.messages()) }, 100*time.Millisecond).Should(Equal(said),
+				"a resume that only banks an answer says nothing new in the thread")
+			Expect(buttonsOf(api, second.TS)()).To(HaveLen(3), "the second question is still pressable")
+
+			socket.deliver(pressing(second, choiceNo, "U7").envelope())
+
+			again := nextWork(ch)
+			Expect(again.Checkpoint.Answer.ToolUseID).To(Equal("tu2"))
 		})
 	})
 })

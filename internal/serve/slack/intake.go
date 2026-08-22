@@ -245,6 +245,28 @@ func (c *Channel) receive(env envelope) {
 		return
 	}
 
+	// A conversation waiting on an answer takes no turn, so what the mention is worth is
+	// decided before admission is considered. Like admit, it reads memory and does no I/O,
+	// which is what lets it run before the acknowledgement.
+	answer, blocked := c.answersOpenQuestion(m)
+	if answer != nil || blocked != "" {
+		c.acknowledge(env)
+
+		if blocked != "" {
+			c.log.Info("Refusing a mention while a question is open in its thread",
+				"channel", m.ChannelID, "thread", m.ThreadTS, "user", m.UserID)
+			c.reply(m, blocked)
+
+			return
+		}
+
+		c.log.Info("Taking a mention as the answer to the question open in its thread",
+			"channel", m.ChannelID, "thread", m.ThreadTS, "tool_use", answer.Value.ToolUse, "user", m.UserID)
+		c.answerQuestion(answer)
+
+		return
+	}
+
 	refusal, narration := c.admit(m)
 
 	c.acknowledge(env)
@@ -633,10 +655,11 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 
 	c.mu.Unlock()
 
-	// Whatever this turn asked stops being a question this worker is holding: the run that
-	// would have taken an answer has ended, so a click arriving now reaches the conversation
-	// as a resume rather than a run nobody is waiting on.
-	c.asked.dropTurn(t.id)
+	// Whatever this turn asked stops being a question a run is waiting on, and stays a
+	// question the thread is waiting on: a click arriving now reaches the conversation as a
+	// resume, and a mention arriving now is decided against the question rather than
+	// journaled as a turn nothing can take.
+	c.asked.abandonTurn(t.id)
 
 	t.log.Info("A turn ended", "reason", out.Reason, "deferred", len(out.Deferred), "folded", len(folded), "returned", len(undelivered))
 

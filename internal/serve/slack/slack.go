@@ -175,7 +175,8 @@ type Channel struct {
 
 	// asked is every question this worker is holding. It belongs here rather than to a
 	// run because the goroutine reading envelopes has to find one without knowing which
-	// turn asked it.
+	// turn asked it, and because a question outlives the turn: a deferred call waits on
+	// the thread, so what is open in a thread is what the next mention is decided against.
 	asked *questions
 
 	// taken recognizes a message this worker already acted on, so a redelivery is
@@ -314,7 +315,7 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		sessions:  opts.Sessions,
 		limit:     newLimiter(defaultRateInterval, defaultRateBurst, nil),
 		clock:     wallClock{},
-		asked:     newQuestions(),
+		asked:     newQuestions(0),
 		taken:     newSeen(0),
 		names:     newNames(),
 		inFlight:  map[string]*turn{},

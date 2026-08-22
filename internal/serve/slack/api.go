@@ -391,34 +391,44 @@ func (c *clientAPI) openView(ctx context.Context, triggerID string, v modalView)
 }
 
 // blocksOf renders one reduced message as the blocks Slack takes: the words as a section,
-// and the buttons under them as one actions block.
+// and the buttons under them as actions blocks.
 //
-// The block ids are fixed rather than minted. Nothing reads them back, a click being routed
-// by the value its button carries, and Slack requires only that they do not repeat within
-// one message.
+// The buttons are spread over as many blocks as they need. Slack takes maxActionElements in
+// one of them and refuses the message rather than trimming it, and a selection of the
+// twenty-five options ask_human_select allows plus its Dismiss is twenty-six.
+//
+// The block ids are fixed apart from the number that separates them. Nothing reads them
+// back, a click being routed by the value its button carries, and Slack requires only that
+// they do not repeat within one message.
 func blocksOf(msg blockMessage) []slackgo.Block {
 	out := []slackgo.Block{
 		slackgo.NewSectionBlock(slackgo.NewTextBlockObject(slackgo.MarkdownType, msg.Text, false, false), nil, nil),
 	}
 
-	if len(msg.Buttons) == 0 {
-		return out
+	for i := 0; i < len(msg.Buttons); i += maxActionElements {
+		group := msg.Buttons[i:min(i+maxActionElements, len(msg.Buttons))]
+
+		elements := make([]slackgo.BlockElement, 0, len(group))
+		for _, b := range group {
+			el := slackgo.NewButtonBlockElement(b.ActionID, b.Value,
+				slackgo.NewTextBlockObject(slackgo.PlainTextType, b.Label, false, false))
+			el.Style = slackgo.Style(b.Style)
+
+			elements = append(elements, el)
+		}
+
+		out = append(out, slackgo.NewActionBlock(fmt.Sprintf("%s%d", actionsBlockID, i), elements...))
 	}
 
-	elements := make([]slackgo.BlockElement, 0, len(msg.Buttons))
-	for _, b := range msg.Buttons {
-		el := slackgo.NewButtonBlockElement(b.ActionID, b.Value,
-			slackgo.NewTextBlockObject(slackgo.PlainTextType, b.Label, false, false))
-		el.Style = slackgo.Style(b.Style)
-
-		elements = append(elements, el)
-	}
-
-	return append(out, slackgo.NewActionBlock(actionsBlockID, elements...))
+	return out
 }
 
-// actionsBlockID names the block the buttons of one message sit in.
-const actionsBlockID = "answers"
+// actionsBlockID names the blocks the buttons of one message sit in, and maxActionElements
+// is how many buttons Slack takes in one of them.
+const (
+	actionsBlockID    = "answers"
+	maxActionElements = 25
+)
 
 // threadPageSize is how many messages one page of a thread asks for, and threadMaxPages
 // how many pages are read before the walk gives up and answers with what it has.

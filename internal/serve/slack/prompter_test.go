@@ -274,7 +274,7 @@ var _ = Describe("The prompter", func() {
 			Expect(q.Text).To(ContainSubstring("restart node3?"))
 			Expect(q.Text).To(ContainSubstring(typedRepliesNote), "a bare reply in the thread reaches this worker not at all")
 			Expect(q.ThreadTS).To(Equal("1700000000.000100"))
-			Expect(q.Buttons).To(HaveLen(2))
+			Expect(q.Buttons).To(HaveLen(3), "yes, no and the Dismiss every question carries")
 
 			socket.deliver(pressing(q, choiceYes, "U2").envelope())
 
@@ -298,8 +298,9 @@ var _ = Describe("The prompter", func() {
 			var q *fakeMessage
 			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
 
-			Expect(q.Buttons).To(HaveLen(3), "one button per option")
+			Expect(q.Buttons).To(HaveLen(4), "one button per option, and Dismiss after them")
 			Expect(q.Buttons[1].Label).To(Equal("node4"))
+			Expect(q.Buttons[3].Label).To(Equal(labelDismiss))
 
 			socket.deliver(pressing(q, "1", "U2").envelope())
 
@@ -325,8 +326,9 @@ var _ = Describe("The prompter", func() {
 			var q *fakeMessage
 			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
 
-			Expect(q.Buttons).To(HaveLen(1))
+			Expect(q.Buttons).To(HaveLen(2))
 			Expect(q.Buttons[0].Label).To(Equal(labelReply))
+			Expect(q.Buttons[1].Label).To(Equal(labelDismiss))
 
 			socket.deliver(pressing(q, choiceReply, "U2").envelope())
 
@@ -432,6 +434,82 @@ var _ = Describe("The prompter", func() {
 		})
 	})
 
+	Describe("Dismissing a question", func() {
+		// A question nobody wants to answer would otherwise hold the conversation until
+		// somebody remembered it. Dismiss answers the call with the null result its own tool
+		// produces for an operator who was reached and gave none, which is a result the model
+		// reasons about rather than a tool failure.
+		DescribeTable("Should report a dismissal to a run still waiting rather than an answer",
+			func(ask func(toolkit.Prompter) error) {
+				ch := promptingChannel(opts, api, socket, clock)
+				w := runningTurn(ch, socket)
+
+				failures := make(chan error, 1)
+				go func() { failures <- ask(w.Prompter) }()
+
+				var q *fakeMessage
+				Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+				socket.deliver(pressing(q, choiceDismiss, "U7").envelope())
+
+				var failed error
+				Eventually(failures).Should(Receive(&failed))
+				Expect(failed).To(MatchError(errDismissed))
+				Expect(failed).ToNot(MatchError(toolkit.ErrPromptAborted), "the call is answered, not left open")
+				Expect(failed).ToNot(MatchError(toolkit.ErrDeferredResult))
+
+				Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: " + answerDismissed))
+				Eventually(buttonsOf(api, q.TS)).Should(BeEmpty())
+			},
+			Entry("a yes/no question", func(p toolkit.Prompter) error {
+				_, err := p.Confirm(callCtx("tu1"), "restart node3?")
+
+				return err
+			}),
+			Entry("a selection", func(p toolkit.Prompter) error {
+				_, err := p.Select(callCtx("tu1"), "which node?", []string{"node3", "node4"})
+
+				return err
+			}),
+			Entry("a free-text question", func(p toolkit.Prompter) error {
+				_, err := p.Input(callCtx("tu1"), "which node?", "")
+
+				return err
+			}),
+		)
+
+		// The gated command does not run, which is the whole of what declining to answer a
+		// gate can mean, so its Decline is its dismissal and there is no second button beside
+		// it saying the same thing.
+		It("Should end the confirm gate on the Decline it already carries", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			failures := make(chan error, 1)
+			answers := make(chan toolkit.ConfirmChoice, 1)
+
+			go func() {
+				got, err := w.Prompter.ApproveCommand(callCtx("tu1"), gateFor("tu1"))
+				failures <- err
+				answers <- got
+			}()
+
+			var q *fakeMessage
+			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+			labels := make([]string, 0, len(q.Buttons))
+			for _, b := range q.Buttons {
+				labels = append(labels, b.Label)
+			}
+			Expect(labels).To(Equal([]string{labelOnce, labelAlways, labelDecline}))
+
+			socket.deliver(pressing(q, choiceNo, "U7").envelope())
+
+			Eventually(failures).Should(Receive(BeNil()))
+			Eventually(answers).Should(Receive(Equal(toolkit.ConfirmNo)))
+		})
+	})
+
 	Describe("A question nobody answers in time", func() {
 		// The run ends at a resumable boundary and the worker is freed. A person answers in
 		// a minute or on Thursday, and no worker can be held for the second case.
@@ -522,7 +600,7 @@ var _ = Describe("The prompter", func() {
 			clock.advance(opts.AnswerGrace)
 			Eventually(failures).Should(Receive(MatchError(toolkit.ErrDeferredResult)))
 
-			Consistently(buttonsOf(api, q.TS), 100*time.Millisecond).Should(HaveLen(2))
+			Consistently(buttonsOf(api, q.TS), 100*time.Millisecond).Should(HaveLen(3))
 		})
 	})
 
@@ -621,9 +699,10 @@ var _ = Describe("The prompter", func() {
 			Eventually(buttonsOf(api, q.TS)).Should(BeEmpty())
 		})
 
-		// Once the turn has reported its outcome nothing is waiting on its questions, so a
-		// press reaches the conversation the way any other press on a restarted worker does.
-		It("Should hold no question for a turn that has ended", func() {
+		// The turn that asked has ended, so nothing is waiting on the question. The thread
+		// still is: a deferred call is answered there or by nothing at all, which is what the
+		// next mention in that thread is decided against.
+		It("Should leave a question standing past the turn that asked it", func() {
 			ch := promptingChannel(opts, api, socket, clock)
 			w := runningTurn(ch, socket)
 
@@ -640,8 +719,29 @@ var _ = Describe("The prompter", func() {
 			Eventually(failures).Should(Receive(HaveOccurred()))
 
 			ended(w)
+			abandoned(ch, "tu1")
 
-			Eventually(func() *question { return heldQuestion(ch, "tu1") }).Should(BeNil())
+			Expect(ch.asked.openIn("C1", "1700000000.000100")).To(HaveLen(1))
+		})
+
+		// The bound is what stops a worker accumulating one entry for every question nobody
+		// ever answered. Evicting one costs nothing a person sees: the press is built from
+		// the value alone, which is the path a press after a restart takes.
+		It("Should evict the oldest question once it is holding as many as it may", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			ch.asked = newQuestions(2)
+
+			for _, id := range []string{"tu1", "tu2", "tu3"} {
+				ch.asked.start(&question{
+					kind: kindConfirm, toolUseID: id, turn: "t1",
+					channelID: "C1", threadTS: "1700000000.000100",
+					woken: make(chan struct{}, 1),
+				})
+			}
+
+			Expect(heldQuestion(ch, "tu1")).To(BeNil(), "the oldest of three, where two is the bound")
+			Expect(heldQuestion(ch, "tu3")).ToNot(BeNil())
+			Expect(ch.asked.openIn("C1", "1700000000.000100")).To(HaveLen(2))
 		})
 	})
 
@@ -672,7 +772,7 @@ var _ = Describe("The prompter", func() {
 
 			Eventually(socket.acked).Should(HaveLen(2), "an envelope Slack is waiting on is answered whether or not it reaches a question")
 			Consistently(answers, 100*time.Millisecond).ShouldNot(Receive())
-			Expect(buttonsOf(api, q.TS)()).To(HaveLen(2), "the question that is still open keeps its buttons")
+			Expect(buttonsOf(api, q.TS)()).To(HaveLen(3), "the question that is still open keeps its buttons")
 		})
 
 		It("Should refuse a press that names a question in another conversation", func() {

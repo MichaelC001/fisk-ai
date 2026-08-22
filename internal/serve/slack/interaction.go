@@ -25,6 +25,10 @@ const (
 	interactionPress interactionKind = iota
 	// interactionSubmit is the dialog a free-text answer was typed into, being sent.
 	interactionSubmit
+	// interactionMention is a mention that answered the free-text question open in its
+	// thread. Nothing decodes one off the socket: the intake mints it so the answer takes
+	// the path a dialog submission takes, there being one way an answer reaches a run.
+	interactionMention
 )
 
 // click is one interaction reduced to what this channel acts on.
@@ -512,6 +516,81 @@ func answerFor(in *click) (*agent.DeferredAnswer, error) {
 	return &agent.DeferredAnswer{ToolUseID: in.Value.ToolUse, Content: content}, nil
 }
 
+// The lines a mention gets while a question it cannot answer is open in its thread.
+//
+// A confirm, a selection and a gate each have a fixed set of answers, and prose cannot be
+// matched to one of them; two questions open at once cannot be told apart by prose either,
+// whichever kinds they are. Each line says where the question is and what ends it, since a
+// person who mentioned the bot and was refused has to know what to do instead.
+const (
+	openQuestionRefusal  = "I am waiting on an answer to %s in this thread. Answer or dismiss it there, and mention me again after that."
+	openQuestionsRefusal = "I am waiting on answers to the questions still open in this thread. Answer or dismiss them there, and mention me again after that."
+	// openQuestionLinked addresses the question message, and openQuestionPlain stands in
+	// where no permalink could be built.
+	openQuestionLinked = "<%s|a question I asked>"
+	openQuestionPlain  = "a question I asked"
+)
+
+// answersOpenQuestion decides what a mention arriving in a thread with a question open in it
+// becomes: the answer to a free-text question, or the refusal to reply with. It reports
+// neither for a thread with nothing open, which is the ordinary mention.
+//
+// A conversation waiting on a deferred tool result reaches no boundary a user message can
+// join, so an ordinary turn there would be journaled as nothing. What a mention is worth
+// instead is decided by what is open: ask_human_input takes the mention's text as its
+// answer, from anybody in the thread, which is who may press its buttons.
+//
+// It reads memory and does no I/O, so it runs where every other admission decision runs,
+// before the envelope is acknowledged.
+func (c *Channel) answersOpenQuestion(m *mention) (*click, string) {
+	open := c.asked.openIn(m.ChannelID, m.ThreadTS)
+	if len(open) == 0 {
+		return nil, ""
+	}
+
+	if len(open) > 1 {
+		return nil, openQuestionsRefusal
+	}
+
+	if open[0].kind == kindInput {
+		return mentionAnswer(m, open[0]), ""
+	}
+
+	link, ok := c.permalink(m.ChannelID, m.ThreadTS, open[0].messageTS)
+	if !ok {
+		return nil, fmt.Sprintf(openQuestionRefusal, openQuestionPlain)
+	}
+
+	return nil, fmt.Sprintf(openQuestionRefusal, fmt.Sprintf(openQuestionLinked, link))
+}
+
+// mentionAnswer is the answer one mention gives to the free-text question open in its
+// thread, in the shape a click takes.
+//
+// It is a click rather than a shape of its own because everything after this point is the
+// same: the same registry decides whether a run is still waiting, the same resume carries it
+// to a conversation that is not, and the same message records who answered.
+//
+// The kind and the call come from the question this worker is holding, never from the
+// mention, and the conversation is the mention's own authenticated fields.
+func mentionAnswer(m *mention, q openQuestion) *click {
+	return &click{
+		Interaction: interactionMention,
+		TeamID:      m.TeamID,
+		ChannelID:   m.ChannelID,
+		ThreadTS:    m.ThreadTS,
+		MessageTS:   m.TS,
+		UserID:      m.UserID,
+		Value: buttonValue{
+			Kind:    kindInput,
+			ToolUse: q.toolUseID,
+			Choice:  choiceReply,
+			Asker:   q.asker,
+		},
+		Text: m.Text,
+	}
+}
+
 // approvalFrom reads the gate's approval off a press, reporting false for a press that
 // answers one of the three tools instead.
 //
@@ -537,7 +616,20 @@ func approvalFrom(in *click) (toolkit.ConfirmChoice, bool) {
 // A selection answers with the option rather than with its position, which is what the
 // model was told ask_human_select returns, so the option is read off the button that was
 // pressed rather than out of a list this worker may no longer hold.
+//
+// A dismissal answers with the null result each of those tools produces for an operator who
+// was reached and gave none, carrying the reason, so the conversation takes a turn again.
+// The model reasons about that result rather than routing around a tool failure.
 func renderAnswer(in *click) (string, error) {
+	if in.Value.Choice == choiceDismiss {
+		tool, ok := toolFor(in.Value.Kind)
+		if !ok {
+			return "", fmt.Errorf("%q has no result shape", in.Value.Kind)
+		}
+
+		return builtin.NoAnswerResult(tool, dismissedReason)
+	}
+
 	switch in.Value.Kind {
 	case kindConfirm:
 		return builtin.ConfirmResult(in.Value.Choice == choiceYes, "")

@@ -7,13 +7,16 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 )
 
 // The prompter is the whole of what this channel does with Work.Prompter, so a change to
@@ -60,7 +63,37 @@ const (
 	// choiceReply is the button that opens the dialog a free-text answer is typed into. It
 	// answers nothing on its own.
 	choiceReply = "reply"
+	// choiceDismiss ends a question nobody wants to answer. The call is answered with the
+	// null result its own tool produces for an operator who gave no answer, so the
+	// conversation takes a turn again instead of waiting on the thread.
+	choiceDismiss = "dismiss"
 )
+
+// dismissedReason is what the model is told about a call somebody dismissed. It reaches the
+// model inside the tool's own null result and nowhere else.
+const dismissedReason = "the question was dismissed in the thread"
+
+// errDismissed is what a dismissed question reports to the tool that asked it, for a run
+// still waiting when the button was pressed. The three question tools turn an error that is
+// neither an abort nor a deferral into their own null result, which is a result the model
+// reasons about rather than a tool failure.
+var errDismissed = errors.New(dismissedReason)
+
+// toolFor is the built-in one question kind belongs to, for rendering the result a
+// dismissal supplies to the call. The confirm gate is not one of them: its call was never
+// dispatched, so there is nothing to supply a result to.
+func toolFor(kind questionKind) (string, bool) {
+	switch kind {
+	case kindConfirm:
+		return builtin.AskHumanConfirmName, true
+	case kindSelect:
+		return builtin.AskHumanSelectName, true
+	case kindInput:
+		return builtin.AskHumanInputName, true
+	default:
+		return "", false
+	}
+}
 
 // buttonValue is what one button carries back when somebody presses it. It is JSON so a
 // field can be added later without every button minted before that becoming unreadable.
@@ -211,8 +244,9 @@ type delivery int
 
 const (
 	// deliveryUnknown is a click naming a call this worker holds no question for: it
-	// restarted since the question was asked, or the turn that asked it has ended. The
-	// answer reaches the conversation as a resume, built from the click alone.
+	// restarted since the question was asked, or the question was evicted by the bound on
+	// how many are held. The answer reaches the conversation as a resume, built from the
+	// click alone.
 	deliveryUnknown delivery = iota
 	// deliveryTaken is a click the run that asked took, still loaded and still waiting.
 	deliveryTaken
@@ -240,23 +274,105 @@ const (
 type questions struct {
 	mu   sync.Mutex
 	open map[string]*question
+
+	// order is the arrival sequence the oldest question is evicted from, and limit how
+	// many are held. A question outlives the turn that asked it, so without a bound a
+	// worker would accumulate one entry for every question nobody ever answered.
+	//
+	// Evicting one costs nothing a person sees: the buttons are still on its message, and
+	// a press on a question this worker no longer holds is built from the value alone,
+	// which is the same path a press after a restart takes.
+	order []string
+	limit int
 }
 
-func newQuestions() *questions {
-	return &questions{open: map[string]*question{}}
+// defaultQuestionLimit is how many questions one worker holds. A bot asked a question an
+// hour would hold ten days of them before the oldest was evicted.
+const defaultQuestionLimit = 256
+
+func newQuestions(limit int) *questions {
+	if limit <= 0 {
+		limit = defaultQuestionLimit
+	}
+
+	return &questions{open: map[string]*question{}, limit: limit}
 }
 
 // start registers a question before it is posted, so a click landing while the post is
 // still returning has somewhere to be delivered.
 //
-// A second question about the same call replaces the first. That call's earlier question
-// belongs to a turn that has ended, since a turn's questions are dropped when it reports its
-// outcome, and the live one is the one a person is looking at.
+// A second question about the same call replaces the first. The live one is the one a
+// person is looking at, and the earlier one belongs to a turn that has ended.
 func (qs *questions) start(q *question) {
 	qs.mu.Lock()
 	defer qs.mu.Unlock()
 
+	_, replacing := qs.open[q.toolUseID]
 	qs.open[q.toolUseID] = q
+
+	if replacing {
+		return
+	}
+
+	qs.order = append(qs.order, q.toolUseID)
+
+	if len(qs.order) > qs.limit {
+		delete(qs.open, qs.order[0])
+		qs.order = qs.order[1:]
+	}
+}
+
+// openQuestion is one question still waiting in a thread, read out of the registry so a
+// caller decides on it without holding the lock or reading fields that move under it.
+type openQuestion struct {
+	kind      questionKind
+	toolUseID string
+	asker     string
+
+	// messageTS names the message the question was asked on, which is what a refusal
+	// points at. It is empty for a question whose message never reached Slack.
+	messageTS string
+}
+
+// openIn is every question still waiting in one conversation, oldest message first.
+//
+// A question is waiting from the moment it is registered until somebody answers it,
+// whether or not the run that asked it is still loaded: a deferred call is answered by the
+// thread or by nothing, so the question stands until it is.
+func (qs *questions) openIn(channelID, threadTS string) []openQuestion {
+	qs.mu.Lock()
+	defer qs.mu.Unlock()
+
+	var out []openQuestion
+
+	for _, q := range qs.open {
+		if q.channelID != channelID || q.threadTS != threadTS {
+			continue
+		}
+		if q.state == questionAnswered {
+			continue
+		}
+
+		out = append(out, openQuestion{
+			kind:      q.kind,
+			toolUseID: q.toolUseID,
+			asker:     q.asker,
+			messageTS: q.messageTS,
+		})
+	}
+
+	// The map is walked in whatever order Go gives, so the order a thread is asked in is
+	// restored here: the message timestamps are Slack's own and sort chronologically, and
+	// the call breaks a tie between two whose messages never landed.
+	slices.SortFunc(out, func(a, b openQuestion) int {
+		if a.messageTS != b.messageTS {
+			return strings.Compare(a.messageTS, b.messageTS)
+		}
+
+		return strings.Compare(a.toolUseID, b.toolUseID)
+	})
+
+	return out
 }
 
 // posted records the message a question was asked on, which is what recording the answer
@@ -300,19 +416,25 @@ func (qs *questions) forget(q *question) {
 	held, ok := qs.open[q.toolUseID]
 	if ok && held == q {
 		delete(qs.open, q.toolUseID)
+		qs.order = slices.DeleteFunc(qs.order, func(key string) bool { return key == q.toolUseID })
 	}
 }
 
-// dropTurn drops every question one turn asked. It is called when that turn reports its
-// outcome: the run that would have taken an answer has ended, so a click arriving afterwards
-// reaches the conversation as a resume rather than a question nobody is waiting on.
-func (qs *questions) dropTurn(id string) {
+// abandonTurn ends one turn's wait on every question it asked and leaves those questions
+// standing. It is called when that turn reports its outcome.
+//
+// The entry is what the thread's next mention is decided against: a call the conversation
+// deferred on is still waiting on an answer, whether or not a run is loaded, so a question
+// outlives the turn that asked it and is dropped when somebody answers it or when the bound
+// evicts it. The run that would have taken an answer has ended, so a click arriving now
+// reaches the conversation as a resume rather than a run nobody is waiting on.
+func (qs *questions) abandonTurn(id string) {
 	qs.mu.Lock()
 	defer qs.mu.Unlock()
 
-	for key, q := range qs.open {
-		if q.turn == id {
-			delete(qs.open, key)
+	for _, q := range qs.open {
+		if q.turn == id && q.state == questionOpen {
+			q.state = questionAbandoned
 		}
 	}
 }
@@ -383,8 +505,8 @@ func (qs *questions) reopen(q *question) {
 // giveUp ends the run's wait on one question and answers with the click that beat it, where
 // one did.
 //
-// The question stays registered. A click arriving between here and the turn's ending is what
-// deliveryResume is for, and dropTurn is what takes it out.
+// The question stays registered, and stays registered past the turn's ending: a click
+// arriving at either point is what deliveryResume is for.
 func (qs *questions) giveUp(q *question) (*given, bool) {
 	qs.mu.Lock()
 	defer qs.mu.Unlock()
@@ -515,7 +637,12 @@ func (p *prompter) ApproveCommand(ctx context.Context, req toolkit.GateRequest) 
 	}
 }
 
-// Confirm puts a yes/no question to the thread as a pair of buttons.
+// Confirm puts a yes/no question to the thread as a pair of buttons, with Dismiss beside
+// them.
+//
+// A dismissal is not a no. It reports errDismissed, which ask_human_confirm turns into its
+// own null result carrying the reason, so the model reads that nobody decided rather than
+// that somebody decided against.
 func (p *prompter) Confirm(ctx context.Context, question string) (bool, error) {
 	q, err := p.newQuestion(kindConfirm, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), nil)
 	if err != nil {
@@ -527,12 +654,16 @@ func (p *prompter) Confirm(ctx context.Context, question string) (bool, error) {
 		return false, err
 	}
 
+	if g.Choice == choiceDismiss {
+		return false, errDismissed
+	}
+
 	return g.Choice == choiceYes, nil
 }
 
-// Select puts the options to the thread as one button each and answers with the index of
-// the one pressed. A choice outside the options is one nobody was offered, reported rather
-// than clamped.
+// Select puts the options to the thread as one button each, with Dismiss after them, and
+// answers with the index of the one pressed. A choice outside the options is one nobody was
+// offered, reported rather than clamped.
 func (p *prompter) Select(ctx context.Context, question string, options []string) (int, error) {
 	q, err := p.newQuestion(kindSelect, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), options)
 	if err != nil {
@@ -542,6 +673,10 @@ func (p *prompter) Select(ctx context.Context, question string, options []string
 	g, err := p.ask(ctx, q, unansweredDefers)
 	if err != nil {
 		return -1, err
+	}
+
+	if g.Choice == choiceDismiss {
+		return -1, errDismissed
 	}
 
 	idx, err := strconv.Atoi(g.Choice)
@@ -555,9 +690,12 @@ func (p *prompter) Select(ctx context.Context, question string, options []string
 	return idx, nil
 }
 
-// Input asks the thread for a free-text value. The message carries one button, which opens
-// the dialog the value is typed into: a button is minted before anybody has typed, so it
-// cannot carry what they will type.
+// Input asks the thread for a free-text value. The message carries Reply, which opens the
+// dialog the value is typed into, and Dismiss: a button is minted before anybody has typed,
+// so it cannot carry what they will type.
+//
+// A mention in the thread answers this question too, its text being the value, which is
+// what a person's first instinct produces.
 //
 // An empty string is a valid answer, which is why the dialog's own submission is what says
 // one was given.
@@ -572,6 +710,10 @@ func (p *prompter) Input(ctx context.Context, question, def string) (string, err
 	g, err := p.ask(ctx, q, unansweredDefers)
 	if err != nil {
 		return "", err
+	}
+
+	if g.Choice == choiceDismiss {
+		return "", errDismissed
 	}
 
 	return g.Text, nil
@@ -712,6 +854,11 @@ func (p *prompter) newQuestion(kind questionKind, toolUseID, body string, option
 // typedRepliesNote is on every question, because a person's first instinct is to type the
 // answer under it. Only app_mention is subscribed, so a bare reply in the thread reaches
 // this worker not at all.
+//
+// A mention answers a free-text question and is refused while any other kind is open, so
+// what a mention is worth differs by kind. The note says the same thing on all four rather
+// than four things: mentioning the bot is what gets a person heard either way, and the
+// refusal that comes back says what to do instead.
 const typedRepliesNote = "_Use the buttons, or mention me with your answer. I do not see plain replies in this thread._"
 
 // The labels the buttons carry. They are plain text rather than mrkdwn, which is what Slack
@@ -723,12 +870,15 @@ const (
 	labelAlways  = "Allow for this conversation"
 	labelDecline = "Decline"
 	labelReply   = "Reply"
+	labelDismiss = "Dismiss"
 )
 
 // What a question says once it has been answered. Anybody in the thread may answer, so who
 // did is the one thing the message has to say that nobody could work out from it.
 const (
 	answeredLine = "Answered by <@%s>: %s"
+	// answerDismissed is what a dismissal reads as, whichever question was dismissed.
+	answerDismissed = "Dismissed"
 	// lateAnswerLine ends a message whose answer arrived after the run had stopped waiting,
 	// so nobody is left looking at a button they pressed with no sign it registered.
 	lateAnswerLine = "_I had already stopped waiting for this one, so I am carrying on from your answer._"
@@ -739,12 +889,19 @@ const (
 
 // mint builds the buttons one question is asked with. Each carries the same value shape, so
 // the click path reads one thing however the question was put.
+//
+// Every question can be ended from its own message. Three of them carry Dismiss, which
+// answers the call with the null result its own tool produces for an operator who gave no
+// answer. The confirm gate's Decline is its dismissal: the gated command does not run, which
+// is the whole of what declining to answer a gate can mean, and a second button beside it
+// saying the same thing in vaguer words would be a choice nobody has to make.
 func (q *question) mint() ([]button, error) {
 	switch q.kind {
 	case kindConfirm:
 		return q.buttonsFor([]buttonSpec{
 			{choice: choiceYes, label: labelYes, style: buttonPrimary},
 			{choice: choiceNo, label: labelNo},
+			{choice: choiceDismiss, label: labelDismiss},
 		})
 
 	case kindApprove:
@@ -757,15 +914,16 @@ func (q *question) mint() ([]button, error) {
 	case kindInput:
 		return q.buttonsFor([]buttonSpec{
 			{choice: choiceReply, label: labelReply, style: buttonPrimary},
+			{choice: choiceDismiss, label: labelDismiss},
 		})
 
 	case kindSelect:
-		specs := make([]buttonSpec, 0, len(q.options))
+		specs := make([]buttonSpec, 0, len(q.options)+1)
 		for i, opt := range q.options {
 			specs = append(specs, buttonSpec{choice: strconv.Itoa(i), label: opt})
 		}
 
-		return q.buttonsFor(specs)
+		return q.buttonsFor(append(specs, buttonSpec{choice: choiceDismiss, label: labelDismiss}))
 
 	default:
 		return nil, fmt.Errorf("no buttons are defined for a %q question", q.kind)
@@ -876,6 +1034,10 @@ func (c *Channel) pressNote(q *question, line string) {
 // reads is what an answer says when it is written back onto the question, in the terms the
 // question was put in rather than the terms the button carried.
 func (q *question) reads(g *given) string {
+	if g.Choice == choiceDismiss {
+		return answerDismissed
+	}
+
 	switch q.kind {
 	case kindConfirm:
 		if g.Choice == choiceYes {

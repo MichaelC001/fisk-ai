@@ -76,6 +76,16 @@ type status struct {
 	// that is the channel's rather than the run's.
 	queued bool
 
+	// quiet holds the first post back until the turn has something to say beyond having
+	// started. It is set for a resume, where one press can produce a run that does nothing
+	// but bank its answer: Outcome.Deferred is a list, so a turn that asked two questions
+	// defers on the second the moment the first is answered, and a thread would collect a
+	// "Thinking..." that never changes for every answer somebody gave.
+	//
+	// It applies to the first post and to no edit after it. Once Slack has the message,
+	// what it shows is the state the turn reached.
+	quiet bool
+
 	// waiting is set while a question this turn asked is open in the thread. The run
 	// blocks in the prompter for as long as it is, so no hint arrives to displace it and
 	// the hint the turn was on is where it goes back to.
@@ -142,6 +152,7 @@ func (c *Channel) newStatus(t *turn, queued bool) *status {
 		channelID: t.m.ChannelID,
 		threadTS:  t.m.ThreadTS,
 		queued:    queued,
+		quiet:     t.resume,
 		buttons:   stopButton(t),
 		changed:   make(chan struct{}, 1),
 		ending:    make(chan struct{}),
@@ -333,7 +344,25 @@ func (s *status) stateLocked() blockMessage {
 
 // movedLocked reports whether Slack shows something other than msg.
 func (s *status) movedLocked(msg blockMessage) bool {
+	if s.heldBackLocked(msg) {
+		return false
+	}
+
 	return msg.Text != s.published || (len(msg.Buttons) > 0) != s.shown
+}
+
+// heldBackLocked reports whether this message is one a quiet turn holds back.
+//
+// The two opening states are what it holds: a turn waiting for a worker and a turn that has
+// started and reported nothing say nothing a person needs, and a resume that banks an answer
+// and defers again never gets past them. A run that reached a tool, a question, or an ending
+// has moved somewhere worth a message, and posts.
+func (s *status) heldBackLocked(msg blockMessage) bool {
+	if !s.quiet || s.ts != "" {
+		return false
+	}
+
+	return msg.Text == hintThinking || msg.Text == hintQueued
 }
 
 // wrote records what Slack now shows. A post that failed records nothing, so the next
