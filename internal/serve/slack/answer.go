@@ -59,8 +59,8 @@ const (
 	lostThreadNote      = "I no longer have a record of this thread. Mention me again and I will start a fresh one."
 )
 
-// ending is what a turn's status message says now that the run has reported, empty for a
-// turn whose answer that message already points at.
+// ending is what a turn's status message says now that the run has reported, and the emoji
+// it says it with. Both are empty for a turn whose answer that message already points at.
 //
 // The cases are ordered rather than distinct, because more than one is true on the
 // commonest paths. An aborted gate reports ReasonSuspended and an error wrapping
@@ -71,17 +71,24 @@ const (
 // A suspend arrives for unrelated causes, and they are told apart in the order they are
 // tested: the gate gave up on a question, somebody pressed Stop on this turn, or the worker
 // is going down.
-func (c *Channel) ending(t *turn, out serve.Outcome) string {
+//
+// Eleven lines share four emoji. A crash and a failure are a fault nobody in the thread
+// asked for and take emojiFailed; the six endings a person carries on from by mentioning the
+// bot again or by starting another thread take emojiStopped; a turn that ran out of things
+// to say finished, so it takes the same emojiAnswered an answer does; and a turn waiting on
+// a question takes emojiAsking, which is what it showed while the run was still parked in
+// the prompter.
+func (c *Channel) ending(t *turn, out serve.Outcome) (string, string) {
 	switch {
 	case out.Crashed:
 		// The panic and its stack are in the worker's log, where the events sink wrote
 		// them. The thread is told the turn ended and nothing about where.
 		t.log.Error("A run crashed", "error", out.Err)
 
-		return crashedNote
+		return crashedNote, emojiFailed
 
 	case out.Abandoned:
-		return abandonedNote
+		return abandonedNote, emojiStopped
 
 	case out.Reason == runstate.ReasonBudget:
 		// Above the failure case, a run stopped by its budget reporting an error as well.
@@ -89,43 +96,43 @@ func (c *Channel) ending(t *turn, out serve.Outcome) string {
 		// to start a thread instead of mentioning this one again.
 		t.log.Info("A conversation used its token budget", "error", out.Err)
 
-		return budgetNote
+		return budgetNote, emojiStopped
 
 	case len(out.Deferred) > 0:
 		// The question is its own message in the thread with its buttons still on it, so
 		// this says why the turn stopped moving rather than what to press.
 		t.log.Info("A turn is waiting on an answer to a question in its thread", "deferred", len(out.Deferred))
 
-		return deferredNote
+		return deferredNote, emojiAsking
 
 	case out.Reason == runstate.ReasonSuspended && errors.Is(out.Err, toolkit.ErrPromptAborted):
-		return abortedNote
+		return abortedNote, emojiStopped
 
 	case out.Reason == runstate.ReasonSuspended && t.stopped():
-		return stoppedNote
+		return stoppedNote, emojiStopped
 
 	case out.Reason == runstate.ReasonSuspended && c.suspendRequested():
-		return drainedNote
+		return drainedNote, emojiStopped
 
 	case out.Reason == runstate.ReasonMaxIterations:
 		// A cap reached is not a failure. The conversation is journaled at a boundary the
 		// next mention in the thread carries on from.
 		t.log.Info("A turn reached the iteration cap")
 
-		return stepsNote
+		return stepsNote, emojiStopped
 
 	case out.Err != nil:
 		t.log.Error("A turn failed", "error", out.Err)
 
-		return failureNote(out.Err)
+		return failureNote(out.Err), emojiFailed
 
 	case out.Text == "":
 		// A run can end on tool calls alone, and chat.update refuses a message with no
 		// text, so this is what a turn with nothing to point at says.
-		return silentNote
+		return silentNote, emojiAnswered
 	}
 
-	return ""
+	return "", ""
 }
 
 // failureNote is the line one failure puts in a thread.
@@ -215,12 +222,12 @@ func (c *Channel) answer(t *turn, text string) {
 
 	link, ok := c.permalink(t.m.ChannelID, t.m.ThreadTS, ts)
 	if !ok {
-		t.status.ends(donePlain)
+		t.status.ends(donePlain, emojiAnswered)
 
 		return
 	}
 
-	t.status.ends(fmt.Sprintf(doneLinked, link))
+	t.status.ends(fmt.Sprintf(doneLinked, link), emojiAnswered)
 }
 
 // fitMarkdown answers with text and false where it is inside limit, and otherwise with a

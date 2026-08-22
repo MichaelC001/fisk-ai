@@ -11,6 +11,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	slackgo "github.com/slack-go/slack"
 )
 
 // testClock is the time a limiter measures with when a spec is driving it, so a throttle
@@ -254,25 +256,78 @@ var _ = Describe("The status message", func() {
 		Entry("a tool named after nothing in particular", "", hintTools),
 	)
 
+	// A thread nobody has read for an hour is scrolled through rather than read, so the
+	// state of every turn in it has to survive being glanced at. The shortcodes are written
+	// out here rather than built from the constants, since what a person sees is the emoji
+	// Slack renders from them.
+	DescribeTable("Should open the line with the emoji for the state the turn is in",
+		func(reach func(s *status), expected string) {
+			s := &status{}
+			reach(s)
+
+			s.mu.Lock()
+			defer s.mu.Unlock()
+
+			Expect(statusText(s.emojiLocked(), s.textLocked())).To(Equal(expected))
+		},
+		Entry("waiting for a worker", func(s *status) { s.queued = true }, ":hourglass_flowing_sand: Queued..."),
+		Entry("a run that has reported nothing yet", func(s *status) {}, ":thinking_face: Thinking..."),
+		Entry("between tool calls", func(s *status) { s.note(hintThinking) }, ":thinking_face: Thinking..."),
+		Entry("in the memory tools", func(s *status) { s.note(hintMemory) }, ":brain: Accessing memory..."),
+		Entry("in the knowledge tools", func(s *status) { s.note(hintKnowledge) }, ":books: Searching knowledge..."),
+		Entry("in any other tool", func(s *status) { s.note(hintTools) }, ":hammer: Calling tools..."),
+		Entry("waiting for a person to answer", func(s *status) { s.asking(true) }, ":question: Waiting for an answer..."),
+		Entry("waiting for a person after the turn deferred", func(s *status) { s.ends(deferredNote, emojiAsking) },
+			":question: Waiting for your answer."),
+		// The emoji goes in front of the whole line, so the link markup an answer ends on is
+		// still a link.
+		Entry("answered", func(s *status) {
+			s.ends("Done: <https://example.slack.com/archives/C1/p17|see the answer>", emojiAnswered)
+		},
+			":white_check_mark: Done: <https://example.slack.com/archives/C1/p17|see the answer>"),
+		Entry("stopped", func(s *status) { s.ends(stoppedNote, emojiStopped) },
+			":octagonal_sign: Stopped. Mention me in this thread to carry on."),
+		Entry("failed", func(s *status) { s.ends(crashedNote, emojiFailed) },
+			":x: Something went wrong on my side. Mention me again to try it, and the worker log has the detail."),
+	)
+
+	// The text argument is what a notification and a client that renders no blocks show, and
+	// a person reading either of those is the one furthest from the thread.
+	It("Should carry the emoji in the blocks and in the text argument alike", func() {
+		s := &status{}
+		s.note(hintTools)
+
+		s.mu.Lock()
+		msg := s.stateLocked()
+		s.mu.Unlock()
+
+		Expect(msg.Text).To(Equal(":hammer: Calling tools..."), "postBlocks gives this to Slack as the text argument")
+
+		section, ok := blocksOf(msg)[0].(*slackgo.SectionBlock)
+		Expect(ok).To(BeTrue())
+		Expect(section.Text.Text).To(Equal(msg.Text), "the blocks and the text argument are set from one string")
+		Expect(section.Text.Type).To(Equal(slackgo.MarkdownType), "Slack renders a shortcode in mrkdwn")
+	})
+
 	It("Should post one message when the turn is admitted and edit that message as the run reports", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
 		Eventually(socket.acked).Should(HaveLen(1))
 
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking), "a turn with a worker to start on is thinking rather than queued")
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)), "a turn with a worker to start on is thinking rather than queued")
 		Expect(api.messages()[0].ThreadTS).To(Equal("1700000000.000100"))
 
 		s := statusOf(ch, session)
 
 		s.note(hintFor("memory_search"))
-		Eventually(textIn(api, "C1")).Should(Equal(hintMemory))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiMemory, hintMemory)))
 
 		s.note(hintFor("knowledge_search"))
-		Eventually(textIn(api, "C1")).Should(Equal(hintKnowledge))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiKnowledge, hintKnowledge)))
 
 		s.note(hintFor("restart_node"))
-		Eventually(textIn(api, "C1")).Should(Equal(hintTools))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiTools, hintTools)))
 
 		Expect(api.messages()).To(HaveLen(1), "one message per turn, edited in place")
 	})
@@ -283,21 +338,21 @@ var _ = Describe("The status message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		s := statusOf(ch, session)
 
 		s.note(hintTools)
-		Eventually(textIn(api, "C1")).Should(Equal("Calling tools..."))
+		Eventually(textIn(api, "C1")).Should(Equal(":hammer: Calling tools..."))
 
 		s.note(hintTools)
-		Eventually(textIn(api, "C1")).Should(Equal("Calling tools... (2)"))
+		Eventually(textIn(api, "C1")).Should(Equal(":hammer: Calling tools... (2)"))
 
 		s.note(hintTools)
-		Eventually(textIn(api, "C1")).Should(Equal("Calling tools... (3)"))
+		Eventually(textIn(api, "C1")).Should(Equal(":hammer: Calling tools... (3)"))
 
 		s.note(hintMemory)
-		Eventually(textIn(api, "C1")).Should(Equal("Accessing memory..."), "a different hint counts from one again")
+		Eventually(textIn(api, "C1")).Should(Equal(":brain: Accessing memory..."), "a different hint counts from one again")
 	})
 
 	// The first thing a run reports is that it started, and a turn already reading as
@@ -306,7 +361,7 @@ var _ = Describe("The status message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		statusOf(ch, session).note(hintThinking)
 
@@ -347,21 +402,21 @@ var _ = Describe("The status message", func() {
 		socket.deliver(second.envelope())
 		Eventually(socket.acked).Should(HaveLen(2))
 
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
-		Eventually(textIn(api, "C2")).Should(Equal(hintQueued))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
+		Eventually(textIn(api, "C2")).Should(Equal(statusText(emojiQueued, hintQueued)))
 
 		// The first turn takes the worker and the second is handed over behind it, which
 		// is not the same as running: serve's puller takes an item before a slot frees.
 		nextWork(ch)
 		queued := nextWork(ch)
 
-		Consistently(textIn(api, "C2"), 100*time.Millisecond).Should(Equal(hintQueued))
+		Consistently(textIn(api, "C2"), 100*time.Millisecond).Should(Equal(statusText(emojiQueued, hintQueued)))
 
 		runCtx, cancel := queued.RunContext(context.Background())
 		Expect(runCtx).ToNot(BeNil())
 		Expect(cancel).To(BeNil(), "this channel cancels no run of its own")
 
-		Eventually(textIn(api, "C2")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C2")).Should(Equal(statusText(emojiThinking, hintThinking)))
 	})
 
 	Describe("The workspace's allowance", func() {
@@ -379,7 +434,7 @@ var _ = Describe("The status message", func() {
 			ch := throttledChannel(opts, api, socket, clock, interval, 1)
 
 			socket.deliver(aMention().envelope())
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking), "the one call the bucket held")
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)), "the one call the bucket held")
 
 			s := statusOf(ch, session)
 
@@ -393,7 +448,7 @@ var _ = Describe("The status message", func() {
 
 			clock.advance(interval)
 
-			Eventually(editsIn(api, "C1")).Should(Equal([]string{hintKnowledge}),
+			Eventually(editsIn(api, "C1")).Should(Equal([]string{statusText(emojiKnowledge, hintKnowledge)}),
 				"where the run is, in one call, rather than every state it passed through")
 		})
 
@@ -444,7 +499,7 @@ var _ = Describe("The Stop button", func() {
 		roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		msg := statusIn(api, "C1")()
 		Expect(msg.Buttons).To(HaveLen(1))
@@ -462,7 +517,7 @@ var _ = Describe("The Stop button", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		msg := statusIn(api, "C1")()
 		Expect(msg.Buttons).To(HaveLen(1))
@@ -476,7 +531,7 @@ var _ = Describe("The Stop button", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 		Expect(w.SuspendRequested()).To(BeFalse())
@@ -493,7 +548,7 @@ var _ = Describe("The Stop button", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 
@@ -511,7 +566,7 @@ var _ = Describe("The Stop button", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 
@@ -524,7 +579,7 @@ var _ = Describe("The Stop button", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 		msg := statusIn(api, "C1")()
@@ -558,7 +613,7 @@ var _ = Describe("The Stop button", func() {
 		second.Text = "<@U0BOT> and my one"
 
 		socket.deliver(second.envelope())
-		Eventually(textIn(api, "C2")).Should(Equal(hintQueued))
+		Eventually(textIn(api, "C2")).Should(Equal(statusText(emojiQueued, hintQueued)))
 
 		socket.deliver(pressingStop(statusIn(api, "C2")(), "U2").envelope())
 		Eventually(socket.acked).Should(HaveLen(3))
@@ -575,7 +630,7 @@ var _ = Describe("The Stop button", func() {
 			ch := roomyChannel(opts, api, socket)
 
 			socket.deliver(aMention().envelope())
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			msg := statusIn(api, "C1")()
 			ended(nextWork(ch))
@@ -612,7 +667,7 @@ var _ = Describe("The Stop button", func() {
 			ch := roomyChannel(opts, api, socket)
 
 			socket.deliver(aMention().envelope())
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			w := nextWork(ch)
 

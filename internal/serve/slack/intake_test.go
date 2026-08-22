@@ -390,11 +390,11 @@ var _ = Describe("Intake", func() {
 			waiting.Text = "<@U0BOT> and my one"
 
 			socket.deliver(waiting.envelope())
-			Eventually(textIn(api, "C2")).Should(Equal(hintQueued))
+			Eventually(textIn(api, "C2")).Should(Equal(statusText(emojiQueued, hintQueued)))
 
 			Expect(ch.Close()).To(Succeed())
 
-			Expect(textIn(api, "C2")()).To(Equal(abandonedNote))
+			Expect(textIn(api, "C2")()).To(Equal(statusText(emojiStopped, abandonedNote)))
 			Expect(statusIn(api, "C2")().Buttons).To(BeEmpty(), "a turn that will not run is not one anybody can stop")
 		})
 
@@ -404,7 +404,7 @@ var _ = Describe("Intake", func() {
 			ch := roomyChannel(opts, api, socket)
 
 			socket.deliver(aMention().envelope())
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			nextWork(ch)
 
@@ -420,7 +420,7 @@ var _ = Describe("Intake", func() {
 
 			Expect(ch.Close()).To(Succeed())
 
-			Expect(api.messages()[1].Text).To(Equal(abandonedNote))
+			Expect(api.messages()[1].Text).To(Equal(statusText(emojiStopped, abandonedNote)))
 		})
 
 		// The run behind a turn the server did take reports after the drain has stopped
@@ -429,7 +429,7 @@ var _ = Describe("Intake", func() {
 			ch := roomyChannel(opts, api, socket)
 
 			socket.deliver(aMention().envelope())
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			w := nextWork(ch)
 
@@ -437,7 +437,7 @@ var _ = Describe("Intake", func() {
 
 			Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
 
-			Eventually(textIn(api, "C1")).Should(Equal(drainedNote))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiStopped, drainedNote)))
 		})
 	})
 

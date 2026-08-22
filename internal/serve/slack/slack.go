@@ -504,7 +504,7 @@ func (c *Channel) abandonWaiting() {
 		t.log.Info("A turn was admitted and never started, so its thread is told the worker is going down", "user", t.m.UserID)
 
 		c.speak(func() {
-			t.status.ends(abandonedNote)
+			t.status.ends(abandonedNote, emojiStopped)
 			t.status.stop()
 		})
 	}

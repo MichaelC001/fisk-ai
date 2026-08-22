@@ -74,7 +74,7 @@ var _ = Describe("The events sink", func() {
 		GinkgoHelper()
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 		Expect(w.Events).ToNot(BeNil(), "a run with nowhere to report is a thread that says nothing")
@@ -92,16 +92,16 @@ var _ = Describe("The events sink", func() {
 				"a turn already reading as thinking spends no call on being told the run started")
 
 			w.Events.ToolCall(agent.ToolTrace{ID: "tu1", Name: "memory_search"})
-			Eventually(textIn(api, "C1")).Should(Equal(hintMemory))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiMemory, hintMemory)))
 
 			w.Events.ToolCall(agent.ToolTrace{ID: "tu2", Name: "knowledge_search"})
-			Eventually(textIn(api, "C1")).Should(Equal(hintKnowledge))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiKnowledge, hintKnowledge)))
 
 			w.Events.ToolCall(agent.ToolTrace{ID: "tu3", Name: "restart_node"})
-			Eventually(textIn(api, "C1")).Should(Equal(hintTools))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiTools, hintTools)))
 
 			w.Events.Message(assistantTurn("let me look at node3"), false)
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			Expect(api.messages()).To(HaveLen(1), "one message per turn, edited in place")
 		})
@@ -113,12 +113,12 @@ var _ = Describe("The events sink", func() {
 			w := running(ch)
 
 			w.Events.ToolCall(agent.ToolTrace{ID: "tu1", Name: "restart_node"})
-			Eventually(textIn(api, "C1")).Should(Equal(hintTools))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiTools, hintTools)))
 
 			w.Events.ToolResult(agent.ToolResultTrace{CallID: "tu1", Output: "restarted"})
 			w.Events.LLMRequest("2 tools, 1200 tokens")
 
-			Consistently(editsIn(api, "C1"), 100*time.Millisecond).Should(Equal([]string{hintTools}))
+			Consistently(editsIn(api, "C1"), 100*time.Millisecond).Should(Equal([]string{statusText(emojiTools, hintTools)}))
 		})
 
 		// The ending posts the answer from Outcome.Text. A sink that posted the terminal

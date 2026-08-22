@@ -417,20 +417,20 @@ var _ = Describe("The prompter", func() {
 			ch := promptingChannel(opts, api, socket, clock)
 			w := runningTurn(ch, socket)
 
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			go func() {
 				_, _ = w.Prompter.Confirm(callCtx("tu1"), "restart node3?")
 			}()
 
-			Eventually(textIn(api, "C1")).Should(Equal(hintWaiting))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiAsking, hintWaiting)))
 
 			var q *fakeMessage
 			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
 
 			socket.deliver(pressing(q, choiceYes, "U2").envelope())
 
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking), "back to where the run was when it asked")
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)), "back to where the run was when it asked")
 		})
 	})
 

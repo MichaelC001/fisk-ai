@@ -35,6 +35,68 @@ const (
 	hintWaiting = "Waiting for an answer..."
 )
 
+// The emoji a status message opens with, one for each state a turn can be in.
+//
+// A thread that has scrolled past is read by these before it is read by the words, so they
+// are told apart by shape rather than by color: somebody who cannot tell the red cross from
+// the green tick still sees a cross where a turn failed and a tick where one answered.
+//
+// They are Slack shortcodes rather than the characters themselves, which Slack renders in
+// the mrkdwn of a section and in the text a notification shows.
+const (
+	// emojiQueued is a turn waiting for a worker.
+	emojiQueued = ":hourglass_flowing_sand:"
+
+	// One per hint, so the icon says what the words say: a run between tool calls, the
+	// memory tools, the knowledge ones, and every other tool.
+	emojiThinking  = ":thinking_face:"
+	emojiMemory    = ":brain:"
+	emojiKnowledge = ":books:"
+	emojiTools     = ":hammer:"
+
+	// emojiAsking is a turn waiting on somebody in the thread, whether the run is parked in
+	// the prompter or the question outlived the turn that asked it.
+	emojiAsking = ":question:"
+
+	// emojiAnswered is a turn that finished, emojiStopped one that parked where the thread
+	// carries on from, and emojiFailed one that ended on a fault.
+	emojiAnswered = ":white_check_mark:"
+	emojiStopped  = ":octagonal_sign:"
+	emojiFailed   = ":x:"
+)
+
+// statusText is the line one status message shows: the emoji for the state the turn is in,
+// then the words.
+//
+// The emoji goes on the front of the whole line rather than into it, so an ending carrying
+// Slack's link markup is still a link. The same string is what the message's text argument
+// is set from, which is what a notification and a client that renders no blocks show.
+func statusText(icon string, line string) string {
+	if icon == "" {
+		return line
+	}
+
+	return icon + " " + line
+}
+
+// hintEmoji is the emoji one hint a run reported is shown with. Anything else takes the
+// thinking one, which is what a run that has reported nothing yet shows.
+//
+// The queued and waiting lines are not among them: neither is a hint a run reports, and the
+// state that produces each of the two chooses its own emoji.
+func hintEmoji(hint string) string {
+	switch hint {
+	case hintMemory:
+		return emojiMemory
+	case hintKnowledge:
+		return emojiKnowledge
+	case hintTools:
+		return emojiTools
+	default:
+		return emojiThinking
+	}
+}
+
 // hintFor is what a thread is told about one tool call.
 func hintFor(tool string) string {
 	switch {
@@ -98,8 +160,11 @@ type status struct {
 
 	// final is what the message ends as, which is the pointer at the answer rather than
 	// a hint. Once it is set nothing the run passed through matters any more, so it wins
-	// over everything above.
-	final string
+	// over everything above. finalEmoji is the state it ended in, which the run reports
+	// alongside the words: a turn that failed and one that answered read the same at a
+	// glance otherwise.
+	final      string
+	finalEmoji string
 
 	// buttons are what a person may press on this message while the turn is live, which is
 	// the Stop button and nothing else. They are part of the state this message publishes
@@ -371,14 +436,17 @@ func (s *status) current() (msg blockMessage, ts string, ok bool) {
 	return msg, s.ts, true
 }
 
-// stateLocked is the whole of what this message shows: the words, and the Stop button while
-// the turn is live.
+// stateLocked is the whole of what this message shows: the emoji for the state the turn is
+// in, the words, and the Stop button while the turn is live.
+//
+// The emoji is part of the state rather than something a caller writes onto the text, so it
+// changes with the words and goes out on the edit those words already cost.
 //
 // The button comes off with the ending rather than on its own edit. A turn that ended is a
 // turn nothing can park, and the same write that says where the answer is takes away the
 // button that would have stopped the run producing it.
 func (s *status) stateLocked() blockMessage {
-	msg := blockMessage{Text: s.textLocked()}
+	msg := blockMessage{Text: statusText(s.emojiLocked(), s.textLocked())}
 	if s.over || s.final != "" {
 		return msg
 	}
@@ -390,7 +458,7 @@ func (s *status) stateLocked() blockMessage {
 
 // movedLocked reports whether Slack shows something other than msg.
 func (s *status) movedLocked(msg blockMessage) bool {
-	if s.heldBackLocked(msg) {
+	if s.heldBackLocked() {
 		return false
 	}
 
@@ -407,12 +475,14 @@ func (s *status) movedLocked(msg blockMessage) bool {
 // The deferral is held back for the same reason. A thread with two questions open takes a
 // resume per answer, and each one ends still waiting on the other; the question message is
 // already in the thread with its buttons on it, so a message per press says nothing new.
-func (s *status) heldBackLocked(msg blockMessage) bool {
+func (s *status) heldBackLocked() bool {
 	if !s.quiet || s.ts != "" {
 		return false
 	}
 
-	return msg.Text == hintThinking || msg.Text == hintQueued || msg.Text == deferredNote
+	line := s.textLocked()
+
+	return line == hintThinking || line == hintQueued || line == deferredNote
 }
 
 // wrote records what Slack now shows. A post that failed records nothing, so the next
@@ -424,6 +494,25 @@ func (s *status) wrote(ts string, msg blockMessage) {
 	s.ts = ts
 	s.published = msg.Text
 	s.shown = len(msg.Buttons) > 0
+}
+
+// emojiLocked is the emoji for the state the words describe. It tests the same states in
+// the same order textLocked does, so the icon and the line always describe one state.
+//
+// Every hint has its own, memory and knowledge included, so a thread scrolled through at
+// speed shows what each turn spent its time on without any of them being read.
+func (s *status) emojiLocked() string {
+	if s.final != "" {
+		return s.finalEmoji
+	}
+	if s.waiting {
+		return emojiAsking
+	}
+	if s.queued {
+		return emojiQueued
+	}
+
+	return hintEmoji(s.hint)
 }
 
 // textLocked is what the message says now.
@@ -513,18 +602,23 @@ func (s *status) running() {
 }
 
 // ends records the last thing this message says, which is where the turn's answer is
-// rather than where the run got to.
+// rather than where the run got to, and icon is the state it ended in.
+//
+// The two are recorded together because the caller knows both: an answer, a turn somebody
+// can carry on from and a failure all end the message, and nothing this file can read off
+// the words tells them apart.
 //
 // It is recorded rather than written: the publisher makes the call, so the last edit is
 // spent from the same allowance as every hint that came before it instead of going around
 // the meter. An empty text records nothing, chat.update refusing a message with none.
-func (s *status) ends(text string) {
+func (s *status) ends(text string, icon string) {
 	if s == nil || text == "" {
 		return
 	}
 
 	s.mu.Lock()
 	s.final = text
+	s.finalEmoji = icon
 	s.queued = false
 	s.mu.Unlock()
 

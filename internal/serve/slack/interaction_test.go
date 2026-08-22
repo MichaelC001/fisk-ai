@@ -1008,7 +1008,7 @@ var _ = Describe("Interactions", func() {
 		resumed := nextWork(ch)
 		resumed.Events.ToolCall(agent.ToolTrace{Name: "shell"})
 
-		Eventually(postedLine(api, hintTools)).Should(BeTrue())
+		Eventually(postedLine(api, statusText(emojiTools, hintTools))).Should(BeTrue())
 	})
 
 	Describe("Two questions open at once", func() {

@@ -53,7 +53,7 @@ var _ = Describe("The answer message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 		answered(w, "node3 was full of journal logs")
@@ -69,7 +69,8 @@ var _ = Describe("The answer message", func() {
 
 		Expect(posted[0].Markdown).To(BeFalse(), "the status message is a sentence this channel wrote itself")
 
-		Eventually(editsIn(api, "C1")).Should(Equal([]string{"Done: <" + answerLink + "|see the answer>"}))
+		Eventually(editsIn(api, "C1")).Should(Equal([]string{emojiAnswered + " Done: <" + answerLink + "|see the answer>"}),
+			"the emoji goes in front of the line, so Slack's link markup is still a link")
 	})
 
 	// The link is a function of three strings this channel already holds, so nothing here
@@ -111,12 +112,12 @@ var _ = Describe("The answer message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		answered(nextWork(ch), "node3 was full of journal logs")
 
 		Eventually(api.messages).Should(HaveLen(2))
-		Eventually(editsIn(api, "C1")).Should(Equal([]string{donePlain}))
+		Eventually(editsIn(api, "C1")).Should(Equal([]string{statusText(emojiAnswered, donePlain)}))
 	})
 
 	// no_progress takes the running commentary and nothing else. There is no message to
@@ -148,7 +149,7 @@ var _ = Describe("The answer message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		status := api.messages()[0].TS
 
@@ -159,7 +160,7 @@ var _ = Describe("The answer message", func() {
 		Eventually(buttonsOf(api, status)).Should(BeEmpty())
 
 		Expect(api.messages()).To(HaveLen(1), "the status message and no answer beside it")
-		Expect(textIn(api, "C1")()).To(Equal(silentNote), "a run can end on tool calls alone, and the thread is told so")
+		Expect(textIn(api, "C1")()).To(Equal(statusText(emojiAnswered, silentNote)), "a run can end on tool calls alone, and the thread is told so")
 	})
 
 	// A stopped run produces no text either, and leaving the message on its last hint made
@@ -168,7 +169,7 @@ var _ = Describe("The answer message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 
@@ -184,7 +185,7 @@ var _ = Describe("The answer message", func() {
 
 		Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
 
-		Eventually(textIn(api, "C1")).Should(Equal(stoppedNote))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiStopped, stoppedNote)))
 		Expect(api.messages()).To(HaveLen(1), "nothing is posted beside it")
 	})
 
@@ -195,7 +196,7 @@ var _ = Describe("The answer message", func() {
 		ch := roomyChannel(opts, api, socket)
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		answered(nextWork(ch), strings.Repeat("every node in the fleet was checked\n", 1000))
 
@@ -207,7 +208,8 @@ var _ = Describe("The answer message", func() {
 		Expect(posted[1].Text).To(HavePrefix("every node in the fleet was checked\n"))
 		Expect(posted[1].Markdown).To(BeTrue())
 
-		Eventually(editsIn(api, "C1")).Should(Equal([]string{"Done: <" + answerLink + "|see the answer>"}))
+		Eventually(editsIn(api, "C1")).Should(Equal([]string{emojiAnswered + " Done: <" + answerLink + "|see the answer>"}),
+			"the emoji goes in front of the line, so Slack's link markup is still a link")
 	})
 })
 
@@ -230,7 +232,7 @@ var _ = Describe("How a turn ends", func() {
 		GinkgoHelper()
 
 		socket.deliver(aMention().envelope())
-		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+		Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 		w := nextWork(ch)
 		out.ID = w.ID
@@ -240,41 +242,43 @@ var _ = Describe("How a turn ends", func() {
 		return textIn(api, "C1")
 	}
 
+	// The emoji is what a thread scrolled past is read by, so each row says which of the
+	// four an ending takes as well as what it says.
 	DescribeTable("Should say what became of a turn that produced no answer",
-		func(out serve.Outcome, expected string) {
+		func(out serve.Outcome, expected string, icon string) {
 			ch := roomyChannel(opts, api, socket)
 
-			Eventually(endedOn(ch, out)).Should(Equal(expected))
+			Eventually(endedOn(ch, out)).Should(Equal(statusText(icon, expected)))
 			Expect(api.messages()).To(HaveLen(1), "the status message, and nothing posted beside it")
 		},
 		// The stack is in the worker's log. A thread is told the turn ended and nothing
 		// about where.
-		Entry("a crash", serve.Outcome{Crashed: true, Err: fmt.Errorf("runtime error: index out of range [3]")}, crashedNote),
+		Entry("a crash", serve.Outcome{Crashed: true, Err: fmt.Errorf("runtime error: index out of range [3]")}, crashedNote, emojiFailed),
 		// Work the server took and never started, which is a drain that reached it first.
-		Entry("work that never started", serve.Outcome{Abandoned: true}, abandonedNote),
+		Entry("work that never started", serve.Outcome{Abandoned: true}, abandonedNote, emojiStopped),
 		// A budget stop reports a reason and an error, and the reason is the one that
 		// decides: the allowance belongs to the conversation, so what it says is to start
 		// another thread rather than to mention this one again.
 		Entry("a conversation that used its allowance",
 			serve.Outcome{Reason: runstate.ReasonBudget, Err: fmt.Errorf("this conversation has processed 210 of its 200 token budget (llm.budget.max_tokens)")},
-			budgetNote),
+			budgetNote, emojiStopped),
 		// The question message is in the thread with its buttons on it, so this says why
 		// the turn stopped moving.
 		Entry("a run waiting on an answer",
 			serve.Outcome{Reason: runstate.ReasonSuspended, Deferred: []agent.DeferredCall{{ToolUseID: "toolu_01deferred"}}},
-			deferredNote),
+			deferredNote, emojiAsking),
 		// An aborted gate reports a suspend and an error wrapping ErrPromptAborted, which
 		// is why the reasons are tested before the error is.
 		Entry("a gate nobody approved in time",
 			serve.Outcome{Reason: runstate.ReasonSuspended, Err: fmt.Errorf("%w: nobody in the thread answered inside the grace window", toolkit.ErrPromptAborted)},
-			abortedNote),
+			abortedNote, emojiStopped),
 		// A cap reached is not a failure: the conversation is journaled where the next
 		// mention carries on from.
-		Entry("a run out of steps", serve.Outcome{Reason: runstate.ReasonMaxIterations, Err: fmt.Errorf("reached the iteration cap of 25")}, stepsNote),
-		Entry("a failure", serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("the provider refused the request")}, failedNote),
+		Entry("a run out of steps", serve.Outcome{Reason: runstate.ReasonMaxIterations, Err: fmt.Errorf("reached the iteration cap of 25")}, stepsNote, emojiStopped),
+		Entry("a failure", serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("the provider refused the request")}, failedNote, emojiFailed),
 		// A run can end on tool calls alone, and chat.update refuses a message with no
 		// text.
-		Entry("a run that finished with nothing to say", serve.Outcome{Reason: runstate.ReasonCompleted}, silentNote),
+		Entry("a run that finished with nothing to say", serve.Outcome{Reason: runstate.ReasonCompleted}, silentNote, emojiAnswered),
 	)
 
 	// The two raced clicks a person can produce: pressing a button on a question the
@@ -283,7 +287,7 @@ var _ = Describe("How a turn ends", func() {
 		func(err error, expected string) {
 			ch := roomyChannel(opts, api, socket)
 
-			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonError, Err: err})).Should(Equal(expected))
+			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonError, Err: err})).Should(Equal(statusText(emojiFailed, expected)))
 		},
 		Entry("an answer for a call nothing deferred",
 			fmt.Errorf("cannot answer call %q of %q: %w", "toolu_01xyz", "s-abcdef", runstate.ErrNotDeferred), notDeferredNote),
@@ -302,7 +306,7 @@ var _ = Describe("How a turn ends", func() {
 		session := SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")
 		err := fmt.Errorf("cannot answer call %q of %q: %w", "toolu_01secret", session, runstate.ErrAlreadyAnswered)
 
-		Eventually(endedOn(ch, serve.Outcome{SessionID: session, Reason: runstate.ReasonError, Err: err})).Should(Equal(alreadyAnsweredNote))
+		Eventually(endedOn(ch, serve.Outcome{SessionID: session, Reason: runstate.ReasonError, Err: err})).Should(Equal(statusText(emojiFailed, alreadyAnsweredNote)))
 
 		for _, m := range api.messages() {
 			Expect(m.Text).ToNot(ContainSubstring(session))
@@ -321,7 +325,7 @@ var _ = Describe("How a turn ends", func() {
 
 		Eventually(api.messages).Should(HaveLen(2))
 		Expect(api.messages()[1].Text).To(Equal("I got as far as node3"))
-		Eventually(text).Should(Equal(stepsNote))
+		Eventually(text).Should(Equal(statusText(emojiStopped, stepsNote)))
 	})
 
 	// Three endings arrive as one reason, so what tells them apart is who asked for the
@@ -332,7 +336,7 @@ var _ = Describe("How a turn ends", func() {
 
 			ch := roomyChannel(opts, api, socket)
 
-			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonSuspended})).Should(Equal(drainedNote))
+			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonSuspended})).Should(Equal(statusText(emojiStopped, drainedNote)))
 		})
 
 		// Somebody who pressed Stop while the worker happened to be draining is told what
@@ -343,7 +347,7 @@ var _ = Describe("How a turn ends", func() {
 			ch := roomyChannel(opts, api, socket)
 
 			socket.deliver(aMention().envelope())
-			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiThinking, hintThinking)))
 
 			w := nextWork(ch)
 
@@ -359,7 +363,7 @@ var _ = Describe("How a turn ends", func() {
 
 			Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
 
-			Eventually(textIn(api, "C1")).Should(Equal(stoppedNote))
+			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiStopped, stoppedNote)))
 		})
 	})
 })
