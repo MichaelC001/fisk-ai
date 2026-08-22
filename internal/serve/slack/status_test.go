@@ -139,6 +139,47 @@ func throttledChannel(opts Options, a api, s *fakeSocket, cl *testClock, interva
 	return ch
 }
 
+// pressingStop is the press of the Stop button on one status message, built from what that
+// message is carrying rather than from a value a spec wrote.
+func pressingStop(m *fakeMessage, user string) pressEvent {
+	GinkgoHelper()
+
+	for _, b := range m.Buttons {
+		if b.ActionID != stopActionID {
+			continue
+		}
+
+		return pressEvent{
+			Team:      "T1",
+			Channel:   m.ChannelID,
+			ThreadTS:  m.ThreadTS,
+			MessageTS: m.TS,
+			User:      user,
+			Value:     b.Value,
+		}
+	}
+
+	Fail("the message carries no Stop button")
+
+	return pressEvent{}
+}
+
+// statusIn is this bot's message in one channel, which for these specs is the status
+// message, and nil until it has been posted.
+func statusIn(a *fakeAPI, channelID string) func() *fakeMessage {
+	return func() *fakeMessage {
+		msgs := a.messages()
+
+		for i := range msgs {
+			if msgs[i].ChannelID == channelID {
+				return &msgs[i]
+			}
+		}
+
+		return nil
+	}
+}
+
 // statusOf is the status message of the turn holding a thread, which is what the events
 // sink drives once a run is reporting into it.
 func statusOf(ch *Channel, session string) *status {
@@ -374,5 +415,235 @@ var _ = Describe("The status message", func() {
 
 			Eventually(api.messages).Should(HaveLen(2))
 		})
+	})
+})
+
+var _ = Describe("The Stop button", func() {
+	var (
+		api    *fakeAPI
+		socket *fakeSocket
+		opts   Options
+	)
+
+	BeforeEach(func() {
+		api = newFakeAPI()
+		socket = newFakeSocket()
+		opts = testOptions()
+	})
+
+	// The turn id is what the press is routed by. It reaches a run only after the team,
+	// channel and thread on the envelope have been checked against the turn, so it is a name
+	// rather than a capability.
+	It("Should carry a button naming the turn and no call", func() {
+		roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		msg := statusIn(api, "C1")()
+		Expect(msg.Buttons).To(HaveLen(1))
+		Expect(msg.Buttons[0].ActionID).To(Equal(stopActionID))
+		Expect(msg.Buttons[0].Label).To(Equal(labelStop))
+
+		v, err := decodeValue(msg.Buttons[0].Value)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(v.Stop).To(Equal("C1/1700000000.000100"))
+		Expect(v.ToolUse).To(BeEmpty(), "it answers no call, so nothing looks for a question under it")
+		Expect(msg.Buttons[0].Value).ToNot(ContainSubstring(SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")))
+	})
+
+	It("Should take the button off when the turn ends", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		msg := statusIn(api, "C1")()
+		Expect(msg.Buttons).To(HaveLen(1))
+
+		ended(nextWork(ch))
+
+		Eventually(buttonsOf(api, msg.TS)).Should(BeEmpty(), "a turn that has ended is not one anybody can park")
+	})
+
+	It("Should make the run report a suspend at its next boundary", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		w := nextWork(ch)
+		Expect(w.SuspendRequested()).To(BeFalse())
+
+		socket.deliver(pressingStop(statusIn(api, "C1")(), "U2").envelope())
+		Eventually(socket.acked).Should(HaveLen(2))
+
+		Eventually(w.SuspendRequested).Should(BeTrue())
+	})
+
+	// Stopping means a conversation somebody can carry on with rather than a turn that died
+	// half done, so the run finishes the step in hand and parks where a resume picks it up.
+	It("Should leave the run's context alone", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		w := nextWork(ch)
+
+		runCtx, cancel := w.RunContext(context.Background())
+		Expect(cancel).To(BeNil(), "this channel cancels no run of its own")
+
+		socket.deliver(pressingStop(statusIn(api, "C1")(), "U2").envelope())
+		Eventually(w.SuspendRequested).Should(BeTrue())
+
+		Expect(runCtx.Err()).To(BeNil())
+	})
+
+	// Whoever can see the thread can press it, which is who may answer a question there.
+	It("Should take a press from somebody other than the person who asked", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		w := nextWork(ch)
+
+		socket.deliver(pressingStop(statusIn(api, "C1")(), "U9").envelope())
+
+		Eventually(w.SuspendRequested).Should(BeTrue())
+	})
+
+	It("Should ask for nothing further on a second press", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		w := nextWork(ch)
+		msg := statusIn(api, "C1")()
+
+		socket.deliver(pressingStop(msg, "U2").envelope())
+		Eventually(w.SuspendRequested).Should(BeTrue())
+
+		socket.deliver(pressingStop(msg, "U9").envelope())
+		Eventually(socket.acked).Should(HaveLen(3))
+
+		Expect(w.SuspendRequested()).To(BeTrue())
+		Consistently(api.messages, 100*time.Millisecond).Should(HaveLen(1), "the status message, and nothing said about the second press")
+		noWork(ch)
+	})
+
+	// A turn queued behind another in its thread has a status message from the moment it is
+	// admitted, so it has a button from then too. Pressing it parks the run at the first
+	// boundary it reaches.
+	It("Should park a turn that was still queued when it was pressed", func() {
+		opts.Workers = 1
+
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(socket.acked).Should(HaveLen(1))
+
+		second := aMention()
+		second.EnvelopeID = "Ev2"
+		second.Channel = "C2"
+		second.TS = "1700000009.000100"
+		second.Text = "<@U0BOT> and my one"
+
+		socket.deliver(second.envelope())
+		Eventually(textIn(api, "C2")).Should(Equal(hintQueued))
+
+		socket.deliver(pressingStop(statusIn(api, "C2")(), "U2").envelope())
+		Eventually(socket.acked).Should(HaveLen(3))
+
+		nextWork(ch)
+		queued := nextWork(ch)
+
+		Expect(queued.ID).To(Equal("C2/1700000009.000100"))
+		Eventually(queued.SuspendRequested).Should(BeTrue())
+	})
+
+	Describe("A press this worker cannot act on", func() {
+		It("Should tell whoever pressed that the turn has already finished", func() {
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+			msg := statusIn(api, "C1")()
+			ended(nextWork(ch))
+			Eventually(buttonsOf(api, msg.TS)).Should(BeEmpty())
+
+			// The message a person is looking at is the one they had before the edit, buttons
+			// and all, which is also what a stale message left by a worker that crashed is.
+			socket.deliver(pressingStop(msg, "U2").envelope())
+
+			Eventually(postedLine(api, stalePressRefusal)).Should(BeTrue())
+		})
+
+		It("Should tell whoever pressed that a turn it never held is not running", func() {
+			roomyChannel(opts, api, socket)
+
+			value, err := encodeValue(buttonValue{Stop: "C1/1699999999.000100"})
+			Expect(err).ToNot(HaveOccurred())
+
+			socket.deliver(pressEvent{
+				Team:      "T1",
+				Channel:   "C1",
+				ThreadTS:  "1700000000.000100",
+				MessageTS: "1699999999.000200",
+				User:      "U2",
+				Value:     value,
+			}.envelope())
+
+			Eventually(postedLine(api, stalePressRefusal)).Should(BeTrue())
+		})
+
+		// The conversation comes from the envelope, so a value presented against a thread it
+		// was not minted in reaches no run.
+		It("Should reach no run for a value presented against another thread", func() {
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+			w := nextWork(ch)
+
+			elsewhere := pressingStop(statusIn(api, "C1")(), "U2")
+			elsewhere.Channel = "C2"
+			elsewhere.ThreadTS = "1700000030.000100"
+
+			socket.deliver(elsewhere.envelope())
+
+			Eventually(postedLine(api, stalePressRefusal)).Should(BeTrue())
+			Expect(w.SuspendRequested()).To(BeFalse())
+		})
+	})
+
+	It("Should leave no button to press where progress is turned off", func() {
+		opts.Progress = false
+
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(socket.acked).Should(HaveLen(1))
+
+		w := nextWork(ch)
+		Expect(w.SuspendRequested()).To(BeFalse())
+
+		Consistently(api.messages, 100*time.Millisecond).Should(BeEmpty(), "no status message, so nothing carrying a Stop button")
+	})
+
+	// A press names a turn and no call, so nothing looks for a question under it and nobody
+	// is told about one this worker does not hold.
+	It("Should read a value that names a turn rather than a call", func() {
+		v, err := decodeValue(`{"stop":"C1/1700000000.000100"}`)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(v.Stop).To(Equal("C1/1700000000.000100"))
+		Expect(v.Kind).To(BeEmpty())
+
+		_, err = decodeValue(`{"kind":"confirm"}`)
+		Expect(err).To(MatchError(ContainSubstring("without the call it answers")))
 	})
 })

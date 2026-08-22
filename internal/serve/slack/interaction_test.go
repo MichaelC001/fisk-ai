@@ -87,7 +87,7 @@ func questionsIn(a *fakeAPI) func() int {
 		n := 0
 
 		for _, m := range a.messages() {
-			if len(m.Buttons) > 0 {
+			if asks(m) {
 				n++
 			}
 		}

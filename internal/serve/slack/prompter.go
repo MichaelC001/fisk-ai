@@ -90,9 +90,22 @@ type buttonValue struct {
 	// Asker is who the run put the question to. A restarted worker holds no record of it
 	// and the question message names them, so it travels here.
 	Asker string `json:"asker"`
+
+	// Stop names the turn a Stop button asks to park, and is empty on every button that
+	// answers a question. A press carrying it names no call and no question kind, so the
+	// click path routes it by this field alone and looks for nothing in the registry of
+	// open questions.
+	//
+	// The turn id is not a capability. It is checked against the team, channel and thread
+	// the interaction envelope authenticated before it reaches a run, the way an answer's
+	// conversation is.
+	Stop string `json:"stop,omitempty"`
 }
 
 // encodeValue is what a button carries, and decodeValue reads it back off a click.
+//
+// A value naming a turn to stop is complete on that name: it answers no call, so neither
+// the kind nor the tool_use a question's value has to carry is required of it.
 func encodeValue(v buttonValue) (string, error) {
 	out, err := json.Marshal(v)
 	if err != nil {
@@ -108,6 +121,10 @@ func decodeValue(s string) (buttonValue, error) {
 	err := json.Unmarshal([]byte(s), &v)
 	if err != nil {
 		return buttonValue{}, fmt.Errorf("reading a button's value: %w", err)
+	}
+
+	if v.Stop != "" {
+		return v, nil
 	}
 
 	if v.ToolUse == "" {

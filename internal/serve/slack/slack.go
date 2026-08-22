@@ -195,6 +195,12 @@ type Channel struct {
 	// does not enforce one.
 	inFlight map[string]*turn
 
+	// stoppable is every turn a Stop button can still reach, keyed by the turn id that
+	// button carries. A turn is entered when its status message is built and dropped when
+	// it gives its thread back, so a press for a turn that has ended finds nothing and
+	// whoever pressed is told so. A channel posting no status message enters none.
+	stoppable map[string]*turn
+
 	// queued holds the turns waiting for a thread another turn is running in, and parked
 	// counts them so the backlog bound covers them as well as the ones waiting for a
 	// worker.
@@ -312,6 +318,7 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		taken:     newSeen(0),
 		names:     newNames(),
 		inFlight:  map[string]*turn{},
+		stoppable: map[string]*turn{},
 		queued:    map[string][]*turn{},
 		wake:      make(chan struct{}, 1),
 		faults:    make(chan error, 1),

@@ -51,19 +51,31 @@ func callCtx(toolUseID string) context.Context {
 }
 
 // questionIn is the message this bot asked its question on, which is the one carrying
-// buttons, and nil until it has been posted.
+// buttons an answer is pressed on, and nil until it has been posted.
 func questionIn(a *fakeAPI) func() *fakeMessage {
 	return func() *fakeMessage {
 		msgs := a.messages()
 
 		for i := range msgs {
-			if len(msgs[i].Buttons) > 0 {
+			if asks(msgs[i]) {
 				return &msgs[i]
 			}
 		}
 
 		return nil
 	}
+}
+
+// asks reports whether one message carries the buttons a question is answered on. A status
+// message carries a button of its own, which answers nothing.
+func asks(m fakeMessage) bool {
+	for _, b := range m.Buttons {
+		if b.ActionID != stopActionID {
+			return true
+		}
+	}
+
+	return false
 }
 
 // bodyOf is what one message says now, so a spec waits for an edit rather than for a count.

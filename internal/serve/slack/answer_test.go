@@ -7,7 +7,6 @@ package slack
 import (
 	"context"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -148,10 +147,42 @@ var _ = Describe("The answer message", func() {
 		socket.deliver(aMention().envelope())
 		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
 
+		status := api.messages()[0].TS
+
 		answered(nextWork(ch), "")
 
-		Consistently(api.messages, 100*time.Millisecond).Should(HaveLen(1), "the status message and no answer beside it")
-		Expect(editsIn(api, "C1")()).To(BeEmpty(), "and nothing pointing at a message that was never posted")
+		// The turn ended, so the one edit it is worth is the one that takes the Stop button
+		// off a run nothing can park any more.
+		Eventually(buttonsOf(api, status)).Should(BeEmpty())
+
+		Expect(api.messages()).To(HaveLen(1), "the status message and no answer beside it")
+		Expect(textIn(api, "C1")()).To(Equal(hintThinking), "and nothing pointing at a message that was never posted")
+	})
+
+	// A stopped run produces no text either, and leaving the message on its last hint made
+	// the press read as having done nothing.
+	It("Should say a turn was stopped, and that the thread carries on", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		w := nextWork(ch)
+
+		ch.stopPressed(&click{
+			ChannelID: "C1",
+			ThreadTS:  "1700000000.000100",
+			TeamID:    "T1",
+			UserID:    "U2",
+			Value:     buttonValue{Stop: w.ID},
+		})
+
+		Expect(w.SuspendRequested()).To(BeTrue())
+
+		Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
+
+		Eventually(textIn(api, "C1")).Should(Equal(stoppedNote))
+		Expect(api.messages()).To(HaveLen(1), "nothing is posted beside it")
 	})
 
 	// Slack refuses the whole message rather than trimming it, and answer returns on a

@@ -235,7 +235,9 @@ func (in *click) complete() error {
 // answered about, and a dialog acknowledged late stays on the screen of whoever sent it.
 //
 // A press on the Reply button of a free-text question opens the dialog and answers nothing.
-// Everything else carries the answer itself.
+// A press on a Stop button answers no question either: it names a turn rather than a call,
+// so it is routed by that name and never looked for among the open questions. Everything
+// else carries the answer itself.
 func (c *Channel) clicked(env envelope) {
 	in, wanted, err := clickOf(env)
 	if err != nil {
@@ -250,6 +252,12 @@ func (c *Channel) clicked(env envelope) {
 		return
 	}
 
+	if in.Interaction == interactionPress && in.Value.Stop != "" {
+		c.stopPressed(in)
+
+		return
+	}
+
 	if in.Interaction == interactionPress && in.Value.Kind == kindInput && in.Value.Choice == choiceReply {
 		c.openReply(in)
 
@@ -257,6 +265,56 @@ func (c *Channel) clicked(env envelope) {
 	}
 
 	c.answerQuestion(in)
+}
+
+// stopPressed asks the turn a Stop button names to park at its next boundary.
+//
+// The run's context is left alone. Somebody pressing Stop is asking for a conversation they
+// can carry on with rather than a turn that died half done, so the run finishes the step in
+// hand, parks where a later mention resumes it, and reports a suspend.
+//
+// Pressing twice is no worse than pressing once: the same live turn is asked for the same
+// thing, and the button stays on the message until the turn's ending takes it off.
+//
+// A turn this worker is not running is one that ended, or one that belonged to a process
+// that has restarted since. Whoever pressed is told so rather than left looking at a button
+// that did nothing.
+func (c *Channel) stopPressed(in *click) {
+	t := c.stopping(in)
+	if t == nil {
+		c.log.Info("A Stop press named a turn this worker is not running",
+			"turn", in.Value.Stop, "channel", in.ChannelID, "thread", in.ThreadTS, "by", in.UserID)
+		c.reply(clickMention(in), stalePressRefusal)
+
+		return
+	}
+
+	t.askStop()
+	t.log.Info("Somebody asked a run to stop", "by", in.UserID)
+}
+
+// stopping is the turn one Stop press names, nil where this worker is running none.
+//
+// The conversation is checked against the interaction envelope's own authenticated fields,
+// as an answer's is. The turn id on the button is not a capability, so a value presented
+// against a thread it was not minted in reaches no run.
+func (c *Channel) stopping(in *click) *turn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	t, held := c.stoppable[in.Value.Stop]
+	if !held {
+		return nil
+	}
+
+	if t.m.ChannelID != in.ChannelID || t.m.ThreadTS != in.ThreadTS {
+		c.log.Warn("A Stop press named a turn this worker is running in another conversation",
+			"turn", in.Value.Stop, "channel", in.ChannelID, "thread", in.ThreadTS)
+
+		return nil
+	}
+
+	return t
 }
 
 // openReply puts the dialog a free-text answer is typed into in front of whoever pressed

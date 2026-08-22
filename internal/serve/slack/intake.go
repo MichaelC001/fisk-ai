@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
@@ -56,6 +57,10 @@ const (
 	backlogPressRefusal    = "I have as much waiting as I can hold, so I have not taken this. Press it again in a few minutes."
 	drainingPressRefusal   = "I am shutting down and have not taken this. Press it again once I am back."
 	unreadablePressRefusal = "I could not make sense of that answer, so I have not acted on it."
+	// stalePressRefusal answers a Stop press for a turn this worker is not running: it
+	// ended, or it belonged to a worker that has restarted since. Either way the button is
+	// on a message nothing is behind any more.
+	stalePressRefusal = "That run has already finished, so there is nothing left to stop."
 )
 
 // turn is one admitted mention on its way to being a run: the thread it belongs to, the
@@ -100,7 +105,39 @@ type turn struct {
 	// which the resume dispatches again.
 	answer *agent.DeferredAnswer
 
+	// stop is closed when somebody presses Stop on this turn's status message. Closing it
+	// rather than canceling the run's context is what makes the press a request for a
+	// boundary: the run reads it at the next one and parks where a later mention in the
+	// thread carries on from, instead of dying wherever it stood.
+	stop     chan struct{}
+	stopOnce sync.Once
+
 	folded []*mention
+}
+
+// stopped reports whether somebody has asked this turn to park.
+func (t *turn) stopped() bool {
+	select {
+	case <-t.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// askStop asks this turn to park at its next boundary.
+//
+// It is idempotent, so a second press costs no more than the first: the channel is closed
+// once and whoever pressed again is asking for what is already happening.
+func (t *turn) askStop() {
+	t.stopOnce.Do(func() { close(t.stop) })
+}
+
+// suspendRequested is what this turn's run reads at each loop boundary: the Stop button on
+// its own status message, the worker's own drain signal, and this channel being closed.
+// Each parks the run somewhere a later mention in the thread continues from.
+func (t *turn) suspendRequested() bool {
+	return t.stopped() || t.ch.suspendRequested()
 }
 
 // newTurn builds a turn for one mention. It records nothing and admits nothing: admit
@@ -136,6 +173,7 @@ func (c *Channel) buildTurn(m *mention, session, id string) *turn {
 		m:       m,
 		session: session,
 		id:      id,
+		stop:    make(chan struct{}),
 		log:     c.log.With("turn", id, "session", session, "thread", m.ThreadTS),
 	}
 	t.events = newEvents(t)
@@ -496,7 +534,7 @@ func (t *turn) work(checkpoint agent.Checkpoint, caller serve.Caller) *serve.Wor
 		Events:           t.events,
 		Prompter:         t.prompter,
 		PromptsMayBlock:  true,
-		SuspendRequested: t.ch.suspendRequested,
+		SuspendRequested: t.suspendRequested,
 		HumanPaced:       true,
 		RunContext:       t.runContext,
 		Done:             t.done,
@@ -534,9 +572,9 @@ func (t *turn) prompt() string {
 	return strings.Join(lines, "\n")
 }
 
-// suspendRequested is what every run of this channel polls at a loop boundary: the
-// worker's own drain signal, and this channel being closed. Either parks the run
-// somewhere a later mention in the thread continues from.
+// suspendRequested is the half of the boundary check that belongs to the whole channel
+// rather than to one turn: the worker's own drain signal, and this channel being closed.
+// A turn reads it alongside the Stop button on its own status message.
 func (c *Channel) suspendRequested() bool {
 	if c.suspend != nil && c.suspend() {
 		return true
@@ -606,7 +644,7 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 		c.startStatus(follow.status)
 	}
 
-	c.conclude(t, out.Text, undelivered)
+	c.conclude(t, out, undelivered)
 }
 
 // conclude says everything a turn owes its thread and then ends its status message.
@@ -623,9 +661,16 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 // It is a goroutine at all so a run reporting its outcome is not held behind the
 // workspace's allowance, and it is one Close waits for, since what it says is owed to a
 // person whether or not the worker is still serving.
-func (c *Channel) conclude(t *turn, answer string, undelivered []*mention) {
+func (c *Channel) conclude(t *turn, out serve.Outcome, undelivered []*mention) {
 	c.speak(func() {
-		c.answer(t, answer)
+		c.answer(t, out.Text)
+
+		// A run somebody stopped produces no text, so answer left the status message on
+		// whichever hint it had reached and the press reads as having done nothing. The
+		// other endings that produce no text are the outcome switch's to word.
+		if out.Text == "" && t.stopped() && out.Reason == runstate.ReasonSuspended {
+			t.status.ends(stoppedNote)
+		}
 
 		// The status message stops here rather than at the run's last event, so the state
 		// it ends on is the one Slack is left with.
@@ -650,6 +695,11 @@ func (c *Channel) conclude(t *turn, answer string, undelivered []*mention) {
 // and the check is what keeps a second ending from handing the thread of a turn that has
 // already started to somebody else.
 func (c *Channel) releaseLocked(t *turn) {
+	// The Stop button on this turn's status message reaches nothing once the turn is over,
+	// so a press that arrives afterwards is answered in the thread rather than routed to a
+	// run that has ended.
+	delete(c.stoppable, t.id)
+
 	if c.inFlight[t.session] != t {
 		return
 	}

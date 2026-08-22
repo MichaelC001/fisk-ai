@@ -21,6 +21,13 @@ const (
 	donePlain  = "Done"
 )
 
+// stoppedNote is what a turn somebody pressed Stop on ends its status message with.
+//
+// A stopped run produces no text, so without this the message is left on whichever hint it
+// had reached and the press looks like it did nothing. The conversation is journaled at the
+// boundary the run parked on, which is what the second sentence is telling the person.
+const stoppedNote = "Stopped. Mention me in this thread to carry on."
+
 // markdownCap is the characters every markdown block in one payload shares, and cutWindow
 // how far back from the cut a line or a word boundary is looked for.
 //

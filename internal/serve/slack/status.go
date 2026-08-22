@@ -59,6 +59,10 @@ func hintFor(tool string) string {
 // where it was. Intermediate hints are the traffic this design drops; the last state is
 // the one it may never drop, since the turn's ending is what turns this message into a
 // pointer at the answer.
+//
+// The Stop button is part of that state rather than an edit of its own, so it goes on with
+// the first write and comes off with the ending through the same publisher and the same
+// allowance as every hint between them.
 type status struct {
 	ch  *Channel
 	log *slog.Logger
@@ -87,10 +91,23 @@ type status struct {
 	// over everything above.
 	final string
 
+	// buttons are what a person may press on this message while the turn is live, which is
+	// the Stop button and nothing else. They are part of the state this message publishes
+	// rather than an edit of their own, so taking them off travels through the same
+	// publisher and the same allowance as every hint before it.
+	buttons []button
+
+	// over is set when the turn's ending is recorded, which is what takes the buttons off
+	// a turn whose run produced no text for final to point at.
+	over bool
+
 	// ts names the message once it has been posted and published is the text Slack was
-	// last given, which is what decides whether another call is worth making.
+	// last given, which is what decides whether another call is worth making. shown says
+	// whether it was given the buttons, so taking them off is a change this message writes
+	// even where the words it shows are the ones it already showed.
 	ts        string
 	published string
+	shown     bool
 
 	// changed wakes the publisher. It is buffered by one because it is a signal that
 	// the state moved, not a queue of the states it moved through.
@@ -104,6 +121,10 @@ type status struct {
 
 // newStatus builds the status message for one turn, or nil where this channel narrates
 // nothing. queued says the turn has no worker to start on.
+//
+// It runs under the channel's lock, where it also records the turn this message's Stop
+// button reaches. The two belong together: a channel that posts no status message puts no
+// button anywhere, and a press for a turn nothing recorded is answered rather than routed.
 func (c *Channel) newStatus(t *turn, queued bool) *status {
 	if !c.progress {
 		return nil
@@ -115,15 +136,50 @@ func (c *Channel) newStatus(t *turn, queued bool) *status {
 		return nil
 	}
 
-	return &status{
+	s := &status{
 		ch:        c,
 		log:       t.log,
 		channelID: t.m.ChannelID,
 		threadTS:  t.m.ThreadTS,
 		queued:    queued,
+		buttons:   stopButton(t),
 		changed:   make(chan struct{}, 1),
 		ending:    make(chan struct{}),
 	}
+
+	if len(s.buttons) > 0 {
+		c.stoppable[t.id] = t
+	}
+
+	return s
+}
+
+// The Stop button one status message carries. It is plain rather than emphasized: the
+// message it sits on is running commentary, and a red button on every turn shouts.
+const (
+	// stopActionID names it within its message, which is what Slack requires of an action
+	// id and what tells it from the buttons a question is answered on.
+	stopActionID = "stop_run"
+	labelStop    = "Stop"
+)
+
+// stopButton is what a person presses to ask one turn's run to park at its next boundary.
+//
+// It carries the turn and nothing else. Who may press it is who can see the thread, which
+// is who may answer a question there, and a press is placed by the team, channel and thread
+// the interaction envelope authenticated rather than by anything the button said.
+//
+// A value that could not be built leaves the message with no button, since a status message
+// that says where the run is, is worth posting either way.
+func stopButton(t *turn) []button {
+	value, err := encodeValue(buttonValue{Stop: t.id})
+	if err != nil {
+		t.log.Warn("Building the value the Stop button carries failed", "error", err)
+
+		return nil
+	}
+
+	return []button{{ActionID: stopActionID, Label: labelStop, Value: value}}
 }
 
 // startStatus starts the goroutine that keeps one status message current.
@@ -188,6 +244,11 @@ func (s *status) publish() {
 // The state is read twice, once to decide the call is worth making at all and again once
 // the allowance let it through, since a run that moved on while a call was owed is better
 // described by where it is than by where it was.
+//
+// It goes as blocks from the first call, the button being what the message has to be able
+// to carry. chat.update leaves the blocks of a message alone unless it is given blocks, so
+// a message posted with a button and then edited as text would keep the button for the rest
+// of its life.
 func (s *status) deliver() {
 	if !s.pending() {
 		return
@@ -203,32 +264,32 @@ func (s *status) deliver() {
 		return
 	}
 
-	text, ts, ok := s.current()
+	msg, ts, ok := s.current()
 	if !ok {
 		return
 	}
 
 	if ts == "" {
-		posted, err := s.ch.api.postMessage(ctx, s.channelID, s.threadTS, text)
+		posted, err := s.ch.api.postBlocks(ctx, s.channelID, s.threadTS, msg)
 		if err != nil {
 			s.log.Warn("Posting a status message failed", "error", err)
 
 			return
 		}
 
-		s.wrote(posted, text)
+		s.wrote(posted, msg)
 
 		return
 	}
 
-	err = s.ch.api.updateMessage(ctx, s.channelID, ts, text)
+	err = s.ch.api.updateBlocks(ctx, s.channelID, ts, msg)
 	if err != nil {
 		s.log.Warn("Updating a status message failed", "error", err)
 
 		return
 	}
 
-	s.wrote(ts, text)
+	s.wrote(ts, msg)
 }
 
 // pending reports whether Slack has yet to be told the state the turn has reached.
@@ -236,31 +297,54 @@ func (s *status) pending() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.textLocked() != s.published
+	return s.movedLocked(s.stateLocked())
 }
 
-// current is the text to write and the message to write it to, reporting false where
+// current is the message to write and the timestamp to write it to, reporting false where
 // Slack already shows it.
-func (s *status) current() (text string, ts string, ok bool) {
+func (s *status) current() (msg blockMessage, ts string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	text = s.textLocked()
-	if text == s.published {
-		return "", "", false
+	msg = s.stateLocked()
+	if !s.movedLocked(msg) {
+		return blockMessage{}, "", false
 	}
 
-	return text, s.ts, true
+	return msg, s.ts, true
+}
+
+// stateLocked is the whole of what this message shows: the words, and the Stop button while
+// the turn is live.
+//
+// The button comes off with the ending rather than on its own edit. A turn that ended is a
+// turn nothing can park, and the same write that says where the answer is takes away the
+// button that would have stopped the run producing it.
+func (s *status) stateLocked() blockMessage {
+	msg := blockMessage{Text: s.textLocked()}
+	if s.over || s.final != "" {
+		return msg
+	}
+
+	msg.Buttons = s.buttons
+
+	return msg
+}
+
+// movedLocked reports whether Slack shows something other than msg.
+func (s *status) movedLocked(msg blockMessage) bool {
+	return msg.Text != s.published || (len(msg.Buttons) > 0) != s.shown
 }
 
 // wrote records what Slack now shows. A post that failed records nothing, so the next
 // write posts rather than editing a message that does not exist.
-func (s *status) wrote(ts string, text string) {
+func (s *status) wrote(ts string, msg blockMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.ts = ts
-	s.published = text
+	s.published = msg.Text
+	s.shown = len(msg.Buttons) > 0
 }
 
 // textLocked is what the message says now.
@@ -370,12 +454,20 @@ func (s *status) ends(text string) {
 
 // stop ends the status message, once the state the turn ended in has been written.
 //
+// It records that the turn is over, which is what takes the Stop button off a message whose
+// run produced no text: a turn nothing is running cannot be parked, so the button goes
+// whether or not there is an answer to point at.
+//
 // It is idempotent: a turn reporting an outcome twice is cheaper to tolerate here than to
 // prove impossible.
 func (s *status) stop() {
 	if s == nil {
 		return
 	}
+
+	s.mu.Lock()
+	s.over = true
+	s.mu.Unlock()
 
 	s.endOnce.Do(func() { close(s.ending) })
 }
