@@ -54,7 +54,8 @@ type api interface {
 	updateMessage(ctx context.Context, channelID, ts, text string) error
 
 	// postBlocks posts a message built from blocks into a thread and returns its
-	// timestamp. It is how a question reaches a thread with buttons somebody can press.
+	// timestamp. It is how a question reaches a thread with the buttons and the field an
+	// answer is given on.
 	//
 	// The body travels as the message's own text as well, which is what a notification
 	// and a client that cannot render blocks show.
@@ -62,16 +63,8 @@ type api interface {
 
 	// updateBlocks replaces a message this bot posted with blocks. A question that has
 	// been answered is rewritten through it: the words stay, the answer is written under
-	// them, and the buttons come off so a second person cannot answer it again.
+	// them, and the controls come off so a second person cannot answer it again.
 	updateBlocks(ctx context.Context, channelID, ts string, msg blockMessage) error
-
-	// openView opens a dialog in front of the person who clicked, which is how a free-text
-	// answer is typed: a button minted before anybody typed cannot carry one.
-	//
-	// triggerID comes from their click, expires three seconds after it and may be used
-	// once, so a caller opens the dialog straight off the interaction rather than after any
-	// other work.
-	openView(ctx context.Context, triggerID string, v modalView) error
 
 	// threadReplies returns the last limit messages of a thread, oldest first, the parent
 	// among them.
@@ -169,6 +162,30 @@ type blockMessage struct {
 	// Buttons are what a person may press. A message with none is a question that has been
 	// answered: the words stay and the buttons come off.
 	Buttons []button
+
+	// Input is the field a free-text answer is typed into, nil on every message that asks
+	// for none. It comes off an answered question along with the buttons.
+	Input *textInput
+}
+
+// textInput is the field a free-text answer is typed into, on the question's own message.
+//
+// Slack takes an input block in a message, and dispatch_action makes it report a
+// block_actions payload the moment somebody presses enter in it. The element takes no value
+// this bot mints, so what a button carries in its value travels in the action id here and
+// comes back on that payload beside the typed text.
+type textInput struct {
+	// ActionID carries what a button's Value carries, and Slack returns it on the payload.
+	// Slack caps it at maxActionID characters.
+	ActionID string
+
+	// Label is what the field is called and Placeholder what an empty one shows.
+	Label       string
+	Placeholder string
+
+	// Initial is what the field arrives pre-filled with, which is the default the run
+	// supplied.
+	Initial string
 }
 
 // button is one thing a person may press on a message this bot posted.
@@ -196,42 +213,13 @@ const (
 	buttonDanger  = "danger"
 )
 
-// What Slack takes: the characters in one section block's text, and in one button's label.
+// What Slack takes: the characters in one section block's text, in one button's label, and
+// in one action id.
 const (
 	maxSectionText = 3000
 	maxButtonLabel = 75
+	maxActionID    = 255
 )
-
-// modalView is the dialog views.open puts in front of one person, reduced to the single
-// text field this channel asks for.
-type modalView struct {
-	// Title heads the dialog, Submit labels the button that sends it and Close the one
-	// that abandons it.
-	Title  string
-	Submit string
-	Close  string
-
-	// CallbackID names what the dialog is for and comes back on the submission, so a
-	// submission of somebody else's dialog is not taken for an answer.
-	CallbackID string
-
-	// Metadata is stamped into private_metadata and returned unchanged on submission. A
-	// view_submission payload carries neither the value of the button that opened the
-	// dialog nor the channel and thread it was opened from, so everything the answer has to
-	// be placed by travels here.
-	Metadata string
-
-	// BlockID and ActionID name the one input, which is where the typed value is read from
-	// on submission.
-	BlockID  string
-	ActionID string
-
-	// Label is what the field is called, Placeholder what an empty one shows and Initial
-	// what it arrives pre-filled with.
-	Label       string
-	Placeholder string
-	Initial     string
-}
 
 // envelopeKind is what one socket mode envelope carries.
 type envelopeKind int
@@ -364,45 +352,37 @@ func (c *clientAPI) updateBlocks(ctx context.Context, channelID, ts string, msg 
 	return nil
 }
 
-func (c *clientAPI) openView(ctx context.Context, triggerID string, v modalView) error {
-	_, err := c.client.OpenViewContext(ctx, triggerID, slackgo.ModalViewRequest{
-		Type:            slackgo.VTModal,
-		Title:           slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Title, false, false),
-		Submit:          slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Submit, false, false),
-		Close:           slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Close, false, false),
-		CallbackID:      v.CallbackID,
-		PrivateMetadata: v.Metadata,
-		Blocks: slackgo.Blocks{BlockSet: []slackgo.Block{
-			slackgo.NewInputBlock(v.BlockID,
-				slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Label, false, false),
-				nil,
-				slackgo.NewPlainTextInputBlockElement(
-					slackgo.NewTextBlockObject(slackgo.PlainTextType, v.Placeholder, false, false),
-					v.ActionID,
-				).WithInitialValue(v.Initial),
-			),
-		}},
-	})
-	if err != nil {
-		return fmt.Errorf("opening a dialog: %w", err)
-	}
-
-	return nil
-}
-
 // blocksOf renders one reduced message as the blocks Slack takes: the words as a section,
-// and the buttons under them as actions blocks.
+// the field a free-text answer is typed into under them, and the buttons under that as
+// actions blocks.
+//
+// The input block sets dispatch_action and its element triggers on the enter key, so
+// pressing enter in the field delivers a block_actions payload carrying the typed text.
+// Without both, the field is drawn and nothing a person types ever leaves their screen.
 //
 // The buttons are spread over as many blocks as they need. Slack takes maxActionElements in
 // one of them and refuses the message rather than trimming it, and a selection of the
 // twenty-five options ask_human_select allows plus its Dismiss is twenty-six.
 //
-// The block ids are fixed apart from the number that separates them. Nothing reads them
-// back, a click being routed by the value its button carries, and Slack requires only that
-// they do not repeat within one message.
+// The block ids are fixed apart from the number that separates the actions blocks. Nothing
+// reads them back, an answer being routed by the value its control carries, and Slack
+// requires only that they do not repeat within one message.
 func blocksOf(msg blockMessage) []slackgo.Block {
 	out := []slackgo.Block{
 		slackgo.NewSectionBlock(slackgo.NewTextBlockObject(slackgo.MarkdownType, msg.Text, false, false), nil, nil),
+	}
+
+	if msg.Input != nil {
+		field := slackgo.NewPlainTextInputBlockElement(
+			slackgo.NewTextBlockObject(slackgo.PlainTextType, msg.Input.Placeholder, false, false),
+			msg.Input.ActionID,
+		).
+			WithInitialValue(msg.Input.Initial).
+			WithDispatchActionConfig(&slackgo.DispatchActionConfig{TriggerActionsOn: []string{dispatchOnEnter}})
+
+		out = append(out, slackgo.NewInputBlock(inputBlockID,
+			slackgo.NewTextBlockObject(slackgo.PlainTextType, msg.Input.Label, false, false),
+			nil, field).WithDispatchAction(true))
 	}
 
 	for i := 0; i < len(msg.Buttons); i += maxActionElements {
@@ -423,11 +403,17 @@ func blocksOf(msg blockMessage) []slackgo.Block {
 	return out
 }
 
-// actionsBlockID names the blocks the buttons of one message sit in, and maxActionElements
-// is how many buttons Slack takes in one of them.
+// actionsBlockID names the blocks the buttons of one message sit in, inputBlockID the block
+// a free-text answer is typed into, and maxActionElements is how many buttons Slack takes in
+// one actions block.
+//
+// dispatchOnEnter is the trigger Slack reports a typed answer on, which is the enter key
+// rather than every character.
 const (
 	actionsBlockID    = "answers"
+	inputBlockID      = "answer"
 	maxActionElements = 25
+	dispatchOnEnter   = "on_enter_pressed"
 )
 
 // threadPageSize is how many messages one page of a thread asks for, and threadMaxPages

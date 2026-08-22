@@ -6,7 +6,6 @@ package slack
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -71,7 +70,6 @@ func pressFor(v buttonValue, user string) pressEvent {
 		ThreadTS:  "1700000000.000100",
 		MessageTS: "1700000000.000200",
 		User:      user,
-		TriggerID: "Tr1",
 		Value:     value,
 	}
 }
@@ -199,8 +197,10 @@ var _ = Describe("Interactions", func() {
 		ch := promptingChannel(opts, api, socket, clock)
 		w := runningTurn(ch, socket)
 
+		answers := make(chan string, 1)
 		go func() {
-			_, _ = w.Prompter.Input(callCtx("tu1"), "which node should I drain?", "")
+			text, _ := w.Prompter.Input(callCtx("tu1"), "which node should I drain?", "")
+			answers <- text
 		}()
 
 		var q *fakeMessage
@@ -208,15 +208,17 @@ var _ = Describe("Interactions", func() {
 
 		release, arrivals := api.hold()
 
-		socket.deliver(pressing(q, choiceReply, "U2").envelope())
+		socket.deliver(typing(q, "node4", "U2").envelope())
 
 		Eventually(socket.acked).Should(HaveLen(2))
 		Eventually(arrivals).Should(Receive())
-		Expect(api.opened()).To(BeEmpty(), "the dialog is still in flight, and the envelope was answered before it")
+		Expect(bodyOf(api, q.TS)()).ToNot(ContainSubstring("Answered by"),
+			"the edit recording the answer is still in flight, and the envelope was answered before it")
 
 		release()
 
-		Eventually(api.opened).Should(HaveLen(1))
+		Eventually(answers).Should(Receive(Equal("node4")))
+		Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U2>: node4"))
 	})
 
 	It("Should acknowledge an interaction it cannot read", func() {
@@ -246,8 +248,9 @@ var _ = Describe("Interactions", func() {
 		Eventually(socket.acked).Should(Equal([]string{"Ei9"}))
 	})
 
-	// A dialog some other app opened in this workspace is not an answer to anything here.
-	It("Should ignore a dialog opened under another callback id", func() {
+	// A field on some other app's message in this workspace is not an answer to anything
+	// here: its action id is not a value this channel minted.
+	It("Should ignore an answer typed into a field this bot did not draw", func() {
 		ch := promptingChannel(opts, api, socket, clock)
 		w := runningTurn(ch, socket)
 
@@ -259,19 +262,15 @@ var _ = Describe("Interactions", func() {
 
 		Eventually(questionIn(api)).ShouldNot(BeNil())
 
-		meta, err := json.Marshal(modalMeta{
-			Question:  buttonValue{Kind: kindInput, ToolUse: "tu1", Choice: choiceReply},
-			ChannelID: "C1",
-			ThreadTS:  "1700000000.000100",
-		})
-		Expect(err).ToNot(HaveOccurred())
-
-		socket.deliver(submitEvent{
+		socket.deliver(pressEvent{
 			EnvelopeID: "Ei9",
 			Team:       "T1",
+			Channel:    "C1",
+			ThreadTS:   "1700000000.000100",
+			MessageTS:  "1700000000.000200",
 			User:       "U2",
-			CallbackID: "somebody_elses_dialog",
-			Metadata:   string(meta),
+			Value:      "somebody_elses_field",
+			Typed:      true,
 			Text:       "node4",
 		}.envelope())
 
@@ -287,7 +286,6 @@ var _ = Describe("Interactions", func() {
 				ThreadTS:  "1700000000.000100",
 				MessageTS: "1700000005.000100",
 				User:      "U2",
-				TriggerID: "Tr1",
 			}
 
 			value, err := encodeValue(buttonValue{Kind: kindConfirm, ToolUse: "tu1", Choice: choiceYes, Asker: "U1"})
@@ -304,45 +302,40 @@ var _ = Describe("Interactions", func() {
 			Expect(in.ThreadTS).To(Equal("1700000000.000100"))
 			Expect(in.MessageTS).To(Equal("1700000005.000100"))
 			Expect(in.UserID).To(Equal("U2"))
-			Expect(in.TriggerID).To(Equal("Tr1"))
 			Expect(in.Value.ToolUse).To(Equal("tu1"))
 			Expect(in.Value.Asker).To(Equal("U1"))
+			Expect(in.Text).To(BeEmpty(), "a button carries a choice, not words")
 		})
 
-		It("Should take a dialog's conversation from what it was stamped with", func() {
-			meta, err := json.Marshal(modalMeta{
-				Question:  buttonValue{Kind: kindInput, ToolUse: "tu1", Choice: choiceReply, Asker: "U1"},
-				ChannelID: "C1",
-				ThreadTS:  "1700000000.000100",
-			})
+		// A dispatched field reports the same block_actions a button does, with what this
+		// channel minted in the action id and the typed text as the action's value. The
+		// conversation still comes from the envelope.
+		It("Should read a typed answer off the action that carries it", func() {
+			value, err := encodeValue(buttonValue{Kind: kindInput, ToolUse: "tu1", Choice: choiceTyped, Asker: "U1"})
 			Expect(err).ToNot(HaveOccurred())
 
-			in, wanted, err := clickOf(submitEvent{Team: "T1", User: "U2", Metadata: string(meta), Text: "node4"}.envelope())
+			typed := pressEvent{
+				Team:      "T1",
+				Channel:   "C1",
+				ThreadTS:  "1700000000.000100",
+				MessageTS: "1700000005.000100",
+				User:      "U2",
+				Value:     value,
+				Typed:     true,
+				Text:      "node4",
+			}
+
+			in, wanted, err := clickOf(typed.envelope())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(wanted).To(BeTrue())
 
-			Expect(in.Interaction).To(Equal(interactionSubmit))
+			Expect(in.Interaction).To(Equal(interactionPress))
 			Expect(in.ChannelID).To(Equal("C1"))
 			Expect(in.ThreadTS).To(Equal("1700000000.000100"))
 			Expect(in.UserID).To(Equal("U2"))
 			Expect(in.Text).To(Equal("node4"))
 			Expect(in.Value.Kind).To(Equal(kindInput))
-		})
-
-		// An empty answer is one somebody gave, which is why the dialog's own submission is
-		// what says a value arrived rather than the value itself.
-		It("Should read an empty dialog as the answer it is", func() {
-			meta, err := json.Marshal(modalMeta{
-				Question:  buttonValue{Kind: kindInput, ToolUse: "tu1", Choice: choiceReply},
-				ChannelID: "C1",
-				ThreadTS:  "1700000000.000100",
-			})
-			Expect(err).ToNot(HaveOccurred())
-
-			in, wanted, err := clickOf(submitEvent{Team: "T1", User: "U2", Metadata: string(meta)}.envelope())
-			Expect(err).ToNot(HaveOccurred())
-			Expect(wanted).To(BeTrue())
-			Expect(in.Text).To(BeEmpty())
+			Expect(in.Value.ToolUse).To(Equal("tu1"))
 		})
 
 		It("Should refuse an interaction missing what an answer is placed by", func() {
@@ -402,7 +395,7 @@ var _ = Describe("Interactions", func() {
 				Answer:   &agent.DeferredAnswer{ToolUseID: "tu1", Content: content},
 				Force:    true,
 			}))
-			Expect(resumed.ID).To(Equal("C1/tu1"), "the call rather than a message, a dialog submission carrying none")
+			Expect(resumed.ID).To(Equal("C1/tu1"), "the call rather than a message: one call is one turn's work")
 			Expect(resumed.ClaimedBy).To(Equal(resumed.ID))
 			Expect(resumed.Prompt).To(BeEmpty(), "a resume adds no turn; it answers a call the conversation is waiting on")
 			Expect(resumed.Caller).To(Equal(serve.Caller{Name: "cara/U7", Verified: true}), "whoever pressed it")
@@ -459,9 +452,9 @@ var _ = Describe("Interactions", func() {
 			Expect(resumed.Checkpoint.Answer).To(Equal(&agent.DeferredAnswer{ToolUseID: "tu1", Content: content}))
 		})
 
-		// The value a free-text question is answered with is typed after the button was
-		// minted, so it arrives on the dialog's own submission.
-		It("Should answer a free-text question with what was typed into the dialog", func() {
+		// The field stays on the message after the run gave up, so the answer typed into it
+		// on Thursday reaches the conversation as a resume.
+		It("Should answer a free-text question with what was typed into the field on it", func() {
 			ch := promptingChannel(opts, api, socket, clock)
 			w := runningTurn(ch, socket)
 
@@ -474,18 +467,16 @@ var _ = Describe("Interactions", func() {
 			ended(w)
 			abandoned(ch, "tu1")
 
-			socket.deliver(pressing(q, choiceReply, "U7").envelope())
-			Eventually(api.opened).Should(HaveLen(1))
+			Expect(q.Input).ToNot(BeNil(), "nothing was answered, so the field is where whoever reads the thread finds it")
 
-			socket.deliver(submitEvent{
-				Team: "T1", User: "U7", Metadata: api.opened()[0].View.Metadata, Text: "node4",
-			}.envelope())
+			socket.deliver(typing(q, "node4", "U7").envelope())
 
 			content, err := builtin.InputResult("node4", "")
 			Expect(err).ToNot(HaveOccurred())
 
 			resumed := nextWork(ch)
 			Expect(resumed.Checkpoint.Answer).To(Equal(&agent.DeferredAnswer{ToolUseID: "tu1", Content: content}))
+			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: node4"))
 		})
 
 		// The gate guards a command that has not run, so there is no result to supply. The

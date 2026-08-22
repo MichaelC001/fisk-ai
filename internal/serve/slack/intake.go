@@ -148,8 +148,8 @@ func (c *Channel) newTurn(m *mention, session string) *turn {
 
 // newResume builds the turn one click becomes.
 //
-// The call names it rather than a message. A dialog submission carries no message of its
-// own, and one call is one turn's worth of work however many times somebody presses.
+// The call names it rather than a message: one call is one turn's worth of work however
+// many times somebody presses.
 //
 // A press on the gate carries no result for the call, which was never dispatched. Its
 // approval goes to this turn's prompter instead, and the gate's question about that call on

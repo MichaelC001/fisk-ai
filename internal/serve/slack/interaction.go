@@ -5,10 +5,8 @@
 package slack
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	slackgo "github.com/slack-go/slack"
 
@@ -21,13 +19,12 @@ import (
 type interactionKind int
 
 const (
-	// interactionPress is a button on a message this bot posted.
+	// interactionPress is a button on a message this bot posted, or the field a free-text
+	// answer was typed into on one. Slack reports both as block_actions.
 	interactionPress interactionKind = iota
-	// interactionSubmit is the dialog a free-text answer was typed into, being sent.
-	interactionSubmit
 	// interactionMention is a mention that answered the free-text question open in its
 	// thread. Nothing decodes one off the socket: the intake mints it so the answer takes
-	// the path a dialog submission takes, there being one way an answer reaches a run.
+	// the path a press takes, there being one way an answer reaches a run.
 	interactionMention
 )
 
@@ -47,65 +44,19 @@ type click struct {
 	ChannelID string
 	ThreadTS  string
 
-	// MessageTS is the question message the button was on, empty for a dialog submission.
+	// MessageTS is the question message the answer was given on.
 	MessageTS string
 
 	// UserID is who pressed it, which the question message records. Anybody in the thread
 	// may answer, so this is not required to be the person the question was put to.
 	UserID string
 
-	// TriggerID opens a dialog. It expires three seconds after the click and may be used
-	// once, so nothing waits on it.
-	TriggerID string
-
-	// Value is what the button carried, or what the dialog was stamped with when it was
-	// opened.
+	// Value is what the control carried: the button's own value, or the action id the
+	// field a free-text answer is typed into was drawn with.
 	Value buttonValue
 
-	// Text is what somebody typed into the dialog.
+	// Text is what somebody typed.
 	Text string
-}
-
-// The dialog a free-text answer is typed into.
-//
-// The callback id is checked on submission, so a dialog some other app opened in this
-// workspace is not taken for an answer. The block and action ids name the one field, which
-// is where the typed value is read from.
-const (
-	modalCallbackID = "fisk_ai_answer"
-	modalBlockID    = "answer"
-	modalActionID   = "text"
-)
-
-// The words the dialog is drawn with.
-const (
-	modalTitle       = "Your answer"
-	modalSubmit      = "Send"
-	modalClose       = "Cancel"
-	modalLabel       = "Answer"
-	modalPlaceholder = "Type your answer"
-)
-
-// triggerWindow bounds opening a dialog. The trigger a click carries expires three seconds
-// after the press, so a call still waiting on the workspace's allowance past this window is
-// worth abandoning rather than spending: it would reach Slack with a trigger Slack has
-// already retired.
-const triggerWindow = 2 * time.Second
-
-// modalMeta is what a dialog carries so its submission can be placed.
-//
-// A view_submission payload carries neither the value of the button that opened the dialog
-// nor a channel and a thread, so everything the answer has to be routed by is stamped in
-// when the dialog is opened. Slack returns it unchanged, and this bot is the only writer of
-// it.
-type modalMeta struct {
-	// Question is the value of the button that opened the dialog.
-	Question buttonValue `json:"question"`
-
-	// ChannelID and ThreadTS are the conversation the button was pressed in, taken from
-	// that press's own authenticated envelope.
-	ChannelID string `json:"channel"`
-	ThreadTS  string `json:"thread"`
 }
 
 // clickOf decodes one envelope into the interaction this channel acts on, reporting false
@@ -129,27 +80,35 @@ func clickOf(env envelope) (*click, bool, error) {
 		return nil, false, fmt.Errorf("decoding an interaction envelope: %w", err)
 	}
 
-	switch cb.Type {
-	case slackgo.InteractionTypeBlockActions:
-		return pressOf(&cb)
-	case slackgo.InteractionTypeViewSubmission:
-		return submitOf(&cb)
-	default:
+	if cb.Type != slackgo.InteractionTypeBlockActions {
 		return nil, false, nil
 	}
+
+	return pressOf(&cb)
 }
 
-// pressOf reads a button press.
+// pressOf reads a button press, or an answer typed into the field a free-text question
+// carries.
 //
-// One press reports one action, and a message of this channel's carries only buttons, so the
-// first is the one that was pressed. A press carrying a value this channel did not mint is
-// refused rather than routed.
+// One interaction reports one action, and a message of this channel's carries one control a
+// person acts on at a time, so the first action is the one they used. A button carries what
+// this channel minted in its own value. A plain_text_input element takes no such value, so
+// the same bytes travel in its action id and the typed text arrives as the action's value.
+//
+// An interaction carrying a value this channel did not mint is refused rather than routed.
 func pressOf(cb *slackgo.InteractionCallback) (*click, bool, error) {
 	if len(cb.ActionCallback.BlockActions) == 0 {
 		return nil, false, nil
 	}
 
-	value, err := decodeValue(cb.ActionCallback.BlockActions[0].Value)
+	act := cb.ActionCallback.BlockActions[0]
+
+	minted, typed := act.Value, ""
+	if act.Type == slackgo.ActionType(slackgo.METPlainTextInput) {
+		minted, typed = act.ActionID, act.Value
+	}
+
+	value, err := decodeValue(minted)
 	if err != nil {
 		return nil, false, err
 	}
@@ -161,56 +120,14 @@ func pressOf(cb *slackgo.InteractionCallback) (*click, bool, error) {
 		ThreadTS:    cb.Container.ThreadTs,
 		MessageTS:   cb.Container.MessageTs,
 		UserID:      cb.User.ID,
-		TriggerID:   cb.TriggerID,
 		Value:       value,
+		Text:        typed,
 	}
 
 	// The container is where a press on a message reports its conversation; the channel is
 	// where an interaction with no container reports one.
 	if in.ChannelID == "" {
 		in.ChannelID = cb.Channel.ID
-	}
-
-	err = in.complete()
-	if err != nil {
-		return nil, false, err
-	}
-
-	return in, true, nil
-}
-
-// submitOf reads a dialog being sent.
-//
-// The value of the button that opened it comes back out of private_metadata, the payload
-// carrying no action of its own, and the typed text off the one field the dialog holds. An
-// empty field is a valid answer, so nothing here refuses one.
-func submitOf(cb *slackgo.InteractionCallback) (*click, bool, error) {
-	if cb.View.CallbackID != modalCallbackID {
-		return nil, false, nil
-	}
-
-	var meta modalMeta
-
-	err := json.Unmarshal([]byte(cb.View.PrivateMetadata), &meta)
-	if err != nil {
-		return nil, false, fmt.Errorf("reading what a dialog was opened for: %w", err)
-	}
-
-	if meta.Question.ToolUse == "" || !meta.Question.Kind.known() {
-		return nil, false, fmt.Errorf("a dialog arrived without the question it answers")
-	}
-
-	in := &click{
-		Interaction: interactionSubmit,
-		TeamID:      cb.Team.ID,
-		ChannelID:   meta.ChannelID,
-		ThreadTS:    meta.ThreadTS,
-		UserID:      cb.User.ID,
-		Value:       meta.Question,
-	}
-
-	if cb.View.State != nil {
-		in.Text = cb.View.State.Values[modalBlockID][modalActionID].Value
 	}
 
 	err = in.complete()
@@ -236,12 +153,11 @@ func (in *click) complete() error {
 //
 // The decode is in memory and the acknowledgement follows it, which is the mention path's
 // order and the same three-second rule: Slack redelivers an interaction it has not been
-// answered about, and a dialog acknowledged late stays on the screen of whoever sent it.
+// answered about within three seconds.
 //
-// A press on the Reply button of a free-text question opens the dialog and answers nothing.
-// A press on a Stop button answers no question either: it names a turn rather than a call,
-// so it is routed by that name and never looked for among the open questions. Everything
-// else carries the answer itself.
+// A press on a Stop button answers no question: it names a turn rather than a call, so it is
+// routed by that name and never looked for among the open questions. Everything else carries
+// the answer itself.
 func (c *Channel) clicked(env envelope) {
 	in, wanted, err := clickOf(env)
 	if err != nil {
@@ -258,12 +174,6 @@ func (c *Channel) clicked(env envelope) {
 
 	if in.Interaction == interactionPress && in.Value.Stop != "" {
 		c.stopPressed(in)
-
-		return
-	}
-
-	if in.Interaction == interactionPress && in.Value.Kind == kindInput && in.Value.Choice == choiceReply {
-		c.openReply(in)
 
 		return
 	}
@@ -319,55 +229,6 @@ func (c *Channel) stopping(in *click) *turn {
 	}
 
 	return t
-}
-
-// openReply puts the dialog a free-text answer is typed into in front of whoever pressed
-// Reply.
-//
-// It is started here rather than after any other work, the trigger expiring three seconds
-// after the press, and it runs under triggerWindow so a call held behind the workspace's
-// allowance past that is abandoned rather than spent on a trigger Slack has retired.
-//
-// The dialog is opened whether or not this worker still holds the question. A person who
-// pressed Reply has an answer to give either way, and what becomes of it is decided when
-// they send it.
-func (c *Channel) openReply(in *click) {
-	meta, err := json.Marshal(modalMeta{Question: in.Value, ChannelID: in.ChannelID, ThreadTS: in.ThreadTS})
-	if err != nil {
-		c.log.Warn("Building what a dialog is opened for failed", "tool_use", in.Value.ToolUse, "error", err)
-
-		return
-	}
-
-	def := c.asked.defaultFor(in.Value.ToolUse)
-
-	c.speak(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), triggerWindow)
-		defer cancel()
-
-		err := c.limit.take(ctx)
-		if err != nil {
-			c.log.Warn("Waiting for the allowance to open a dialog failed", "tool_use", in.Value.ToolUse, "error", err)
-
-			return
-		}
-
-		err = c.api.openView(ctx, in.TriggerID, modalView{
-			Title:       modalTitle,
-			Submit:      modalSubmit,
-			Close:       modalClose,
-			CallbackID:  modalCallbackID,
-			Metadata:    string(meta),
-			BlockID:     modalBlockID,
-			ActionID:    modalActionID,
-			Label:       modalLabel,
-			Placeholder: modalPlaceholder,
-			Initial:     def,
-		})
-		if err != nil {
-			c.log.Warn("Opening the dialog a free-text answer is typed into failed", "tool_use", in.Value.ToolUse, "error", err)
-		}
-	})
 }
 
 // answerQuestion routes one answer to the question it names.
@@ -584,7 +445,7 @@ func mentionAnswer(m *mention, q openQuestion) *click {
 		Value: buttonValue{
 			Kind:    kindInput,
 			ToolUse: q.toolUseID,
-			Choice:  choiceReply,
+			Choice:  choiceTyped,
 			Asker:   q.asker,
 		},
 		Text: m.Text,

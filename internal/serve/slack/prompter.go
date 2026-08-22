@@ -60,9 +60,10 @@ const (
 	choiceNo     = "no"
 	choiceOnce   = "once"
 	choiceAlways = "always"
-	// choiceReply is the button that opens the dialog a free-text answer is typed into. It
-	// answers nothing on its own.
-	choiceReply = "reply"
+	// choiceTyped is what an answer somebody wrote carries, whether they typed it into the
+	// field on the question message or mentioned the bot with it. The words are the click's
+	// own text; this says which of the two shapes of answer they are.
+	choiceTyped = "typed"
 	// choiceDismiss ends a question nobody wants to answer. The call is answered with the
 	// null result its own tool produces for an operator who gave no answer, so the
 	// conversation takes a turn again instead of waiting on the thread.
@@ -114,10 +115,10 @@ type buttonValue struct {
 	// Choice is what this button says, in the terms the question's own kind reads.
 	Choice string `json:"choice"`
 
-	// Label is what the button was drawn with, which for a selection is the option itself.
-	// A restarted worker holds no record of the options a selection offered, and the result
-	// ask_human_select returns names the option rather than its position, so the option
-	// travels with the choice.
+	// Label is what the choice says in words, which for a selection is the option itself
+	// rather than the number its button is drawn with. A restarted worker holds no record
+	// of the options a selection offered, and the result ask_human_select returns names the
+	// option rather than its position, so the option travels with the choice.
 	Label string `json:"label,omitempty"`
 
 	// Asker is who the run put the question to. A restarted worker holds no record of it
@@ -173,11 +174,11 @@ func decodeValue(s string) (buttonValue, error) {
 
 // given is one person's answer to one question.
 type given struct {
-	// By is who pressed the button or sent the dialog, which the question message records.
+	// By is who pressed the button or typed the answer, which the question message records.
 	By string
 
-	// Choice is what the button carried and Text what somebody typed into the dialog. A
-	// question uses one of them.
+	// Choice is what the control carried and Text what somebody typed. A question uses one
+	// of them.
 	Choice string
 	Text   string
 }
@@ -212,8 +213,9 @@ type question struct {
 	channelID string
 	threadTS  string
 
-	// text is the message body without the buttons, so recording an answer rewrites the
-	// message rather than losing what was asked.
+	// text is the message body without the controls, so recording an answer rewrites the
+	// message rather than losing what was asked. A selection's options are part of it: the
+	// buttons carry the index and the words are read off the message.
 	text string
 
 	// buttons are what the message is posted with, and options the choices a selection was
@@ -221,9 +223,14 @@ type question struct {
 	buttons []button
 	options []string
 
-	// def pre-fills the dialog a free-text answer is typed into, for the question kind that
-	// opens one.
+	// def pre-fills the field a free-text answer is typed into, for the question kind that
+	// carries one.
 	def string
+
+	// input is the field a free-text answer is typed into, nil for the three kinds that
+	// take a button. It is held here as well as posted so a refused press can put the
+	// message back the way whoever pressed found it.
+	input *textInput
 
 	// woken tells the run an answer arrived. It is buffered by one and written once, under
 	// the lock and only on the move out of questionOpen, so the goroutine reading envelopes
@@ -391,21 +398,6 @@ func (qs *questions) message(q *question) (channelID string, ts string, text str
 	defer qs.mu.Unlock()
 
 	return q.channelID, q.messageTS, q.text
-}
-
-// defaultFor is what the dialog for one call arrives pre-filled with, empty where this
-// worker is holding no question for it. A restarted worker opens the dialog empty rather
-// than refusing to open one, since a person pressing Reply has an answer to give either way.
-func (qs *questions) defaultFor(toolUseID string) string {
-	qs.mu.Lock()
-	defer qs.mu.Unlock()
-
-	q, held := qs.open[toolUseID]
-	if !held {
-		return ""
-	}
-
-	return q.def
 }
 
 // forget drops a question this worker is no longer holding.
@@ -617,7 +609,7 @@ func (p *prompter) ApproveCommand(ctx context.Context, req toolkit.GateRequest) 
 		return choice, nil
 	}
 
-	q, err := p.newQuestion(kindApprove, req.ToolUseID, gateText(req), nil)
+	q, err := p.newQuestion(kindApprove, req.ToolUseID, gateText(req), nil, "")
 	if err != nil {
 		return toolkit.ConfirmNo, err
 	}
@@ -644,7 +636,7 @@ func (p *prompter) ApproveCommand(ctx context.Context, req toolkit.GateRequest) 
 // own null result carrying the reason, so the model reads that nobody decided rather than
 // that somebody decided against.
 func (p *prompter) Confirm(ctx context.Context, question string) (bool, error) {
-	q, err := p.newQuestion(kindConfirm, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), nil)
+	q, err := p.newQuestion(kindConfirm, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), nil, "")
 	if err != nil {
 		return false, err
 	}
@@ -661,11 +653,14 @@ func (p *prompter) Confirm(ctx context.Context, question string) (bool, error) {
 	return g.Choice == choiceYes, nil
 }
 
-// Select puts the options to the thread as one button each, with Dismiss after them, and
-// answers with the index of the one pressed. A choice outside the options is one nobody was
-// offered, reported rather than clamped.
+// Select puts the options to the thread as a numbered list in the message, with one button
+// per number under it and Dismiss after them, and answers with the index of the one pressed.
+//
+// The words are in the message rather than on the buttons because a button label is cut at
+// 75 characters and a row of long ones is unreadable, where a section block holds 3000. A
+// choice outside the options is one nobody was offered, reported rather than clamped.
 func (p *prompter) Select(ctx context.Context, question string, options []string) (int, error) {
-	q, err := p.newQuestion(kindSelect, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), options)
+	q, err := p.newQuestion(kindSelect, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), options, "")
 	if err != nil {
 		return -1, err
 	}
@@ -690,22 +685,21 @@ func (p *prompter) Select(ctx context.Context, question string, options []string
 	return idx, nil
 }
 
-// Input asks the thread for a free-text value. The message carries Reply, which opens the
-// dialog the value is typed into, and Dismiss: a button is minted before anybody has typed,
-// so it cannot carry what they will type.
+// Input asks the thread for a free-text value. The message carries the field it is typed
+// into and Dismiss beside it: a button is minted before anybody has typed, so it cannot
+// carry what they will type, and the field reports what somebody wrote when they press
+// enter in it.
 //
 // A mention in the thread answers this question too, its text being the value, which is
 // what a person's first instinct produces.
 //
-// An empty string is a valid answer, which is why the dialog's own submission is what says
-// one was given.
+// An empty string is a valid answer, which is why pressing enter is what says one was given
+// rather than the value itself.
 func (p *prompter) Input(ctx context.Context, question, def string) (string, error) {
-	q, err := p.newQuestion(kindInput, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), nil)
+	q, err := p.newQuestion(kindInput, toolkit.ToolUseIDFromContext(ctx), escapeMrkdwn(question), nil, def)
 	if err != nil {
 		return "", err
 	}
-
-	q.def = def
 
 	g, err := p.ask(ctx, q, unansweredDefers)
 	if err != nil {
@@ -809,7 +803,7 @@ func (p *prompter) post(ctx context.Context, q *question) error {
 		return fmt.Errorf("waiting for the allowance to ask a question: %w", err)
 	}
 
-	ts, err := p.ch.api.postBlocks(ctx, q.channelID, q.threadTS, blockMessage{Text: q.text, Buttons: q.buttons})
+	ts, err := p.ch.api.postBlocks(ctx, q.channelID, q.threadTS, blockMessage{Text: q.text, Buttons: q.buttons, Input: q.input})
 	if err != nil {
 		return fmt.Errorf("asking a question in %s: %w", q.channelID, err)
 	}
@@ -819,12 +813,14 @@ func (p *prompter) post(ctx context.Context, q *question) error {
 	return nil
 }
 
-// newQuestion builds one question and the buttons it is asked with.
+// newQuestion builds one question, the words it is asked in and the controls it is answered
+// on. def is what a free-text question's field arrives pre-filled with and is empty for the
+// other three.
 //
-// A call this question cannot name is refused rather than asked. The button carries the
+// A call this question cannot name is refused rather than asked. The control carries the
 // call, the click is routed by it, and the resume answers it, so a question with none would
 // put buttons in a thread that nothing could ever be delivered from.
-func (p *prompter) newQuestion(kind questionKind, toolUseID, body string, options []string) (*question, error) {
+func (p *prompter) newQuestion(kind questionKind, toolUseID, body string, options []string, def string) (*question, error) {
 	if toolUseID == "" {
 		return nil, fmt.Errorf("a question cannot be put to a thread outside a tool call: nothing anybody pressed could be delivered back to it")
 	}
@@ -837,18 +833,75 @@ func (p *prompter) newQuestion(kind questionKind, toolUseID, body string, option
 		channelID: p.t.m.ChannelID,
 		threadTS:  p.t.m.ThreadTS,
 		options:   options,
+		def:       def,
 		woken:     make(chan struct{}, 1),
 	}
 
-	q.text = clipped(body, maxQuestionText) + "\n\n" + typedRepliesNote
+	q.text = questionText(q.asker, body, options)
 
-	buttons, err := q.mint()
+	buttons, field, err := q.mint()
 	if err != nil {
 		return nil, err
 	}
+
 	q.buttons = buttons
+	q.input = field
 
 	return q, nil
+}
+
+// questionText is what one question message says: who is being asked, what is being asked,
+// the options where there are any, and the note about typed replies.
+//
+// The asker is named with Slack's own mention markup, so the thread shows their name, links
+// them and notifies them. Their id comes from the event Slack delivered and carries nothing
+// that needs escaping.
+//
+// The words are cut to fit under Slack's section cap. A selection's options take room of
+// their own beside them, so the question is held to what is left rather than to the whole.
+// body arrives escaped, so the cut it takes is the one that leaves no entity half written.
+func questionText(asker, body string, options []string) string {
+	room := maxQuestionText
+	if len(options) > 0 {
+		room -= maxOptionsText
+	}
+
+	text := clippedMrkdwn(body, room)
+	if asker != "" {
+		text = fmt.Sprintf(askedOf, asker) + " " + text
+	}
+
+	if len(options) > 0 {
+		text += "\n\n" + optionList(options, maxOptionsText)
+	}
+
+	return text + "\n\n" + typedRepliesNote
+}
+
+// askedOf names the person a question is put to, and Slack renders it as their name.
+const askedOf = "<@%s>"
+
+// optionList renders a selection's options as the numbered list its buttons answer, one per
+// line, within budget bytes.
+//
+// Every option is on the list, since a button carries the number and the words are the only
+// place the person reads what they are choosing between. The budget is shared out evenly, so
+// twenty-five options each get a share rather than the first few taking all of it, and an
+// option longer than its share is cut where it is.
+//
+// The escape comes before the cut, as it does for the question's own words: an option of
+// ampersands is five times its own length once escaped, and a list cut afterwards would take
+// the message past what Slack accepts.
+func optionList(options []string, budget int) string {
+	per := max(budget/len(options)-optionOverhead, minOptionText)
+	per = min(per, maxOptionText)
+
+	lines := make([]string, 0, len(options))
+	for i, opt := range options {
+		lines = append(lines, fmt.Sprintf("*%d.* %s", i+1, clippedMrkdwn(escapeMrkdwn(opt), per)))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // typedRepliesNote is on every question, because a person's first instinct is to type the
@@ -869,8 +922,13 @@ const (
 	labelOnce    = "Allow once"
 	labelAlways  = "Allow for this conversation"
 	labelDecline = "Decline"
-	labelReply   = "Reply"
 	labelDismiss = "Dismiss"
+)
+
+// What the field a free-text answer is typed into is called, and what an empty one shows.
+const (
+	labelAnswer       = "Your answer"
+	placeholderAnswer = "Type your answer and press enter"
 )
 
 // What a question says once it has been answered. Anybody in the thread may answer, so who
@@ -887,53 +945,104 @@ const (
 	secondPressLine = "_This one already has an answer, so I have left it where it is._"
 )
 
-// mint builds the buttons one question is asked with. Each carries the same value shape, so
-// the click path reads one thing however the question was put.
+// mint builds the controls one question is answered on: the buttons, and for a free-text
+// question the field the answer is typed into. Each carries the same value shape, so the
+// click path reads one thing however the question was put.
+//
+// A selection's buttons are numbered rather than labeled with the options. A label is cut at
+// 75 characters and a row of long ones reads badly, so the options are on the message and
+// each button carries the number of the line it answers. The option itself travels in the
+// value, which is what a worker holding no question answers with.
 //
 // Every question can be ended from its own message. Three of them carry Dismiss, which
 // answers the call with the null result its own tool produces for an operator who gave no
 // answer. The confirm gate's Decline is its dismissal: the gated command does not run, which
 // is the whole of what declining to answer a gate can mean, and a second button beside it
 // saying the same thing in vaguer words would be a choice nobody has to make.
-func (q *question) mint() ([]button, error) {
+func (q *question) mint() ([]button, *textInput, error) {
 	switch q.kind {
 	case kindConfirm:
-		return q.buttonsFor([]buttonSpec{
+		buttons, err := q.buttonsFor([]buttonSpec{
 			{choice: choiceYes, label: labelYes, style: buttonPrimary},
 			{choice: choiceNo, label: labelNo},
 			{choice: choiceDismiss, label: labelDismiss},
 		})
 
+		return buttons, nil, err
+
 	case kindApprove:
-		return q.buttonsFor([]buttonSpec{
+		buttons, err := q.buttonsFor([]buttonSpec{
 			{choice: choiceOnce, label: labelOnce, style: buttonPrimary},
 			{choice: choiceAlways, label: labelAlways},
 			{choice: choiceNo, label: labelDecline, style: buttonDanger},
 		})
 
+		return buttons, nil, err
+
 	case kindInput:
-		return q.buttonsFor([]buttonSpec{
-			{choice: choiceReply, label: labelReply, style: buttonPrimary},
-			{choice: choiceDismiss, label: labelDismiss},
-		})
+		buttons, err := q.buttonsFor([]buttonSpec{{choice: choiceDismiss, label: labelDismiss}})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		field, err := q.field()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return buttons, field, nil
 
 	case kindSelect:
 		specs := make([]buttonSpec, 0, len(q.options)+1)
 		for i, opt := range q.options {
-			specs = append(specs, buttonSpec{choice: strconv.Itoa(i), label: opt})
+			specs = append(specs, buttonSpec{choice: strconv.Itoa(i), label: strconv.Itoa(i + 1), answer: opt})
 		}
 
-		return q.buttonsFor(append(specs, buttonSpec{choice: choiceDismiss, label: labelDismiss}))
+		buttons, err := q.buttonsFor(append(specs, buttonSpec{choice: choiceDismiss, label: labelDismiss}))
+
+		return buttons, nil, err
 
 	default:
-		return nil, fmt.Errorf("no buttons are defined for a %q question", q.kind)
+		return nil, nil, fmt.Errorf("no controls are defined for a %q question", q.kind)
 	}
 }
 
-// buttonSpec is one button before its value has been built.
+// field is the input a free-text answer is typed into.
+//
+// The action id carries what a button carries in its value, a plain_text_input element
+// taking none of its own, and Slack returns it on the payload the enter key produces. A
+// value too long for an action id is refused rather than posted: Slack would refuse the
+// message itself, leaving a run waiting on a question nobody was ever shown.
+func (q *question) field() (*textInput, error) {
+	value, err := encodeValue(buttonValue{
+		Kind:    q.kind,
+		ToolUse: q.toolUseID,
+		Choice:  choiceTyped,
+		Asker:   q.asker,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(value) > maxActionID {
+		return nil, fmt.Errorf("a free-text question about call %q cannot be asked: what the field has to carry is %d characters, and Slack takes %d", q.toolUseID, len(value), maxActionID)
+	}
+
+	return &textInput{
+		ActionID:    value,
+		Label:       labelAnswer,
+		Placeholder: placeholderAnswer,
+		Initial:     q.def,
+	}, nil
+}
+
+// buttonSpec is one button before its value has been built. answer is what the value records
+// the choice as, for the button whose label is not the answer in words; it is empty where
+// the label says it.
 type buttonSpec struct {
 	choice string
 	label  string
+	answer string
 	style  string
 }
 
@@ -941,16 +1050,20 @@ func (q *question) buttonsFor(specs []buttonSpec) ([]button, error) {
 	out := make([]button, 0, len(specs))
 
 	for _, spec := range specs {
-		// The label travels in the value as well as on the button, so the answer a
-		// selection resumes with names the option rather than its position even where this
-		// worker restarted between the question and the press.
 		label := clipped(spec.label, maxButtonLabel)
+
+		// The answer travels in the value as well as on the message, so a selection
+		// resumed after a restart names the option rather than the number of its button.
+		answer := spec.answer
+		if answer == "" {
+			answer = label
+		}
 
 		value, err := encodeValue(buttonValue{
 			Kind:    q.kind,
 			ToolUse: q.toolUseID,
 			Choice:  spec.choice,
-			Label:   label,
+			Label:   clipped(answer, maxOptionText),
 			Asker:   q.asker,
 		})
 		if err != nil {
@@ -971,7 +1084,7 @@ func (q *question) buttonsFor(specs []buttonSpec) ([]button, error) {
 }
 
 // recordAnswer rewrites a question message with the answer it was given, which takes the
-// buttons off it: the question is settled and a second press would change nothing.
+// controls off it: the question is settled and a second press would change nothing.
 //
 // note is one line about what became of that answer, so nobody is left looking at a button
 // they pressed with no sign it registered. It is empty for an answer the run that asked
@@ -1007,8 +1120,9 @@ func (c *Channel) recordAnswer(q *question, g *given, note string) {
 
 // pressNote says on a question message what became of a press this channel did not act on.
 //
-// The buttons go back on with it. Nothing was recorded as the answer, so the press whoever
-// clicked was asked to make again has a button to be made on.
+// The controls go back on with it. Nothing was recorded as the answer, so the press whoever
+// clicked was asked to make again has a button to be made on, and the field a free-text
+// answer is typed into is there to type it into again.
 func (c *Channel) pressNote(q *question, line string) {
 	channelID, ts, text := c.asked.message(q)
 	if ts == "" {
@@ -1025,7 +1139,7 @@ func (c *Channel) pressNote(q *question, line string) {
 		return
 	}
 
-	err = c.api.updateBlocks(ctx, channelID, ts, blockMessage{Text: text + "\n\n" + line, Buttons: q.buttons})
+	err = c.api.updateBlocks(ctx, channelID, ts, blockMessage{Text: text + "\n\n" + line, Buttons: q.buttons, Input: q.input})
 	if err != nil {
 		c.log.Warn("Answering a press on its question failed", "channel", channelID, "message", ts, "error", err)
 	}
@@ -1033,6 +1147,14 @@ func (c *Channel) pressNote(q *question, line string) {
 
 // reads is what an answer says when it is written back onto the question, in the terms the
 // question was put in rather than the terms the button carried.
+//
+// A selection's option, a choice naming none of them and a typed answer are escaped before
+// they are cut, the way the question's own words are: escaping grows the string, so an answer
+// cut first would put the rewritten message past the room maxQuestionText left for it and the
+// update recording it would be refused.
+//
+// The choice and the text come off the click rather than out of anything this worker minted,
+// so both are held to maxAnswerText however long they arrive.
 func (q *question) reads(g *given) string {
 	if g.Choice == choiceDismiss {
 		return answerDismissed
@@ -1059,17 +1181,17 @@ func (q *question) reads(g *given) string {
 	case kindSelect:
 		idx, err := strconv.Atoi(g.Choice)
 		if err != nil || idx < 0 || idx >= len(q.options) {
-			return escapeMrkdwn(g.Choice)
+			return clippedMrkdwn(escapeMrkdwn(g.Choice), maxAnswerText)
 		}
 
-		return escapeMrkdwn(clipped(q.options[idx], maxAnswerText))
+		return clippedMrkdwn(escapeMrkdwn(q.options[idx]), maxAnswerText)
 
 	default:
 		if g.Text == "" {
 			return "_nothing_"
 		}
 
-		return escapeMrkdwn(clipped(g.Text, maxAnswerText))
+		return clippedMrkdwn(escapeMrkdwn(g.Text), maxAnswerText)
 	}
 }
 
@@ -1087,9 +1209,20 @@ func gateText(req toolkit.GateRequest) string {
 // The lengths the text of one question is held to. maxQuestionText leaves room under
 // Slack's own section cap for the line the answer adds and for the note about typed
 // replies, and maxAnswerText caps what somebody typed where it is written back.
+//
+// maxOptionsText is what a selection's list takes of maxQuestionText, and the other two
+// limit one option: maxOptionText where there are few enough for the whole share to be more
+// than an option needs, minOptionText where there are enough that an even share would be
+// shorter than a word.
 const (
 	maxQuestionText = maxSectionText - 400
 	maxAnswerText   = 200
+	maxOptionsText  = 1200
+	maxOptionText   = 200
+	minOptionText   = 24
+	// optionOverhead is the number, its markup and the newline each option's line spends
+	// beyond the option itself.
+	optionOverhead = 8
 )
 
 // clipMarker ends a string that had to be cut.
@@ -1099,22 +1232,71 @@ const clipMarker = "..."
 // is bytes rather than characters for the reason the answer's own cap is: Slack states these
 // limits in characters without saying which count, and a byte length is at or above every
 // reading of that.
+//
+// Text that has been through escapeMrkdwn is cut by clippedMrkdwn instead.
 func clipped(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 
-	kept := s[:max(0, n-len(clipMarker))]
-	for len(kept) > 0 {
-		r, size := utf8.DecodeLastRuneInString(kept)
+	return wholeRunes(s[:max(0, n-len(clipMarker))]) + clipMarker
+}
+
+// clippedMrkdwn cuts escaped text to at most n bytes, on a rune boundary and never inside
+// one of the entities escapeMrkdwn writes.
+//
+// Escaping comes before the cut wherever a size limit is counted, because escaping grows the
+// string: an answer of ampersands is five times its length once escaped, and a string cut
+// first takes the message past the room its caller reserved. The cut then has the entities
+// to land in, and a message carrying &am where the answer had an ampersand shows it that
+// way.
+func clippedMrkdwn(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	return wholeEntities(wholeRunes(s[:max(0, n-len(clipMarker))])) + clipMarker
+}
+
+// wholeRunes drops the bytes of a character a cut landed in the middle of.
+func wholeRunes(s string) string {
+	for len(s) > 0 {
+		r, size := utf8.DecodeLastRuneInString(s)
 		if r != utf8.RuneError || size > 1 {
 			break
 		}
 
-		kept = kept[:len(kept)-1]
+		s = s[:len(s)-1]
 	}
 
-	return kept + clipMarker
+	return s
+}
+
+// mrkdwnEntities is what escapeMrkdwn writes, which is where the ampersands in escaped text
+// come from.
+var mrkdwnEntities = []string{"&amp;", "&lt;", "&gt;"}
+
+// wholeEntities drops the start of an entity a cut landed inside. The ampersand it looks
+// back to is the last one in escaped text, so an entity ending before it is complete.
+func wholeEntities(s string) string {
+	i := strings.LastIndexByte(s, '&')
+	if i < 0 {
+		return s
+	}
+
+	tail := s[i:]
+
+	for _, entity := range mrkdwnEntities {
+		if tail == entity {
+			return s
+		}
+
+		if strings.HasPrefix(entity, tail) {
+			return s[:i]
+		}
+	}
+
+	return s
 }
 
 // escapeMrkdwn takes the three characters Slack reads as markup out of text somebody else

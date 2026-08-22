@@ -36,11 +36,6 @@ type fakeAPI struct {
 	names   map[string]person
 	lookups int
 
-	// views is every dialog this bot asked Slack to open, and viewErr fails every call
-	// that asks for one.
-	views   []fakeView
-	viewErr error
-
 	// postErr and updateErr fail the next call of each, so a spec covers a Slack that
 	// refuses.
 	postErr   error
@@ -52,9 +47,9 @@ type fakeAPI struct {
 	repliesErr error
 	nameErr    error
 
-	// gate holds every post until a spec releases it and arrivals reports each one
-	// reaching that hold, which is how a spec keeps a message in flight while it asserts
-	// on what waits for it.
+	// gate holds every call that talks to Slack until a spec releases it and arrivals
+	// reports each one reaching that hold, which is how a spec keeps a message in flight
+	// while it asserts on what waits for it.
 	gate     chan struct{}
 	arrivals chan struct{}
 }
@@ -74,6 +69,10 @@ type fakeMessage struct {
 	// Buttons is what a person can press on it, empty for the messages that carry none and
 	// for a question whose answer has been recorded.
 	Buttons []button
+
+	// Input is the field a free-text answer is typed into, nil for every message that
+	// carries none and for a question that has been answered.
+	Input *textInput
 }
 
 func newFakeAPI() *fakeAPI {
@@ -104,7 +103,8 @@ func (f *fakeAPI) authTest(context.Context) (workspace, error) {
 	return f.ws, nil
 }
 
-// hold makes every post wait, returning the release and the arrivals to wait on.
+// hold makes every post and every edit wait, returning the release and the arrivals to wait
+// on.
 func (f *fakeAPI) hold() (release func(), arrivals chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -117,33 +117,41 @@ func (f *fakeAPI) hold() (release func(), arrivals chan struct{}) {
 	return func() { close(gate) }, f.arrivals
 }
 
-func (f *fakeAPI) postMessage(_ context.Context, channelID, threadTS, text string) (string, error) {
-	return f.record(channelID, threadTS, text, false, nil)
-}
-
-func (f *fakeAPI) postMarkdown(_ context.Context, channelID, threadTS, markdown string) (string, error) {
-	return f.record(channelID, threadTS, markdown, true, nil)
-}
-
-func (f *fakeAPI) postBlocks(_ context.Context, channelID, threadTS string, msg blockMessage) (string, error) {
-	return f.record(channelID, threadTS, msg.Text, false, msg.Buttons)
-}
-
-// record is what every posting path does, differing only in whether Slack is being asked to
-// render the text and in what a person can press on the result.
-func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool, buttons []button) (string, error) {
+// wait is where a call held by hold stops, reporting that it reached the hold before it
+// blocks. A spec that set no hold passes straight through.
+func (f *fakeAPI) wait() {
 	f.mu.Lock()
 	gate, arrivals := f.gate, f.arrivals
 	f.mu.Unlock()
 
-	if gate != nil {
-		select {
-		case arrivals <- struct{}{}:
-		default:
-		}
-
-		<-gate
+	if gate == nil {
+		return
 	}
+
+	select {
+	case arrivals <- struct{}{}:
+	default:
+	}
+
+	<-gate
+}
+
+func (f *fakeAPI) postMessage(_ context.Context, channelID, threadTS, text string) (string, error) {
+	return f.record(channelID, threadTS, text, false, nil, nil)
+}
+
+func (f *fakeAPI) postMarkdown(_ context.Context, channelID, threadTS, markdown string) (string, error) {
+	return f.record(channelID, threadTS, markdown, true, nil, nil)
+}
+
+func (f *fakeAPI) postBlocks(_ context.Context, channelID, threadTS string, msg blockMessage) (string, error) {
+	return f.record(channelID, threadTS, msg.Text, false, msg.Buttons, msg.Input)
+}
+
+// record is what every posting path does, differing only in whether Slack is being asked to
+// render the text and in what a person can answer on the result.
+func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool, buttons []button, field *textInput) (string, error) {
+	f.wait()
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -158,23 +166,25 @@ func (f *fakeAPI) record(channelID, threadTS, text string, markdown bool, button
 	f.nextTS++
 	ts := fmt.Sprintf("%d.000100", 1700000000+f.nextTS)
 
-	f.posted[ts] = &fakeMessage{ChannelID: channelID, ThreadTS: threadTS, TS: ts, Text: text, Markdown: markdown, Buttons: buttons}
+	f.posted[ts] = &fakeMessage{ChannelID: channelID, ThreadTS: threadTS, TS: ts, Text: text, Markdown: markdown, Buttons: buttons, Input: field}
 	f.order = append(f.order, ts)
 
 	return ts, nil
 }
 
 func (f *fakeAPI) updateMessage(_ context.Context, channelID, ts, text string) error {
-	return f.edit(channelID, ts, text, nil)
+	return f.edit(channelID, ts, text, nil, nil)
 }
 
 func (f *fakeAPI) updateBlocks(_ context.Context, channelID, ts string, msg blockMessage) error {
-	return f.edit(channelID, ts, msg.Text, msg.Buttons)
+	return f.edit(channelID, ts, msg.Text, msg.Buttons, msg.Input)
 }
 
-// edit is what both update paths do. The buttons are replaced rather than added to, so a
+// edit is what both update paths do. The controls are replaced rather than added to, so a
 // question that has been answered records what it lost.
-func (f *fakeAPI) edit(channelID, ts, text string, buttons []button) error {
+func (f *fakeAPI) edit(channelID, ts, text string, buttons []button, field *textInput) error {
+	f.wait()
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -193,51 +203,9 @@ func (f *fakeAPI) edit(channelID, ts, text string, buttons []button) error {
 	m.Edits = append(m.Edits, text)
 	m.Text = text
 	m.Buttons = buttons
+	m.Input = field
 
 	return nil
-}
-
-// openView records the dialog this bot asked Slack to put in front of somebody, and holds
-// like a post does so a spec can keep one in flight.
-func (f *fakeAPI) openView(_ context.Context, triggerID string, v modalView) error {
-	f.mu.Lock()
-	gate, arrivals := f.gate, f.arrivals
-	err := f.viewErr
-	f.mu.Unlock()
-
-	if gate != nil {
-		select {
-		case arrivals <- struct{}{}:
-		default:
-		}
-
-		<-gate
-	}
-
-	if err != nil {
-		return err
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.views = append(f.views, fakeView{TriggerID: triggerID, View: v})
-
-	return nil
-}
-
-// fakeView is one dialog this bot asked Slack to open.
-type fakeView struct {
-	TriggerID string
-	View      modalView
-}
-
-// opened is every dialog this bot asked for, in order.
-func (f *fakeAPI) opened() []fakeView {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	return append([]fakeView(nil), f.views...)
 }
 
 func (f *fakeAPI) threadReplies(_ context.Context, channelID, threadTS string, limit int) ([]message, error) {

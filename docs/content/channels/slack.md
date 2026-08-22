@@ -43,8 +43,8 @@ settings:
 ```
 
 Socket mode is the transport the channel connects over. `app_mention` is the only event it subscribes to. Interactivity
-carries the button presses and the dialog submissions back, so without it an answer to a question never reaches the
-worker.
+carries the button presses and the answers typed into a question back, so without it an answer to a question never
+reaches the worker.
 
 | Scope               | What it covers                                          |
 |---------------------|----------------------------------------------------------|
@@ -108,9 +108,23 @@ that lets a tool-serving configuration omit them does not apply.
 
 ## What a thread shows
 
-A mention starts a turn, and that turn posts a status message it edits while the run works: `Thinking...`,
-`Calling tools...`, `Searching knowledge...`. The message names a family of tools rather than the tool being run,
-because everybody in the channel reads the thread.
+A mention starts a turn, and that turn posts a status message it edits while the run works:
+`:thinking_face: Thinking...`, `:hammer: Calling tools...`, `:books: Searching knowledge...`. The message names a
+family of tools rather than the tool being run, because everybody in the channel reads the thread.
+
+Each line opens with an emoji, so a thread scrolled past shows which turns worked and which did not before anybody
+reads the words:
+
+| The turn is                | The line reads                            |
+|----------------------------|-------------------------------------------|
+| waiting for a worker       | `:hourglass_flowing_sand: Queued...`      |
+| thinking                   | `:thinking_face: Thinking...`             |
+| using the memory tools     | `:brain: Accessing memory...`             |
+| using the knowledge tools  | `:books: Searching knowledge...`          |
+| using any other tool       | `:hammer: Calling tools...`               |
+| waiting on somebody        | `:question: Waiting for an answer...`     |
+
+The emoji is part of the line, so the notification a phone shows carries it too.
 
 The status message carries a Stop button while the turn is running, and anyone in the thread may press it. The bot
 finishes the step it is on and stops there. Everything the thread has said is kept, so mentioning the bot again carries
@@ -128,21 +142,35 @@ Stop button goes with the status message.
 
 ## Questions
 
-A tool that needs a person asks in the thread, as a message with buttons. Anybody in the thread may answer, whether or
-not they asked the question. A free-text question carries a Reply button that opens a dialog to type into, and every
-question carries Dismiss.
+A tool that needs a person asks in the thread, as a message of its own. It opens by mentioning whoever started the
+turn, so they are notified, and anybody in the thread may answer whether or not they asked the question.
 
-Nothing expires. The question stays in the thread until somebody presses a button, and the bot carries on from the
-answer whenever it arrives: a minute later, on Thursday, or after the worker has been restarted in between. The status
-message reads `Waiting for your answer.` in the meantime, and the question message records who answered and what they
-chose.
+| Question              | The thread shows                                                                    |
+|-----------------------|--------------------------------------------------------------------------------------|
+| a yes/no question     | Yes and No                                                                           |
+| a confirmation gate   | Allow once, Allow for this conversation, and Decline                                 |
+| a selection           | the options as a numbered list in the message, and a button per number under it       |
+| a free-text question  | a field to type the answer into, sent by pressing enter                              |
+
+The first three carry Dismiss beside them, which answers the tool that a person was reached and gave no answer. The
+gate's Decline is its dismissal: the gated command not running is the whole of what declining a gate can mean.
+
+A selection puts the options in the message rather than on the buttons because a button label is cut at 75 characters,
+where the message holds 3000. Twenty-five options share those characters, so a long option is cut to its share of them
+and every option is on the list.
+
+Nothing expires. The question stays in the thread until somebody answers it, and the bot carries on from that answer
+whenever it arrives: a minute later, on Thursday, or after the worker has been restarted in between. The status message
+reads `:question: Waiting for your answer.` in the meantime, and the question message records who answered and what
+they chose.
 
 `answer_grace` is how long the bot stays on that thread before it goes back to answering other people. It changes
 nothing about how long an answer is accepted for.
 
-The worker never sees a plain reply in the thread. Only `app_mention` is subscribed, so a typed answer reaches it only
-when it mentions the bot, and every question message says so. A mention answers a free-text question; while any other
-kind is open the channel refuses the mention with a link to the question.
+The worker never sees a plain reply in the thread. Only `app_mention` is subscribed, so words typed under a question
+reach it through the question's own field or through a mention and no other way, and every question message says so. A
+mention answers a free-text question; while any other kind is open the channel refuses the mention with a link to the
+question.
 
 > [!info] Warning
 > `Allow for this conversation` on a confirmation-gated command covers the whole thread, not one turn and not the
@@ -152,17 +180,20 @@ kind is open the channel refuses the mention with a link to the question.
 
 The status message says what became of the turn:
 
-| Ending                        | The thread shows                                                       |
-|-------------------------------|-------------------------------------------------------------------------|
-| the agent answered            | the answer as its own message, and `Done: see the answer`                |
-| the agent answered nothing    | `I finished, but had nothing to say.`                                    |
-| a question is unanswered      | `Waiting for your answer.`                                               |
-| Stop was pressed              | `Stopped. Mention me in this thread to carry on.`                        |
-| a gate was never approved     | `Nobody answered my question in time, so I stopped.`                     |
-| the worker drained            | `I was shut down part way through. Mention me to carry on.`              |
-| the token budget ran out      | `This conversation has used its allowance. Start a new thread to carry on.` |
-| the model-call cap was reached | `I ran out of steps on this one. Mention me to carry on.`               |
-| the run failed or crashed     | one line saying so                                                       |
+| Ending                         | The thread shows                                                                            |
+|--------------------------------|----------------------------------------------------------------------------------------------|
+| the agent answered             | the answer as its own message, and `:white_check_mark: Done: see the answer`                 |
+| the agent answered nothing     | `:white_check_mark: I finished, but had nothing to say.`                                     |
+| a question is unanswered       | `:question: Waiting for your answer.`                                                        |
+| Stop was pressed               | `:octagonal_sign: Stopped. Mention me in this thread to carry on.`                           |
+| a gate was never approved      | `:octagonal_sign: Nobody answered my question in time, so I stopped. Answer it and I will carry on.` |
+| the worker drained             | `:octagonal_sign: I was shut down part way through. Mention me to carry on.`                 |
+| the token budget ran out       | `:octagonal_sign: This conversation has used its allowance. Start a new thread to carry on.` |
+| the model-call cap was reached | `:octagonal_sign: I ran out of steps on this one. Mention me to carry on.`                   |
+| the run failed or crashed      | `:x:` and one line saying so                                                                 |
+
+The budget and the step cap read as parked rather than as faults, since both lines tell the person where to carry on.
+A run that finished with nothing to say reads as answered, the run having finished.
 
 No ending names a session, a tool call or a Go error. The worker log has all three, and a thread is read by everybody
 in the channel.

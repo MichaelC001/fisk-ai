@@ -7,6 +7,8 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -104,8 +106,13 @@ func buttonsOf(a *fakeAPI, ts string) func() []button {
 	}
 }
 
-// pressEvent builds the interaction envelope Slack delivers for a button press, so a spec
-// varies one field of a real payload rather than a hand-made struct.
+// pressEvent builds the interaction envelope Slack delivers for a button press and for an
+// answer typed into a question's own field, so a spec varies one field of a real payload
+// rather than a hand-made struct.
+//
+// Typed says this is the second of those: Slack reports it as a block_actions like any
+// press, with the action id the field was drawn with and the typed text as the action's
+// value.
 type pressEvent struct {
 	EnvelopeID string
 	Team       string
@@ -113,80 +120,46 @@ type pressEvent struct {
 	ThreadTS   string
 	MessageTS  string
 	User       string
-	TriggerID  string
 	Value      string
+	Typed      bool
+	Text       string
 }
 
 func (p pressEvent) envelope() envelope {
 	GinkgoHelper()
 
+	action := map[string]any{
+		"type":      "button",
+		"block_id":  actionsBlockID,
+		"action_id": "answer",
+		"value":     p.Value,
+	}
+
+	if p.Typed {
+		action = map[string]any{
+			"type":      "plain_text_input",
+			"block_id":  inputBlockID,
+			"action_id": p.Value,
+			"value":     p.Text,
+		}
+	}
+
 	body, err := json.Marshal(map[string]any{
-		"type":       "block_actions",
-		"trigger_id": p.TriggerID,
-		"team":       map[string]any{"id": p.Team},
-		"user":       map[string]any{"id": p.User},
-		"channel":    map[string]any{"id": p.Channel},
+		"type":    "block_actions",
+		"team":    map[string]any{"id": p.Team},
+		"user":    map[string]any{"id": p.User},
+		"channel": map[string]any{"id": p.Channel},
 		"container": map[string]any{
 			"type":       "message",
 			"channel_id": p.Channel,
 			"thread_ts":  p.ThreadTS,
 			"message_ts": p.MessageTS,
 		},
-		"actions": []any{map[string]any{
-			"type":      "button",
-			"block_id":  actionsBlockID,
-			"action_id": "answer",
-			"value":     p.Value,
-		}},
+		"actions": []any{action},
 	})
 	Expect(err).ToNot(HaveOccurred())
 
 	id := p.EnvelopeID
-	if id == "" {
-		id = "Ei1"
-	}
-
-	return envelope{ID: id, Kind: envelopeInteractive, Payload: body}
-}
-
-// submitEvent builds the interaction envelope Slack delivers when a dialog is sent.
-type submitEvent struct {
-	EnvelopeID string
-	Team       string
-	User       string
-	CallbackID string
-	Metadata   string
-	Text       string
-}
-
-func (s submitEvent) envelope() envelope {
-	GinkgoHelper()
-
-	callback := s.CallbackID
-	if callback == "" {
-		callback = modalCallbackID
-	}
-
-	body, err := json.Marshal(map[string]any{
-		"type": "view_submission",
-		"team": map[string]any{"id": s.Team},
-		"user": map[string]any{"id": s.User},
-		"view": map[string]any{
-			"type":             "modal",
-			"callback_id":      callback,
-			"private_metadata": s.Metadata,
-			"state": map[string]any{
-				"values": map[string]any{
-					modalBlockID: map[string]any{
-						modalActionID: map[string]any{"type": "plain_text_input", "value": s.Text},
-					},
-				},
-			},
-		},
-	})
-	Expect(err).ToNot(HaveOccurred())
-
-	id := s.EnvelopeID
 	if id == "" {
 		id = "Ei1"
 	}
@@ -212,7 +185,6 @@ func pressing(m *fakeMessage, choice string, user string) pressEvent {
 			ThreadTS:  m.ThreadTS,
 			MessageTS: m.TS,
 			User:      user,
-			TriggerID: "Tr1",
 			Value:     b.Value,
 		}
 	}
@@ -220,6 +192,24 @@ func pressing(m *fakeMessage, choice string, user string) pressEvent {
 	Fail("the question carries no button for " + choice)
 
 	return pressEvent{}
+}
+
+// typing is somebody pressing enter in the field a free-text question carries.
+func typing(m *fakeMessage, text string, user string) pressEvent {
+	GinkgoHelper()
+
+	Expect(m.Input).ToNot(BeNil(), "the question carries no field to type into")
+
+	return pressEvent{
+		Team:      "T1",
+		Channel:   m.ChannelID,
+		ThreadTS:  m.ThreadTS,
+		MessageTS: m.TS,
+		User:      user,
+		Value:     m.Input.ActionID,
+		Typed:     true,
+		Text:      text,
+	}
 }
 
 // heldQuestion is the question this worker is holding for one call.
@@ -282,15 +272,22 @@ var _ = Describe("The prompter", func() {
 			Eventually(answers).Should(Receive(BeTrue()))
 		})
 
-		It("Should present the options and answer with the index of the one pressed", func() {
+		// The words are on the message and the buttons carry the number of the line they
+		// answer, so an option longer than a button label reads in full.
+		It("Should put the options in the message and answer with the index of the number pressed", func() {
 			ch := promptingChannel(opts, api, socket, clock)
 			w := runningTurn(ch, socket)
+
+			long := []string{
+				"node3, the one in Frankfurt that has been paging since Tuesday about its disk",
+				"node4, the one in Dublin that nobody has touched since the upgrade last month",
+			}
 
 			answers := make(chan int, 1)
 			failures := make(chan error, 1)
 
 			go func() {
-				idx, err := w.Prompter.Select(callCtx("tu1"), "which node?", []string{"node3", "node4", "node5"})
+				idx, err := w.Prompter.Select(callCtx("tu1"), "which node?", long)
 				failures <- err
 				answers <- idx
 			}()
@@ -298,9 +295,21 @@ var _ = Describe("The prompter", func() {
 			var q *fakeMessage
 			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
 
-			Expect(q.Buttons).To(HaveLen(4), "one button per option, and Dismiss after them")
-			Expect(q.Buttons[1].Label).To(Equal("node4"))
-			Expect(q.Buttons[3].Label).To(Equal(labelDismiss))
+			Expect(q.Text).To(ContainSubstring("*1.* " + long[0]))
+			Expect(q.Text).To(ContainSubstring("*2.* " + long[1]))
+			Expect(len(long[1])).To(BeNumerically(">", maxButtonLabel), "an option no button label would hold")
+
+			Expect(q.Buttons).To(HaveLen(3), "one numbered button per option, and Dismiss after them")
+			Expect(q.Buttons[0].Label).To(Equal("1"))
+			Expect(q.Buttons[1].Label).To(Equal("2"))
+			Expect(q.Buttons[2].Label).To(Equal(labelDismiss))
+
+			// The words travel in the value too, which is what a worker holding no question
+			// answers the model with.
+			v, err := decodeValue(q.Buttons[1].Value)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v.Choice).To(Equal("1"))
+			Expect(v.Label).To(Equal(long[1]))
 
 			socket.deliver(pressing(q, "1", "U2").envelope())
 
@@ -309,8 +318,9 @@ var _ = Describe("The prompter", func() {
 		})
 
 		// A button is minted before anybody has typed, so it cannot carry what they will
-		// type. The dialog is what a free-text answer is given in.
-		It("Should open a dialog from a button and answer with what was typed into it", func() {
+		// type. The field on the question's own message reports what they wrote when they
+		// press enter in it.
+		It("Should answer a free-text question with what was typed into the field on it", func() {
 			ch := promptingChannel(opts, api, socket, clock)
 			w := runningTurn(ch, socket)
 
@@ -326,33 +336,49 @@ var _ = Describe("The prompter", func() {
 			var q *fakeMessage
 			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
 
-			Expect(q.Buttons).To(HaveLen(2))
-			Expect(q.Buttons[0].Label).To(Equal(labelReply))
-			Expect(q.Buttons[1].Label).To(Equal(labelDismiss))
+			Expect(q.Buttons).To(HaveLen(1), "Dismiss, the answer being typed rather than pressed")
+			Expect(q.Buttons[0].Label).To(Equal(labelDismiss))
 
-			socket.deliver(pressing(q, choiceReply, "U2").envelope())
+			Expect(q.Input).ToNot(BeNil())
+			Expect(q.Input.Initial).To(Equal("node3"), "the default the run supplied")
 
-			Eventually(api.opened).Should(HaveLen(1))
+			// The element takes no value this channel mints, so what a button carries in its
+			// value travels in the action id.
+			v, err := decodeValue(q.Input.ActionID)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v.ToolUse).To(Equal("tu1"))
+			Expect(v.Kind).To(Equal(kindInput))
+			Expect(len(q.Input.ActionID)).To(BeNumerically("<=", maxActionID))
 
-			opened := api.opened()[0]
-			Expect(opened.TriggerID).To(Equal("Tr1"))
-			Expect(opened.View.CallbackID).To(Equal(modalCallbackID))
-			Expect(opened.View.Initial).To(Equal("node3"), "the default the run supplied")
-
-			// A view_submission carries neither the value of the button that opened the
-			// dialog nor a channel and a thread, so the metadata is the whole of what places
-			// the answer.
-			var meta modalMeta
-			Expect(json.Unmarshal([]byte(opened.View.Metadata), &meta)).To(Succeed())
-			Expect(meta.Question.ToolUse).To(Equal("tu1"))
-			Expect(meta.Question.Kind).To(Equal(kindInput))
-			Expect(meta.ChannelID).To(Equal("C1"))
-			Expect(meta.ThreadTS).To(Equal("1700000000.000100"))
-
-			socket.deliver(submitEvent{Team: "T1", User: "U2", Metadata: opened.View.Metadata, Text: "node4"}.envelope())
+			socket.deliver(typing(q, "node4", "U2").envelope())
 
 			Eventually(failures).Should(Receive(BeNil()))
 			Eventually(answers).Should(Receive(Equal("node4")))
+		})
+
+		// An empty answer is one somebody gave, so pressing enter in an empty field is what
+		// says a value arrived rather than the value itself.
+		It("Should read an empty field as the answer it is", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			answers := make(chan string, 1)
+			failures := make(chan error, 1)
+
+			go func() {
+				text, err := w.Prompter.Input(callCtx("tu1"), "which node should I drain?", "")
+				failures <- err
+				answers <- text
+			}()
+
+			var q *fakeMessage
+			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+			socket.deliver(typing(q, "", "U2").envelope())
+
+			Eventually(failures).Should(Receive(BeNil()))
+			Eventually(answers).Should(Receive(Equal("")))
+			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U2>: _nothing_"))
 		})
 
 		DescribeTable("Should put the gate's three-way choice to the thread",
@@ -409,6 +435,64 @@ var _ = Describe("The prompter", func() {
 			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: node4"))
 			Eventually(buttonsOf(api, q.TS)).Should(BeEmpty(), "a settled question is not answered twice")
 			Expect(bodyOf(api, q.TS)()).To(ContainSubstring("which node?"), "what was asked stays on the message")
+		})
+
+		// Escaping grows the string, so an answer of nothing but the three characters Slack
+		// reads as markup is five times its own length once it is written back. A question
+		// already at its own cap plus an answer cut before it was escaped is a message Slack
+		// refuses, which would leave the buttons on a call that has been answered.
+		It("Should record an answer of escaping characters inside the section Slack takes", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			go func() {
+				_, _ = w.Prompter.Input(callCtx("tu1"), strings.Repeat("n", maxSectionText), "")
+			}()
+
+			var q *fakeMessage
+			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+			socket.deliver(typing(q, strings.Repeat("&", 500), "U7").envelope())
+
+			// The cut lands two bytes into the fortieth ampersand, so it takes the whole of
+			// that one rather than leaving &am on the message.
+			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: " + strings.Repeat("&amp;", 39) + clipMarker))
+			Expect(len(bodyOf(api, q.TS)())).To(BeNumerically("<=", maxSectionText))
+		})
+
+		// The choice comes off the click payload rather than out of the button this worker
+		// minted, so a choice naming no option is whatever the press carried. Recording it
+		// uncut takes the update past the section Slack accepts, which leaves the buttons on
+		// a call that has been answered.
+		It("Should record a choice naming no option inside the section Slack takes", func() {
+			ch := promptingChannel(opts, api, socket, clock)
+			w := runningTurn(ch, socket)
+
+			options := make([]string, 25)
+			for i := range options {
+				options[i] = strings.Repeat("n", 300)
+			}
+
+			go func() {
+				_, _ = w.Prompter.Select(callCtx("tu1"), strings.Repeat("n", maxSectionText), options)
+			}()
+
+			var q *fakeMessage
+			Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+			press := pressing(q, "0", "U7")
+
+			v, err := decodeValue(press.Value)
+			Expect(err).ToNot(HaveOccurred())
+			v.Choice = strings.Repeat("<", maxSectionText)
+
+			press.Value, err = encodeValue(v)
+			Expect(err).ToNot(HaveOccurred())
+
+			socket.deliver(press.envelope())
+
+			Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: " + strings.Repeat("&lt;", 49) + clipMarker))
+			Expect(len(bodyOf(api, q.TS)())).To(BeNumerically("<=", maxSectionText))
 		})
 
 		// The run blocks in the prompter, so a thread watching a status message that still
@@ -824,6 +908,27 @@ var _ = Describe("The prompter", func() {
 		Expect(q.Buttons[0].Value).ToNot(ContainSubstring(SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")))
 	})
 
+	// A raw user id names nobody a reader recognizes. Slack's own mention markup renders as
+	// that person's name, links them and notifies them, and costs no lookup.
+	It("Should name the person it is asking with a mention", func() {
+		ch := promptingChannel(opts, api, socket, clock)
+		w := runningTurn(ch, socket)
+
+		go func() {
+			_, _ = w.Prompter.Confirm(callCtx("tu1"), "restart node3?")
+		}()
+
+		var q *fakeMessage
+		Eventually(func() *fakeMessage { q = questionIn(api)(); return q }).ShouldNot(BeNil())
+
+		Expect(q.Text).To(HavePrefix("<@U1> restart node3?"), "the asker, then what they are being asked")
+		Expect(q.Text).ToNot(MatchRegexp(`(^|[^@<])U1\b`), "nowhere does it name them by the id itself")
+
+		socket.deliver(pressing(q, choiceYes, "U7").envelope())
+
+		Eventually(bodyOf(api, q.TS)).Should(ContainSubstring("Answered by <@U7>: Yes"), "and neither does the line recording who answered")
+	})
+
 	// The call is what the click is routed by and what the resume answers, so a question that
 	// cannot name one would put buttons in a thread nothing could ever be delivered from.
 	It("Should refuse to ask a question outside a tool call", func() {
@@ -833,6 +938,32 @@ var _ = Describe("The prompter", func() {
 		_, err := w.Prompter.Confirm(context.Background(), "restart node3?")
 		Expect(err).To(MatchError(ContainSubstring("outside a tool call")))
 		Expect(err).ToNot(MatchError(toolkit.ErrPromptAborted), "nobody was asked, so nobody walked away from it")
+	})
+})
+
+var _ = Describe("The words a question is asked in", func() {
+	// ask_human_select allows twenty-five options and Slack refuses a section over 3000
+	// characters rather than trimming it, so the budget is shared out and every option is
+	// on the list a person chooses from.
+	It("Should list every option of a long selection and stay inside one section", func() {
+		options := make([]string, 25)
+		for i := range options {
+			options[i] = strings.Repeat("n", 300)
+		}
+
+		text := questionText("U1", "which node?", options)
+
+		Expect(len(text)).To(BeNumerically("<=", maxSectionText))
+
+		for i := range options {
+			Expect(text).To(ContainSubstring(fmt.Sprintf("*%d.* ", i+1)))
+		}
+	})
+
+	It("Should leave a question with no options as the words and the note", func() {
+		text := questionText("U1", "restart node3?", nil)
+
+		Expect(text).To(Equal("<@U1> restart node3?\n\n" + typedRepliesNote))
 	})
 })
 
@@ -849,5 +980,41 @@ var _ = Describe("Escaping what somebody else wrote", func() {
 	It("Should never clip a character in half", func() {
 		out := clipped("世界世界世界", 8)
 		Expect(out).To(Equal("世..."))
+	})
+
+	// Slack renders what it is given, so a cut between the ampersand and the semicolon puts
+	// &am in the message where the answer had an ampersand.
+	It("Should never clip escaped text inside an entity", func() {
+		Expect(clippedMrkdwn("a&amp;b", 6)).To(Equal("a" + clipMarker))
+		Expect(clippedMrkdwn("&amp;&amp;", 8)).To(Equal("&amp;" + clipMarker))
+		Expect(clippedMrkdwn("&lt;&gt;", 7)).To(Equal("&lt;" + clipMarker))
+	})
+
+	// Escaping grows the string, so an answer cut before it is escaped comes out longer than
+	// the room the question's own cap left for it.
+	It("Should escape a typed answer before it is cut to fit", func() {
+		q := &question{kind: kindInput}
+		answer := q.reads(&given{Choice: choiceTyped, Text: strings.Repeat("&", maxAnswerText)})
+
+		Expect(len(answer)).To(BeNumerically("<=", maxAnswerText))
+		Expect(answer).To(Equal(strings.Repeat("&amp;", 39) + clipMarker))
+	})
+
+	It("Should escape a chosen option before it is cut to fit", func() {
+		q := &question{kind: kindSelect, options: []string{strings.Repeat("<", maxAnswerText)}}
+		answer := q.reads(&given{Choice: "0"})
+
+		Expect(len(answer)).To(BeNumerically("<=", maxAnswerText))
+		Expect(answer).To(Equal(strings.Repeat("&lt;", 49) + clipMarker))
+	})
+
+	// A choice this worker minted names one of the options, but what comes back is whatever
+	// the payload carried, so the fallback is held to the same cap the option is.
+	It("Should escape and cut a choice that names no option", func() {
+		q := &question{kind: kindSelect, options: []string{"node3"}}
+		answer := q.reads(&given{Choice: strings.Repeat("<", maxSectionText)})
+
+		Expect(len(answer)).To(BeNumerically("<=", maxAnswerText))
+		Expect(answer).To(Equal(strings.Repeat("&lt;", 49) + clipMarker))
 	})
 })
