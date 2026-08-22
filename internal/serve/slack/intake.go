@@ -390,12 +390,21 @@ func (c *Channel) takeWaiting() *turn {
 // behind another one asks about the journal the turn in front of it left rather than the
 // one it found on arrival.
 func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
+	// One lookup names the person for both readers: the prompt the model reads, and the
+	// caller record this turn is logged and journaled under.
+	who := c.names.of(ctx, c.api, t.m.UserID)
+	caller := callerOf(t.m, who)
+
 	// A resume asks the store nothing and reads no surrounding conversation. It delivers
 	// the result of a call the conversation is already waiting on, so there is no thread
 	// this worker holds to tell apart from one it is opening, and nobody wrote words for
 	// the surroundings to place.
+	//
+	// It carries no asker line either. resumeCheckpoint sets no FollowUp, and agent.Run
+	// takes a prompt onto a resume only with it, so the line would be dropped on the way in.
+	// Who pressed the button is in Caller.
 	if t.resume {
-		return t.work(resumeCheckpoint(t.session, t.answer)), nil
+		return t.work(resumeCheckpoint(t.session, t.answer), caller), nil
 	}
 
 	held, err := c.held(t.session)
@@ -403,7 +412,12 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 		return nil, err
 	}
 
-	work := t.work(checkpointFor(t.session, held))
+	work := t.work(checkpointFor(t.session, held), caller)
+
+	// The name in front of the words, so the model can address the person and can tell two
+	// people apart in a thread they are both in. Another person's mention is a turn of its
+	// own, which is where that matters most.
+	work.Prompt = spoken(who.Full, work.Prompt)
 
 	// The two reads answer to the same allowance and reach the run by different routes. An
 	// opening turn's surrounding conversation is supporting material, which is what
@@ -457,13 +471,16 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 // run's questions and the prompter bounds them itself. A person answers in a minute or on
 // Thursday, and no number fits both; answer_grace is how long the run is held before it
 // defers and gives the worker back.
-func (t *turn) work(checkpoint agent.Checkpoint) *serve.Work {
+//
+// caller arrives as a parameter because naming the person costs a user lookup, and workFor
+// is where this turn does its I/O.
+func (t *turn) work(checkpoint agent.Checkpoint, caller serve.Caller) *serve.Work {
 	return &serve.Work{
 		ID:               t.id,
 		Prompt:           t.prompt(),
 		Checkpoint:       checkpoint,
 		ClaimedBy:        t.id,
-		Caller:           callerOf(t.m),
+		Caller:           caller,
 		Events:           t.events,
 		Prompter:         t.prompter,
 		PromptsMayBlock:  true,

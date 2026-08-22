@@ -165,13 +165,19 @@ var _ = Describe("stripMention", func() {
 })
 
 var _ = Describe("callerOf", func() {
-	// A user id is unique within its workspace and nowhere else, so a worker answering in
-	// two of them would otherwise record two people under one name.
-	It("Should record the workspace with the user and report it verified", func() {
-		caller := callerOf(&mention{TeamID: "T1", UserID: "U1"})
+	// A log line and a journal's Meta record are read by a person months later, and
+	// T1/U024BE7LH tells them nothing about who it was.
+	It("Should record the username with the user id and report it verified", func() {
+		caller := callerOf(&mention{TeamID: "T1", UserID: "U024BE7LH"}, person{Full: "Roland Pienaar", Username: "rip"})
 
-		Expect(caller.Name).To(Equal("T1/U1"))
+		Expect(caller.Name).To(Equal("rip/U024BE7LH"))
 		Expect(caller.Verified).To(BeTrue(), "Slack authenticated the sender")
+	})
+
+	// The record is worth having with one name missing from it.
+	It("Should record the id alone when the lookup gave no username", func() {
+		Expect(callerOf(&mention{UserID: "U1"}, person{}).Name).To(Equal("U1"))
+		Expect(callerOf(&mention{UserID: "U1"}, person{Full: "U1", Username: "U1"}).Name).To(Equal("U1"))
 	})
 })
 

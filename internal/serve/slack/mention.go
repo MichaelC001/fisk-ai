@@ -130,14 +130,21 @@ func stripMention(text, botUserID string) string {
 	})
 }
 
-// callerOf is what this channel knows about who asked. Slack authenticated the sender, so
-// the claim is verified; the team is carried with the user because a user id is unique
-// only within its workspace.
+// callerOf is what this channel knows about who asked, as rip/U024BE7LH. Slack
+// authenticated the sender, so the claim is verified.
 //
-// The display name is not here. It changes whenever the person changes it, while this
-// reaches the journal's Meta record, which somebody reads back months later.
-func callerOf(m *mention) serve.Caller {
-	return serve.Caller{Name: m.TeamID + "/" + m.UserID, Verified: true}
+// It reaches a worker's log and the journal's Meta record, which somebody reads back
+// months later, so it carries both names. The username is who a reader recognizes; the id
+// is who it still was after they renamed themselves.
+//
+// A lookup that failed leaves the id on its own rather than the id written twice, which is
+// the same fallback every other reader of a name takes.
+func callerOf(m *mention, p person) serve.Caller {
+	if p.Username == "" || p.Username == m.UserID {
+		return serve.Caller{Name: m.UserID, Verified: true}
+	}
+
+	return serve.Caller{Name: p.Username + "/" + m.UserID, Verified: true}
 }
 
 // seen recognizes a message this worker already took, so a redelivery does not pay for

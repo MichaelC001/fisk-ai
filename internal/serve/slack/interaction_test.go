@@ -98,6 +98,7 @@ var _ = Describe("Interactions", func() {
 
 	BeforeEach(func() {
 		api = newFakeAPI()
+		api.names = map[string]person{"U7": {Full: "Cara Duarte", Username: "cara"}}
 		socket = newFakeSocket()
 		opts = testOptions()
 		clock = newTestClock()
@@ -316,7 +317,7 @@ var _ = Describe("Interactions", func() {
 			Expect(resumed.ID).To(Equal("C1/tu1"), "the call rather than a message, a dialog submission carrying none")
 			Expect(resumed.ClaimedBy).To(Equal(resumed.ID))
 			Expect(resumed.Prompt).To(BeEmpty(), "a resume adds no turn; it answers a call the conversation is waiting on")
-			Expect(resumed.Caller).To(Equal(serve.Caller{Name: "T1/U7", Verified: true}), "whoever pressed it")
+			Expect(resumed.Caller).To(Equal(serve.Caller{Name: "cara/U7", Verified: true}), "whoever pressed it")
 		})
 
 		// The pending-question map is process memory, so a worker that restarted between

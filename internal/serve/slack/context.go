@@ -188,8 +188,7 @@ func tsValue(ts string) float64 {
 	return v
 }
 
-// render turns messages into the lines a prompt carries, resolving each speaker's display
-// name.
+// render turns messages into the lines a prompt carries, resolving each speaker's name.
 //
 // The name rather than the user id, because the model is reading a conversation and
 // "U024BE7LH: restart it" is not one. A lookup that fails renders the id, which is worse
@@ -201,28 +200,45 @@ func (c *Channel) render(ctx context.Context, msgs []message) string {
 
 	lines := make([]string, 0, len(msgs))
 	for _, msg := range msgs {
-		lines = append(lines, c.names.of(ctx, c.api, msg.UserID)+": "+strings.TrimSpace(msg.Text))
+		lines = append(lines, spoken(c.names.of(ctx, c.api, msg.UserID).Full, strings.TrimSpace(msg.Text)))
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// names resolves a Slack user id to what a person reading the thread sees, once per user.
+// spoken puts a name in front of what that person said. A turn's own words take the shape
+// the surrounding conversation is rendered in, so the model reads one transcript rather
+// than a message with a label beside it.
 //
-// A conversation is mostly the same few people, so the cache turns a read of twenty lines
-// into two or three calls rather than twenty. It is never invalidated: a display name a
-// person changes mid-conversation is stale in the prompt and nowhere else, and a worker
-// that answers for weeks holds one entry per person it has heard from.
-type names struct {
-	mu sync.Mutex
-	by map[string]string
+// Everything folded into one turn came from one person, so the name goes in front of the
+// block once rather than in front of each line of it. A mention carrying no words is an
+// address rather than something somebody said, and takes no name.
+func spoken(name, text string) string {
+	if text == "" {
+		return ""
+	}
+
+	return name + ": " + text
 }
 
-func newNames() *names { return &names{by: map[string]string{}} }
+// names resolves a Slack user id to what this channel calls that person, once per user.
+//
+// A conversation is mostly the same few people, so the cache turns a read of twenty lines
+// into two or three calls rather than twenty. It is never invalidated: a name a person
+// changes mid-conversation is stale in the prompt and nowhere else, and a worker that
+// answers for weeks holds one entry per person it has heard from.
+type names struct {
+	mu sync.Mutex
+	by map[string]person
+}
 
-func (n *names) of(ctx context.Context, api api, userID string) string {
+func newNames() *names { return &names{by: map[string]person{}} }
+
+// of answers with both names, resolving the user once. A lookup that fails answers with
+// the id under both, which is what the line and the caller record fall back to.
+func (n *names) of(ctx context.Context, api api, userID string) person {
 	if userID == "" {
-		return "unknown"
+		return person{Full: unknownName, Username: unknownName}
 	}
 
 	n.mu.Lock()
@@ -233,17 +249,37 @@ func (n *names) of(ctx context.Context, api api, userID string) string {
 		return cached
 	}
 
-	name, err := api.userDisplayName(ctx, userID)
-	if err != nil || name == "" {
+	p, err := api.userNames(ctx, userID)
+	p.Full = plainName(p.Full)
+	p.Username = plainName(p.Username)
+
+	if err != nil || p.Full == "" || p.Username == "" {
 		// Not cached: a lookup that failed for a reason that passes should be tried again
 		// on the next turn rather than leaving the id in every line for as long as this
 		// worker runs.
-		return userID
+		return person{Full: userID, Username: userID}
 	}
 
 	n.mu.Lock()
-	n.by[userID] = name
+	n.by[userID] = p
 	n.mu.Unlock()
 
-	return name
+	return p
+}
+
+// unknownName stands in where a message names no user to resolve.
+const unknownName = "unknown"
+
+// maxNameText is how much of a name reaches a prompt or a caller record. A person is
+// called something well within it, and the cut stops a name being the substance of a turn.
+const maxNameText = 80
+
+// plainName is what a name somebody chose for themselves is written down as: one line, and
+// short.
+//
+// A profile name is text its owner controls and it heads every prompt this channel builds,
+// so a name carrying newlines would arrive as further lines of the very transcript it sits
+// at the top of, in the shape the model reads as somebody else speaking.
+func plainName(name string) string {
+	return clipped(strings.Join(strings.Fields(name), " "), maxNameText)
 }

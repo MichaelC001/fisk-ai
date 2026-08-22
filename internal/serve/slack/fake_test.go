@@ -31,9 +31,9 @@ type fakeAPI struct {
 	history map[string][]message
 	replies map[string][]message
 
-	// names is what userDisplayName answers, and lookups counts the calls that reached
-	// it rather than a cache above it.
-	names   map[string]string
+	// names is what userNames answers, and lookups counts the calls that reached it
+	// rather than a cache above it.
+	names   map[string]person
 	lookups int
 
 	// views is every dialog this bot asked Slack to open, and viewErr fails every call
@@ -87,7 +87,7 @@ func newFakeAPI() *fakeAPI {
 		posted:  map[string]*fakeMessage{},
 		history: map[string][]message{},
 		replies: map[string][]message{},
-		names:   map[string]string{},
+		names:   map[string]person{},
 	}
 }
 
@@ -262,22 +262,31 @@ func (f *fakeAPI) channelHistory(_ context.Context, channelID string, limit int)
 	return capped(f.history[channelID], limit), nil
 }
 
-func (f *fakeAPI) userDisplayName(_ context.Context, userID string) (string, error) {
+// userNames answers from what a spec set, falling back to the id under both names the way
+// a workspace that reports neither does.
+func (f *fakeAPI) userNames(_ context.Context, userID string) (person, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.lookups++
 
 	if f.nameErr != nil {
-		return "", f.nameErr
+		return person{}, f.nameErr
 	}
 
-	name, ok := f.names[userID]
+	p, ok := f.names[userID]
 	if !ok {
-		return userID, nil
+		return person{Full: userID, Username: userID}, nil
 	}
 
-	return name, nil
+	if p.Full == "" {
+		p.Full = userID
+	}
+	if p.Username == "" {
+		p.Username = userID
+	}
+
+	return p, nil
 }
 
 // messages is every message this bot posted, in the order it posted them.

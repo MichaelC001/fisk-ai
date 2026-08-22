@@ -90,8 +90,22 @@ type api interface {
 	// find a message of its own to stop at.
 	channelHistory(ctx context.Context, channelID string, limit int) ([]message, error)
 
-	// userDisplayName resolves a user id to what a person reading the thread sees.
-	userDisplayName(ctx context.Context, userID string) (string, error)
+	// userNames resolves a user id to the two names this channel writes down, in one call.
+	// Slack reports both from one user lookup, and every turn needs both.
+	userNames(ctx context.Context, userID string) (person, error)
+}
+
+// person is who a user id resolves to, in the two names this channel writes down.
+type person struct {
+	// Full is what the model reads: the profile's real name, "Roland Pienaar". It heads
+	// each turn's prompt and names every speaker in the surrounding conversation, so an
+	// answer can address somebody the way the thread does.
+	Full string
+
+	// Username is the workspace handle, "rip". It goes in the caller record beside the
+	// user id, where somebody reading a log or a journal months later needs a name they
+	// recognize.
+	Username string
 }
 
 // socket is the socket mode connection: it runs until its context ends, yields one
@@ -476,22 +490,42 @@ func (c *clientAPI) channelHistory(ctx context.Context, channelID string, limit 
 	return out, nil
 }
 
-func (c *clientAPI) userDisplayName(ctx context.Context, userID string) (string, error) {
+func (c *clientAPI) userNames(ctx context.Context, userID string) (person, error) {
 	u, err := c.client.GetUserInfoContext(ctx, userID)
 	if err != nil {
-		return "", fmt.Errorf("resolving user %s: %w", userID, err)
+		return person{}, fmt.Errorf("resolving user %s: %w", userID, err)
 	}
 
-	// The display name is what a person chose to be called and is often empty, in which
-	// case the real name is what the client itself falls back to.
-	if u.Profile.DisplayName != "" {
-		return u.Profile.DisplayName, nil
+	return namesOf(u, userID), nil
+}
+
+// namesOf picks the two names out of the three Slack reports for a person.
+//
+// Slack has a username, a display-name field somebody may fill in, and a real name. The
+// real name heads the full name's order because plenty of workspaces have people setting
+// the display-name field to their handle, and "rip" is not what the model should call
+// somebody it is answering. The display-name field is next for the workspaces where the
+// real name is blank, then the username, then the id, so a line is never lost.
+//
+// The username takes the handle and falls back to the id, which is what a caller record
+// carries where Slack reports no handle at all.
+func namesOf(u *slackgo.User, userID string) person {
+	p := person{Full: u.RealName, Username: u.Name}
+
+	if p.Full == "" {
+		p.Full = u.Profile.DisplayName
 	}
-	if u.RealName != "" {
-		return u.RealName, nil
+	if p.Full == "" {
+		p.Full = u.Name
+	}
+	if p.Full == "" {
+		p.Full = userID
+	}
+	if p.Username == "" {
+		p.Username = userID
 	}
 
-	return userID, nil
+	return p
 }
 
 // messageOf reduces the library's message to the fields a prompt needs.
