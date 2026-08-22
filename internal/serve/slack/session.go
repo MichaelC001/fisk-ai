@@ -86,3 +86,22 @@ func checkpointFor(sessionID string, held bool) agent.Checkpoint {
 
 	return agent.Checkpoint{ResumeID: sessionID, CreateIfMissing: true}
 }
+
+// resumeCheckpoint is how a click joins its thread's conversation: the journal that thread
+// runs in, and the result of the call the conversation is waiting on.
+//
+// A click adds no turn, so neither FollowUp nor CreateIfMissing is set. CreateIfMissing
+// would invent a conversation under the name of one that is gone and answer a call nobody
+// in it ever made; a journal that is not there is the run's to refuse.
+//
+// answer is nil for the confirm gate. Its call was never dispatched, so the resume
+// dispatches it and the gate asks again rather than the approval arriving as the guarded
+// command's own result.
+//
+// Force is set for the reason checkpointFor sets it on a resume: a click may land days
+// after the question and across a deploy, and a resume is otherwise refused whenever the
+// model, the system prompt, the thinking mode or the reasoning effort has moved since the
+// journal was written.
+func resumeCheckpoint(sessionID string, answer *agent.DeferredAnswer) agent.Checkpoint {
+	return agent.Checkpoint{ResumeID: sessionID, Answer: answer, Force: true}
+}

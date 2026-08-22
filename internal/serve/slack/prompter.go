@@ -38,6 +38,18 @@ const (
 	kindApprove questionKind = "approve"
 )
 
+// known reports whether this names one of the four questions. A value carrying anything
+// else was not minted here, or was minted by a version of this bot that asked something
+// this one does not, and the resume path has no result shape for it.
+func (k questionKind) known() bool {
+	switch k {
+	case kindConfirm, kindSelect, kindInput, kindApprove:
+		return true
+	default:
+		return false
+	}
+}
+
 // The choices a button carries. A selection carries the option's index in decimal instead,
 // there being no fixed set of them.
 const (
@@ -69,6 +81,12 @@ type buttonValue struct {
 	// Choice is what this button says, in the terms the question's own kind reads.
 	Choice string `json:"choice"`
 
+	// Label is what the button was drawn with, which for a selection is the option itself.
+	// A restarted worker holds no record of the options a selection offered, and the result
+	// ask_human_select returns names the option rather than its position, so the option
+	// travels with the choice.
+	Label string `json:"label,omitempty"`
+
 	// Asker is who the run put the question to. A restarted worker holds no record of it
 	// and the question message names them, so it travels here.
 	Asker string `json:"asker"`
@@ -92,8 +110,12 @@ func decodeValue(s string) (buttonValue, error) {
 		return buttonValue{}, fmt.Errorf("reading a button's value: %w", err)
 	}
 
-	if v.Kind == "" || v.ToolUse == "" {
-		return buttonValue{}, fmt.Errorf("a button arrived without the question it answers")
+	if v.ToolUse == "" {
+		return buttonValue{}, fmt.Errorf("a button arrived without the call it answers")
+	}
+
+	if !v.Kind.known() {
+		return buttonValue{}, fmt.Errorf("a button arrived naming %q, which is not a question this bot asks", v.Kind)
 	}
 
 	return v, nil
@@ -163,22 +185,31 @@ type question struct {
 	answer    *given
 }
 
-// delivery says what became of a click, which is three answers rather than two.
+// delivery says what became of a click.
 //
-// The third exists because a click can land in the moment a run gives up. Reporting it as
-// taken would put the answer in a buffer nobody will read, and a Slack thread has no way to
-// send it again: the buttons have been replaced by the answer the message records.
+// deliveryResume exists because a click can land in the moment a run gives up. Reporting it
+// as taken would put the answer in a buffer nobody will read, and a Slack thread has no way
+// to send it again: the buttons have been replaced by the answer the message records.
 type delivery int
 
 const (
-	// deliveryUnknown is a click naming a question this worker is not holding: another
-	// worker asked it, or the turn that asked it has ended.
+	// deliveryUnknown is a click naming a call this worker holds no question for: it
+	// restarted since the question was asked, or the turn that asked it has ended. The
+	// answer reaches the conversation as a resume, built from the click alone.
 	deliveryUnknown delivery = iota
 	// deliveryTaken is a click the run that asked took, still loaded and still waiting.
 	deliveryTaken
 	// deliveryResume is a click that landed after the run stopped waiting. The answer is
 	// not lost: it reaches the conversation as a resume rather than through the live run.
 	deliveryResume
+	// deliveryAnswered is a press on a question that already has an answer. The first
+	// press is the answer, and a second resume would answer one call twice.
+	deliveryAnswered
+	// deliveryElsewhere is a click whose value names a call this worker holds a question
+	// for in another conversation, or under another kind. The conversation comes from the
+	// interaction envelope, so this is a value presented against a thread it was not
+	// minted in.
+	deliveryElsewhere
 )
 
 // questions is every question this worker is holding, keyed by the call a click names. It
@@ -288,7 +319,7 @@ func (qs *questions) deliver(in *click) (*question, *given, delivery) {
 	}
 
 	if q.kind != in.Value.Kind || q.channelID != in.ChannelID || q.threadTS != in.ThreadTS {
-		return nil, nil, deliveryUnknown
+		return nil, nil, deliveryElsewhere
 	}
 
 	g := &given{By: in.UserID, Choice: in.Value.Choice, Text: in.Text}
@@ -308,10 +339,28 @@ func (qs *questions) deliver(in *click) (*question, *given, delivery) {
 		return q, g, deliveryResume
 
 	default:
-		// A second press on a question already settled. The first is the answer, and this
-		// one reaches nothing.
-		return q, nil, deliveryUnknown
+		// A second press on a question already settled. The answer it holds is what the
+		// message records, and this press starts nothing.
+		return q, q.answer, deliveryAnswered
 	}
+}
+
+// reopen puts a question back where a click found it, for an answer this channel took off
+// it and then could not act on.
+//
+// The buttons are still on the message in that case, since recording an answer is what
+// takes them off and a refused press records none, so whoever was told to press again
+// reaches a question that can take it.
+func (qs *questions) reopen(q *question) {
+	qs.mu.Lock()
+	defer qs.mu.Unlock()
+
+	if q.state != questionAnswered {
+		return
+	}
+
+	q.state = questionAbandoned
+	q.answer = nil
 }
 
 // giveUp ends the run's wait on one question and answers with the click that beat it, where
@@ -534,7 +583,7 @@ func (p *prompter) answered(q *question) *given {
 	p.t.log.Info("A question was answered", "kind", q.kind, "tool_use", q.toolUseID, "by", g.By)
 
 	p.ch.asked.forget(q)
-	p.ch.speak(func() { p.ch.recordAnswer(q, g, false) })
+	p.ch.speak(func() { p.ch.recordAnswer(q, g, "") })
 
 	return g
 }
@@ -613,7 +662,10 @@ const (
 	answeredLine = "Answered by <@%s>: %s"
 	// lateAnswerLine ends a message whose answer arrived after the run had stopped waiting,
 	// so nobody is left looking at a button they pressed with no sign it registered.
-	lateAnswerLine = "_I had already stopped waiting for this one._"
+	lateAnswerLine = "_I had already stopped waiting for this one, so I am carrying on from your answer._"
+	// secondPressLine ends a message somebody pressed again once it already had an answer.
+	// One call takes one answer, and the first is the one the conversation ran on.
+	secondPressLine = "_This one already has an answer, so I have left it where it is._"
 )
 
 // mint builds the buttons one question is asked with. Each carries the same value shape, so
@@ -662,10 +714,16 @@ func (q *question) buttonsFor(specs []buttonSpec) ([]button, error) {
 	out := make([]button, 0, len(specs))
 
 	for _, spec := range specs {
+		// The label travels in the value as well as on the button, so the answer a
+		// selection resumes with names the option rather than its position even where this
+		// worker restarted between the question and the press.
+		label := clipped(spec.label, maxButtonLabel)
+
 		value, err := encodeValue(buttonValue{
 			Kind:    q.kind,
 			ToolUse: q.toolUseID,
 			Choice:  spec.choice,
+			Label:   label,
 			Asker:   q.asker,
 		})
 		if err != nil {
@@ -676,7 +734,7 @@ func (q *question) buttonsFor(specs []buttonSpec) ([]button, error) {
 			// The choice is what makes each unique within the message, which is what Slack
 			// requires of an action id.
 			ActionID: "answer_" + spec.choice,
-			Label:    clipped(spec.label, maxButtonLabel),
+			Label:    label,
 			Value:    value,
 			Style:    spec.style,
 		})
@@ -688,9 +746,10 @@ func (q *question) buttonsFor(specs []buttonSpec) ([]button, error) {
 // recordAnswer rewrites a question message with the answer it was given, which takes the
 // buttons off it: the question is settled and a second press would change nothing.
 //
-// late says the run had already stopped waiting, which the message says so that nobody is
-// left looking at a button they pressed with no sign it registered.
-func (c *Channel) recordAnswer(q *question, g *given, late bool) {
+// note is one line about what became of that answer, so nobody is left looking at a button
+// they pressed with no sign it registered. It is empty for an answer the run that asked
+// took while it was still waiting.
+func (c *Channel) recordAnswer(q *question, g *given, note string) {
 	channelID, ts, text := c.asked.message(q)
 	if ts == "" {
 		// A question whose message never reached Slack. There is nothing to rewrite and the
@@ -709,13 +768,39 @@ func (c *Channel) recordAnswer(q *question, g *given, late bool) {
 	}
 
 	body := text + "\n\n" + fmt.Sprintf(answeredLine, g.By, q.reads(g))
-	if late {
-		body += "\n" + lateAnswerLine
+	if note != "" {
+		body += "\n" + note
 	}
 
 	err = c.api.updateBlocks(ctx, channelID, ts, blockMessage{Text: body})
 	if err != nil {
 		c.log.Warn("Recording an answer on its question failed", "channel", channelID, "message", ts, "error", err)
+	}
+}
+
+// pressNote says on a question message what became of a press this channel did not act on.
+//
+// The buttons go back on with it. Nothing was recorded as the answer, so the press whoever
+// clicked was asked to make again has a button to be made on.
+func (c *Channel) pressNote(q *question, line string) {
+	channelID, ts, text := c.asked.message(q)
+	if ts == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultReplyDeadline)
+	defer cancel()
+
+	err := c.limit.take(ctx)
+	if err != nil {
+		c.log.Warn("Waiting for the allowance to answer a press failed", "channel", channelID, "error", err)
+
+		return
+	}
+
+	err = c.api.updateBlocks(ctx, channelID, ts, blockMessage{Text: text + "\n\n" + line, Buttons: q.buttons})
+	if err != nil {
+		c.log.Warn("Answering a press on its question failed", "channel", channelID, "message", ts, "error", err)
 	}
 }
 

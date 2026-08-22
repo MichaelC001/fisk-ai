@@ -11,6 +11,9 @@ import (
 	"time"
 
 	slackgo "github.com/slack-go/slack"
+
+	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 )
 
 // interactionKind is which interaction one envelope carries.
@@ -188,7 +191,7 @@ func submitOf(cb *slackgo.InteractionCallback) (*click, bool, error) {
 		return nil, false, fmt.Errorf("reading what a dialog was opened for: %w", err)
 	}
 
-	if meta.Question.Kind == "" || meta.Question.ToolUse == "" {
+	if meta.Question.ToolUse == "" || !meta.Question.Kind.known() {
 		return nil, false, fmt.Errorf("a dialog arrived without the question it answers")
 	}
 
@@ -306,10 +309,15 @@ func (c *Channel) openReply(in *click) {
 
 // answerQuestion routes one answer to the question it names.
 //
-// A live run takes it. A question this worker is not holding reaches nothing and is logged.
-// A run that stopped waiting before the click landed leaves an answer that has to reach the
-// conversation as a resume, which is the next thing built here; the message is rewritten
-// meanwhile, so nobody is left looking at a button they pressed with no sign it registered.
+// A live run takes it. A run that stopped waiting before the click landed, and a call this
+// worker holds no question for at all, both reach the conversation as a resume. The second
+// is what a press after a restart is: the envelope names the thread, and the value names
+// the call and the kind, which is everything the answer has to be built from.
+//
+// A call that already has an answer starts nothing, one call taking one answer. A press
+// naming a call this worker holds a question for in another conversation starts nothing
+// either: the conversation a resume runs in comes from the envelope, so a value presented
+// against a thread it was not minted in reaches a journal that never made the call.
 func (c *Channel) answerQuestion(in *click) {
 	q, g, out := c.asked.deliver(in)
 
@@ -322,10 +330,143 @@ func (c *Channel) answerQuestion(in *click) {
 		c.log.Info("An answer arrived after the run had stopped waiting for it",
 			"tool_use", in.Value.ToolUse, "kind", in.Value.Kind, "by", in.UserID, "channel", in.ChannelID, "thread", in.ThreadTS)
 
-		c.speak(func() { c.recordAnswer(q, g, true) })
+		c.resume(in, q, g)
 
-	default:
-		c.log.Warn("An answer reached no question this worker is holding",
+	case deliveryUnknown:
+		c.log.Info("An answer arrived for a question this worker is not holding, so it resumes the thread it was given in",
+			"tool_use", in.Value.ToolUse, "kind", in.Value.Kind, "by", in.UserID, "channel", in.ChannelID, "thread", in.ThreadTS)
+
+		c.resume(in, nil, nil)
+
+	case deliveryAnswered:
+		c.log.Info("An answer reached a call that already has one",
+			"tool_use", in.Value.ToolUse, "kind", in.Value.Kind, "by", in.UserID)
+
+		if g != nil {
+			c.speak(func() { c.recordAnswer(q, g, secondPressLine) })
+		}
+
+	case deliveryElsewhere:
+		c.log.Warn("An answer named a call this worker is holding a question for in another conversation",
 			"tool_use", in.Value.ToolUse, "kind", in.Value.Kind, "channel", in.ChannelID, "thread", in.ThreadTS)
+	}
+}
+
+// resume turns one click into a turn of its own, which is the second source Next produces
+// work from.
+//
+// q is the question this worker is holding, and nil where it holds none. Everything the
+// resume needs is in the click either way, which is what the call and the kind travel in
+// the value for.
+//
+// The answer is written onto the question only once the turn has been admitted. A press
+// this channel could not take leaves the question where it found it, buttons and all, so
+// whoever is told to press again has a button to press.
+func (c *Channel) resume(in *click, q *question, g *given) {
+	m := clickMention(in)
+
+	answer, err := answerFor(in)
+	if err != nil {
+		c.log.Error("Building the answer a press carried failed",
+			"tool_use", in.Value.ToolUse, "kind", in.Value.Kind, "error", err)
+		c.declinePress(m, q, unreadablePressRefusal)
+
+		return
+	}
+
+	// A resume waits behind the turn that asked and is refused by any other, since what
+	// that turn is ending on is this very question.
+	var askedBy string
+	if q != nil {
+		askedBy = q.turn
+	}
+
+	refusal, narration := c.admitResume(m, in.Value.ToolUse, askedBy, answer)
+	if refusal != "" {
+		c.log.Warn("Refusing an answer", "channel", in.ChannelID, "thread", in.ThreadTS, "reason", refusal)
+		c.declinePress(m, q, refusal)
+
+		return
+	}
+
+	if q != nil && g != nil {
+		c.speak(func() { c.recordAnswer(q, g, lateAnswerLine) })
+	}
+
+	c.startStatus(narration)
+}
+
+// declinePress tells whoever pressed that their answer is not being acted on and puts the
+// question back where they found it.
+//
+// The line goes on the question message where this worker holds one, which is where the
+// person is looking and where the button they pressed still is. A worker that restarted
+// since the question was asked holds none, so it goes into the thread instead.
+func (c *Channel) declinePress(m *mention, q *question, line string) {
+	if q == nil {
+		c.reply(m, line)
+
+		return
+	}
+
+	c.asked.reopen(q)
+	c.speak(func() { c.pressNote(q, line) })
+}
+
+// clickMention places one click in the thread it was made in, in the shape the rest of this
+// channel decides a turn on.
+//
+// Every identifier is the interaction envelope's own, so a resume reaches the journal of
+// the thread the button was pressed in and no other. The text is empty: a resume adds no
+// turn to the conversation, it supplies the result of a call the conversation is already
+// waiting on.
+func clickMention(in *click) *mention {
+	return &mention{
+		TeamID:    in.TeamID,
+		ChannelID: in.ChannelID,
+		ThreadTS:  in.ThreadTS,
+		TS:        in.MessageTS,
+		UserID:    in.UserID,
+	}
+}
+
+// answerFor is the result the tool that asked would have returned, which the resume
+// supplies to the call that deferred.
+//
+// This channel renders it rather than reading a shape off the button, because the shape is
+// the one that tool's own results take and the model was told to expect it. It is built
+// from the click alone, so a worker that restarted between the question and the press
+// answers as completely as the one that asked.
+//
+// The confirm gate has none. Its call was never dispatched, so the resume dispatches it
+// and the gate asks again.
+func answerFor(in *click) (*agent.DeferredAnswer, error) {
+	if in.Value.Kind == kindApprove {
+		return nil, nil
+	}
+
+	content, err := renderAnswer(in)
+	if err != nil {
+		return nil, err
+	}
+
+	return &agent.DeferredAnswer{ToolUseID: in.Value.ToolUse, Content: content}, nil
+}
+
+// renderAnswer produces the result of the built-in that asked the question.
+//
+// A selection answers with the option rather than with its position, which is what the
+// model was told ask_human_select returns, so the option is read off the button that was
+// pressed rather than out of a list this worker may no longer hold.
+func renderAnswer(in *click) (string, error) {
+	switch in.Value.Kind {
+	case kindConfirm:
+		return builtin.ConfirmResult(in.Value.Choice == choiceYes, "")
+	case kindSelect:
+		return builtin.SelectResult(in.Value.Label, "")
+	case kindInput:
+		return builtin.InputResult(in.Text, "")
+	default:
+		return "", fmt.Errorf("%q has no result shape", in.Value.Kind)
 	}
 }

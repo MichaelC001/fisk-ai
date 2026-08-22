@@ -46,6 +46,18 @@ const (
 	storeRefusal    = "I could not read my record of this thread, so I have not taken this one. Mention me again in a moment."
 )
 
+// The same three, and one more, in the terms a press reads in: the person pressed a button
+// rather than writing a message, so what they are asked to do again is press it.
+const (
+	// busyPressRefusal answers a press on a thread this worker is running a turn in. Two
+	// concurrent resumes of one conversation is what the in-flight entry prevents, and the
+	// press stands until the turn in front of it has ended.
+	busyPressRefusal       = "I am part way through something else in this thread. Press this again once I have finished."
+	backlogPressRefusal    = "I have as much waiting as I can hold, so I have not taken this. Press it again in a few minutes."
+	drainingPressRefusal   = "I am shutting down and have not taken this. Press it again once I am back."
+	unreadablePressRefusal = "I could not make sense of that answer, so I have not acted on it."
+)
+
 // turn is one admitted mention on its way to being a run: the thread it belongs to, the
 // journal that thread runs in, and whatever arrived from the same person while it was
 // waiting or running.
@@ -78,14 +90,36 @@ type turn struct {
 	// same reason: the ending drops whatever it is still holding.
 	prompter *prompter
 
+	// resume says this turn came from a click rather than a mention. It carries no words
+	// of its own: what it delivers is the result of a call the conversation is waiting on.
+	resume bool
+
+	// answer is that result, nil for the confirm gate, whose call was never dispatched and
+	// which the resume dispatches again.
+	answer *agent.DeferredAnswer
+
 	folded []*mention
 }
 
 // newTurn builds a turn for one mention. It records nothing and admits nothing: admit
 // decides where the turn goes.
 func (c *Channel) newTurn(m *mention, session string) *turn {
-	id := m.ChannelID + "/" + m.TS
+	return c.buildTurn(m, session, m.ChannelID+"/"+m.TS)
+}
 
+// newResume builds the turn one click becomes.
+//
+// The call names it rather than a message. A dialog submission carries no message of its
+// own, and one call is one turn's worth of work however many times somebody presses.
+func (c *Channel) newResume(m *mention, session, toolUseID string, answer *agent.DeferredAnswer) *turn {
+	t := c.buildTurn(m, session, m.ChannelID+"/"+toolUseID)
+	t.resume = true
+	t.answer = answer
+
+	return t
+}
+
+func (c *Channel) buildTurn(m *mention, session, id string) *turn {
 	t := &turn{
 		ch:      c,
 		m:       m,
@@ -252,6 +286,63 @@ func (c *Channel) admit(m *mention) (string, *status) {
 	return "", t.status
 }
 
+// admitResume decides what becomes of a click that has to reach its conversation as a
+// resume. It returns the refusal to answer the press with, or an empty string and the
+// status message of the turn it took, which the caller starts.
+//
+// askedBy names the turn holding the question this answers, empty where this worker holds
+// none. A thread running that turn is running a turn on its way out: it gave up on the
+// question this press answers, so the resume is queued behind it and releaseLocked hands
+// the thread on the moment it reports. A press on a thread running any other turn is
+// refused, two concurrent resumes of one conversation being what the in-flight entry
+// prevents, and the button stays pressable until that thread is free.
+//
+// Like admit it decides in memory and does no I/O, so a click is answered inside Slack's
+// three-second window whatever the store and the workspace are doing.
+func (c *Channel) admitResume(m *mention, toolUseID, askedBy string, answer *agent.DeferredAnswer) (string, *status) {
+	session := SessionFor(c.identity, m.TeamID, m.ChannelID, m.ThreadTS)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.draining() {
+		return drainingPressRefusal, nil
+	}
+
+	running, inFlight := c.inFlight[session]
+	if inFlight && (askedBy == "" || running.id != askedBy) {
+		return busyPressRefusal, nil
+	}
+
+	if len(c.waiting)+c.parked >= c.maxWait {
+		return backlogPressRefusal, nil
+	}
+
+	t := c.newResume(m, session, toolUseID, answer)
+
+	if inFlight {
+		// It waits for the turn that asked rather than for a worker, so it is queued
+		// whatever the workers are doing.
+		t.status = c.newStatus(t, true)
+
+		c.queued[session] = append(c.queued[session], t)
+		c.parked++
+		t.log.Info("Queueing an answer behind the turn that asked for it", "user", m.UserID, "tool_use", toolUseID)
+
+		return "", t.status
+	}
+
+	t.status = c.newStatus(t, !c.workerFreeLocked())
+
+	c.inFlight[session] = t
+	c.waiting = append(c.waiting, t)
+	c.wakeNext()
+
+	t.log.Info("Admitted an answer as a resume", "user", m.UserID, "tool_use", toolUseID, "waiting", len(c.waiting))
+
+	return "", t.status
+}
+
 // workerFreeLocked reports whether a turn admitted now starts rather than waits, which is
 // what decides between a first hint and the queued line.
 //
@@ -299,6 +390,14 @@ func (c *Channel) takeWaiting() *turn {
 // behind another one asks about the journal the turn in front of it left rather than the
 // one it found on arrival.
 func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
+	// A resume asks the store nothing and reads no surrounding conversation. It delivers
+	// the result of a call the conversation is already waiting on, so there is no thread
+	// this worker holds to tell apart from one it is opening, and nobody wrote words for
+	// the surroundings to place.
+	if t.resume {
+		return t.work(resumeCheckpoint(t.session, t.answer)), nil
+	}
+
 	held, err := c.held(t.session)
 	if err != nil {
 		return nil, err

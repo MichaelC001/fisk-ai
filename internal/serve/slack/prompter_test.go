@@ -683,7 +683,7 @@ var _ = Describe("The prompter", func() {
 				Value:       buttonValue{Kind: kindConfirm, ToolUse: "tu1", Choice: choiceYes},
 			})
 
-			Expect(out).To(Equal(deliveryUnknown))
+			Expect(out).To(Equal(deliveryElsewhere), "a value presented against a thread it was not minted in reaches nothing")
 		})
 	})
 
