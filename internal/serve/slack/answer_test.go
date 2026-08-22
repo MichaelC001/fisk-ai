@@ -6,7 +6,9 @@ package slack
 
 import (
 	"context"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -150,5 +152,105 @@ var _ = Describe("The answer message", func() {
 
 		Consistently(api.messages, 100*time.Millisecond).Should(HaveLen(1), "the status message and no answer beside it")
 		Expect(editsIn(api, "C1")()).To(BeEmpty(), "and nothing pointing at a message that was never posted")
+	})
+
+	// Slack refuses the whole message rather than trimming it, and answer returns on a
+	// refusal, so an uncut answer leaves the thread on a status message saying the run is
+	// still working.
+	It("Should cut an answer longer than the markdown block holds and say that it did", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		answered(nextWork(ch), strings.Repeat("every node in the fleet was checked\n", 1000))
+
+		var posted []fakeMessage
+		Eventually(func() []fakeMessage { posted = api.messages(); return posted }).Should(HaveLen(2))
+
+		Expect(len(posted[1].Text)).To(BeNumerically("<=", markdownCap))
+		Expect(posted[1].Text).To(HaveSuffix(answerCutNote))
+		Expect(posted[1].Text).To(HavePrefix("every node in the fleet was checked\n"))
+		Expect(posted[1].Markdown).To(BeTrue())
+
+		Eventually(editsIn(api, "C1")).Should(Equal([]string{"Done: <" + answerLink + "|see the answer>"}))
+	})
+})
+
+var _ = Describe("Fitting an answer to the markdown block", func() {
+	It("Should answer an answer that fits with itself", func() {
+		text := strings.Repeat("a", markdownCap)
+
+		out, cut := fitMarkdown(text, markdownCap)
+		Expect(cut).To(BeFalse())
+		Expect(out).To(Equal(text))
+	})
+
+	// The note is inside the cap rather than beside it, so the message Slack is asked to
+	// take is under the cap with the note counted.
+	It("Should cut an answer past the cap and pay for the note out of the same budget", func() {
+		text := strings.Repeat("word ", 4000)
+
+		out, cut := fitMarkdown(text, markdownCap)
+		Expect(cut).To(BeTrue())
+		Expect(len(out)).To(BeNumerically("<=", markdownCap))
+		Expect(len(out)).To(BeNumerically(">", markdownCap-cutWindow-len(answerCutNote)), "the cut spends the budget it has")
+		Expect(out).To(HaveSuffix(answerCutNote))
+	})
+
+	// A cut mid-word reads as corruption, and a line boundary is what a reader sees as a
+	// place the answer could have stopped.
+	It("Should move the cut back to a line boundary where one is close by", func() {
+		line := "the same line of the answer, over and over\n"
+
+		out, cut := fitMarkdown(strings.Repeat(line, 1000), markdownCap)
+		Expect(cut).To(BeTrue())
+
+		body := strings.TrimSuffix(out, answerCutNote)
+		for _, l := range strings.Split(body, "\n") {
+			Expect(l + "\n").To(Equal(line))
+		}
+	})
+
+	// A fence left open renders everything after it, the note included, as prose.
+	It("Should close a fenced block the cut landed inside", func() {
+		text := "here is what the disk was full of\n\n```\n" + strings.Repeat("/var/log/journal 8.1G\n", 1000)
+
+		out, cut := fitMarkdown(text, markdownCap)
+		Expect(cut).To(BeTrue())
+		Expect(len(out)).To(BeNumerically("<=", markdownCap))
+		Expect(out).To(HaveSuffix("\n```" + answerCutNote))
+		Expect(strings.Count(out, "```")).To(Equal(2))
+	})
+
+	It("Should close a tilde fence with tildes, of the length that opened it", func() {
+		text := "~~~~\n" + strings.Repeat("still inside the block\n", 1000)
+
+		out, cut := fitMarkdown(text, markdownCap)
+		Expect(cut).To(BeTrue())
+		Expect(out).To(HaveSuffix("\n~~~~" + answerCutNote))
+	})
+
+	// A fence that closed before the cut needs no closer, and a fence of the other
+	// character inside a block is content rather than its end.
+	It("Should close nothing where every block the answer opened was closed", func() {
+		text := "```\nfree -m\n~~~\n```\n" + strings.Repeat("prose after the block, at length. ", 1000)
+
+		out, cut := fitMarkdown(text, markdownCap)
+		Expect(cut).To(BeTrue())
+		Expect(strings.Count(out, "```")).To(Equal(2))
+		Expect(out).To(HaveSuffix(answerCutNote))
+	})
+
+	// The cap is counted in bytes, so a three byte rune straddles the budget rather than
+	// ending on it, and half of one is not a character at all.
+	It("Should never cut a character in half", func() {
+		text := strings.Repeat("世", 6000)
+
+		out, cut := fitMarkdown(text, markdownCap)
+		Expect(cut).To(BeTrue())
+		Expect(len(out)).To(BeNumerically("<=", markdownCap))
+		Expect(utf8.ValidString(out)).To(BeTrue())
+		Expect(strings.TrimSuffix(out, answerCutNote)).To(Equal(strings.Repeat("世", (markdownCap-len(answerCutNote))/3)))
 	})
 })

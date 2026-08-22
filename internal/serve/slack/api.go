@@ -46,7 +46,8 @@ type api interface {
 	// dialect the model already writes.
 	//
 	// All markdown blocks in one payload share 12,000 characters, against the 40,000 text
-	// gets, so a long answer has to be split. Nothing here splits one yet.
+	// gets, and Slack refuses a longer one rather than trimming it. The caller cuts an
+	// answer to fit; nothing here checks the length.
 	postMarkdown(ctx context.Context, channelID, threadTS, markdown string) (string, error)
 
 	// updateMessage replaces the text of a message this bot posted.
