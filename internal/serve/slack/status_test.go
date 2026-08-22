@@ -81,11 +81,17 @@ func (c *testClock) waiting() int {
 }
 
 // release lets everything through, now and from now on.
+//
+// Time moves as well as the waiters firing, because a limiter that woke on a clock that
+// stood still would find its bucket as empty as it left it and wait again. A drain writes
+// the ending of every turn that never ran, so there is something spending tokens at the end
+// of every spec that uses this.
 func (c *testClock) release() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.released = true
+	c.at = c.at.Add(24 * time.Hour)
 	c.fireLocked()
 }
 

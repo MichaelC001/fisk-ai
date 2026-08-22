@@ -447,10 +447,14 @@ func (c *Channel) Close() error {
 			return
 		}
 
-		// The intake goroutine stops first and the messages it started are waited for
-		// next, so nothing is still deciding on a mention or still telling somebody they
-		// were refused when the connection those answers travel over is taken away.
+		// The intake goroutine stops first, so nothing is still deciding on a mention when
+		// the waiting set is rendered and the answers travel out.
 		<-c.intakeEnd
+		c.abandonWaiting()
+
+		// The messages this channel started are waited for next, so nobody is still being
+		// told they were refused when the connection those answers travel over is taken
+		// away.
 		c.awaitPosts()
 
 		c.socketOff()
@@ -459,6 +463,51 @@ func (c *Channel) Close() error {
 	})
 
 	return c.closeErr
+}
+
+// abandonWaiting says on its own status message that every turn admitted and never handed
+// over is not going to run, and drops them.
+//
+// The channel renders this set itself because the server reports no outcome for work it
+// never took: Outcome.Abandoned covers what the puller already holds, and a turn still in
+// this queue never reached it. Nothing else would edit these messages again, so a person
+// who mentioned the bot a minute before a deploy would be left with a queued line on their
+// thread for good.
+//
+// They go out on the goroutines every other message of this channel's uses, which Close
+// waits for immediately after.
+func (c *Channel) abandonWaiting() {
+	c.mu.Lock()
+
+	stranded := c.waiting
+
+	for _, behind := range c.queued {
+		stranded = append(stranded, behind...)
+	}
+
+	for _, t := range stranded {
+		// Neither the thread nor the Stop button reaches a turn that will not run.
+		delete(c.stoppable, t.id)
+
+		if c.inFlight[t.session] == t {
+			delete(c.inFlight, t.session)
+		}
+	}
+
+	c.waiting = nil
+	c.queued = map[string][]*turn{}
+	c.parked = 0
+
+	c.mu.Unlock()
+
+	for _, t := range stranded {
+		t.log.Info("A turn was admitted and never started, so its thread is told the worker is going down", "user", t.m.UserID)
+
+		c.speak(func() {
+			t.status.ends(abandonedNote)
+			t.status.stop()
+		})
+	}
 }
 
 // start opens the socket once, on the channel's own context rather than a caller's, so it

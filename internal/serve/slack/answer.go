@@ -6,9 +6,15 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // What a status message becomes once the turn has posted its answer.
@@ -27,6 +33,122 @@ const (
 // had reached and the press looks like it did nothing. The conversation is journaled at the
 // boundary the run parked on, which is what the second sentence is telling the person.
 const stoppedNote = "Stopped. Mention me in this thread to carry on."
+
+// The lines an ending that produced no answer puts on the status message.
+//
+// Each says what happened and what the person can do next. None of them names a session, a
+// tool call, a worker or a Go error: a thread is read by everybody in the channel, and the
+// worker's log is where that material belongs.
+const (
+	crashedNote   = "Something went wrong on my side. Mention me again to try it, and the worker log has the detail."
+	abandonedNote = "I was shut down before starting on this, ask me again."
+	budgetNote    = "This conversation has used its allowance. Start a new thread to carry on."
+	deferredNote  = "Waiting for your answer."
+	abortedNote   = "Nobody answered my question in time, so I stopped. Answer it and I will carry on."
+	drainedNote   = "I was shut down part way through. Mention me to carry on."
+	stepsNote     = "I ran out of steps on this one. Mention me to carry on."
+	silentNote    = "I finished, but had nothing to say."
+)
+
+// The lines a failure ends on, one per failure a person in the thread can act on and one
+// for everything else.
+const (
+	failedNote          = "I could not finish this one. Mention me again, and the worker log has what went wrong."
+	notDeferredNote     = "That answer is not one this thread is waiting on, so I have not acted on it."
+	alreadyAnsweredNote = "That question already had an answer, so I carried on from the first one."
+	lostThreadNote      = "I no longer have a record of this thread. Mention me again and I will start a fresh one."
+)
+
+// ending is what a turn's status message says now that the run has reported, empty for a
+// turn whose answer that message already points at.
+//
+// The cases are ordered rather than distinct, because more than one is true on the
+// commonest paths. An aborted gate reports ReasonSuspended and an error wrapping
+// ErrPromptAborted, and a run stopped by its budget reports both a reason and an error, so
+// testing Err first would put a prompt-aborted error in the thread every time somebody
+// walked away from a question. a2aendpoint's disposition is ordered for the same reason.
+//
+// A suspend arrives for unrelated causes, and they are told apart in the order they are
+// tested: the gate gave up on a question, somebody pressed Stop on this turn, or the worker
+// is going down.
+func (c *Channel) ending(t *turn, out serve.Outcome) string {
+	switch {
+	case out.Crashed:
+		// The panic and its stack are in the worker's log, where the events sink wrote
+		// them. The thread is told the turn ended and nothing about where.
+		t.log.Error("A run crashed", "error", out.Err)
+
+		return crashedNote
+
+	case out.Abandoned:
+		return abandonedNote
+
+	case out.Reason == runstate.ReasonBudget:
+		// Above the failure case, a run stopped by its budget reporting an error as well.
+		// The allowance is the conversation's rather than this turn's, so what it says is
+		// to start a thread instead of mentioning this one again.
+		t.log.Info("A conversation used its token budget", "error", out.Err)
+
+		return budgetNote
+
+	case len(out.Deferred) > 0:
+		// The question is its own message in the thread with its buttons still on it, so
+		// this says why the turn stopped moving rather than what to press.
+		t.log.Info("A turn is waiting on an answer to a question in its thread", "deferred", len(out.Deferred))
+
+		return deferredNote
+
+	case out.Reason == runstate.ReasonSuspended && errors.Is(out.Err, toolkit.ErrPromptAborted):
+		return abortedNote
+
+	case out.Reason == runstate.ReasonSuspended && t.stopped():
+		return stoppedNote
+
+	case out.Reason == runstate.ReasonSuspended && c.suspendRequested():
+		return drainedNote
+
+	case out.Reason == runstate.ReasonMaxIterations:
+		// A cap reached is not a failure. The conversation is journaled at a boundary the
+		// next mention in the thread carries on from.
+		t.log.Info("A turn reached the iteration cap")
+
+		return stepsNote
+
+	case out.Err != nil:
+		t.log.Error("A turn failed", "error", out.Err)
+
+		return failureNote(out.Err)
+
+	case out.Text == "":
+		// A run can end on tool calls alone, and chat.update refuses a message with no
+		// text, so this is what a turn with nothing to point at says.
+		return silentNote
+	}
+
+	return ""
+}
+
+// failureNote is the line one failure puts in a thread.
+//
+// Every error is mapped rather than rendered. The resume path builds its errors as "cannot
+// answer call %q of %q", which carries the tool_use id and the session id in the message
+// text, and neither belongs in a thread. An error nothing here recognizes says the turn
+// failed and leaves the rest to the log.
+func failureNote(err error) string {
+	switch {
+	case errors.Is(err, runstate.ErrNotDeferred):
+		return notDeferredNote
+
+	case errors.Is(err, runstate.ErrAlreadyAnswered):
+		return alreadyAnsweredNote
+
+	case errors.Is(err, agent.ErrConversationNotFound):
+		return lostThreadNote
+
+	default:
+		return failedNote
+	}
+}
 
 // markdownCap is the characters every markdown block in one payload shares, and cutWindow
 // how far back from the cut a line or a word boundary is looked for.

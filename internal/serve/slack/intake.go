@@ -672,10 +672,14 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 
 // conclude says everything a turn owes its thread and then ends its status message.
 //
-// The order is what a person reads: the answer, then the pointer to it, then what the run
-// had to say about the holes in it, then the lines it never reached. They are on one
+// The order is what a person reads: the answer, then what became of the turn, then what the
+// run had to say about the holes in it, then the lines it never reached. They are on one
 // goroutine rather than four because they are one thread's worth of messages and the
 // allowance is spent in the order they were written.
+//
+// The ending wins over the pointer answer left. A run that produced text and then suspended
+// posts that text, and the status message says the turn was stopped rather than that it
+// finished; the answer is in the thread either way.
 //
 // The advisories are their own message rather than a paragraph joined onto the answer, so
 // a turn that raised one and produced no text still says what went wrong, and so the link
@@ -688,12 +692,11 @@ func (c *Channel) conclude(t *turn, out serve.Outcome, undelivered []*mention) {
 	c.speak(func() {
 		c.answer(t, out.Text)
 
-		// A run somebody stopped produces no text, so answer left the status message on
-		// whichever hint it had reached and the press reads as having done nothing. The
-		// other endings that produce no text are the outcome switch's to word.
-		if out.Text == "" && t.stopped() && out.Reason == runstate.ReasonSuspended {
-			t.status.ends(stoppedNote)
-		}
+		// Every ending that is not an answer says so here. Without it a turn that crashed,
+		// failed, ran out of allowance or was stopped leaves its status message on whichever
+		// hint it had reached, and somebody who mentioned the bot two minutes ago cannot
+		// tell whether to wait or to ask again.
+		t.status.ends(c.ending(t, out))
 
 		// The status message stops here rather than at the run's last event, so the state
 		// it ends on is the one Slack is left with.

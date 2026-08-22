@@ -119,6 +119,10 @@ type status struct {
 	published string
 	shown     bool
 
+	// writes serializes one delivery against another, since the ending is written by
+	// whoever recorded it once the publisher has stopped and the two can overlap.
+	writes sync.Mutex
+
 	// changed wakes the publisher. It is buffered by one because it is a signal that
 	// the state moved, not a queue of the states it moved through.
 	changed chan struct{}
@@ -127,6 +131,10 @@ type status struct {
 	// one last time and stops.
 	ending  chan struct{}
 	endOnce sync.Once
+
+	// gone is closed by the publisher before its last write, which hands the writing of
+	// anything recorded after that to whoever records it.
+	gone chan struct{}
 }
 
 // newStatus builds the status message for one turn, or nil where this channel narrates
@@ -156,6 +164,7 @@ func (c *Channel) newStatus(t *turn, queued bool) *status {
 		buttons:   stopButton(t),
 		changed:   make(chan struct{}, 1),
 		ending:    make(chan struct{}),
+		gone:      make(chan struct{}),
 	}
 
 	if len(s.buttons) > 0 {
@@ -229,6 +238,10 @@ func (c *Channel) startStatus(s *status) {
 
 // publish writes the state the turn has reached, for as long as the turn runs, and writes
 // it once more on the way out.
+//
+// It stops on a drain as well as on the turn's own ending, so a worker shutting down does
+// not wait for a goroutine per turn before it closes the socket. The run behind such a turn
+// is still going to report, and settle is what writes the ending it reports.
 func (s *status) publish() {
 	for {
 		s.deliver()
@@ -237,15 +250,41 @@ func (s *status) publish() {
 		case <-s.changed:
 
 		case <-s.ending:
-			s.deliver()
+			s.leave()
 
 			return
 
 		case <-s.ch.shutdown:
-			s.deliver()
+			s.leave()
 
 			return
 		}
+	}
+}
+
+// leave writes the state one last time and hands the next write to whoever records it.
+//
+// gone is closed before that write rather than after it, so the two orders both land: a
+// state recorded before the close is picked up by this write, and one recorded after it is
+// written by settle on the goroutine that recorded it.
+func (s *status) leave() {
+	close(s.gone)
+	s.deliver()
+}
+
+// settle wakes the publisher, and writes the state itself where a drain has already stopped
+// it.
+//
+// Only the ending takes this path. An intermediate hint recorded after the publisher has
+// gone is dropped, as every hint the allowance skipped was, but the ending is what turns
+// this message into a pointer at the answer or says why there is none.
+func (s *status) settle() {
+	select {
+	case <-s.gone:
+		s.deliver()
+
+	default:
+		s.moved()
 	}
 }
 
@@ -260,7 +299,14 @@ func (s *status) publish() {
 // to carry. chat.update leaves the blocks of a message alone unless it is given blocks, so
 // a message posted with a button and then edited as text would keep the button for the rest
 // of its life.
+//
+// One delivery at a time: the publisher and the goroutine that recorded an ending can both
+// reach this as a drain hands the writing over, and two of them at once would post the
+// message twice.
 func (s *status) deliver() {
+	s.writes.Lock()
+	defer s.writes.Unlock()
+
 	if !s.pending() {
 		return
 	}
@@ -357,12 +403,16 @@ func (s *status) movedLocked(msg blockMessage) bool {
 // started and reported nothing say nothing a person needs, and a resume that banks an answer
 // and defers again never gets past them. A run that reached a tool, a question, or an ending
 // has moved somewhere worth a message, and posts.
+//
+// The deferral is held back for the same reason. A thread with two questions open takes a
+// resume per answer, and each one ends still waiting on the other; the question message is
+// already in the thread with its buttons on it, so a message per press says nothing new.
 func (s *status) heldBackLocked(msg blockMessage) bool {
 	if !s.quiet || s.ts != "" {
 		return false
 	}
 
-	return msg.Text == hintThinking || msg.Text == hintQueued
+	return msg.Text == hintThinking || msg.Text == hintQueued || msg.Text == deferredNote
 }
 
 // wrote records what Slack now shows. A post that failed records nothing, so the next
@@ -478,7 +528,7 @@ func (s *status) ends(text string) {
 	s.queued = false
 	s.mu.Unlock()
 
-	s.moved()
+	s.settle()
 }
 
 // stop ends the status message, once the state the turn ended in has been written.
@@ -499,6 +549,10 @@ func (s *status) stop() {
 	s.mu.Unlock()
 
 	s.endOnce.Do(func() { close(s.ending) })
+
+	// A turn whose publisher a drain already stopped still has a button to take off, so
+	// the write happens here rather than waiting for a goroutine that has gone.
+	s.settle()
 }
 
 // moved wakes the publisher. It is a signal rather than a handover, since what the

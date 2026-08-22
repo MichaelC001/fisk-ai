@@ -368,6 +368,79 @@ var _ = Describe("Intake", func() {
 		Expect(api.messages()).To(HaveLen(1))
 	})
 
+	// The server reports no outcome for work it never took, so nothing else would edit
+	// these messages again and a queued line would sit in the thread after every deploy.
+	Describe("A drain", func() {
+		BeforeEach(func() {
+			opts.Progress = true
+		})
+
+		It("Should tell a thread whose turn was still waiting that it will not run", func() {
+			opts.Workers = 1
+
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(socket.acked).Should(HaveLen(1))
+
+			waiting := aMention()
+			waiting.EnvelopeID = "Ev2"
+			waiting.Channel = "C2"
+			waiting.TS = "1700000009.000100"
+			waiting.Text = "<@U0BOT> and my one"
+
+			socket.deliver(waiting.envelope())
+			Eventually(textIn(api, "C2")).Should(Equal(hintQueued))
+
+			Expect(ch.Close()).To(Succeed())
+
+			Expect(textIn(api, "C2")()).To(Equal(abandonedNote))
+			Expect(statusIn(api, "C2")().Buttons).To(BeEmpty(), "a turn that will not run is not one anybody can stop")
+		})
+
+		// A turn behind another in its own thread waits for that turn rather than for a
+		// worker, and a drain leaves it as stranded as the rest.
+		It("Should tell a thread whose turn was queued behind another", func() {
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+			nextWork(ch)
+
+			behind := aMention()
+			behind.EnvelopeID = "Ev2"
+			behind.User = "U2"
+			behind.ThreadTS = "1700000000.000100"
+			behind.TS = "1700000002.000100"
+			behind.Text = "<@U0BOT> and node4"
+
+			socket.deliver(behind.envelope())
+			Eventually(api.messages).Should(HaveLen(2))
+
+			Expect(ch.Close()).To(Succeed())
+
+			Expect(api.messages()[1].Text).To(Equal(abandonedNote))
+		})
+
+		// The run behind a turn the server did take reports after the drain has stopped
+		// that turn's publisher, and the ending is what this message may never drop.
+		It("Should write the ending of a run that reported after the drain", func() {
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+			w := nextWork(ch)
+
+			Expect(ch.Close()).To(Succeed())
+
+			Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
+
+			Eventually(textIn(api, "C1")).Should(Equal(drainedNote))
+		})
+	})
+
 	It("Should refuse a mention that arrives once it is draining", func() {
 		ch := newTestChannel(opts, api, socket)
 		ch.start()

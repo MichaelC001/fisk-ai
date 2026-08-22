@@ -6,14 +6,17 @@ package slack
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // answered reports a turn finished with something the agent said, which is what the answer
@@ -151,12 +154,12 @@ var _ = Describe("The answer message", func() {
 
 		answered(nextWork(ch), "")
 
-		// The turn ended, so the one edit it is worth is the one that takes the Stop button
-		// off a run nothing can park any more.
+		// The turn ended, so the edit that says so also takes the Stop button off a run
+		// nothing can park any more.
 		Eventually(buttonsOf(api, status)).Should(BeEmpty())
 
 		Expect(api.messages()).To(HaveLen(1), "the status message and no answer beside it")
-		Expect(textIn(api, "C1")()).To(Equal(hintThinking), "and nothing pointing at a message that was never posted")
+		Expect(textIn(api, "C1")()).To(Equal(silentNote), "a run can end on tool calls alone, and the thread is told so")
 	})
 
 	// A stopped run produces no text either, and leaving the message on its last hint made
@@ -205,6 +208,159 @@ var _ = Describe("The answer message", func() {
 		Expect(posted[1].Markdown).To(BeTrue())
 
 		Eventually(editsIn(api, "C1")).Should(Equal([]string{"Done: <" + answerLink + "|see the answer>"}))
+	})
+})
+
+var _ = Describe("How a turn ends", func() {
+	var (
+		api    *fakeAPI
+		socket *fakeSocket
+		opts   Options
+	)
+
+	BeforeEach(func() {
+		api = newFakeAPI()
+		socket = newFakeSocket()
+		opts = testOptions()
+	})
+
+	// endedOn admits a mention, hands the turn over, reports the outcome it is given, and
+	// answers with what that turn's status message says from then on.
+	endedOn := func(ch *Channel, out serve.Outcome) func() string {
+		GinkgoHelper()
+
+		socket.deliver(aMention().envelope())
+		Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+		w := nextWork(ch)
+		out.ID = w.ID
+
+		Expect(w.Done(context.Background(), out)).To(Succeed())
+
+		return textIn(api, "C1")
+	}
+
+	DescribeTable("Should say what became of a turn that produced no answer",
+		func(out serve.Outcome, expected string) {
+			ch := roomyChannel(opts, api, socket)
+
+			Eventually(endedOn(ch, out)).Should(Equal(expected))
+			Expect(api.messages()).To(HaveLen(1), "the status message, and nothing posted beside it")
+		},
+		// The stack is in the worker's log. A thread is told the turn ended and nothing
+		// about where.
+		Entry("a crash", serve.Outcome{Crashed: true, Err: fmt.Errorf("runtime error: index out of range [3]")}, crashedNote),
+		// Work the server took and never started, which is a drain that reached it first.
+		Entry("work that never started", serve.Outcome{Abandoned: true}, abandonedNote),
+		// A budget stop reports a reason and an error, and the reason is the one that
+		// decides: the allowance belongs to the conversation, so what it says is to start
+		// another thread rather than to mention this one again.
+		Entry("a conversation that used its allowance",
+			serve.Outcome{Reason: runstate.ReasonBudget, Err: fmt.Errorf("this conversation has processed 210 of its 200 token budget (llm.budget.max_tokens)")},
+			budgetNote),
+		// The question message is in the thread with its buttons on it, so this says why
+		// the turn stopped moving.
+		Entry("a run waiting on an answer",
+			serve.Outcome{Reason: runstate.ReasonSuspended, Deferred: []agent.DeferredCall{{ToolUseID: "toolu_01deferred"}}},
+			deferredNote),
+		// An aborted gate reports a suspend and an error wrapping ErrPromptAborted, which
+		// is why the reasons are tested before the error is.
+		Entry("a gate nobody approved in time",
+			serve.Outcome{Reason: runstate.ReasonSuspended, Err: fmt.Errorf("%w: nobody in the thread answered inside the grace window", toolkit.ErrPromptAborted)},
+			abortedNote),
+		// A cap reached is not a failure: the conversation is journaled where the next
+		// mention carries on from.
+		Entry("a run out of steps", serve.Outcome{Reason: runstate.ReasonMaxIterations, Err: fmt.Errorf("reached the iteration cap of 25")}, stepsNote),
+		Entry("a failure", serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("the provider refused the request")}, failedNote),
+		// A run can end on tool calls alone, and chat.update refuses a message with no
+		// text.
+		Entry("a run that finished with nothing to say", serve.Outcome{Reason: runstate.ReasonCompleted}, silentNote),
+	)
+
+	// The two raced clicks a person can produce: pressing a button on a question the
+	// conversation is no longer waiting on, and pressing one somebody else already answered.
+	DescribeTable("Should say what a person can do about a failure they caused",
+		func(err error, expected string) {
+			ch := roomyChannel(opts, api, socket)
+
+			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonError, Err: err})).Should(Equal(expected))
+		},
+		Entry("an answer for a call nothing deferred",
+			fmt.Errorf("cannot answer call %q of %q: %w", "toolu_01xyz", "s-abcdef", runstate.ErrNotDeferred), notDeferredNote),
+		Entry("an answer for a call that has one",
+			fmt.Errorf("cannot answer call %q of %q: %w", "toolu_01xyz", "s-abcdef", runstate.ErrAlreadyAnswered), alreadyAnsweredNote),
+		Entry("a thread whose journal is gone",
+			fmt.Errorf("cannot resume %q: %w", "s-abcdef", agent.ErrConversationNotFound), lostThreadNote),
+	)
+
+	// The resume path builds its errors out of the session and the call they name, so
+	// rendering Outcome.Err would publish exactly what every other decision here keeps out
+	// of a thread.
+	It("Should put no session, call or error text in the thread", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		session := SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")
+		err := fmt.Errorf("cannot answer call %q of %q: %w", "toolu_01secret", session, runstate.ErrAlreadyAnswered)
+
+		Eventually(endedOn(ch, serve.Outcome{SessionID: session, Reason: runstate.ReasonError, Err: err})).Should(Equal(alreadyAnsweredNote))
+
+		for _, m := range api.messages() {
+			Expect(m.Text).ToNot(ContainSubstring(session))
+			Expect(m.Text).ToNot(ContainSubstring("toolu_01secret"))
+			Expect(m.Text).ToNot(ContainSubstring("cannot answer call"))
+		}
+	})
+
+	// A run that said something and then stopped has both to report. The answer is posted
+	// as its own message either way, and the status message says how the turn ended rather
+	// than pointing at an answer the thread already has.
+	It("Should post what a stopped run said and still say it stopped", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		text := endedOn(ch, serve.Outcome{Reason: runstate.ReasonMaxIterations, Text: "I got as far as node3"})
+
+		Eventually(api.messages).Should(HaveLen(2))
+		Expect(api.messages()[1].Text).To(Equal("I got as far as node3"))
+		Eventually(text).Should(Equal(stepsNote))
+	})
+
+	// Three endings arrive as one reason, so what tells them apart is who asked for the
+	// suspend.
+	Describe("A suspend", func() {
+		It("Should say the worker is going down where nothing in the thread asked for it", func() {
+			opts.SuspendRequested = func() bool { return true }
+
+			ch := roomyChannel(opts, api, socket)
+
+			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonSuspended})).Should(Equal(drainedNote))
+		})
+
+		// Somebody who pressed Stop while the worker happened to be draining is told what
+		// they asked for, which is why the press is tested before the drain.
+		It("Should say a press stopped it even while the worker is going down", func() {
+			opts.SuspendRequested = func() bool { return true }
+
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(textIn(api, "C1")).Should(Equal(hintThinking))
+
+			w := nextWork(ch)
+
+			// Pressed here rather than delivered over the socket, the worker's own drain
+			// signal making SuspendRequested true whether or not the press has landed.
+			ch.stopPressed(&click{
+				ChannelID: "C1",
+				ThreadTS:  "1700000000.000100",
+				TeamID:    "T1",
+				UserID:    "U2",
+				Value:     buttonValue{Stop: w.ID},
+			})
+
+			Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
+
+			Eventually(textIn(api, "C1")).Should(Equal(stoppedNote))
+		})
 	})
 })
 
