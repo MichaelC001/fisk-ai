@@ -743,6 +743,19 @@ type AgentExpose struct {
 	// paths of a single micro service, so the tuning below belongs to the block rather
 	// than to either endpoint.
 	A2A *ExposedA2AConfig `json:"a2a,omitempty" yaml:"a2a,omitempty"`
+	// Slack opts this agent in to answering people in Slack, one thread being one
+	// conversation. Its presence is the switch for the Slack channel of `fisk-ai serve`,
+	// and every field under it has a default, so an empty block is a working
+	// configuration.
+	//
+	// It differs in kind from MCP and A2A above on the same terms Jobs does: those serve
+	// this agent's tools to a caller that drives them, while this hands the agent a whole
+	// unit of work and runs the agent loop over it. So Tools below does NOT narrow it.
+	//
+	// The two Slack credentials are deliberately absent. They are read from
+	// SLACK_APP_TOKEN and SLACK_BOT_TOKEN, so a configuration file that is committed and
+	// shared never holds one.
+	Slack *ExposedSlackConfig `json:"slack,omitempty" yaml:"slack,omitempty"`
 	// Jobs opts this agent in to taking whole units of work off a Choria asyncjobs work
 	// queue. Its presence is the switch for the queued-jobs intake of `fisk-ai serve`,
 	// which refuses to start without it, and every field under it has a default, so an
@@ -923,6 +936,97 @@ const (
 	// spend without anyone having asked for it.
 	DefaultJobsWorkers = 1
 )
+
+// Defaults for the Slack channel.
+const (
+	// DefaultSlackWorkers is how many turns one worker runs at once when none is set.
+	//
+	// It is five where the queue and prompt intakes are one. Their reason, that a run is
+	// expensive and a worker quietly running several multiplies spend nobody asked for,
+	// holds for a queue and for a peer. It does not hold here: a turn is a person
+	// waiting, and at one worker the second person to ask anything watches a queued
+	// message until the first person's run finishes. The number is easy to lower and the
+	// failure it prevents is the one a team notices.
+	DefaultSlackWorkers = 5
+	// DefaultSlackContextLines is how many messages of surrounding conversation a turn
+	// reads when none is set.
+	DefaultSlackContextLines = 20
+	// DefaultSlackMaxCoalesced is how many messages arriving during a run are folded
+	// into one follow-up turn when none is set.
+	DefaultSlackMaxCoalesced = 5
+	// defaultSlackAnswerGrace is how long a question is held while the run that asked it
+	// is still loaded, before the run defers and gives its worker back. It is short
+	// because it buys only the case where somebody is already looking at the thread; a
+	// person who is not answers minutes or days later, which no timeout can wait for.
+	defaultSlackAnswerGrace = 30 * time.Second
+	// slackWaitingPerWorker multiplies the worker count into the default backlog of
+	// admitted turns waiting for a slot.
+	slackWaitingPerWorker = 2
+)
+
+// ExposedSlackConfig configures the Slack channel: how many turns run at once, how much
+// surrounding conversation a turn reads, and how the thread reports what is happening.
+//
+// What is deliberately not here is as much of the shape as what is. The two credentials
+// come from the environment, the session store is harness.sessions and the per-tool
+// bound is harness.tool_timeout, both shared with every other endpoint.
+type ExposedSlackConfig struct {
+	// Workers is how many turns this process runs at once, and the number above which a
+	// mention is admitted and left waiting rather than started.
+	//
+	// The --workers flag does not reach it. That flag sizes the queue intake, and one
+	// flag setting two numbers could not be reported honestly on a startup banner.
+	Workers int `json:"workers,omitempty" yaml:"workers,omitempty"`
+
+	// ContextLines is how much of the surrounding conversation a turn reads.
+	//
+	// It means two slightly different things on the two reads that use it, and the
+	// difference is visible in what a turn costs. A follow-up turn reads the thread
+	// forward from this bot's own last message, so it usually takes far fewer than this.
+	// An opening turn has no message of its own to stop at, every reply this bot posts
+	// being threaded and threaded replies being absent from a channel's history, so it
+	// reads this many every time a thread opens.
+	ContextLines int `json:"context_lines,omitempty" yaml:"context_lines,omitempty"`
+
+	// NoProgress turns off the status message a turn posts and edits while it runs,
+	// leaving the answer, the questions and the refusals.
+	//
+	// The Stop button lives on that message, so turning it off also removes the only way
+	// to stop a turn that is already running, as does the line that says a turn is
+	// waiting for a worker.
+	//
+	// It is negated because an absent bool unmarshals to false: an on-by-default switch
+	// cannot be spelled positively. no_bell, no_tui and no_prompt_cache have the same
+	// shape.
+	NoProgress bool `json:"no_progress,omitempty" yaml:"no_progress,omitempty"`
+
+	// AnswerGraceString is how long a question is held while the run that asked it is
+	// still loaded, as a duration string (e.g. 30s). Past it the run defers and gives its
+	// worker back, and the answer arrives whenever somebody clicks.
+	//
+	// It is not a bound on answering. Nothing expires: a question stays open in the
+	// thread until it is answered or dismissed, which is the point of deferring rather
+	// than waiting.
+	AnswerGraceString string `json:"answer_grace,omitempty" yaml:"answer_grace,omitempty"`
+	// AnswerGraceParsed is the parsed form of AnswerGraceString, filled by prepare().
+	// Read it through Config.SlackAnswerGrace, which supplies the default for an unset
+	// key and for a configuration prepare() never ran over.
+	AnswerGraceParsed time.Duration `json:"-" yaml:"-"`
+
+	// MaxWaiting is how many admitted turns may wait for a worker before a further
+	// mention is refused; <= 0 derives it from Workers.
+	//
+	// It bounds the backlog and nothing else. A person told to come back is better served
+	// than one watching a queued message for minutes, which is the whole of what this
+	// decides.
+	MaxWaiting int `json:"max_waiting,omitempty" yaml:"max_waiting,omitempty"`
+
+	// MaxCoalesced is how many messages arriving from the same person during their own
+	// running turn are folded into one follow-up turn. A mention past it is queued behind
+	// as a turn of its own: the cap bounds what one follow-up carries rather than
+	// licensing the loss of what somebody wrote.
+	MaxCoalesced int `json:"max_coalesced,omitempty" yaml:"max_coalesced,omitempty"`
+}
 
 // ExposedJobsConfig configures the queued-jobs intake: which work queue this agent
 // takes whole units of work from, and how many it runs at once.
@@ -1143,7 +1247,7 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	// no key in the file.
 	mcpOnly := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.MCP != nil
 	jobs := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.Jobs != nil
-	if !mcpOnly || jobs || cfg.A2APromptsEnabled() {
+	if !mcpOnly || jobs || cfg.A2APromptsEnabled() || cfg.SlackEnabled() {
 		if cfg.Identity == "" {
 			return fmt.Errorf("identity is required unless exposed over MCP")
 		}
@@ -1187,6 +1291,22 @@ func validateServe(cfg *Config) error {
 		}
 		if cfg.NatsContext == "" && cfg.Expose.Agent.Jobs.NatsContext == "" {
 			return fmt.Errorf("nats_context is required when expose.agent.jobs is set, either at the top level or under the block")
+		}
+	}
+
+	// A Slack turn runs the whole agent loop, so it needs what a run at a terminal
+	// needs. The identity is required for a further reason: it is the first field
+	// hashed into the journal a thread runs in, so two agents sharing one it did not
+	// choose would share their conversations.
+	if cfg.SlackEnabled() {
+		if !cfg.IdentityIsNamed() {
+			return fmt.Errorf("identity is required when expose.agent.slack is set: it names the journals this bot's threads run in, so it must be a name you chose rather than one derived from the application or left at the default")
+		}
+		if cfg.SystemPrompt == "" {
+			return fmt.Errorf("prompt is required when expose.agent.slack is set")
+		}
+		if cfg.LLM.Model == "" {
+			return fmt.Errorf("llm.model is required when expose.agent.slack is set")
 		}
 	}
 
@@ -1816,6 +1936,78 @@ func (c *Config) JobsMaxPayload() int {
 	return c.Expose.Agent.Jobs.MaxPayload
 }
 
+// SlackEnabled reports whether this agent answers people in Slack, which is the
+// presence of expose.agent.slack. Every field under it defaults, so an empty block
+// enables the channel.
+func (c *Config) SlackEnabled() bool {
+	return c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.Slack != nil
+}
+
+// SlackWorkers returns how many turns the Slack channel runs at once, or the default
+// when unset. The --workers flag does not reach it.
+func (c *Config) SlackWorkers() int {
+	if !c.SlackEnabled() || c.Expose.Agent.Slack.Workers <= 0 {
+		return DefaultSlackWorkers
+	}
+
+	return c.Expose.Agent.Slack.Workers
+}
+
+// SlackContextLines returns how much surrounding conversation a turn reads, or the
+// default when unset.
+func (c *Config) SlackContextLines() int {
+	if !c.SlackEnabled() || c.Expose.Agent.Slack.ContextLines <= 0 {
+		return DefaultSlackContextLines
+	}
+
+	return c.Expose.Agent.Slack.ContextLines
+}
+
+// SlackProgressEnabled reports whether a turn posts the status message it edits while
+// it runs. It is on unless the block sets no_progress.
+func (c *Config) SlackProgressEnabled() bool {
+	if !c.SlackEnabled() {
+		return false
+	}
+
+	return !c.Expose.Agent.Slack.NoProgress
+}
+
+// SlackAnswerGrace returns how long a question is held while the run that asked it is
+// still loaded, from expose.agent.slack.answer_grace.
+//
+// It never returns zero, and the default lives here rather than only in prepare(),
+// which never runs for a Config an embedder built in process. A zero grace would defer
+// every question the instant it was asked, paying a resume for an answer somebody was
+// about to give.
+func (c *Config) SlackAnswerGrace() time.Duration {
+	if !c.SlackEnabled() || c.Expose.Agent.Slack.AnswerGraceParsed <= 0 {
+		return defaultSlackAnswerGrace
+	}
+
+	return c.Expose.Agent.Slack.AnswerGraceParsed
+}
+
+// SlackMaxWaiting returns how many admitted turns may wait for a worker, deriving it
+// from the worker count when unset.
+func (c *Config) SlackMaxWaiting() int {
+	if !c.SlackEnabled() || c.Expose.Agent.Slack.MaxWaiting <= 0 {
+		return c.SlackWorkers() * slackWaitingPerWorker
+	}
+
+	return c.Expose.Agent.Slack.MaxWaiting
+}
+
+// SlackMaxCoalesced returns how many messages are folded into one follow-up turn, or
+// the default when unset.
+func (c *Config) SlackMaxCoalesced() int {
+	if !c.SlackEnabled() || c.Expose.Agent.Slack.MaxCoalesced <= 0 {
+		return DefaultSlackMaxCoalesced
+	}
+
+	return c.Expose.Agent.Slack.MaxCoalesced
+}
+
 // MCPBuiltins returns the built-in tools opted in to MCP exposure via
 // expose.agent.mcp.builtins, normalized and validated by prepare. It is nil when
 // none are set.
@@ -1902,6 +2094,14 @@ func (c *Config) prepare() error {
 			return err
 		}
 		c.Expose.Agent.A2A.RequestTimeoutParsed = rd
+	}
+
+	if c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.Slack != nil {
+		d, err := prepareAnswerGrace(c.Expose.Agent.Slack.AnswerGraceString)
+		if err != nil {
+			return err
+		}
+		c.Expose.Agent.Slack.AnswerGraceParsed = d
 	}
 
 	// An unset key takes the default; an explicit 0s parses to zero and is how an
@@ -2153,6 +2353,28 @@ func prepareRequestTimeout(timeout string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("invalid expose.agent.a2a.request_timeout %q: must be greater than zero", timeout)
+	}
+
+	return d, nil
+}
+
+// prepareAnswerGrace parses how long a Slack question is held while its run is still
+// loaded. An unset key leaves zero, which Config.SlackAnswerGrace reads as the default.
+//
+// Zero is refused along with a negative. It would defer every question the instant it
+// was asked, spending a resume on an answer somebody was already typing, and an operator
+// who wants that writes a very short duration rather than none.
+func prepareAnswerGrace(grace string) (time.Duration, error) {
+	if grace == "" {
+		return 0, nil
+	}
+
+	d, err := fisk.ParseDuration(grace)
+	if err != nil {
+		return 0, fmt.Errorf("invalid expose.agent.slack.answer_grace %q: %w", grace, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid expose.agent.slack.answer_grace %q: must be greater than zero", grace)
 	}
 
 	return d, nil

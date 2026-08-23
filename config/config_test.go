@@ -752,6 +752,149 @@ llm:
 		})
 	})
 
+	Describe("Slack", func() {
+		It("Should be off unless the block is present", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.SlackEnabled()).To(BeFalse())
+			Expect(cfg.SlackProgressEnabled()).To(BeFalse())
+		})
+
+		It("Should default every field so an empty block works", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    slack: {}
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.SlackEnabled()).To(BeTrue())
+			Expect(cfg.SlackWorkers()).To(Equal(DefaultSlackWorkers))
+			Expect(cfg.SlackContextLines()).To(Equal(DefaultSlackContextLines))
+			Expect(cfg.SlackMaxCoalesced()).To(Equal(DefaultSlackMaxCoalesced))
+			Expect(cfg.SlackAnswerGrace()).To(Equal(30 * time.Second))
+			Expect(cfg.SlackMaxWaiting()).To(Equal(DefaultSlackWorkers*2), "it derives from the worker count")
+			Expect(cfg.SlackProgressEnabled()).To(BeTrue(), "the status message is on unless no_progress says otherwise")
+		})
+
+		It("Should take what the block sets", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    slack:
+      workers: 2
+      context_lines: 50
+      no_progress: true
+      answer_grace: 5s
+      max_waiting: 3
+      max_coalesced: 9
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.SlackWorkers()).To(Equal(2))
+			Expect(cfg.SlackContextLines()).To(Equal(50))
+			Expect(cfg.SlackProgressEnabled()).To(BeFalse())
+			Expect(cfg.SlackAnswerGrace()).To(Equal(5 * time.Second))
+			Expect(cfg.SlackMaxWaiting()).To(Equal(3), "its own value wins over the derived one")
+			Expect(cfg.SlackMaxCoalesced()).To(Equal(9))
+		})
+
+		// prepare() never runs for a Config an embedder builds in process, so the default
+		// has to survive a zero parsed value rather than living only in prepare().
+		It("Should default the grace window on a config prepare never ran over", func() {
+			cfg := &Config{Expose: &ExposeConfig{Agent: &AgentExpose{Slack: &ExposedSlackConfig{}}}}
+
+			Expect(cfg.SlackAnswerGrace()).To(Equal(30 * time.Second))
+		})
+
+		It("Should refuse a grace window of zero or less", func() {
+			for _, grace := range []string{"0s", "-5s"} {
+				_, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    slack:
+      answer_grace: ` + grace + `
+llm:
+  model: claude-sonnet-4-6
+`))
+				Expect(err).To(MatchError(ContainSubstring("answer_grace")), "grace %q", grace)
+				Expect(err).To(MatchError(ContainSubstring("greater than zero")), "grace %q", grace)
+			}
+		})
+
+		// The identity names the journals this bot's threads run in, so a name derived
+		// from the application's basename is not enough: two agents that never chose one
+		// would share their conversations.
+		It("Should require what a run needs, naming the block that asked", func() {
+			_, err := ParseConfigForMode([]byte(`
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    slack: {}
+llm:
+  model: claude-sonnet-4-6
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("identity is required when expose.agent.slack is set")))
+
+			_, err = ParseConfigForMode([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+expose:
+  agent:
+    slack: {}
+llm:
+  model: claude-sonnet-4-6
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("prompt is required when expose.agent.slack is set")))
+
+			_, err = ParseConfigForMode([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    slack: {}
+llm: {}
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("llm.model is required when expose.agent.slack is set")))
+		})
+
+		// An MCP-only agent needs neither identity nor prompt because it runs no agent
+		// loop. A Slack turn runs the whole loop, so the waiver must not reach a config
+		// that carries both.
+		It("Should not inherit the MCP waiver on identity and prompt", func() {
+			_, err := ParseConfig([]byte(`
+application_path: /usr/bin/nats
+expose:
+  agent:
+    mcp:
+      port: 8080
+    slack: {}
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).To(MatchError(ContainSubstring("prompt is required unless exposed over MCP")))
+		})
+	})
+
 	Describe("Jobs", func() {
 		It("Should be off unless the block is present", func() {
 			cfg, err := ParseConfig([]byte(`

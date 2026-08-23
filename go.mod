@@ -24,6 +24,7 @@ require (
 	github.com/rivo/tview v0.42.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/segmentio/ksuid v1.0.4
+	github.com/slack-go/slack v0.29.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.45.0
@@ -69,6 +70,7 @@ require (
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/hhrutter/tiff v1.0.6 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
