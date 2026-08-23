@@ -489,7 +489,7 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 	// The name in front of the words, so the model can address the person and can tell two
 	// people apart in a thread they are both in. Another person's mention is a turn of its
 	// own, which is where that matters most.
-	work.Prompt = spoken(who.Full, work.Prompt)
+	work.Prompt = spoken(speaker(who, t.m.UserID), work.Prompt)
 
 	// The two reads answer to the same allowance and reach the run by different routes. An
 	// opening turn's surrounding conversation is supporting material, which is what

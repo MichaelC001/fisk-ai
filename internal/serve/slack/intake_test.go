@@ -98,7 +98,7 @@ var _ = Describe("Intake", func() {
 
 		Expect(w.ID).To(Equal("C1/1700000000.000100"), "the mention's channel and timestamp, which Slack minted rather than anybody choosing")
 		Expect(w.ClaimedBy).To(Equal(w.ID))
-		Expect(w.Prompt).To(Equal("Ana Silva: what is eating disk on node3"))
+		Expect(w.Prompt).To(Equal("Ana Silva <@U1>: what is eating disk on node3"))
 		Expect(w.Caller).To(Equal(serve.Caller{Name: "ana/U1", Verified: true}), "readable in a log, and still the same person after a rename")
 		Expect(w.HumanPaced).To(BeTrue(), "a thread moves at the pace of whoever is typing in it")
 		Expect(w.SuspendRequested).ToNot(BeNil())
@@ -125,7 +125,7 @@ var _ = Describe("Intake", func() {
 		Eventually(socket.acked).Should(Equal([]string{"Ev1", "Ev2"}), "an envelope Slack is waiting on is answered whether or not it earns a turn")
 
 		w := nextWork(ch)
-		Expect(w.Prompt).To(Equal("Ana Silva: what is eating disk on node3"))
+		Expect(w.Prompt).To(Equal("Ana Silva <@U1>: what is eating disk on node3"))
 
 		noWork(ch)
 	})
@@ -183,7 +183,7 @@ var _ = Describe("Intake", func() {
 			ended(first)
 
 			follow := nextWork(ch)
-			Expect(follow.Prompt).To(Equal("Ana Silva: and check node4\nand node5"), "one turn carrying both lines under one name")
+			Expect(follow.Prompt).To(Equal("Ana Silva <@U1>: and check node4\nand node5"), "one turn carrying both lines under one name")
 			Expect(follow.Caller.Name).To(Equal("ana/U1"))
 			Expect(follow.Checkpoint).To(Equal(agent.Checkpoint{ResumeID: id, FollowUp: true, Force: true}))
 			Expect(api.messages()).To(BeEmpty())
@@ -207,7 +207,7 @@ var _ = Describe("Intake", func() {
 			Eventually(socket.acked).Should(HaveLen(2))
 
 			w := nextWork(ch)
-			Expect(w.Prompt).To(Equal("Ana Silva: what is eating disk on node3\nthe disk one, not the memory one"),
+			Expect(w.Prompt).To(Equal("Ana Silva <@U1>: what is eating disk on node3\nthe disk one, not the memory one"),
 				"both lines are the same person's, so the name goes in front of the block once")
 		})
 
@@ -236,7 +236,7 @@ var _ = Describe("Intake", func() {
 			ended(first)
 
 			w := nextWork(ch)
-			Expect(w.Prompt).To(Equal("Ben Cole: while you are there, check node4"))
+			Expect(w.Prompt).To(Equal("Ben Cole <@U2>: while you are there, check node4"))
 			Expect(w.Caller.Name).To(Equal("ben/U2"))
 			Expect(w.ID).To(Equal("C1/1700000002.000100"), "its own turn with its own id")
 		})
@@ -333,7 +333,7 @@ var _ = Describe("Intake", func() {
 		Eventually(socket.acked).Should(HaveLen(2))
 
 		w := nextWork(ch)
-		Expect(w.Prompt).To(Equal("Ana Silva: ok do that then"))
+		Expect(w.Prompt).To(Equal("Ana Silva <@U1>: ok do that then"))
 		Expect(w.ID).To(Equal("C1/1700000005.000100"))
 	})
 
