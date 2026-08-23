@@ -36,6 +36,11 @@ const defaultReplyDeadline = 30 * time.Second
 // The lines this channel says for itself, as opposed to anything a run produced. Each is
 // a refusal a person has to be able to act on, so each says what happened and what to do
 // about it, and none of them names a session, a worker or an error.
+//
+// backlogRefusal and drainingRefusal are decided at admission, before there is a status
+// message, and are posted into the thread. storeRefusal is decided at the handover, where
+// the turn usually has a status message, and ends that message instead of posting beside
+// it.
 const (
 	backlogRefusal  = "I have as much waiting as I can hold, so I have not taken this one. Mention me again in a few minutes."
 	drainingRefusal = "I am shutting down and have not taken this one. Mention me again once I am back."

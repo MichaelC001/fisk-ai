@@ -6,6 +6,7 @@ package slack
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -438,6 +439,62 @@ var _ = Describe("Intake", func() {
 			Expect(w.Done(context.Background(), serve.Outcome{ID: w.ID, Reason: runstate.ReasonSuspended})).To(Succeed())
 
 			Eventually(textIn(api, "C1")).Should(Equal(statusText(emojiStopped, drainedNote)))
+		})
+	})
+
+	// The status message is posted at admission and the store is read at the handover, so a
+	// turn refused between the two has a message in the thread that nothing else will edit
+	// again.
+	Describe("A conversation the store cannot answer for", func() {
+		BeforeEach(func() {
+			opts.Sessions = &failingStore{Store: opts.Sessions, err: fmt.Errorf("the store is unreachable")}
+		})
+
+		// The reason reaches the person on the message they were already watching, and the
+		// turn spends one call on it rather than two.
+		It("Should end the status message on the refusal rather than posting beside it", func() {
+			opts.Progress = true
+
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(socket.acked).Should(HaveLen(1))
+
+			noWork(ch)
+
+			texts := func() []string {
+				var out []string
+				for _, m := range api.messages() {
+					out = append(out, m.Text)
+				}
+
+				return out
+			}
+
+			Eventually(texts).Should(ConsistOf(statusText(emojiFailed, storeRefusal)),
+				"one message carrying the reason rather than a status message and a post saying the same thing")
+
+			Expect(statusIn(api, "C1")().Buttons).To(BeEmpty(), "a turn that never started is not one anybody can stop")
+		})
+
+		// A channel that narrates nothing has no message to put the reason on, so the
+		// refusal is posted on its own.
+		It("Should post the refusal where the turn has no status message", func() {
+			opts.Progress = false
+
+			ch := roomyChannel(opts, api, socket)
+
+			socket.deliver(aMention().envelope())
+			Eventually(socket.acked).Should(HaveLen(1))
+
+			noWork(ch)
+
+			var posted []fakeMessage
+			Eventually(func() []fakeMessage { posted = api.messages(); return posted }).Should(HaveLen(1))
+
+			Expect(posted[0].Text).To(Equal(storeRefusal))
+			Expect(posted[0].ChannelID).To(Equal("C1"))
+			Expect(posted[0].ThreadTS).To(Equal("1700000000.000100"))
 		})
 	})
 

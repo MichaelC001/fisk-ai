@@ -385,8 +385,17 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 			w, err := c.workFor(ctx, t)
 			if err != nil {
 				t.log.Error("Refusing a mention whose conversation could not be read", "error", err)
-				t.status.stop()
-				c.reply(t.m, storeRefusal)
+
+				// The refusal goes on the status message where the turn has one, so the
+				// thread says the outcome once and in the place the person is already
+				// watching, for one call rather than two. A turn with no status message,
+				// which is what no_progress leaves, is told in a message of its own.
+				if t.status != nil {
+					t.status.ends(storeRefusal, emojiFailed)
+					t.status.stop()
+				} else {
+					c.reply(t.m, storeRefusal)
+				}
 
 				c.mu.Lock()
 				c.releaseLocked(t)
