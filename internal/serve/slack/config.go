@@ -18,7 +18,7 @@ import (
 // links it in and a program that does not never references this package at all.
 func Builder() serve.EndpointBuilder {
 	return serve.EndpointBuilder{
-		Name:    "slack",
+		Name:    channelName,
 		Enabled: func(cfg *config.Config) bool { return cfg.SlackEnabled() },
 		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 			ch, err := NewFromConfig(cfg, ConfigOptions{
@@ -58,9 +58,6 @@ type ConfigOptions struct {
 // which one to set: a worker that started without them would take mentions it could not
 // answer.
 //
-// serve.BuildOptions carries no field for either token, and deliberately. Adding two would
-// put a Slack concern in the package that is otherwise ignorant of which endpoints exist.
-//
 // The --workers flag does not reach this. It sizes the queue intake, and one flag setting
 // two numbers could not be reported honestly on a startup banner.
 func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
@@ -68,14 +65,14 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 		return nil, fmt.Errorf("expose.agent.slack is not configured")
 	}
 
-	appToken := os.Getenv(AppTokenVar)
+	appToken := os.Getenv(appTokenVar)
 	if appToken == "" {
-		return nil, fmt.Errorf("expose.agent.slack needs an app-level token in %s, which is where its credentials come from rather than the configuration file", AppTokenVar)
+		return nil, fmt.Errorf("expose.agent.slack needs an app-level token in %s, which is where its credentials come from rather than the configuration file", appTokenVar)
 	}
 
-	botToken := os.Getenv(BotTokenVar)
+	botToken := os.Getenv(botTokenVar)
 	if botToken == "" {
-		return nil, fmt.Errorf("expose.agent.slack needs a bot token in %s, which is where its credentials come from rather than the configuration file", BotTokenVar)
+		return nil, fmt.Errorf("expose.agent.slack needs a bot token in %s, which is where its credentials come from rather than the configuration file", botTokenVar)
 	}
 
 	if opts.Sessions == nil {

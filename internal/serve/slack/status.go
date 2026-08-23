@@ -26,8 +26,8 @@ const (
 	// named as families rather than by the call being made.
 	hintMemory    = "Accessing memory..."
 	hintKnowledge = "Searching knowledge..."
-	// hintTools covers every other tool, which is what keeps a tool this bot gained
-	// yesterday from naming itself in a channel.
+	// hintTools covers every other tool, so a tool this bot gained yesterday does not name
+	// itself in a channel.
 	hintTools = "Calling tools..."
 	// hintWaiting is what a turn shows while a question of its own is open in the thread.
 	// The question is its own message with the buttons on it; this says why the turn has
@@ -80,10 +80,8 @@ func statusText(icon string, line string) string {
 }
 
 // hintEmoji is the emoji one hint a run reported is shown with. Anything else takes the
-// thinking one, which is what a run that has reported nothing yet shows.
-//
-// The queued and waiting lines are not among them: neither is a hint a run reports, and the
-// state that produces each of the two chooses its own emoji.
+// thinking one, which is what a run that has reported nothing yet shows. The queued and
+// waiting states are not hints a run reports and choose their own in lineLocked.
 func hintEmoji(hint string) string {
 	switch hint {
 	case hintMemory:
@@ -118,9 +116,8 @@ func hintFor(tool string) string {
 // What it publishes is a state rather than a stream. A caller records the hint the turn
 // has reached and the message catches up when the workspace's allowance lets it, so a run
 // that moved on three times while a call was owed shows where it is rather than replaying
-// where it was. Intermediate hints are the traffic this design drops; the last state is
-// the one it may never drop, since the turn's ending is what turns this message into a
-// pointer at the answer.
+// where it was. An intermediate hint is dropped that way; the ending never is, since it
+// turns this message into a pointer at the answer.
 //
 // The Stop button is part of that state rather than an edit of its own, so it goes on with
 // the first write and comes off with the ending through the same publisher and the same
@@ -250,12 +247,12 @@ const (
 
 // stopButton is what a person presses to ask one turn's run to park at its next boundary.
 //
-// It carries the turn and nothing else. Who may press it is who can see the thread, which
-// is who may answer a question there, and a press is placed by the team, channel and thread
-// the interaction envelope authenticated rather than by anything the button said.
+// It carries the turn and nothing else. Anybody who can see the thread may press it, as
+// anybody there may answer a question, and a press is placed by the team, channel and
+// thread the interaction envelope authenticated rather than by anything the button said.
 //
-// A value that could not be built leaves the message with no button, since a status message
-// that says where the run is, is worth posting either way.
+// A value that could not be built leaves the message with no button: a status message
+// saying where the run is is worth posting either way.
 func stopButton(t *turn) []button {
 	value, err := encodeValue(buttonValue{Stop: t.id})
 	if err != nil {
@@ -280,17 +277,9 @@ func (c *Channel) startStatus(s *status) {
 		return
 	}
 
-	c.mu.Lock()
-	closed := c.postsClosed
-	if !closed {
-		c.posts.Add(1)
-	}
-	c.mu.Unlock()
-
-	// Past that point nothing is waiting for this message and the socket is on its way
-	// out, so the turn narrates nothing rather than starting a goroutine the shutdown
-	// has already passed.
-	if closed {
+	// Once Close has stopped waiting for these, nothing would wait for this message and the
+	// socket is on its way out, so the turn narrates nothing.
+	if !c.enterPosts() {
 		return
 	}
 
@@ -446,7 +435,9 @@ func (s *status) current() (msg blockMessage, ts string, ok bool) {
 // turn nothing can park, and the same write that says where the answer is takes away the
 // button that would have stopped the run producing it.
 func (s *status) stateLocked() blockMessage {
-	msg := blockMessage{Text: statusText(s.emojiLocked(), s.textLocked())}
+	text, icon := s.lineLocked()
+
+	msg := blockMessage{Text: statusText(icon, text)}
 	if s.over || s.final != "" {
 		return msg
 	}
@@ -467,10 +458,10 @@ func (s *status) movedLocked(msg blockMessage) bool {
 
 // heldBackLocked reports whether this message is one a quiet turn holds back.
 //
-// The two opening states are what it holds: a turn waiting for a worker and a turn that has
-// started and reported nothing say nothing a person needs, and a resume that banks an answer
-// and defers again never gets past them. A run that reached a tool, a question, or an ending
-// has moved somewhere worth a message, and posts.
+// A turn waiting for a worker and a turn that has started and reported nothing say nothing
+// a person needs, and a resume that banks an answer and defers again never gets past those
+// two states. A run that reached a tool, a question or an ending has moved somewhere worth
+// a message, and posts.
 //
 // The deferral is held back for the same reason. A thread with two questions open takes a
 // resume per answer, and each one ends still waiting on the other; the question message is
@@ -480,7 +471,7 @@ func (s *status) heldBackLocked() bool {
 		return false
 	}
 
-	line := s.textLocked()
+	line, _ := s.lineLocked()
 
 	return line == hintThinking || line == hintQueued || line == deferredNote
 }
@@ -496,48 +487,30 @@ func (s *status) wrote(ts string, msg blockMessage) {
 	s.shown = len(msg.Buttons) > 0
 }
 
-// emojiLocked is the emoji for the state the words describe. It tests the same states in
-// the same order textLocked does, so the icon and the line always describe one state.
-//
-// Every hint has its own, memory and knowledge included, so a thread scrolled through at
-// speed shows what each turn spent its time on without any of them being read.
-func (s *status) emojiLocked() string {
-	if s.final != "" {
-		return s.finalEmoji
-	}
-	if s.waiting {
-		return emojiAsking
-	}
-	if s.queued {
-		return emojiQueued
-	}
-
-	return hintEmoji(s.hint)
-}
-
-// textLocked is what the message says now.
+// lineLocked is what the message says now and the emoji it says it with. The two are
+// decided in one place so they cannot describe different states.
 //
 // A run that has started and reported nothing yet reads as thinking rather than as blank,
 // which is also what its first event says, so the two agree and no call is spent moving
 // between them.
-func (s *status) textLocked() string {
-	if s.final != "" {
-		return s.final
-	}
-	if s.waiting {
-		return hintWaiting
-	}
-	if s.queued {
-		return hintQueued
-	}
-	if s.hint == "" {
-		return hintThinking
-	}
-	if s.repeats > 1 {
-		return fmt.Sprintf("%s (%d)", s.hint, s.repeats)
+//
+// Every hint has an emoji of its own, memory and knowledge included, so a thread scrolled
+// through at speed shows what each turn spent its time on without any of them being read.
+func (s *status) lineLocked() (text string, icon string) {
+	switch {
+	case s.final != "":
+		return s.final, s.finalEmoji
+	case s.waiting:
+		return hintWaiting, emojiAsking
+	case s.queued:
+		return hintQueued, emojiQueued
+	case s.hint == "":
+		return hintThinking, emojiThinking
+	case s.repeats > 1:
+		return fmt.Sprintf("%s (%d)", s.hint, s.repeats), hintEmoji(s.hint)
 	}
 
-	return s.hint
+	return s.hint, hintEmoji(s.hint)
 }
 
 // note records the hint the turn has reached.

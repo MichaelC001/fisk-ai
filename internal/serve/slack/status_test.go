@@ -268,7 +268,8 @@ var _ = Describe("The status message", func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 
-			Expect(statusText(s.emojiLocked(), s.textLocked())).To(Equal(expected))
+			text, icon := s.lineLocked()
+			Expect(statusText(icon, text)).To(Equal(expected))
 		},
 		Entry("waiting for a worker", func(s *status) { s.queued = true }, ":hourglass_flowing_sand: Queued..."),
 		Entry("a run that has reported nothing yet", func(s *status) {}, ":thinking_face: Thinking..."),

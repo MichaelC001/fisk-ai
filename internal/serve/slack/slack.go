@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -54,23 +55,19 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-// The environment variables the two Slack credentials are read from. They are named here
-// rather than in the configuration because a file that is committed and shared must never
-// hold either.
+// The environment variables the two Slack credentials are read from. A configuration file
+// is committed and shared, so neither token may be written there.
 const (
-	// AppTokenVar is the app-level token, which opens the socket mode connection.
-	AppTokenVar = "SLACK_APP_TOKEN"
-	// BotTokenVar is the bot token, which every Web API call is made with.
-	BotTokenVar = "SLACK_BOT_TOKEN"
+	// appTokenVar is the app-level token, which opens the socket mode connection.
+	appTokenVar = "SLACK_APP_TOKEN"
+	// botTokenVar is the bot token, which every Web API call is made with.
+	botTokenVar = "SLACK_BOT_TOKEN"
 )
 
-// A Slack channel runs turns for people, holds a socket connection, and stops working
-// when that connection cannot be re-established, so it is all three of the optional
-// shapes a channel can have. Declaring them makes a change to any of those contracts a
-// compile error here rather than a channel the server silently stops asking.
-//
-// The siblings assert the first two. FaultingEndpoint is asserted here as well because
-// this channel is the one whose endpoint can be revoked while it runs.
+// This channel is all three of the optional shapes a channel can have: it sizes its own
+// concurrency, it holds a socket connection to release, and its credential can be revoked
+// while it runs. Declaring them makes a change to any of those contracts a compile error
+// here rather than a channel the server silently stops asking.
 var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
@@ -127,10 +124,10 @@ type Options struct {
 
 func (o *Options) validate() error {
 	if o.AppToken == "" {
-		return fmt.Errorf("an app-level token is required: set %s", AppTokenVar)
+		return fmt.Errorf("an app-level token is required: set %s", appTokenVar)
 	}
 	if o.BotToken == "" {
-		return fmt.Errorf("a bot token is required: set %s", BotTokenVar)
+		return fmt.Errorf("a bot token is required: set %s", botTokenVar)
 	}
 	if o.Identity == "" {
 		return fmt.Errorf("an identity is required: it names the journals this bot's threads run in")
@@ -162,10 +159,10 @@ type Channel struct {
 	socket   socket
 	sessions runstate.Store
 
-	// limit is the allowance every call this channel makes to Slack is spent from. It
-	// is one bucket for the whole channel because that is what Slack meters: the Tier 3
-	// methods a status message, an answer, a question and a refusal all use are counted
-	// for the app across the workspace rather than per channel or per message.
+	// limit is the allowance every call this channel makes to Slack is spent from. One
+	// bucket for the whole channel, because Slack counts the Tier 3 methods a status
+	// message, an answer, a question and a refusal all use for the app across the
+	// workspace rather than per channel or per message.
 	limit *limiter
 
 	// clock is the time this channel measures a question's grace window with, so a spec
@@ -210,15 +207,13 @@ type Channel struct {
 
 	// waiting is the admitted turns Next pops from, and wake tells it there may be one.
 	// A queue rather than a handover, so the goroutine reading envelopes never blocks on
-	// the server's puller: what it bounds is the backlog, not who waits for whom, the
-	// puller being serial either way.
+	// the server's puller.
 	waiting []*turn
 	wake    chan struct{}
 
-	// handed counts the turns given to the server that have not yet reported an
-	// outcome, which is how a turn being admitted tells a worker it can start on from
-	// one it has to wait for. That is the difference between a first hint and the
-	// queued line, and nothing else in this channel knows it: the server bounds this
+	// handed counts the turns given to the server that have not yet reported an outcome,
+	// which is how a turn being admitted tells a worker it can start on from one it has
+	// to wait for, and so a first hint from the queued line. The server bounds this
 	// channel by Concurrency and reports nothing back about how much of it is spent.
 	handed int
 
@@ -226,8 +221,7 @@ type Channel struct {
 	// itself, which Close waits for so a refusal is not lost to a shutdown. postsClosed
 	// says it has stopped waiting, after which a message is posted on the goroutine that
 	// asked for it: a run reporting its outcome after the drain has moved on still owes
-	// its thread an explanation, and starting a goroutine the wait has passed is the
-	// misuse that panics.
+	// its thread an explanation.
 	posts       sync.WaitGroup
 	postsClosed bool
 
@@ -270,7 +264,7 @@ func New(opts Options) (*Channel, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	log = log.With("channel", ChannelName)
+	log = log.With("channel", channelName)
 
 	client := slackgo.New(opts.BotToken, slackgo.OptionAppLevelToken(opts.AppToken))
 
@@ -295,8 +289,8 @@ func New(opts Options) (*Channel, error) {
 	return c, nil
 }
 
-// newChannel assembles a Channel over an already-built API and socket, which is what lets
-// a test drive every decision this package makes without reaching Slack.
+// newChannel assembles a Channel over an already-built API and socket, so a spec drives
+// every decision this package makes without reaching Slack.
 func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -330,10 +324,10 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		intakeEnd: make(chan struct{}),
 	}
 
-	// Both bounds are defaulted here as well as in the configuration, because a Config
-	// an embedder builds in process never runs prepare and an Options an embedder builds
-	// directly never sees the configuration at all. A zero would read as a bound of none
-	// rather than as unset: no mention would be admitted, and no folded line delivered.
+	// Defaulted here as well as in the configuration accessors, since Options an embedder
+	// assembles in process reaches neither. A zero would read as a limit of none rather
+	// than as unset: no mention admitted, no folded line delivered, and every question
+	// deferred the instant it was asked.
 	if c.maxWait <= 0 {
 		c.maxWait = opts.Workers * waitingPerWorker
 	}
@@ -349,19 +343,19 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 	ws, err := a.authTest(ctx)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("%s does not authenticate: %w", BotTokenVar, err)
+		return nil, fmt.Errorf("%s does not authenticate: %w", botTokenVar, err)
 	}
 	c.workspace = ws
 
 	return c, nil
 }
 
-// ChannelName identifies this channel in the server's logs, its metrics and a worker's
+// channelName identifies this channel in the server's logs, its metrics and a worker's
 // startup banner.
-const ChannelName = "slack"
+const channelName = "slack"
 
 // Name identifies the channel in the server's logs.
-func (c *Channel) Name() string { return ChannelName }
+func (c *Channel) Name() string { return channelName }
 
 // Concurrency is how many turns this channel may have running at once, which is also the
 // number above which a mention waits rather than starting.
@@ -428,9 +422,9 @@ func (c *Channel) Faults() <-chan error { return c.faults }
 
 // Close stops the channel taking new work and releases the connection.
 //
-// The socket is closed last and deliberately. Turns already handed to the server are
-// still running and are still receiving what people click on their messages, so a socket
-// closed at the start of a drain would strand every question open at that moment.
+// The socket is closed last. Turns already handed to the server are still running and are
+// still receiving what people click on their messages, so a socket closed at the start of
+// a drain would strand every question open at that moment.
 //
 // It is idempotent and returns the same answer to every caller, since a program that
 // drains on one signal and stops on the next releases every endpoint twice.
@@ -470,12 +464,9 @@ func (c *Channel) Close() error {
 //
 // The channel renders this set itself because the server reports no outcome for work it
 // never took: Outcome.Abandoned covers what the puller already holds, and a turn still in
-// this queue never reached it. Nothing else would edit these messages again, so a person
+// this queue never reached it. Nothing else would edit these messages again, so somebody
 // who mentioned the bot a minute before a deploy would be left with a queued line on their
 // thread for good.
-//
-// They go out on the goroutines every other message of this channel's uses, which Close
-// waits for immediately after.
 func (c *Channel) abandonWaiting() {
 	c.mu.Lock()
 
@@ -550,8 +541,32 @@ func (c *Channel) fault(err error) {
 	c.faultOnce.Do(func() { c.faults <- err })
 }
 
-// Workspace is the team this bot answers in, as authTest reported it at construction. A
-// caller building its own banner reads it from here rather than making the call again.
-func (c *Channel) Workspace() (team string, teamID string, botUserID string) {
-	return c.workspace.Team, c.workspace.TeamID, c.workspace.UserID
+// DescLine is one label and value describing this channel, for a caller printing a
+// startup banner.
+type DescLine struct {
+	Label string
+	Value string
+}
+
+// Describe names the workspace this bot joined, the identity it joined as and the limits
+// it answers under, for the banner a worker prints before its log takes over.
+//
+// The workspace and the bot come from the authTest at construction rather than from the
+// configuration, since neither is written there: an operator holding two bot tokens has no
+// other way to see which one this process is using. Both are named with their id, which is
+// what a Slack admin page and an audit log are searched by.
+func (c *Channel) Describe() []DescLine {
+	progress := "on"
+	if !c.progress {
+		progress = "off"
+	}
+
+	return []DescLine{
+		{Label: "Workspace", Value: fmt.Sprintf("%s (%s)", c.workspace.Team, c.workspace.TeamID)},
+		{Label: "Bot", Value: fmt.Sprintf("%s (%s)", c.workspace.User, c.workspace.UserID)},
+		{Label: "Workers", Value: strconv.Itoa(c.workers)},
+		{Label: "Answer Grace", Value: c.grace.String()},
+		{Label: "Context Lines", Value: strconv.Itoa(c.lines)},
+		{Label: "Progress", Value: progress},
+	}
 }

@@ -19,18 +19,13 @@ import (
 const (
 	// waitingPerWorker multiplies the worker count into the backlog a channel built
 	// without a MaxWaiting holds, and defaultMaxCoalesced is how many messages fold into
-	// one follow-up turn for a channel built without a MaxCoalesced. NewFromConfig always
-	// supplies both; an embedder assembling Options in process reaches these, where a
-	// zero would refuse every mention or discard every folded line rather than reading as
-	// unset.
+	// one follow-up turn for a channel built without a MaxCoalesced.
 	waitingPerWorker    = 2
 	defaultMaxCoalesced = 5
 )
 
 // defaultAnswerGrace is how long a question is held while the run that asked it is still
-// loaded, for a channel built without an AnswerGrace. It is defaulted here as well as in the
-// configuration accessor, because Options an embedder assembles in process reaches neither:
-// a zero window would defer every question the instant it was asked.
+// loaded, for a channel built without an AnswerGrace.
 const defaultAnswerGrace = 30 * time.Second
 
 // defaultReplyDeadline bounds one message this channel posts for itself. It is not a
@@ -68,8 +63,8 @@ const (
 // waiting or running.
 //
 // A turn holds its thread from the moment it is admitted until its outcome is reported,
-// which is what stops two mentions in one thread resuming one journal at once. runstate
-// writes a claim and does not enforce one, so this is the only mutual exclusion there is.
+// which stops two mentions in one thread resuming one journal at once. runstate writes a
+// claim and does not enforce one, so this is the only mutual exclusion there is.
 //
 // folded is guarded by the channel's own mutex rather than one of its own: every decision
 // that reads or writes it is an admission decision, and those are already made under that
@@ -106,9 +101,9 @@ type turn struct {
 	answer *agent.DeferredAnswer
 
 	// stop is closed when somebody presses Stop on this turn's status message. Closing it
-	// rather than canceling the run's context is what makes the press a request for a
-	// boundary: the run reads it at the next one and parks where a later mention in the
-	// thread carries on from, instead of dying wherever it stood.
+	// rather than canceling the run's context makes the press a request for a boundary:
+	// the run reads it at the next one and parks where a later mention in the thread
+	// carries on from, instead of dying wherever it stood.
 	stop     chan struct{}
 	stopOnce sync.Once
 
@@ -295,21 +290,21 @@ func (c *Channel) acknowledge(env envelope) {
 // empty string and the status message of the turn it took, which the caller starts once
 // the envelope has been acknowledged. A mention folded into a running turn takes neither.
 //
-// There are four answers. A thread nothing is running in takes the mention as a turn and
-// waits for a worker. A thread running a turn for the same person folds it into that
-// turn, so three lines typed in ten seconds arrive as one thought. A thread running a
-// turn for somebody else queues it behind, since Work.Caller, the Stop button and the
-// next question each have exactly one owner and folding two people together would leave
-// them with two. A backlog already at MaxWaiting refuses, because a person told to come
-// back is better served than one watching a queued message for three minutes.
+// A thread nothing is running in takes the mention as a turn and waits for a worker. A
+// thread running a turn for the same person folds it into that turn, so three lines typed
+// in ten seconds arrive as one thought. A thread running a turn for somebody else queues
+// it behind, since Work.Caller, the Stop button and the next question each have exactly
+// one owner and folding two people together would leave them with two. A backlog already
+// at MaxWaiting refuses, a person told to come back being better served than one watching
+// a queued message for three minutes.
 //
 // A mention past the coalescing cap is queued behind rather than dropped. The cap bounds
 // how much one follow-up turn carries; it does not license discarding what somebody
 // wrote.
 //
-// It decides in memory and holds no I/O of any kind, which is what lets it run before the
-// acknowledgement. That placement is the point: it is the only mutual exclusion between
-// two concurrent resumes of one thread.
+// It decides in memory and does no I/O, which is what lets it run before the
+// acknowledgement, and that placement is the only mutual exclusion between two concurrent
+// resumes of one thread.
 func (c *Channel) admit(m *mention) (string, *status) {
 	session := SessionFor(c.identity, m.TeamID, m.ChannelID, m.ThreadTS)
 
@@ -535,13 +530,12 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 // channel holds, and a worker answering in many threads under one identity would
 // otherwise stamp every claim in every journal identically.
 //
-// HumanPaced is set because a Slack thread is a person's pace by definition: the next
-// turn arrives when somebody types it, so the gap before this history is used again is
-// think time rather than a loop's.
+// HumanPaced is set because the next turn of a thread arrives when somebody types it, so
+// the gap before this history is used again is think time.
 //
-// PromptsMayBlock is set and PromptWait is left unset, so the server bounds none of this
-// run's questions and the prompter bounds them itself. A person answers in a minute or on
-// Thursday, and no number fits both; answer_grace is how long the run is held before it
+// PromptsMayBlock is set and PromptWait is left unset, so the server holds none of this
+// run's questions and the prompter holds them itself. A person answers in a minute or on
+// Thursday, and no number fits both; answer_grace is how long the run waits before it
 // defers and gives the worker back.
 //
 // caller arrives as a parameter because naming the person costs a user lookup, and workFor
@@ -673,9 +667,8 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 // conclude says everything a turn owes its thread and then ends its status message.
 //
 // The order is what a person reads: the answer, then what became of the turn, then what the
-// run had to say about the holes in it, then the lines it never reached. They are on one
-// goroutine rather than four because they are one thread's worth of messages and the
-// allowance is spent in the order they were written.
+// run had to say about the holes in it, then the lines it never reached. They go on one
+// goroutine rather than four so the allowance is spent in the order they were written.
 //
 // The ending wins over the pointer answer left. A run that produced text and then suspended
 // posts that text, and the status message says the turn was stopped rather than that it
@@ -685,9 +678,9 @@ func (c *Channel) finish(t *turn, out serve.Outcome) {
 // a turn that raised one and produced no text still says what went wrong, and so the link
 // the status message ends on names the answer rather than a note about it.
 //
-// It is a goroutine at all so a run reporting its outcome is not held behind the
-// workspace's allowance, and it is one Close waits for, since what it says is owed to a
-// person whether or not the worker is still serving.
+// It runs on a goroutine so a run reporting its outcome is not held behind the workspace's
+// allowance, and Close waits for that goroutine, since what it says is owed to a person
+// whether or not the worker is still serving.
 func (c *Channel) conclude(t *turn, out serve.Outcome, undelivered []*mention) {
 	c.speak(func() {
 		c.answer(t, out.Text)
@@ -718,8 +711,8 @@ func (c *Channel) conclude(t *turn, out serve.Outcome, undelivered []*mention) {
 // the mutual exclusion never lapses between the two.
 //
 // A turn that no longer holds its thread releases nothing. Nothing produces that today,
-// and the check is what keeps a second ending from handing the thread of a turn that has
-// already started to somebody else.
+// and the check stops a second ending handing the thread of a turn that has already
+// started to somebody else.
 func (c *Channel) releaseLocked(t *turn) {
 	// The Stop button on this turn's status message reaches nothing once the turn is over,
 	// so a press that arrives afterwards is answered in the thread rather than routed to a
@@ -755,11 +748,10 @@ func (c *Channel) releaseLocked(t *turn) {
 // reachedUserBoundary reports whether a run ended somewhere the conversation can take
 // another user message.
 //
-// A deferred call and a suspend are the two endings that are not one. Every other ending
-// is: a completed turn, a turn that ran out of steps, a failure, and work that was taken
-// and never started all leave the stored conversation able to take a prompt, or leave
-// nothing at all, and in both cases sending the folded lines is what the person asked
-// for.
+// A deferred call and a suspend leave the conversation waiting rather than at a boundary.
+// A completed turn, a turn that ran out of steps, a failure, and work that was taken and
+// never started all leave the stored conversation able to take a prompt, or leave nothing
+// at all, and in both cases sending the folded lines is what the person asked for.
 func reachedUserBoundary(out serve.Outcome) bool {
 	return len(out.Deferred) == 0 && out.Reason != runstate.ReasonSuspended
 }
@@ -811,22 +803,31 @@ func (c *Channel) reply(m *mention, text string) {
 	c.speak(func() { c.post(m, text) })
 }
 
+// enterPosts registers one more of the goroutines this channel posts its own messages on,
+// reporting false once Close has stopped waiting for them. Starting a goroutine a WaitGroup
+// has already been waited on is the misuse that panics, so the flag is read under the same
+// lock every start takes.
+func (c *Channel) enterPosts() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.postsClosed {
+		return false
+	}
+
+	c.posts.Add(1)
+
+	return true
+}
+
 // speak runs what this channel is saying for itself on a goroutine Close waits for, so a
 // refusal or an answer is not lost to a shutdown that started while it was in flight.
 //
-// Once Close has stopped waiting it runs on the caller's own goroutine instead. A run
+// Once Close has stopped waiting it runs on the caller's own goroutine instead: a run
 // reporting its outcome after the drain has moved past that point still owes its thread an
-// answer, the socket is not closed until the runs have ended, and starting a goroutine a
-// WaitGroup has already been waited on is the misuse that panics.
+// answer, and the socket is not closed until the runs have ended.
 func (c *Channel) speak(say func()) {
-	c.mu.Lock()
-	closed := c.postsClosed
-	if !closed {
-		c.posts.Add(1)
-	}
-	c.mu.Unlock()
-
-	if closed {
+	if !c.enterPosts() {
 		say()
 
 		return
@@ -863,8 +864,7 @@ func (c *Channel) post(m *mention, text string) {
 }
 
 // awaitPosts waits for the messages this channel started, having first closed the door on
-// new ones: a goroutine started while the wait is in progress is what makes a WaitGroup
-// panic, and the flag is set under the same lock every start takes.
+// new ones through the flag enterPosts reads.
 func (c *Channel) awaitPosts() {
 	c.mu.Lock()
 	c.postsClosed = true

@@ -40,10 +40,9 @@ type api interface {
 	// postMarkdown posts standard markdown and lets Slack render it, returning the new
 	// message's timestamp.
 	//
-	// The model writes markdown and mrkdwn is a different dialect: it has no headings and
-	// no table syntax, and it spells bold and links differently, so an answer sent as text
-	// arrives with its asterisks and brackets showing. The markdown block takes the
-	// dialect the model already writes.
+	// mrkdwn is a different dialect: no headings, no table syntax, and bold and links
+	// spelled differently, so an answer sent as text arrives with its asterisks and
+	// brackets showing. The markdown block takes the dialect the model already writes.
 	//
 	// All markdown blocks in one payload share 12,000 characters, against the 40,000 text
 	// gets, and Slack refuses a longer one rather than trimming it. The caller cuts an
@@ -70,12 +69,9 @@ type api interface {
 	// among them.
 	//
 	// The tail rather than the head, which costs the implementation something: Slack pages
-	// a thread chronologically from its start, so reading the most recent messages of a
-	// long one means paging to the end. The alternative is asking for a window with
-	// latest, whose interaction with limit is not something this repository can verify
-	// without a workspace to try it against, and a preload that silently read the wrong
-	// end of an incident thread would be invisible until somebody noticed the bot
-	// answering about an hour ago.
+	// a thread chronologically from its start, so the most recent messages of a long one
+	// mean paging to the end. Asking for a window with latest would be one call, and its
+	// interaction with limit cannot be verified without a workspace to try it against.
 	threadReplies(ctx context.Context, channelID, threadTS string, limit int) ([]message, error)
 
 	// channelHistory returns up to limit of a channel's most recent messages, oldest
@@ -127,8 +123,11 @@ type workspace struct {
 	Team   string
 	TeamID string
 	// UserID is this bot's own user id, which is how its messages are told from a
-	// person's when reading a thread back.
+	// person's when reading a thread back. User is the name that id shows as in the
+	// workspace, so a startup banner names the bot an operator sees in a channel rather
+	// than only the id behind it.
 	UserID string
+	User   string
 }
 
 // message is one line of conversation read back from Slack, reduced to what a prompt
@@ -267,6 +266,7 @@ func (c *clientAPI) authTest(ctx context.Context) (workspace, error) {
 		Team:   res.Team,
 		TeamID: res.TeamID,
 		UserID: res.UserID,
+		User:   res.User,
 	}, nil
 }
 
@@ -363,10 +363,6 @@ func (c *clientAPI) updateBlocks(ctx context.Context, channelID, ts string, msg 
 // The buttons are spread over as many blocks as they need. Slack takes maxActionElements in
 // one of them and refuses the message rather than trimming it, and a selection of the
 // twenty-five options ask_human_select allows plus its Dismiss is twenty-six.
-//
-// The block ids are fixed apart from the number that separates the actions blocks. Nothing
-// reads them back, an answer being routed by the value its control carries, and Slack
-// requires only that they do not repeat within one message.
 func blocksOf(msg blockMessage) []slackgo.Block {
 	out := []slackgo.Block{
 		slackgo.NewSectionBlock(slackgo.NewTextBlockObject(slackgo.MarkdownType, msg.Text, false, false), nil, nil),
@@ -630,7 +626,7 @@ func (s *clientSocket) translate(ctx context.Context) {
 //
 // The client reconnects on its own, so connecting and disconnecting happen often enough
 // to log at Debug. Connected is Info: a worker that never logs it never reached the
-// workspace, and a bot that answers nothing looks the same from a thread either way.
+// workspace.
 func (s *clientSocket) report(ev socketmode.Event) {
 	if s.log == nil {
 		return

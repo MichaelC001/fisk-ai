@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -66,18 +65,15 @@ const (
 // commonest paths. An aborted gate reports ReasonSuspended and an error wrapping
 // ErrPromptAborted, and a run stopped by its budget reports both a reason and an error, so
 // testing Err first would put a prompt-aborted error in the thread every time somebody
-// walked away from a question. a2aendpoint's disposition is ordered for the same reason.
+// walked away from a question.
 //
 // A suspend arrives for unrelated causes, and they are told apart in the order they are
 // tested: the gate gave up on a question, somebody pressed Stop on this turn, or the worker
 // is going down.
 //
-// Eleven lines share four emoji. A crash and a failure are a fault nobody in the thread
-// asked for and take emojiFailed; the six endings a person carries on from by mentioning the
-// bot again or by starting another thread take emojiStopped; a turn that ran out of things
-// to say finished, so it takes the same emojiAnswered an answer does; and a turn waiting on
-// a question takes emojiAsking, which is what it showed while the run was still parked in
-// the prompter.
+// Each row names its own emoji. Budget and out-of-steps read as parked rather than as
+// faults, their lines telling the person to carry on in a new thread or in this one, and a
+// turn that ran out of things to say finished, so it takes the emoji an answer does.
 func (c *Channel) ending(t *turn, out serve.Outcome) (string, string) {
 	switch {
 	case out.Crashed:
@@ -235,8 +231,7 @@ func (c *Channel) answer(t *turn, text string) {
 //
 // The answer is cut rather than split across several messages. Twelve thousand characters
 // is already more than a thread usefully holds, and four messages are worse to read than
-// one that stops and says it stopped. Where the rest of a long answer should go is not
-// decided.
+// one that stops and says it stopped.
 //
 // A cut answer costs the text that survived the cut, the fence line that closes it and the
 // note, all three inside limit. Closing the fence can push the message over, so the budget
@@ -270,9 +265,9 @@ func fitMarkdown(text string, limit int) (string, bool) {
 // cutMarkdown is the first budget bytes of text, moved back to the nearest line or word
 // boundary within cutWindow of it.
 //
-// A cut mid-word or mid-line reads as corruption, so the boundary is preferred wherever
-// one is close by. A rune is never cut in half: the byte offset lands wherever the budget
-// puts it, and the bytes of a partial rune at the end come off before anything else does.
+// A cut mid-word or mid-line reads as corruption, so a boundary within cutWindow of the
+// budget is preferred over the budget itself. The budget is a byte offset, so wholeRunes
+// takes off the partial rune it can land in before any boundary is looked for.
 func cutMarkdown(text string, budget int) string {
 	if budget <= 0 {
 		return ""
@@ -281,16 +276,7 @@ func cutMarkdown(text string, budget int) string {
 		return text
 	}
 
-	kept := text[:budget]
-
-	for len(kept) > 0 {
-		r, size := utf8.DecodeLastRuneInString(kept)
-		if r != utf8.RuneError || size > 1 {
-			break
-		}
-
-		kept = kept[:len(kept)-1]
-	}
+	kept := wholeRunes(text[:budget])
 
 	line := strings.LastIndexByte(kept, '\n')
 	if line >= 0 && len(kept)-line <= cutWindow {
@@ -364,10 +350,10 @@ func fenceCloser(md string) string {
 // channel, and the message's own timestamp.
 //
 // The archives form takes the timestamp with its dot removed, under a p. The thread and
-// the channel travel as query parameters, which is what makes a client open the thread the
-// answer is in rather than the channel around it: a permalink to a reply with neither
-// lands a reader in the channel with the answer nowhere on screen. Slack mints all three
-// values out of digits, a dot and its own id alphabet, so none of them needs escaping.
+// the channel travel as query parameters, so a client opens the thread the answer is in
+// rather than the channel around it: a permalink to a reply with neither lands a reader in
+// the channel with the answer nowhere on screen. Slack mints all three values out of
+// digits, a dot and its own id alphabet, so none of them needs escaping.
 func (c *Channel) permalink(channelID string, threadTS string, ts string) (string, bool) {
 	if c.workspace.URL == "" || channelID == "" || ts == "" {
 		return "", false

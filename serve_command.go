@@ -390,6 +390,22 @@ func (c *fiskServeCommand) describeEndpoints(doc *columns.Document, cfg *config.
 		})
 	}
 
+	// The Slack channel supplies its own worker count, unlike the a2a one above: it sizes
+	// its own concurrency from expose.agent.slack rather than from the number the queue
+	// intake uses.
+	for _, ch := range channels {
+		bot, ok := ch.(*slackchannel.Channel)
+		if !ok {
+			continue
+		}
+
+		doc.Section("Answering in Slack", func(d *columns.Document) {
+			for _, line := range bot.Describe() {
+				d.Item(line.Label, line.Value)
+			}
+		})
+	}
+
 	for _, svc := range services {
 		a2aSvc, ok := svc.(*a2aendpoint.Service)
 		if !ok {

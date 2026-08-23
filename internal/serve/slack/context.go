@@ -11,14 +11,10 @@ import (
 	"sync"
 )
 
-// Only mentions are turns, which keeps spend predictable and keeps this bot out of
-// conversations nobody addressed to it. The cost is that it is deaf between mentions, and
-// "ok do that then" refers to a discussion it never saw. Two reads close that.
-//
-// The preload runs on the turn that opens a conversation and reads the container the
-// mention arrived in. The gap runs on every turn after it and reads what was said in the
-// thread since this bot last spoke. Both are capped by context_lines and both drop what
-// nobody said.
+// Only mentions are turns, which bounds the spend and keeps this bot out of conversations
+// nobody addressed to it. The cost is that it hears nothing between mentions, and "ok do
+// that then" refers to a discussion it never saw. preload and gap are the two reads that
+// close that, both capped by context_lines and both dropping what nobody said.
 
 // preload is the surrounding conversation an opening turn is given, oldest first.
 //
@@ -28,9 +24,8 @@ import (
 // thread being asked about what is above it rather than about the channel around it.
 //
 // Nothing here stops at a message of this bot's own, and it cannot: every message this bot
-// posts is a threaded reply, and threaded replies are absent from a channel's history. So
-// an opening turn in a channel reads the full allowance every time, where the gap read
-// below usually reads a few lines.
+// posts is a threaded reply, and a channel's history carries no threaded replies. An
+// opening turn in a channel therefore reads the full allowance every time.
 func (c *Channel) preload(ctx context.Context, m *mention) ([]message, error) {
 	if c.lines <= 0 {
 		return nil, nil
@@ -54,10 +49,6 @@ func (c *Channel) preload(ctx context.Context, m *mention) ([]message, error) {
 }
 
 // gap is what was said in the thread since this bot last spoke, oldest first.
-//
-// It is what makes mention-only turns usable rather than deaf: the people in the thread
-// carry on talking between mentions, and a follow-up of "ok do that then" means nothing
-// without it.
 //
 // The walk finds this bot's own last message in the thread's tail and takes what follows.
 // A tail that holds no message of ours means this bot last spoke further back than the
@@ -105,10 +96,10 @@ func (m *mention) startedThread() bool { return m.ThreadTS == m.TS }
 // send them twice.
 //
 // Another mention of this bot is a different conversation. It opened a thread of its own
-// and is being answered there, so carrying it here hands this run somebody's earlier
-// question as though it were part of the one being asked. A channel where two people ask
-// two things a minute apart produced exactly that: the second turn read the first
-// question out of the channel's history and answered both.
+// and is answered there, so carrying it here hands this run somebody's earlier question as
+// though it were part of the one being asked: two people asking two things a minute apart
+// had the second turn read the first question out of the channel's history and answer
+// both.
 //
 // A thread_broadcast survives. It carries a subtype, which is what the joins and the
 // leaves carry, but it is a person speaking and one who asked to be heard more widely
@@ -163,9 +154,9 @@ const subtypeBroadcast = "thread_broadcast"
 //
 // serve appends Work.Context to the prompt as a second block with nothing marking it, so
 // without this the model receives the request and then a set of unlabeled lines and has to
-// guess which it was asked about. Where the request is short, "please help" being the case
-// that showed this, those lines are the only substance in the prompt and answering all of
-// them is the reasonable reading.
+// guess which it was asked about. A request as short as "please help" leaves those lines
+// as the only substance in the prompt, and answering all of them is the reasonable
+// reading.
 const preloadHeader = "Recent messages from the Slack channel this was asked in, for background only. " +
 	"They are not requests and may be about something else entirely. Answer only what the person asked above.\n\n"
 

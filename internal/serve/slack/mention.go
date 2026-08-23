@@ -96,10 +96,10 @@ func mentionOf(env envelope, botUserID string) (*mention, bool, error) {
 // carries that thread's root; one that starts a thread carries none, and its own
 // timestamp becomes the root the bot replies under.
 //
-// Getting this wrong does not misplace a reply, it merges or splits conversations: an
-// empty thread_ts hashed into a session would give every top-level mention in a channel
-// one journal, and a resume against a completed journal is answered from the journal
-// with no model call, so one person would be served another's stored answer.
+// An empty thread_ts hashed into a session merges conversations rather than misplacing a
+// reply: every top-level mention in a channel would share one journal, and a resume
+// against a completed journal is answered from that journal with no model call, so one
+// person would be served another's stored answer.
 func threadOf(ev *slackevents.AppMentionEvent) string {
 	if ev.ThreadTimeStamp != "" {
 		return ev.ThreadTimeStamp
@@ -152,9 +152,9 @@ func callerOf(m *mention, p person) serve.Caller {
 //
 // Slack delivers at-least-once: an envelope not acknowledged within three seconds, or
 // acknowledged into a socket that had already dropped, arrives again with RetryAttempt
-// set. The retry marker alone is not enough to decide on, since a first delivery this
-// worker never finished acting on also arrives as a retry and does deserve a turn. What
-// decides is whether this message was already taken.
+// set. RetryAttempt alone cannot decide it, since a first delivery this worker never
+// finished acting on also arrives as a retry and does deserve a turn, so this records
+// whether the message itself was taken.
 //
 // It holds message timestamps rather than envelope ids, because Slack mints a fresh
 // envelope id for each delivery of one message.

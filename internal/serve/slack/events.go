@@ -15,10 +15,9 @@ import (
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 )
 
-// Everything a thread hears about a run in progress comes through this sink, and the
-// optional half is declared as well because the notes it carries reach an implementation or
-// nowhere. A change to either contract is a compile error here rather than a thread that
-// quietly stops narrating.
+// Everything a thread hears about a run in progress comes through this sink. Declaring both
+// contracts makes a change to either a compile error here rather than a thread that stops
+// narrating.
 var (
 	_ agent.Events             = (*events)(nil)
 	_ agent.RemoteHostReporter = (*events)(nil)
@@ -42,14 +41,9 @@ const (
 // events is the run's narration for one turn: it moves that turn's status message and
 // collects the advisories the ending puts under the answer.
 //
-// It holds the turn rather than the status message because the two things it feeds are the
-// turn's, and because a channel that narrates nothing has a nil status message that every
-// method here still calls.
-//
-// The status message is a state rather than a stream, so nothing here talks to Slack. A
-// method records where the run has reached and the turn's publisher writes whatever that is
-// by the time the workspace's allowance lets it through, which is what keeps a run that
-// called forty tools from spending forty calls saying so.
+// Nothing here talks to Slack. A method records where the run has reached and the turn's
+// publisher writes whatever that is by the time the workspace's allowance lets it through,
+// so a run that called forty tools spends nothing like forty calls saying so.
 //
 // Every method is called from the run's own goroutine, Panicked from a deferred recover
 // while it unwinds, so none of them blocks or panics. The advisories are the exception to
@@ -79,8 +73,8 @@ func newEvents(t *turn) *events {
 }
 
 // Starting reports the run's resolved parameters, none of which a thread has any use for:
-// the tool count, the trace file and the session id are the worker's business. What it says
-// here is that the run began.
+// the tool count, the trace file and the session id are the worker's business. It records
+// that the run began.
 //
 // The message a turn is posted with already reads as thinking, so this spends no call: it
 // records the state Slack was given at admission and the publisher finds nothing to write.
@@ -120,7 +114,7 @@ func (e *events) ToolResult(agent.ToolResultTrace) {}
 func (e *events) LLMRequest(string) {}
 
 // SessionRotated is logged and never posted. The previous session is a journal id, which is
-// exactly the material this channel keeps out of a thread, and the log is the only place an
+// exactly the material this channel leaves out of a thread, and the log is the only place an
 // operator could pick that conversation back up from.
 //
 // Nothing here produces one today: a rotation is a context reset, and a reset arrives on
@@ -152,9 +146,7 @@ func (e *events) Warn(w agent.Warning) {
 //
 // This sink implements the optional half because nothing else on this path reports it: the
 // notes reach an implementation or nowhere, so a mistyped include filter would otherwise
-// leave every thread short of tools with nobody told. The people in a thread cannot see
-// this worker's configuration and are the only ones who can ask for it to be fixed, which
-// is the reason every other advisory is rendered here.
+// leave every thread short of tools and say nothing.
 func (e *events) RemoteHostNotes(imports []remotetools.HostImport) {
 	for _, imp := range imports {
 		for _, w := range agent.HostImportWarnings(imp) {
@@ -213,9 +205,9 @@ func (e *events) note() string {
 // The advisories a thread hears, one fixed sentence for each kind.
 //
 // None of them carries the warning's own fields. A Warning names tools, paths, parameters
-// and errors, which is the material the hint table already keeps out of a channel everybody
-// reads, and a tool supplies some of it. What a person in a thread can act on is that the
-// answer has a hole in it and roughly which one; the worker's log has the rest, the server
+// and errors, some of it supplied by a tool, which is the material the hint table already
+// leaves out of a channel everybody reads. A person in a thread can act on the answer
+// having a hole in it and roughly which one; the worker's log has the rest, the server
 // recording every advisory whatever a channel does with it.
 const (
 	warnJournal = "I could not fully record this turn, so what I remember of this thread may be incomplete."

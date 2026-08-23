@@ -274,10 +274,9 @@ const (
 // belongs to the channel rather than to a run, because the goroutine reading envelopes has
 // to find a question without knowing which turn asked it.
 //
-// One mutex covers both directions, which is the point of it. A run giving up on a question
-// and a click being delivered to that question are one transition under this lock, so a
-// click landing exactly as the window closes is reported as one or the other and never as
-// both.
+// A run giving up on a question and a click being delivered to that question are one
+// transition under the one mutex, so a click landing exactly as the window closes is
+// reported as one or the other and never as both.
 type questions struct {
 	mu   sync.Mutex
 	open map[string]*question
@@ -888,10 +887,6 @@ const askedOf = "<@%s>"
 // place the person reads what they are choosing between. The budget is shared out evenly, so
 // twenty-five options each get a share rather than the first few taking all of it, and an
 // option longer than its share is cut where it is.
-//
-// The escape comes before the cut, as it does for the question's own words: an option of
-// ampersands is five times its own length once escaped, and a list cut afterwards would take
-// the message past what Slack accepts.
 func optionList(options []string, budget int) string {
 	per := max(budget/len(options)-optionOverhead, minOptionText)
 	per = min(per, maxOptionText)
@@ -908,10 +903,9 @@ func optionList(options []string, budget int) string {
 // answer under it. Only app_mention is subscribed, so a bare reply in the thread reaches
 // this worker not at all.
 //
-// A mention answers a free-text question and is refused while any other kind is open, so
-// what a mention is worth differs by kind. The note says the same thing on all four rather
-// than four things: mentioning the bot is what gets a person heard either way, and the
-// refusal that comes back says what to do instead.
+// It says the same thing on all four kinds even though a mention answers only a free-text
+// question: mentioning the bot gets a person heard either way, and the refusal that comes
+// back says what to do instead.
 const typedRepliesNote = "_Use the buttons, or mention me with your answer. I do not see plain replies in this thread._"
 
 // The labels the buttons carry. They are plain text rather than mrkdwn, which is what Slack
@@ -956,9 +950,8 @@ const (
 //
 // Every question can be ended from its own message. Three of them carry Dismiss, which
 // answers the call with the null result its own tool produces for an operator who gave no
-// answer. The confirm gate's Decline is its dismissal: the gated command does not run, which
-// is the whole of what declining to answer a gate can mean, and a second button beside it
-// saying the same thing in vaguer words would be a choice nobody has to make.
+// answer. The confirm gate's Decline is its dismissal, the gated command not running being
+// the whole of what declining a gate can mean.
 func (q *question) mint() ([]button, *textInput, error) {
 	switch q.kind {
 	case kindConfirm:
@@ -1148,13 +1141,8 @@ func (c *Channel) pressNote(q *question, line string) {
 // reads is what an answer says when it is written back onto the question, in the terms the
 // question was put in rather than the terms the button carried.
 //
-// A selection's option, a choice naming none of them and a typed answer are escaped before
-// they are cut, the way the question's own words are: escaping grows the string, so an answer
-// cut first would put the rewritten message past the room maxQuestionText left for it and the
-// update recording it would be refused.
-//
 // The choice and the text come off the click rather than out of anything this worker minted,
-// so both are held to maxAnswerText however long they arrive.
+// so both are escaped and then held to maxAnswerText however long they arrive.
 func (q *question) reads(g *given) string {
 	if g.Choice == choiceDismiss {
 		return answerDismissed

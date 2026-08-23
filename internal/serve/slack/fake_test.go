@@ -82,6 +82,7 @@ func newFakeAPI() *fakeAPI {
 			Team:   "Example",
 			TeamID: "T000",
 			UserID: "U0BOT",
+			User:   "NATS Docs",
 		},
 		posted:  map[string]*fakeMessage{},
 		history: map[string][]message{},

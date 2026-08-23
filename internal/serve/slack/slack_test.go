@@ -74,8 +74,8 @@ var _ = Describe("Options", func() {
 			return err.Error()
 		}
 
-		Expect(missing(func(o *Options) { o.AppToken = "" })).To(ContainSubstring(AppTokenVar))
-		Expect(missing(func(o *Options) { o.BotToken = "" })).To(ContainSubstring(BotTokenVar))
+		Expect(missing(func(o *Options) { o.AppToken = "" })).To(ContainSubstring(appTokenVar))
+		Expect(missing(func(o *Options) { o.BotToken = "" })).To(ContainSubstring(botTokenVar))
 		Expect(missing(func(o *Options) { o.Identity = "" })).To(ContainSubstring("identity is required"))
 		Expect(missing(func(o *Options) { o.Workers = 0 })).To(ContainSubstring("greater than zero"))
 		Expect(missing(func(o *Options) { o.Sessions = nil })).To(ContainSubstring("session store is required"))
@@ -94,10 +94,13 @@ var _ = Describe("New", func() {
 
 		Expect(api.auths).To(Equal(1))
 
-		team, teamID, bot := ch.Workspace()
-		Expect(team).To(Equal("Example"))
-		Expect(teamID).To(Equal("T000"))
-		Expect(bot).To(Equal("U0BOT"))
+		lines := map[string]string{}
+		for _, line := range ch.Describe() {
+			lines[line.Label] = line.Value
+		}
+
+		Expect(lines["Workspace"]).To(Equal("Example (T000)"))
+		Expect(lines["Bot"]).To(Equal("NATS Docs (U0BOT)"))
 	})
 
 	It("Should refuse a credential Slack does not accept, naming the variable to fix", func() {
@@ -105,7 +108,7 @@ var _ = Describe("New", func() {
 		api.authErr = fmt.Errorf("invalid_auth")
 
 		_, err := newChannel(testOptions(), api, newFakeSocket(), quietLogger())
-		Expect(err).To(MatchError(ContainSubstring(BotTokenVar)))
+		Expect(err).To(MatchError(ContainSubstring(botTokenVar)))
 		Expect(err).To(MatchError(ContainSubstring("invalid_auth")))
 	})
 
@@ -128,6 +131,33 @@ var _ = Describe("Channel", func() {
 
 		Expect(ch.Name()).To(Equal("slack"))
 		Expect(ch.Concurrency()).To(Equal(3))
+	})
+
+	Describe("Describe", func() {
+		It("Should name the workspace, the bot and the limits a turn answers under", func() {
+			ch := newTestChannel(testOptions(), newFakeAPI(), newFakeSocket())
+
+			Expect(ch.Describe()).To(Equal([]DescLine{
+				{Label: "Workspace", Value: "Example (T000)"},
+				{Label: "Bot", Value: "NATS Docs (U0BOT)"},
+				{Label: "Workers", Value: "5"},
+				{Label: "Answer Grace", Value: "30s"},
+				{Label: "Context Lines", Value: "20"},
+				{Label: "Progress", Value: "on"},
+			}))
+		})
+
+		// no_progress is one absent status message per turn, which is a change to what
+		// every thread looks like. Reporting it by leaving the line out would read as a
+		// banner that forgot rather than as a bot that stays quiet.
+		It("Should report a channel posting no status message as off", func() {
+			opts := testOptions()
+			opts.Progress = false
+
+			ch := newTestChannel(opts, newFakeAPI(), newFakeSocket())
+
+			Expect(ch.Describe()).To(ContainElement(DescLine{Label: "Progress", Value: "off"}))
+		})
 	})
 
 	It("Should open the connection on the first Next", func() {

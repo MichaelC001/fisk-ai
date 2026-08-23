@@ -31,10 +31,9 @@ const (
 // click is one interaction reduced to what this channel acts on.
 //
 // The conversation comes from the envelope's own authenticated fields rather than from
-// anything the button carried. A workspace member knows the team, channel and thread of
-// every thread they can see, so those are not a secret that would make a hash of them a
-// capability; reading them from the envelope is what keeps the property both sibling
-// channels have.
+// anything the button carried. Anybody in a workspace knows the team, channel and thread of
+// every thread they can see, so a value derived from those would be a string one person
+// could present against another's conversation.
 type click struct {
 	// Interaction says which of the two shapes this is.
 	Interaction interactionKind
@@ -185,10 +184,9 @@ func (c *Channel) clicked(env envelope) {
 //
 // The run's context is left alone. Somebody pressing Stop is asking for a conversation they
 // can carry on with rather than a turn that died half done, so the run finishes the step in
-// hand, parks where a later mention resumes it, and reports a suspend.
-//
-// Pressing twice is no worse than pressing once: the same live turn is asked for the same
-// thing, and the button stays on the message until the turn's ending takes it off.
+// hand, parks where a later mention resumes it, and reports a suspend. Pressing twice asks
+// the same live turn for the same thing, the button staying on the message until the turn's
+// ending takes it off.
 //
 // A turn this worker is not running is one that ended, or one that belonged to a process
 // that has restarted since. Whoever pressed is told so rather than left looking at a button
@@ -430,10 +428,8 @@ func (c *Channel) answersOpenQuestion(m *mention) (*click, string) {
 //
 // It is a click rather than a shape of its own because everything after this point is the
 // same: the same registry decides whether a run is still waiting, the same resume carries it
-// to a conversation that is not, and the same message records who answered.
-//
-// The kind and the call come from the question this worker is holding, never from the
-// mention, and the conversation is the mention's own authenticated fields.
+// to a conversation that is not, and the same message records who answered. The kind and the
+// call come from the question this worker is holding, never from the mention.
 func mentionAnswer(m *mention, q openQuestion) *click {
 	return &click{
 		Interaction: interactionMention,
