@@ -311,7 +311,7 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		clock:     wallClock{},
 		asked:     newQuestions(0),
 		taken:     newSeen(0),
-		names:     newNames(),
+		names:     newNames(log),
 		inFlight:  map[string]*turn{},
 		stoppable: map[string]*turn{},
 		queued:    map[string][]*turn{},

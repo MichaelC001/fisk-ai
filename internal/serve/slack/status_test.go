@@ -378,7 +378,7 @@ var _ = Describe("The status message", func() {
 		Eventually(socket.acked).Should(HaveLen(1))
 
 		w := nextWork(ch)
-		Expect(w.Prompt).To(Equal("U1: what is eating disk on node3"))
+		Expect(w.Prompt).To(Equal("<@U1>: what is eating disk on node3"))
 
 		Expect(statusOf(ch, session)).To(BeNil())
 		Consistently(api.messages, 100*time.Millisecond).Should(BeEmpty())

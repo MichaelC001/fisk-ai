@@ -6,6 +6,7 @@ package slack
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,19 +192,44 @@ func (c *Channel) render(ctx context.Context, msgs []message) string {
 
 	lines := make([]string, 0, len(msgs))
 	for _, msg := range msgs {
-		lines = append(lines, spoken(c.names.of(ctx, c.api, msg.UserID).Full, strings.TrimSpace(msg.Text)))
+		who := c.names.of(ctx, c.api, msg.UserID)
+		lines = append(lines, spoken(speaker(who, msg.UserID), strings.TrimSpace(msg.Text)))
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// spoken puts a name in front of what that person said. A turn's own words take the shape
-// the surrounding conversation is rendered in, so the model reads one transcript rather
-// than a message with a label beside it.
+// speaker is how one person is introduced in the transcript: what they are called, and the
+// markup that addresses them, as "Ana Silva <@U024BE7LH>".
 //
-// Everything folded into one turn came from one person, so the name goes in front of the
+// The markup is there so an answer can notify somebody. Slack delivers a notification for
+// <@U024BE7LH> and none for a name written out, and the id is the only form that carries
+// one, so a model that never sees the id cannot produce one. Whether it addresses anybody
+// at all is the system prompt's business.
+//
+// A lookup that failed leaves the name equal to the id, and the markup alone is what that
+// renders as: "U024BE7LH <@U024BE7LH>" says the same thing twice. A message naming no user
+// takes no markup, since there is nobody for it to address.
+func speaker(p person, userID string) string {
+	if userID == "" {
+		return p.Full
+	}
+
+	addressed := "<@" + userID + ">"
+	if p.Full == "" || p.Full == userID {
+		return addressed
+	}
+
+	return p.Full + " " + addressed
+}
+
+// spoken puts a speaker in front of what that person said. A turn's own words take the
+// shape the surrounding conversation is rendered in, so the model reads one transcript
+// rather than a message with a label beside it.
+//
+// Everything folded into one turn came from one person, so the speaker goes in front of the
 // block once rather than in front of each line of it. A mention carrying no words is an
-// address rather than something somebody said, and takes no name.
+// address rather than something somebody said, and takes no speaker.
 func spoken(name, text string) string {
 	if text == "" {
 		return ""
@@ -219,14 +245,19 @@ func spoken(name, text string) string {
 // changes mid-conversation is stale in the prompt and nowhere else, and a worker that
 // answers for weeks holds one entry per person it has heard from.
 type names struct {
-	mu sync.Mutex
-	by map[string]person
+	mu  sync.Mutex
+	by  map[string]person
+	log *slog.Logger
 }
 
-func newNames() *names { return &names{by: map[string]person{}} }
+func newNames(log *slog.Logger) *names { return &names{by: map[string]person{}, log: log} }
 
 // of answers with both names, resolving the user once. A lookup that fails answers with
 // the id under both, which is what the line and the caller record fall back to.
+//
+// The failure is logged as well as fallen back from. A token installed before users:read
+// was granted fails every lookup, and the bot goes on answering with a transcript naming
+// everybody by their id, which is a degradation nothing else reports.
 func (n *names) of(ctx context.Context, api api, userID string) person {
 	if userID == "" {
 		return person{Full: unknownName, Username: unknownName}
@@ -245,6 +276,10 @@ func (n *names) of(ctx context.Context, api api, userID string) person {
 	p.Username = plainName(p.Username)
 
 	if err != nil || p.Full == "" || p.Username == "" {
+		if n.log != nil {
+			n.log.Warn("Resolving a Slack user failed, naming them by their id instead", "user", userID, "error", err)
+		}
+
 		// Not cached: a lookup that failed for a reason that passes should be tried again
 		// on the next turn rather than leaving the id in every line for as long as this
 		// worker runs.
