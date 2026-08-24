@@ -1161,9 +1161,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// the same sessions to every run it hosts rather than starting a stdio child around
 		// each one. They are used verbatim and never closed (the caller owns them).
 		// Otherwise Run connects here and closes at the end of the run, the CLI path.
+		// setupCtx, not ctx: the per-server connect and import spans nest under startup,
+		// as the memory index load does. A run given sessions somebody else opened opens
+		// no connect span, since the connect happened before this run existed.
 		sessions := opts.MCPSessions
 		if sessions == nil {
-			sessions, err = mcpclient.Connect(ctx, mcpclient.Options{
+			sessions, err = mcpclient.Connect(setupCtx, mcpclient.Options{
 				Servers:            cfg.MCPServers,
 				Identity:           cfg.Identity,
 				Version:            util.Version(),
@@ -1192,7 +1195,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// The names the remote import settled on are never written into taken, so the
 		// naming pass is given both lookups. The names this import settles on are added to
 		// taken below, which keeps it the whole set of claimed names.
-		mcpTools, mcpByName, mcpImports, err = mcpclient.ImportForRun(ctx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+		mcpTools, mcpByName, mcpImports, err = mcpclient.ImportForRun(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
 
 		// ImportForRun returns the per-server outcomes with its error as well as without
 		// one, so the notes are reported before the error is: an operator deciding whether
@@ -1537,6 +1540,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		Application: len(tools),
 		Builtin:     len(builtins) + len(memBuiltins) + len(ragBuiltins),
 		Remote:      len(remoteTools),
+		MCP:         len(mcpTools),
 		Custom:      len(customByName),
 		Deferred:    toolSet.search,
 	})

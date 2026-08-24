@@ -25,6 +25,12 @@ const (
 	AttrToolsBuiltin = attribute.Key("fisk.tools.builtin")
 	// AttrToolsRemote counts the tools imported from remote a2a hosts.
 	AttrToolsRemote = attribute.Key("fisk.tools.remote")
+	// AttrToolsMCP counts the tools imported from the configured MCP servers. It is
+	// its own key rather than part of the remote count for the reason the accounting
+	// keeps the two kinds apart: an a2a peer runs an agent and an MCP server runs a
+	// tool, and a startup that reported them as one number would make a run whose
+	// tools all came from MCP indistinguishable from one that reached four agents.
+	AttrToolsMCP = attribute.Key("fisk.tools.mcp")
 	// AttrToolsCustom counts the tools a Go caller injected through Options.
 	AttrToolsCustom = attribute.Key("fisk.tools.custom")
 	// AttrMemoryBackend and AttrMemoryLocation describe the memory store a run bound,
@@ -148,6 +154,15 @@ const (
 	// AttrToolRemoteAgent names it.
 	AttrToolRemote      = attribute.Key("fisk.tool.remote")
 	AttrToolRemoteAgent = attribute.Key("fisk.tool.remote_agent")
+	// AttrToolMCPServer names the configured MCP server that served the call.
+	//
+	// It is a key of its own rather than a second use of AttrToolRemoteAgent, which
+	// means the a2a peer alone. An MCP tool presents like a remote one and is accounted
+	// under its own kind, and a backend filtering on the remote agent has to keep
+	// returning a2a calls only. It is the configured server name, operator
+	// configuration validated to letters, digits, '-' and '_', and it is the only thing
+	// about a server that reaches a span: see AttrMCPServer.
+	AttrToolMCPServer = attribute.Key("fisk.tool.mcp_server")
 	// AttrToolExitCode is the exit status of the command a tool ran, and is ABSENT for
 	// a tool that ran none: a built-in, a Go caller's own tool, a tool invoked on a
 	// remote agent. Reporting zero for those would publish "the command succeeded" for a
@@ -284,6 +299,57 @@ const (
 	// query request at all. Without this key that trace reads as an embeddings call that
 	// embedded nothing.
 	AttrEmbeddingsPurpose = attribute.Key("fisk.embeddings.purpose")
+
+	// AttrMCPServer is the configured name of an MCP server and AttrMCPTransport is
+	// how this process reaches it, from the closed MCPTransport vocabulary.
+	//
+	// They are the only two things about a server that reach a span, and that is a
+	// rule rather than the current state of the code. The url is out because a
+	// credential sits in its query or its userinfo, and the command and its arguments
+	// are out for the same reason: the bridge shape an operator writes most often,
+	// "npx -y mcp-remote https://host/sse?key=SECRET", carries the token in an
+	// argument, which is why fisk info redacts them. A span is exported to whoever can
+	// read the collector's traces and cannot be un-sent. MCPServerInfo is the shape
+	// that enforces this: it has these two fields and no way to express a third.
+	AttrMCPServer    = attribute.Key("fisk.mcp.server")
+	AttrMCPTransport = attribute.Key("fisk.mcp.transport")
+	// AttrMCPToolsDiscovered is how many tools a server advertised, AttrMCPToolsKept
+	// how many survived the entry's include and exclude filters, and
+	// AttrMCPToolsSkipped how many of those could not be built into a tool the model
+	// is offered, whether the name was taken or the server described the tool badly.
+	//
+	// All three are absent on a failure, since zero discovered says the server offers
+	// nothing, which is a different answer from not having been asked.
+	AttrMCPToolsDiscovered = attribute.Key("fisk.mcp.tools.discovered")
+	AttrMCPToolsKept       = attribute.Key("fisk.mcp.tools.kept")
+	AttrMCPToolsSkipped    = attribute.Key("fisk.mcp.tools.skipped")
+)
+
+// MCPTransport is the closed vocabulary for how this process reaches an MCP server.
+//
+// It is a struct wrapping a string for the reason ErrorClass and DegradeReason are:
+// `type MCPTransport string` reads as closed and is not, so
+// telemetry.MCPTransport(server.URL) would compile and put an endpoint carrying a
+// credential on a span. There is no exported way to build one; a caller picks from
+// the values below.
+type MCPTransport struct{ s string }
+
+// String renders the token for the span attribute.
+func (t MCPTransport) String() string { return t.s }
+
+// Set reports whether a transport was named at all.
+func (t MCPTransport) Set() bool { return t.s != "" }
+
+var (
+	// MCPTransportStdio is a server started as a child process and spoken to over its
+	// standard input and output.
+	MCPTransportStdio = MCPTransport{"stdio"}
+	// MCPTransportHTTP is an already-running server reached over streamable HTTP.
+	MCPTransportHTTP = MCPTransport{"http"}
+	// MCPTransportOther is a transport this build does not name: one a Go caller
+	// supplied itself, and an entry that declares neither a command nor a url, which
+	// fails before it connects.
+	MCPTransportOther = MCPTransport{"other"}
 )
 
 // The retrieval tiers. Hybrid means the lexical and vector retrievers were fused;
@@ -551,7 +617,9 @@ var (
 	// names a distinct operator action: a run repeatedly reporting it has a prompt
 	// problem rather than an infrastructure one.
 	ClassInvalidQuery = ErrorClass{"invalid_query"}
-	// ClassRemoteUnavailable is a remote agent that could not be reached.
+	// ClassRemoteUnavailable is a peer this process calls out to that could not be
+	// reached: a remote agent, or an MCP server that would not start, would not
+	// answer the initialize handshake, or would not list its tools.
 	ClassRemoteUnavailable = ErrorClass{"remote_unavailable"}
 	// ClassRemoteCapacity is a remote agent that answered and refused, being already
 	// running as many tool calls as it will run at once. It is kept apart from

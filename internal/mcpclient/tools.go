@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
@@ -134,7 +135,7 @@ func Import(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]Se
 	var collisions []string
 
 	for _, server := range servers {
-		imported, clashes := importServer(ctx, sessions, server, claimed, byName)
+		imported, clashes := sessions.importOne(ctx, server, claimed, byName)
 		out = append(out, imported)
 		collisions = append(collisions, clashes...)
 	}
@@ -232,7 +233,7 @@ func DiscoverForInfo(ctx context.Context, opts Options, claimed ClaimedNames) []
 
 		// byName is carried across the servers so the second server to offer a name is
 		// told it is taken, which is what a run would tell it.
-		imported, _ := importServer(ctx, sessions, server, claimed, byName)
+		imported, _ := sessions.importOne(ctx, server, claimed, byName)
 		out = append(out, imported)
 
 		// The close error describes tearing down a session whose tools have already been
@@ -297,6 +298,28 @@ func ImportChanged(change ToolListChange, claimed ClaimedNames, caller Caller) S
 	result.Tools, result.Skipped, _ = buildServerTools(change.Server, change.Kept, claimed, map[string]*functool.Tool{}, caller)
 
 	return result
+}
+
+// importOne imports one server under a span of its own, so a listing that took ten
+// seconds is attributed to the server that took them. It is where every import a run
+// or fisk info makes goes through; the rebuild after a tools/list_changed
+// notification does not, and stays untraced.
+func (s *Sessions) importOne(ctx context.Context, server config.MCPServer, claimed ClaimedNames, byName map[string]*functool.Tool) (ServerImport, []string) {
+	ctx, span := telemetry.ProviderFromContext(ctx).StartMCPImport(ctx, s.spanInfo(server))
+
+	imported, clashes := importServer(ctx, s, server, claimed, byName)
+	if imported.Err != nil {
+		span.Finish(telemetry.MCPServerOutcome{Failed: true, Class: listClass(imported.Err)})
+		return imported, clashes
+	}
+
+	span.Finish(telemetry.MCPServerOutcome{Tools: &telemetry.MCPToolCounts{
+		Discovered: imported.Discovered,
+		Kept:       len(imported.Kept),
+		Skipped:    len(imported.Skipped),
+	}})
+
+	return imported, clashes
 }
 
 // importServer discovers one server, filters it, and names and builds what
@@ -450,13 +473,24 @@ func compileFilters(server config.MCPServer) (toolFilters, error) {
 	return filters, nil
 }
 
+// filterError marks a pattern the operator wrote that would not compile. It is the
+// configuration failing rather than the server, and it is the one import failure that
+// never made a round trip, which is what a span needs to classify it as a
+// configuration error instead of an unreachable server. It wraps rather than
+// replaces, so the message is unchanged and errors.Is still reaches what regexp
+// reported.
+type filterError struct{ err error }
+
+func (e filterError) Error() string { return e.err.Error() }
+func (e filterError) Unwrap() error { return e.err }
+
 // compilePatterns compiles one filter's name patterns.
 func compilePatterns(patterns []string) ([]*regexp.Regexp, error) {
 	out := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			return nil, fmt.Errorf("invalid mcp tool filter pattern %q: %w", p, err)
+			return nil, filterError{fmt.Errorf("invalid mcp tool filter pattern %q: %w", p, err)}
 		}
 		out = append(out, re)
 	}

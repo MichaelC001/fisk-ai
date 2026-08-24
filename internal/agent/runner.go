@@ -1583,8 +1583,16 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	outcome.Remote = remote
 	if remote {
 		// CallInfo.Agent names whoever serves the call, and other providers present
-		// like a remote one, so the journal takes the name only for an a2a peer.
+		// like a remote one, so the tool span takes the name only for an a2a peer. The
+		// journal records no agent name at all: ToolResultRecord carries the Remote flag
+		// and nothing more.
 		outcome.RemoteAgent = effInfo.Agent
+	}
+	// The same field names the configured server for an MCP tool, and it reaches the
+	// span under a key of its own: the two kinds are accounted apart, so a backend
+	// filtering on the remote agent must keep answering with a2a calls alone.
+	if effInfo.Kind == toolkit.KindMCP {
+		outcome.MCPServer = effInfo.Agent
 	}
 
 	// Last check before an effect this process cannot take back. A journaled run on a

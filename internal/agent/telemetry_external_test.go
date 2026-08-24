@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -1985,4 +1986,65 @@ func TestTelemetry_MemoryIndexClassifiesCancellationAsCancellation(t *testing.T)
 	class, ok := spanAttr(spanNamed(g, exp, "memory_index"), "error.type")
 	g.Expect(ok).To(BeTrue())
 	g.Expect(class.AsString()).To(Equal(telemetry.ClassCanceled.String()))
+}
+
+// TestTelemetry_MCPRunReportsTheServerOnStartupAndOnTheCall drives the whole path a
+// configured server takes through a trace: the import of the server is a span of its
+// own, the startup span counts what it contributed, and the call the model then makes
+// names the server that served it.
+//
+// The sessions are the caller's, which is the shape fisk serve runs in, so the connect
+// happened before this run existed and there is no connect span to find. That absence
+// is asserted rather than left implicit: it is what says the connect span belongs to
+// whoever opened the sessions.
+func TestTelemetry_MCPRunReportsTheServerOnStartupAndOnTheCall(t *testing.T) {
+	g := NewWithT(t)
+
+	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+
+	app := agenttest.NewFakeApp(t, exampleApp())
+	cfg := agenttest.Config(t, app)
+	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+	tel, exp := recordingTelemetry()
+
+	_, err := agent.Run(context.Background(), agent.Options{
+		Config:     cfg,
+		ConfigFile: "agent.yaml",
+		Prompt:     []string{"search the docs"},
+		Provider: agenttest.NewScriptedProvider(t,
+			agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`)),
+			agenttest.TextResponse("done"),
+		),
+		MCPSessions: sessions,
+		Telemetry:   tel,
+	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	g.Expect(err).ToNot(HaveOccurred())
+
+	count, ok := spanAttr(startupSpan(g, exp), telemetry.AttrToolsMCP)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(count.AsInt64()).To(Equal(int64(1)))
+
+	imported := spanNamed(g, exp, "mcp_import ")
+	g.Expect(imported.Name).To(Equal("mcp_import docs"))
+
+	kept, ok := spanAttr(imported, telemetry.AttrMCPToolsKept)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(kept.AsInt64()).To(Equal(int64(1)))
+
+	for _, span := range exp.GetSpans() {
+		g.Expect(span.Name).ToNot(HavePrefix("mcp_connect"))
+	}
+
+	tool := spanNamed(g, exp, "execute_tool ")
+	g.Expect(tool.Name).To(Equal("execute_tool docs_search"))
+
+	server, ok := spanAttr(tool, telemetry.AttrToolMCPServer)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(server.AsString()).To(Equal("docs"))
+
+	// The a2a peer's key stays empty for an MCP call, which is what keeps a backend
+	// filtering on it answering with a2a calls alone.
+	_, ok = spanAttr(tool, telemetry.AttrToolRemoteAgent)
+	g.Expect(ok).To(BeFalse())
 }

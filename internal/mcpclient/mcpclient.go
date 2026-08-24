@@ -32,6 +32,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // Dialer builds the transport for one configured server. Sessions uses the
@@ -394,23 +395,38 @@ func closeEnded(session *mcp.ClientSession) {
 // canceled as soon as the handshake is done: the SDK detaches the session from
 // it, so the deadline limits the connect and not the life of the session. The
 // import applies the same timeout again when it lists the server's tools.
+//
+// It is spanned when ctx carries a telemetry provider, which covers the connects a
+// run makes at startup and a session replaced during a tool call, and leaves the
+// rebuild after a tools/list_changed notification untraced: that runs on a goroutine
+// of these sessions' own, on a context belonging to no run.
 func (s *Sessions) open(ctx context.Context, e *entry) error {
+	ctx, span := telemetry.ProviderFromContext(ctx).StartMCPConnect(ctx, s.spanInfo(e.server))
+
 	ctx, cancel := context.WithTimeout(ctx, e.server.StartupTimeout())
 	defer cancel()
 
 	transport, err := s.transport(ctx, e.server)
 	if err != nil {
+		// The transport is built from the entry alone, so a failure here is the
+		// configuration: a variable that is not set, a url that will not parse, an entry
+		// naming neither a command nor a url.
+		span.Finish(telemetry.MCPServerOutcome{Failed: true, Class: telemetry.ClassConfig})
 		return redacted(err, e.secrets)
 	}
 
 	session, err := s.client(e).Connect(ctx, transport, nil)
 	if err != nil {
+		span.Finish(telemetry.MCPServerOutcome{Failed: true, Class: connectClass(err)})
+
 		if errors.Is(err, context.DeadlineExceeded) {
 			return redacted(fmt.Errorf("connecting to mcp server %q: it did not answer the initialize handshake within %v: %w", e.server.Name, e.server.StartupTimeout(), err), e.secrets)
 		}
 
 		return redacted(fmt.Errorf("connecting to mcp server %q: %w", e.server.Name, err), e.secrets)
 	}
+
+	span.Finish(telemetry.MCPServerOutcome{})
 
 	done := make(chan struct{})
 	go func() {
