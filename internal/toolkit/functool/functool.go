@@ -156,10 +156,11 @@ type Spec struct {
 // serving agent (see RemoteSpec) and an MCP tool's to its configured server (see
 // MCPSpec), and neither runs local code.
 //
-// A tool's Definition JSON (name, description, schema, deferral) must be
-// deterministic across process restarts. The agent fingerprints the tool set to
-// decide whether a checkpointed run may resume; a Definition that varies run to run
-// flips that fingerprint and makes a resume refuse.
+// A tool's Definition JSON (name, description, schema, deferral) should be
+// deterministic across process restarts. A checkpointed run fingerprints the tool set,
+// and a Definition that varies run to run moves that hash, so every resume warns that
+// the tool set changed and drops the standing approvals, leaving the operator to
+// approve each gated tool again. The resume itself continues.
 type Tool struct {
 	name        string
 	description string

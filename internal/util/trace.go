@@ -83,9 +83,10 @@ type traceEvent struct {
 	LLMCalls        int64  `json:"llm_calls,omitempty"`
 	ToolCalls       int64  `json:"tool_calls,omitempty"`
 	RemoteToolCalls int64  `json:"remote_tool_calls,omitempty"`
+	MCPToolCalls    int64  `json:"mcp_tool_calls,omitempty"`
 	// ToolCallsByKind partitions tool_calls by provider kind, keyed by the stable
-	// toolkit.Kind token. It is live-only and omitted when empty, so a resumed run
-	// (which seeds only the coarse totals) does not emit a map that could not sum.
+	// toolkit.Kind token. A resumed run seeds it from the journal, so it sums to
+	// tool_calls there as well. It is omitted when empty.
 	ToolCallsByKind   map[string]int64 `json:"tool_calls_by_kind,omitempty"`
 	InTokens          int64            `json:"input_tokens,omitempty"`
 	OutTokens         int64            `json:"output_tokens,omitempty"`
@@ -227,6 +228,7 @@ func (t *Tracer) RecordSummary(stats *RunStats) {
 		LLMCalls:          stats.LlmCalls,
 		ToolCalls:         stats.ToolCalls,
 		RemoteToolCalls:   stats.RemoteToolCalls,
+		MCPToolCalls:      stats.MCPToolCalls,
 		ToolCallsByKind:   toolCallsByKindTokens(stats.ToolCallsByKind),
 		InTokens:          stats.InTokens,
 		OutTokens:         stats.OutTokens,
@@ -236,9 +238,9 @@ func (t *Tracer) RecordSummary(stats *RunStats) {
 	})
 }
 
-// toolCallsByKindTokens re-keys the live per-kind counters onto their stable string
-// tokens for the JSON trace. It returns nil for an empty input so the map is omitted
-// rather than emitted empty (a resumed run has no live per-kind counts).
+// toolCallsByKindTokens re-keys the per-kind counters onto their stable string tokens
+// for the JSON trace. It returns nil for an empty input so the map is omitted rather
+// than emitted empty (a run that called no tool has no buckets).
 func toolCallsByKindTokens(counts map[toolkit.Kind]int64) map[string]int64 {
 	if len(counts) == 0 {
 		return nil

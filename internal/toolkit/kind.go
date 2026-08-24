@@ -60,3 +60,27 @@ func (k Kind) String() string {
 		return "unknown"
 	}
 }
+
+// ParseKind returns the Kind a String token names, for reading back a kind that was
+// recorded as its token: a run journal, a log line, a stored trace.
+//
+// A token this build does not have a Kind for, which is what a record written by a
+// newer build carries, returns KindUnknown. The call is still counted, under the
+// sentinel that says the provider is not known here rather than under a provider it
+// was not.
+func ParseKind(token string) Kind {
+	switch token {
+	case "application":
+		return KindApplication
+	case "builtin":
+		return KindBuiltin
+	case "remote":
+		return KindRemote
+	case "custom":
+		return KindCustom
+	case "mcp":
+		return KindMCP
+	default:
+		return KindUnknown
+	}
+}

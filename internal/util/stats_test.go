@@ -34,6 +34,11 @@ var _ = Describe("RunStats", func() {
 			Expect((&RunStats{RemoteToolCalls: 3}).summaryLine(false)).To(ContainSubstring("remote_tool_calls=3"))
 		})
 
+		It("shows the MCP tool count only when any were made", func() {
+			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("mcp_tool_calls"))
+			Expect((&RunStats{MCPToolCalls: 2}).summaryLine(false)).To(ContainSubstring("mcp_tool_calls=2"))
+		})
+
 		It("shows the cache read count only when the cache was hit", func() {
 			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("cached="))
 			Expect((&RunStats{CacheReadTokens: 4096}).summaryLine(false)).To(ContainSubstring("cached=4096"))
@@ -82,6 +87,20 @@ var _ = Describe("RunStats", func() {
 				toolkit.KindApplication: 2,
 				toolkit.KindBuiltin:     1,
 			}))
+		})
+
+		// The buckets count what the model asked for and the two totals count what was
+		// dispatched, so counting a call by kind must not move either total: the caller
+		// increments those where it dispatches a call.
+		It("leaves the remote and MCP totals to the caller", func() {
+			s := &RunStats{}
+			s.CountToolKind(toolkit.KindMCP)
+			s.CountToolKind(toolkit.KindRemote)
+			s.CountToolKind(toolkit.KindMCP)
+
+			Expect(s.ToolCallsByKind[toolkit.KindMCP]).To(Equal(int64(2)))
+			Expect(s.MCPToolCalls).To(BeZero())
+			Expect(s.RemoteToolCalls).To(BeZero())
 		})
 	})
 })

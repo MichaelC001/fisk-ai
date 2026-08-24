@@ -314,9 +314,9 @@ var _ = Describe("runner", func() {
 				tools:  map[string]toolkit.Tool{},
 			}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nope"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nope"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeTrue())
 
@@ -346,9 +346,9 @@ var _ = Describe("runner", func() {
 				tools:  map[string]toolkit.Tool{"do": tool},
 			}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"level":"info"}`)})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"level":"info"}`)})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeTrue())
 
@@ -370,9 +370,9 @@ var _ = Describe("runner", func() {
 			tool := &fisk2.FiskCommandTool{Path: []string{"do"}, AppPath: app, Model: &fisk.CmdModel{}}
 			r := &runner{stats: &util.RunStats{}, events: ev, tools: map[string]toolkit.Tool{"do": tool}}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeTrue())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
 
@@ -383,7 +383,7 @@ var _ = Describe("runner", func() {
 			Expect(ev.results[0].Present).To(Equal(toolkit.PresentCommand))
 		})
 
-		It("dispatches a remote tool: flags it remote, counts it, and traces the agent", func() {
+		It("dispatches a remote tool: reports the dispatch, counts it, and traces the agent", func() {
 			ev := &captureEvents{}
 			desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
 			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
@@ -391,9 +391,9 @@ var _ = Describe("runner", func() {
 
 			r := &runner{stats: &util.RunStats{}, events: ev, tools: map[string]toolkit.Tool{"nats_info": rt}}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeTrue())
+			Expect(dispatched).To(BeTrue())
 			Expect(r.stats.RemoteToolCalls).To(Equal(int64(1)))
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
@@ -423,9 +423,9 @@ var _ = Describe("runner", func() {
 			// there is no one to approve, so the gate denies. The gated tool is never run:
 			// no call or result line is emitted, and the denial is an authoritative
 			// non-error result to the model.
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
 			Expect(ev.calls).To(BeEmpty())
@@ -507,9 +507,9 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "orig", Input: json.RawMessage(`{"x":1}`)})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "orig", Input: json.RawMessage(`{"x":1}`)})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeTrue())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.Content).To(Equal("safe-out"))
 
@@ -548,9 +548,9 @@ var _ = Describe("runner", func() {
 
 			// With no operator reachable the union gate denies, and the ungated effective
 			// tool never runs: a hook cannot strip a gate by redirecting.
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse()) // an authoritative confirm denial, not an error
 			Expect(safe.ranInputs).To(BeEmpty())
@@ -572,7 +572,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			block, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "leaky", Input: json.RawMessage(`{}`)})
+			block, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "leaky", Input: json.RawMessage(`{}`)})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.Content).To(Equal("[redacted]"))
@@ -599,7 +599,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			block, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"a":1}`)})
+			block, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"a":1}`)})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(block.IsError).To(BeFalse())
 			Expect(tool.ranInputs).To(ConsistOf(`{"a":1}`))
@@ -617,7 +617,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			_, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("PreToolUse hook"))
 			Expect(tool.ranInputs).To(BeEmpty())
@@ -635,7 +635,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			_, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("unregistered"))
 			Expect(tool.ranInputs).To(BeEmpty())
@@ -653,7 +653,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			_, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("invalid JSON"))
 			Expect(tool.ranInputs).To(BeEmpty())

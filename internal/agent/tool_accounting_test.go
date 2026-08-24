@@ -17,11 +17,11 @@ import (
 	"github.com/choria-io/fisk-ai/internal/util"
 )
 
-// These tests pin the by-kind tool accounting the runner keeps: every dispatched
-// call, including the ones rejected before the tool runs, is counted against the
-// provider that supplied the tool, so on a fresh run the per-kind buckets partition
-// tool_calls exactly. That partition is the invariant the JSON per-kind map and the
-// coarse summary both rely on.
+// These tests pin the two axes the runner counts a tool call on. Every call, including
+// the ones answered before the tool runs, is counted against the provider that supplied
+// the tool, so on a fresh run the per-kind buckets partition tool_calls exactly. The
+// remote and MCP totals count only the calls that were dispatched, so a denied call is
+// in its bucket and in neither total. See util.RunStats.ToolCallsByKind.
 var _ = Describe("runner tool accounting", func() {
 	const objSchema = `{"type":"object"}`
 
@@ -100,10 +100,84 @@ var _ = Describe("runner tool accounting", func() {
 
 		Expect(r.stats.ToolCalls).To(BeEquivalentTo(2))
 		Expect(r.stats.RemoteToolCalls).To(BeEquivalentTo(1))
+		Expect(r.stats.MCPToolCalls).To(BeEquivalentTo(1))
 		Expect(r.stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
 			toolkit.KindRemote: 1,
 			toolkit.KindMCP:    1,
 		}))
+	})
+
+	It("Should bucket a denied call under its kind and leave it out of the dispatch counters", func() {
+		remote := mustFunc(functool.Spec{Name: "remote_tool", Description: "remote", Schema: obj(), Handler: okHandler, Remote: &functool.RemoteSpec{Agent: "peer"}})
+		served := mustFunc(functool.Spec{Name: "mcp_tool", Description: "mcp", Schema: obj(), Handler: okHandler, MCP: &functool.MCPSpec{Server: "docs"}})
+
+		r := newRunner(map[string]toolkit.Tool{"remote_tool": remote, "mcp_tool": served})
+		r.hooks = Hooks{
+			PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+				if in.ToolUseID != "denied" {
+					return PreToolUseResult{}, nil
+				}
+
+				return PreToolUseResult{Deny: true, DenyReason: "blocked by policy"}, nil
+			},
+		}
+
+		deny := func(name string) {
+			GinkgoHelper()
+			_, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "denied", Name: name, Input: json.RawMessage(`{}`)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dispatched).To(BeFalse())
+		}
+
+		call(r, "mcp_tool")
+		deny("mcp_tool")
+		call(r, "remote_tool")
+		deny("remote_tool")
+
+		Expect(r.stats.ToolCalls).To(BeEquivalentTo(4))
+		Expect(r.stats.MCPToolCalls).To(BeEquivalentTo(1), "the denied MCP call never left the process")
+		Expect(r.stats.RemoteToolCalls).To(BeEquivalentTo(1), "the denied remote call never left the process")
+		Expect(r.stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
+			toolkit.KindMCP:    2,
+			toolkit.KindRemote: 2,
+		}))
+
+		var summed int64
+		for _, n := range r.stats.ToolCallsByKind {
+			summed += n
+		}
+		Expect(summed).To(Equal(r.stats.ToolCalls), "per-kind buckets must partition tool_calls")
+	})
+
+	// The kind goes into the journal so a resume recomputes every bucket. It is the
+	// effective one, so a call a hook redirected is journaled under the provider that
+	// served it rather than the one the model named.
+	It("Should report the effective kind of each call for the journal", func() {
+		served := mustFunc(functool.Spec{Name: "mcp_tool", Description: "mcp", Schema: obj(), Handler: okHandler, MCP: &functool.MCPSpec{Server: "docs"}})
+		builtinLike := mustFunc(functool.Spec{Name: "builtin_tool", Description: "builtin", Schema: obj(), Handler: okHandler, Kind: toolkit.KindBuiltin})
+
+		r := newRunner(map[string]toolkit.Tool{"mcp_tool": served, "builtin_tool": builtinLike})
+		r.hooks = Hooks{
+			PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
+				if in.ToolName != "builtin_tool" {
+					return PreToolUseResult{}, nil
+				}
+
+				return PreToolUseResult{RewriteTool: "mcp_tool"}, nil
+			},
+		}
+
+		_, _, kind, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "mcp_tool", Input: json.RawMessage(`{}`)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(kind).To(Equal(toolkit.KindMCP))
+
+		_, _, kind, err = r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t2", Name: "builtin_tool", Input: json.RawMessage(`{}`)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(kind).To(Equal(toolkit.KindMCP), "a rewritten call is accounted under the tool that ran")
+
+		_, _, kind, err = r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t3", Name: "absent_tool", Input: json.RawMessage(`{}`)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(kind).To(Equal(toolkit.KindUnknown))
 	})
 
 	It("Should count the rejected paths so the buckets still partition tool_calls", func() {

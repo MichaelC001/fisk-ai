@@ -39,18 +39,34 @@ type RunStats struct {
 	Suspended bool
 	// LlmCalls is the number of LLM requests made.
 	LlmCalls int64
-	// ToolCalls is the total number of tool invocations, including the remote ones
-	// counted separately in RemoteToolCalls.
+	// ToolCalls is the total number of tool invocations, including the remote and MCP
+	// ones counted separately in RemoteToolCalls and MCPToolCalls.
 	ToolCalls int64
 	// RemoteToolCalls is the number of tool invocations dispatched to a remote
-	// agent over a2a, a subset of ToolCalls.
+	// agent over a2a, a subset of ToolCalls. It counts the calls that were made, so a
+	// call a policy hook denied or the operator refused is outside it, and it is a
+	// subset of the KindRemote bucket of ToolCallsByKind rather than that bucket. See
+	// ToolCallsByKind.
 	RemoteToolCalls int64
-	// ToolCallsByKind counts dispatched calls by the provider that supplied the tool.
-	// Every call counted in ToolCalls is counted here too, including the ones rejected
-	// before execution, so on a fresh run the buckets partition ToolCalls. It is
-	// live-only: a resumed run seeds only the coarse totals, so a resume leaves this
-	// nil and reflects at most the calls made since the resume. It is nil until the
-	// first call is counted.
+	// MCPToolCalls is the number of tool invocations dispatched to an MCP server, a
+	// subset of ToolCalls. It counts the calls that were made, on the same terms as
+	// RemoteToolCalls, so it is a subset of the KindMCP bucket of ToolCallsByKind rather
+	// than that bucket. See ToolCallsByKind.
+	MCPToolCalls int64
+	// ToolCallsByKind counts calls by the provider that supplied the tool. Every call
+	// counted in ToolCalls is counted here too, including the ones answered without
+	// running: an unknown tool, a policy denial, a missing required argument, a confirm
+	// gate the operator refused. The buckets partition ToolCalls exactly.
+	//
+	// That is what separates it from RemoteToolCalls and MCPToolCalls, which count the
+	// calls that actually left this process. A denied or refused call is in its bucket
+	// here and in neither counter, so a counter is a subset of the bucket of the same
+	// kind and never that bucket. Equality between the two is a run in which nothing was
+	// refused, not a contract.
+	//
+	// A resume seeds both from the journal, which records each call's kind and whether
+	// it was dispatched, so the partition and the two counters hold across a suspend.
+	// ToolCallsByKind is nil until the first call is counted.
 	ToolCallsByKind map[toolkit.Kind]int64
 	InTokens        int64
 	OutTokens       int64
@@ -69,10 +85,13 @@ type RunStats struct {
 	ThinkingTokens int64
 }
 
-// CountToolKind records one dispatched tool call against its provider kind,
-// allocating the map on first use. It is called for every call ToolCalls counts,
-// the rejected ones included, so the buckets partition ToolCalls on a fresh run. A
-// RunStats is driven only from its own single run goroutine, so this needs no lock.
+// CountToolKind records one tool call against its provider kind, allocating the map
+// on first use. It is called for every call ToolCalls counts, the ones answered
+// without running included, so the buckets partition ToolCalls. It leaves
+// RemoteToolCalls and MCPToolCalls alone: those count dispatches, and the caller
+// increments them where it dispatches a call. See ToolCallsByKind.
+//
+// A RunStats is driven only from its own single run goroutine, so this needs no lock.
 func (s *RunStats) CountToolKind(kind toolkit.Kind) {
 	if s.ToolCallsByKind == nil {
 		s.ToolCallsByKind = make(map[toolkit.Kind]int64)
@@ -90,7 +109,7 @@ func (s *RunStats) Print(verbose bool) {
 
 // summaryLine formats the run summary. The label distinguishes a suspended run
 // from a completed one; the session id and model are shown only when set, and the
-// remote tool call count only when any were made, so an ephemeral run stays
+// remote and MCP tool call counts only when any were made, so an ephemeral run stays
 // uncluttered. The cache-read count appears only when the cache was hit (following
 // the remote_tool_calls pattern); the cache-write count is verbose-only.
 func (s *RunStats) summaryLine(verbose bool) string {
@@ -112,6 +131,9 @@ func (s *RunStats) summaryLine(verbose bool) string {
 	tools := fmt.Sprintf("tool_calls=%d", s.ToolCalls)
 	if s.RemoteToolCalls > 0 {
 		tools += fmt.Sprintf(" remote_tool_calls=%d", s.RemoteToolCalls)
+	}
+	if s.MCPToolCalls > 0 {
+		tools += fmt.Sprintf(" mcp_tool_calls=%d", s.MCPToolCalls)
 	}
 
 	cache := ""

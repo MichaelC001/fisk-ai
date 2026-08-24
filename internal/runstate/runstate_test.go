@@ -16,6 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 func TestRunState(t *testing.T) {
@@ -49,7 +50,25 @@ func assistantWithTools(iter int64, ids ...string) *AssistantRecord {
 }
 
 func toolResult(id string) *ToolResultRecord {
-	return &ToolResultRecord{ToolUseID: id, Result: llm.ToolResultBlock{ToolUseID: id, Content: "ok"}}
+	return toolResultKind(id, toolkit.KindApplication)
+}
+
+// toolResultKind is a result a named provider served and the call was dispatched to,
+// for the per-kind accounting the fold recomputes. Every record a run writes carries a
+// kind, so the shared helper does too and the schema is exercised with the field
+// present.
+func toolResultKind(id string, kind toolkit.Kind) *ToolResultRecord {
+	rec := toolResultDenied(id, kind)
+	rec.Remote = kind == toolkit.KindRemote
+	rec.Dispatched = true
+
+	return rec
+}
+
+// toolResultDenied is a result for a call that was answered without reaching its
+// provider, which a run records with a kind and no dispatch flag.
+func toolResultDenied(id string, kind toolkit.Kind) *ToolResultRecord {
+	return &ToolResultRecord{ToolUseID: id, Result: llm.ToolResultBlock{ToolUseID: id, Content: "ok"}, Kind: kind.String()}
 }
 
 func userRecord(text string) *UserRecord {
@@ -172,6 +191,101 @@ var _ = Describe("runstate", func() {
 				Expect(got.NextIteration).To(Equal(want.NextIteration), name)
 				Expect(got.Terminal).To(Equal(want.Terminal), name)
 			}
+		})
+
+		It("counts every tool result under the kind its record carries", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2", "tu_3")},
+				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResultKind("tu_1", toolkit.KindApplication)},
+				{Seq: 4, Protocol: ToolResultProtocol, ToolResult: toolResultKind("tu_2", toolkit.KindMCP)},
+				{Seq: 5, Protocol: ToolResultProtocol, ToolResult: toolResultKind("tu_3", toolkit.KindMCP)},
+			}
+
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Counters.ToolCalls).To(Equal(int64(3)))
+			Expect(rs.Counters.MCPToolCalls).To(Equal(int64(2)))
+			Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
+				toolkit.KindApplication: 1,
+				toolkit.KindMCP:         2,
+			}))
+
+			var summed int64
+			for _, n := range rs.Counters.ToolCallsByKind {
+				summed += n
+			}
+			Expect(summed).To(Equal(rs.Counters.ToolCalls), "per-kind buckets must partition tool_calls")
+		})
+
+		// The buckets take a call whatever became of it and the two dispatch counters take
+		// only the calls that reached their provider, so a call a policy hook denied or the
+		// operator refused folds back into its bucket and into neither counter.
+		It("keeps a call that never reached its provider out of the dispatch counters", func() {
+			recs := []Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2", "tu_3", "tu_4")},
+				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResultKind("tu_1", toolkit.KindMCP)},
+				{Seq: 4, Protocol: ToolResultProtocol, ToolResult: toolResultDenied("tu_2", toolkit.KindMCP)},
+				{Seq: 5, Protocol: ToolResultProtocol, ToolResult: toolResultKind("tu_3", toolkit.KindRemote)},
+				{Seq: 6, Protocol: ToolResultProtocol, ToolResult: toolResultDenied("tu_4", toolkit.KindRemote)},
+			}
+
+			rs, err := Fold(recs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Counters.ToolCalls).To(Equal(int64(4)))
+			Expect(rs.Counters.MCPToolCalls).To(Equal(int64(1)), "the denied MCP call was never dispatched")
+			Expect(rs.Counters.RemoteToolCalls).To(Equal(int64(1)), "the denied remote call was never dispatched")
+			Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
+				toolkit.KindMCP:    2,
+				toolkit.KindRemote: 2,
+			}))
+
+			var summed int64
+			for _, n := range rs.Counters.ToolCallsByKind {
+				summed += n
+			}
+			Expect(summed).To(Equal(rs.Counters.ToolCalls), "per-kind buckets must partition tool_calls")
+		})
+
+		// A record written before the kind field existed carries no token. Its remote flag
+		// is what such a journal has always reported, so it still folds as the remote kind
+		// and as a dispatch, and a record without one folds as the unknown kind and no
+		// dispatch rather than being guessed at from the tool name.
+		It("folds a record with no kind from its remote flag alone", func() {
+			legacy := func(id string, remote bool) *ToolResultRecord {
+				return &ToolResultRecord{ToolUseID: id, Result: llm.ToolResultBlock{ToolUseID: id, Content: "ok"}, Remote: remote}
+			}
+
+			rs, err := Fold([]Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")},
+				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: legacy("tu_1", true)},
+				{Seq: 4, Protocol: ToolResultProtocol, ToolResult: legacy("tu_2", false)},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Counters.ToolCalls).To(Equal(int64(2)))
+			Expect(rs.Counters.RemoteToolCalls).To(Equal(int64(1)))
+			Expect(rs.Counters.MCPToolCalls).To(BeZero())
+			Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
+				toolkit.KindRemote:  1,
+				toolkit.KindUnknown: 1,
+			}))
+		})
+
+		// A token this build has no Kind for is what a journal written by a newer one
+		// carries. The call is still counted, under the sentinel rather than under a
+		// provider it was not.
+		It("counts an unrecognized kind token as the unknown kind", func() {
+			rec := &ToolResultRecord{ToolUseID: "tu_1", Result: llm.ToolResultBlock{ToolUseID: "tu_1", Content: "ok"}, Kind: "quantum"}
+
+			rs, err := Fold([]Record{
+				meta(),
+				{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+				{Seq: 3, Protocol: ToolResultProtocol, ToolResult: rec},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindUnknown: 1}))
 		})
 
 		It("rejects a claim record with no payload", func() {

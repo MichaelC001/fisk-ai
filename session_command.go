@@ -246,7 +246,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	c.Item("Model", rs.Fingerprint.Model)
 	c.Item("Next iter", rs.NextIteration)
 	c.Item("LLM calls", rs.Counters.LlmCalls)
-	c.Item("Tool calls", fmt.Sprintf("%d (remote %d)", rs.Counters.ToolCalls, rs.Counters.RemoteToolCalls))
+	c.Item("Tool calls", fmt.Sprintf("%d (remote %d, mcp %d)", rs.Counters.ToolCalls, rs.Counters.RemoteToolCalls, rs.Counters.MCPToolCalls))
 	c.Item("Tokens", sessionTokens(rs))
 
 	if rs.Pending != nil {

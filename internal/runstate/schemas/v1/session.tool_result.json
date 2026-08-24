@@ -29,7 +29,15 @@
         },
         "remote": {
           "type": "boolean",
-          "description": "Set when the call was dispatched to another agent over A2A."
+          "description": "Set when the call was dispatched to another agent over A2A. Derived from kind and dispatched, and written so a build that predates those two still reads an A2A dispatch out of this record."
+        },
+        "kind": {
+          "type": "string",
+          "description": "The toolkit.Kind token of the provider that served the call, written for every result including a call that never ran, so the per-kind buckets partition tool_calls. Absent on a record written before the field existed, where a set remote flag reads as the remote kind, dispatched, and everything else as the unknown kind, not dispatched."
+        },
+        "dispatched": {
+          "type": "boolean",
+          "description": "Set when the call was handed to whoever serves it rather than answered before it ran. The remote and MCP totals count the calls with this set under the matching kind, which is what makes them count calls that happened while the per-kind buckets count calls the model asked for."
         }
       }
     }

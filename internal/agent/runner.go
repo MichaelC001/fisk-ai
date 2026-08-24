@@ -1089,7 +1089,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			results := make([]llm.ContentBlock, 0, len(toolUses))
 			deferred := false
 			for _, use := range toolUses {
-				result, remote, herr := r.executeTool(ctx, use)
+				result, dispatched, kind, herr := r.executeTool(ctx, use)
 				if herr != nil {
 					// A tool answering later is not a failure. The rest of the batch still
 					// runs, because those results are journaled and then never re-run, so
@@ -1105,11 +1105,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 					return terminalFor(herr), herr
 				}
-				err = r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
-					ToolUseID: use.ID,
-					Result:    result,
-					Remote:    remote,
-				}})
+				err = r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResultRecord(use.ID, result, kind, dispatched)})
 				if err != nil {
 					return runstate.ReasonError, err
 				}
@@ -1190,7 +1186,7 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 			continue
 		}
 
-		result, remote, herr := r.executeTool(ctx, *block.ToolUse)
+		result, dispatched, kind, herr := r.executeTool(ctx, *block.ToolUse)
 		if herr != nil {
 			was, jerr := r.journalDeferral(*block.ToolUse, herr)
 			if jerr != nil {
@@ -1203,11 +1199,7 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 
 			return false, herr
 		}
-		err := r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
-			ToolUseID: id,
-			Result:    result,
-			Remote:    remote,
-		}})
+		err := r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResultRecord(id, result, kind, dispatched)})
 		if err != nil {
 			return false, err
 		}
@@ -1275,13 +1267,17 @@ func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) 
 // interfaces, and the kind-specific call trace is built by a type switch, so a tool
 // of any kind executes the same way. Around that pipeline it fires the PreToolUse and
 // PostToolUse hooks, which may deny the call, rewrite the tool and its arguments, or
-// replace the output. The second return reports whether the call was dispatched to a
-// remote agent, for the journal and stats; the third is non-nil when a hook aborted
-// the run, which the caller surfaces on the ReasonError path, and when the tool will
-// answer later, which the caller tells apart with toolkit.IsDeferred and suspends on.
+// replace the output. The second return reports whether the call was handed to whoever
+// serves it rather than answered here, and the third which provider served it, both for
+// the journal and stats; the fourth is non-nil when a hook aborted the run, which the
+// caller surfaces on the ReasonError path, and when the tool will answer later, which
+// the caller tells apart with toolkit.IsDeferred and suspends on. The kind is the
+// effective one, so a call a hook redirected is accounted under the provider that
+// actually served it, and it is reported for a call that never ran too, which is why
+// the caller needs both to tell a bucket from a dispatch counter.
 // The returns are named so the deferred span finish can read what the model was
 // actually told, from one place rather than from each of the eight ways this ends.
-func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result llm.ToolResultBlock, remote bool, herr error) {
+func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result llm.ToolResultBlock, dispatched bool, kind toolkit.Kind, herr error) {
 	tool, ok := r.tools[use.Name]
 
 	// The span covers every way this can end, and there are eight of them, so it is
@@ -1338,7 +1334,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		r.stats.ToolCalls++
 		r.stats.CountToolKind(toolkit.KindUnknown)
 		r.events.Warn(Warning{Kind: WarnUnknownTool, Name: use.Name})
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("unknown tool %q", use.Name), IsError: true}, false, nil
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("unknown tool %q", use.Name), IsError: true}, false, toolkit.KindUnknown, nil
 	}
 
 	outcome.Name = use.Name
@@ -1361,7 +1357,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		ConfirmGated: origGated,
 	})
 	if err != nil {
-		return llm.ToolResultBlock{}, false, fmt.Errorf("PreToolUse hook: %w", err)
+		return llm.ToolResultBlock{}, false, origInfo.Kind, fmt.Errorf("PreToolUse hook: %w", err)
 	}
 
 	// A policy deny returns an error result the model can adapt to (unlike the
@@ -1377,7 +1373,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		if reason == "" {
 			reason = "the tool call was denied by a policy hook"
 		}
-		return llm.ToolResultBlock{ToolUseID: use.ID, Content: reason, IsError: true}, false, nil
+		return llm.ToolResultBlock{ToolUseID: use.ID, Content: reason, IsError: true}, false, origInfo.Kind, nil
 	}
 
 	// Resolve the effective tool and arguments once, applying any rewrite; the hook does
@@ -1390,14 +1386,14 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	if pre.RewriteTool != "" {
 		rt, ok := r.tools[pre.RewriteTool]
 		if !ok {
-			return llm.ToolResultBlock{}, false, fmt.Errorf("PreToolUse hook redirected tool %q to unregistered tool %q", use.Name, pre.RewriteTool)
+			return llm.ToolResultBlock{}, false, origInfo.Kind, fmt.Errorf("PreToolUse hook redirected tool %q to unregistered tool %q", use.Name, pre.RewriteTool)
 		}
 		effTool = rt
 		effName = pre.RewriteTool
 	}
 	if pre.RewriteInput != nil {
 		if !json.Valid(pre.RewriteInput) {
-			return llm.ToolResultBlock{}, false, fmt.Errorf("PreToolUse hook rewrote %q arguments to invalid JSON", effName)
+			return llm.ToolResultBlock{}, false, origInfo.Kind, fmt.Errorf("PreToolUse hook rewrote %q arguments to invalid JSON", effName)
 		}
 		effInput = bytes.Clone(pre.RewriteInput)
 	}
@@ -1440,7 +1436,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		if len(missing) > 0 {
 			outcome.Outcome = telemetry.ToolOutcomeMissingArguments
 			r.events.Warn(Warning{Kind: WarnMissingRequired, Name: effName, Params: missing})
-			return llm.ToolResultBlock{ToolUseID: use.ID, Content: v.MissingRequiredMessage(missing), IsError: true}, false, nil
+			return llm.ToolResultBlock{ToolUseID: use.ID, Content: v.MissingRequiredMessage(missing), IsError: true}, false, effInfo.Kind, nil
 		}
 	}
 
@@ -1478,22 +1474,38 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 				outcome.Outcome = telemetry.ToolOutcomeDeferred
 			}
 
-			return llm.ToolResultBlock{}, false, aerr
+			return llm.ToolResultBlock{}, false, effInfo.Kind, aerr
 		}
 
 		if !allowed {
 			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
-			return util.ConfirmDeniedResult(use.ID, reason), false, nil
+			return util.ConfirmDeniedResult(use.ID, reason), false, effInfo.Kind, nil
 		}
 	}
 
 	// The call trace shape and the execution dependencies are kind-specific; the result
 	// trace and the ExecuteUse call are uniform. A call line is emitted for every tool
 	// that runs, so its result always has a visible command above it.
-	deps, remote := r.traceCall(effUse, effInfo)
-	if remote {
+	deps := r.traceCall(effUse, effInfo)
+
+	// Every path above answers the call without it leaving this process, so this is
+	// where a call becomes one that happened and every return below reports it as
+	// dispatched. The two first-class dispatch counters are incremented here rather than
+	// beside CountToolKind, which is what makes them count calls that were made while
+	// the buckets count calls the model asked for. See util.RunStats.ToolCallsByKind.
+	//
+	// Both are keyed on the provider kind and never on the presentation or the agent
+	// name: presentation is the visibility axis, and other providers present the same way
+	// a remote call does while being accounted under their own kind.
+	dispatched = true
+	switch effInfo.Kind {
+	case toolkit.KindRemote:
 		r.stats.RemoteToolCalls++
+	case toolkit.KindMCP:
+		r.stats.MCPToolCalls++
 	}
+
+	remote := effInfo.Kind == toolkit.KindRemote
 	outcome.Remote = remote
 	if remote {
 		// CallInfo.Agent names whoever serves the call, and other providers present
@@ -1508,7 +1520,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// happens, which is the residue this cannot reach.
 	heldErr := r.checkStillHeld()
 	if heldErr != nil {
-		return llm.ToolResultBlock{}, false, heldErr
+		return llm.ToolResultBlock{}, dispatched, effInfo.Kind, heldErr
 	}
 
 	// The bound goes in a context of its own rather than into ctx: ctx here is the tool
@@ -1534,7 +1546,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 			outcome.Outcome = telemetry.ToolOutcomeDeferred
 		}
 
-		return llm.ToolResultBlock{}, remote, unansweredErr
+		return llm.ToolResultBlock{}, dispatched, effInfo.Kind, unansweredErr
 	}
 
 	// A call the bound stopped is already an error result carrying whatever the tool
@@ -1567,7 +1579,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		IsError:   result.IsError,
 	})
 	if err != nil {
-		return llm.ToolResultBlock{}, false, fmt.Errorf("PostToolUse hook: %w", err)
+		return llm.ToolResultBlock{}, false, effInfo.Kind, fmt.Errorf("PostToolUse hook: %w", err)
 	}
 	if post.Replace {
 		result = llm.ToolResultBlock{ToolUseID: use.ID, Content: post.Output, IsError: post.IsError}
@@ -1584,7 +1596,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	}
 
 	r.events.ToolResult(toolResultTrace(effInfo.Present, effInfo.Kind, result))
-	return result, remote, nil
+	return result, dispatched, effInfo.Kind, nil
 }
 
 // checkStillHeld reports whether this run may go on writing to its journal, so a run
@@ -1735,15 +1747,15 @@ func describeCall(tool toolkit.Tool, input json.RawMessage) toolkit.CallInfo {
 
 // traceCall emits the ToolCall trace for a dispatched call from the CallInfo the
 // runner already obtained, and returns the execution dependencies the call's kind
-// needs and whether it is a remote call. The tool described its own call rather than
-// the runner switching on its concrete type, so the presentation and dependency needs
+// needs. The tool described its own call rather than the runner switching on its
+// concrete type, so the presentation and dependency needs
 // travel with the tool on info.Present: a built-in shows its own call line (a
 // human-in-the-loop tool is distracting to name and is shown only under verbose
 // downstream, a memory or knowledge tool is traced like a command); a remote tool
 // names the agent it runs on; a command tool carries the full call line and a short
 // form with long argument values elided, so a width-aware surface can fall back to
 // the short one only when the full line would overflow.
-func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit.ExecDeps, bool) {
+func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) toolkit.ExecDeps {
 	r.events.ToolCall(ToolTrace{
 		ID:           use.ID,
 		Name:         use.Name,
@@ -1757,10 +1769,7 @@ func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit
 
 	// A kind receives only the dependencies it asked for: a command tool the per-run
 	// working directory, a built-in the operator prompter (and a working directory it
-	// ignores), a remote tool neither. The remote flag is taken from the provider kind
-	// and never from the presentation or the agent name: presentation is the visibility
-	// axis, and other providers present the same way a remote call does while being
-	// accounted under their own kind.
+	// ignores), a remote tool neither.
 	var deps toolkit.ExecDeps
 	if info.NeedsPrompter {
 		deps.Prompter = r.prompter
@@ -1769,7 +1778,23 @@ func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit
 		deps.WorkDir = r.toolWorkDir
 	}
 
-	return deps, info.Kind == toolkit.KindRemote
+	return deps
+}
+
+// toolResultRecord builds the journal entry for one answered tool call. Kind is
+// recorded for every call, including one that never ran, and Dispatched only for a call
+// that was handed to whoever serves it, so a fold recovers both the per-kind buckets and
+// the remote and MCP totals. Remote is derived from the two and still written, so a
+// build that predates them reads an a2a dispatch out of a journal this one wrote. See
+// runstate.Counters.
+func toolResultRecord(id string, result llm.ToolResultBlock, kind toolkit.Kind, dispatched bool) *runstate.ToolResultRecord {
+	return &runstate.ToolResultRecord{
+		ToolUseID:  id,
+		Result:     result,
+		Remote:     dispatched && kind == toolkit.KindRemote,
+		Kind:       kind.String(),
+		Dispatched: dispatched,
+	}
 }
 
 // toolResultTrace extracts the display fields from a tool result: its presentation

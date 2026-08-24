@@ -213,16 +213,18 @@ var _ = Describe("Tracer", func() {
 		tr, err := NewTracer(path, nil)
 		Expect(err).ToNot(HaveOccurred())
 
-		stats := &RunStats{ToolCalls: 3, RemoteToolCalls: 1, Start: time.Now()}
+		stats := &RunStats{ToolCalls: 4, RemoteToolCalls: 1, MCPToolCalls: 1, Start: time.Now()}
 		stats.CountToolKind(toolkit.KindApplication)
 		stats.CountToolKind(toolkit.KindApplication)
 		stats.CountToolKind(toolkit.KindRemote)
+		stats.CountToolKind(toolkit.KindMCP)
 		tr.RecordSummary(stats)
 		Expect(tr.Close()).To(Succeed())
 
 		events := readTrace(path)
 		Expect(events).To(HaveLen(1))
-		Expect(events[0].ToolCallsByKind).To(Equal(map[string]int64{"application": 2, "remote": 1}))
+		Expect(events[0].ToolCallsByKind).To(Equal(map[string]int64{"application": 2, "remote": 1, "mcp": 1}))
+		Expect(events[0].MCPToolCalls).To(Equal(int64(1)))
 
 		var summed int64
 		for _, n := range events[0].ToolCallsByKind {
@@ -231,11 +233,12 @@ var _ = Describe("Tracer", func() {
 		Expect(summed).To(Equal(events[0].ToolCalls), "per-kind map must partition tool_calls")
 	})
 
-	It("Should omit the per-kind map when there were no live per-kind counts", func() {
+	It("Should omit the per-kind map when there are no per-kind counts", func() {
 		tr, err := NewTracer(path, nil)
 		Expect(err).ToNot(HaveOccurred())
 
-		// A resumed run seeds only the coarse totals, so it has no live per-kind counts.
+		// An empty map is omitted rather than emitted, so nothing reads a run that
+		// counted no kind as a partition that does not sum.
 		tr.RecordSummary(&RunStats{ToolCalls: 5, Start: time.Now()})
 		Expect(tr.Close()).To(Succeed())
 

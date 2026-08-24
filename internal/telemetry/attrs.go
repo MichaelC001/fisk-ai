@@ -109,10 +109,13 @@ const (
 	AttrRunInteractive = attribute.Key("fisk.run.interactive")
 	// AttrRunTurns counts the interactive turns, absent on a one-shot run.
 	AttrRunTurns = attribute.Key("fisk.run.turns")
-	// AttrRunToolCalls and AttrRunRemoteToolCalls count this process's tool calls;
-	// the remote ones are a subset of the total.
+	// AttrRunToolCalls, AttrRunRemoteToolCalls and AttrRunMCPToolCalls count this
+	// process's tool calls; the remote and MCP ones are each a subset of the total. A
+	// resumed run subtracts the restored counts from all three, so summing any of them
+	// across a session's traces counts each call once.
 	AttrRunToolCalls       = attribute.Key("fisk.run.tool_calls")
 	AttrRunRemoteToolCalls = attribute.Key("fisk.run.remote_tool_calls")
+	AttrRunMCPToolCalls    = attribute.Key("fisk.run.mcp_tool_calls")
 
 	// AttrTurnIndex is the one-based position of a turn within an interactive run.
 	AttrTurnIndex = attribute.Key("fisk.turn.index")

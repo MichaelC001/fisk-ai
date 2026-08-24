@@ -166,9 +166,12 @@ type RunOutcome struct {
 
 	// Turns is the interactive turn count, zero for a one-shot run.
 	Turns int64
-	// ToolCalls and RemoteToolCalls are this process's counts.
+	// ToolCalls, RemoteToolCalls and MCPToolCalls are this process's counts. On a
+	// resumed run all three have the restored counts subtracted, as Usage does, so the
+	// remote and MCP counts stay subsets of the total.
 	ToolCalls       int64
 	RemoteToolCalls int64
+	MCPToolCalls    int64
 }
 
 // RunSpan is the trace root: one span covering an entire agent run, which is what
@@ -292,6 +295,7 @@ func (s *RunSpan) Finish(o RunOutcome) {
 		AttrRunCrashed.Bool(o.Crashed),
 		AttrRunToolCalls.Int64(o.ToolCalls),
 		AttrRunRemoteToolCalls.Int64(o.RemoteToolCalls),
+		AttrRunMCPToolCalls.Int64(o.MCPToolCalls),
 		semconv.GenAIUsageInputTokens(int(o.Usage.Input)),
 		semconv.GenAIUsageOutputTokens(int(o.Usage.Output)),
 		semconv.GenAIUsageCacheReadInputTokens(int(o.Usage.CacheRead)),

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -626,11 +627,12 @@ const setupFailedReason = "setup_failed"
 // res.Reason cannot: a crash deliberately leaves the reason unset, because a crash is
 // not an outcome, so without this every crash would be reported as a setup failure.
 //
-// seed is the counter state a resume restored, nil for a fresh run. Where it is set,
-// the token attributes carry this process's own consumption and the session totals are
-// reported separately, so that summing either one across a session's traces gives an
-// answer that means something.
-func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls int64) telemetry.RunOutcome {
+// seed is the token state a resume restored, nil for a fresh run, and seedCalls,
+// seedRemoteCalls and seedMCPCalls are the tool call counts it restored. Where seed is
+// set, the token and tool call attributes carry this process's own consumption and the
+// session totals are reported separately, so that summing either one across a session's
+// traces gives an answer that means something.
+func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls, seedRemoteCalls, seedMCPCalls int64) telemetry.RunOutcome {
 	out := telemetry.RunOutcome{TerminalReason: string(res.Reason)}
 
 	var panicErr *PanicError
@@ -657,6 +659,7 @@ func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.Toke
 
 	out.ToolCalls = res.Stats.ToolCalls
 	out.RemoteToolCalls = res.Stats.RemoteToolCalls
+	out.MCPToolCalls = res.Stats.MCPToolCalls
 	out.Usage = telemetry.TokenUsage{
 		Input:       res.Stats.InTokens + res.Stats.CacheReadTokens + res.Stats.CacheCreateTokens,
 		Output:      res.Stats.OutTokens,
@@ -686,6 +689,8 @@ func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.Toke
 		Reasoning:   session.Reasoning - seed.Reasoning,
 	}
 	out.ToolCalls = res.Stats.ToolCalls - seedCalls
+	out.RemoteToolCalls = res.Stats.RemoteToolCalls - seedRemoteCalls
+	out.MCPToolCalls = res.Stats.MCPToolCalls - seedMCPCalls
 
 	return out
 }
@@ -747,8 +752,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// session's traces counts the restored prefix once per resume, so a session resumed
 	// five times reports roughly fifteen times its true input tokens. It is nil for a
 	// fresh run, which is also what suppresses the session-cumulative attributes.
+	//
+	// The three tool call seeds are the same thing for the call counts, and all three
+	// are subtracted: a total with the restored prefix taken out beside per-kind counts
+	// that still carried it would report more MCP calls than tool calls.
 	var resumeSeed *telemetry.TokenUsage
-	var resumeSeedCalls int64
+	var resumeSeedCalls, resumeSeedRemoteCalls, resumeSeedMCPCalls int64
 
 	// Resolved here rather than where it is first used, because the root span's
 	// operation name turns on it: a one-shot run is a single agent invocation, so its
@@ -828,7 +837,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		Model:       cfg.LLM.Model,
 	})
 	defer func() {
-		runSpan.Finish(runOutcome(res, err, activeRunner != nil, resumeSeed, resumeSeedCalls))
+		runSpan.Finish(runOutcome(res, err, activeRunner != nil, resumeSeed, resumeSeedCalls, resumeSeedRemoteCalls, resumeSeedMCPCalls))
 	}()
 
 	// The startup span covers everything from here to the handoff to the run loop:
@@ -1602,6 +1611,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.LlmCalls = rs.Counters.LlmCalls
 			stats.ToolCalls = rs.Counters.ToolCalls
 			stats.RemoteToolCalls = rs.Counters.RemoteToolCalls
+			stats.MCPToolCalls = rs.Counters.MCPToolCalls
+			stats.ToolCallsByKind = maps.Clone(rs.Counters.ToolCallsByKind)
 			stats.InTokens = rs.Counters.InTokens
 			stats.OutTokens = rs.Counters.OutTokens
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
@@ -1788,6 +1799,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.LlmCalls = rs.Counters.LlmCalls
 			stats.ToolCalls = rs.Counters.ToolCalls
 			stats.RemoteToolCalls = rs.Counters.RemoteToolCalls
+			stats.MCPToolCalls = rs.Counters.MCPToolCalls
+			// Cloned rather than shared: the loop counts into this map for the rest of
+			// the run, and the folded RunState is the caller's to read afterwards.
+			stats.ToolCallsByKind = maps.Clone(rs.Counters.ToolCallsByKind)
 			stats.InTokens = rs.Counters.InTokens
 			stats.OutTokens = rs.Counters.OutTokens
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
@@ -1807,6 +1822,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Reasoning:   rs.Counters.ThinkingTokens,
 			}
 			resumeSeedCalls = rs.Counters.ToolCalls
+			resumeSeedRemoteCalls = rs.Counters.RemoteToolCalls
+			resumeSeedMCPCalls = rs.Counters.MCPToolCalls
 
 			// Tell the model it resumed so it re-verifies external state before
 			// acting on possibly-stale results. Appended after the fingerprint was

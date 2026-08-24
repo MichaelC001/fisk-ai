@@ -44,4 +44,17 @@ var _ = Describe("Kind", func() {
 	It("Should fall back to the unknown token for an unrecognized value", func() {
 		Expect(Kind(99).String()).To(Equal("unknown"))
 	})
+
+	It("Should read every kind back from its own token", func() {
+		for _, k := range allKinds {
+			Expect(ParseKind(k.String())).To(Equal(k), "kind %q did not survive the round trip", k)
+		}
+	})
+
+	It("Should parse an unrecognized token as the unknown kind", func() {
+		// The token a journal from a newer build carries. It is counted under the
+		// sentinel rather than failing the fold or landing under a provider it was not.
+		Expect(ParseKind("something_new")).To(Equal(KindUnknown))
+		Expect(ParseKind("")).To(Equal(KindUnknown))
+	})
 })
