@@ -39,6 +39,7 @@ import (
 	// Link the anthropic provider in so it registers itself; llm.NewProvider resolves
 	// the configured provider from the registry, and this is the sole provider today.
 	_ "github.com/choria-io/fisk-ai/internal/llm/anthropic"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	// Link the file memory backend in so it registers itself; memory.New resolves
 	// the configured backend from the registry, and this is the default backend.
@@ -381,6 +382,19 @@ type Options struct {
 	// this field replaces.
 	A2ATransport a2a.Transport
 
+	// MCPSessions, when non-nil, are the already-connected sessions with the configured
+	// MCP servers that Run borrows for importing their tools instead of connecting its
+	// own. A server process connects once at start and hands the same sessions to every
+	// run it hosts, so a long-lived process is not starting and stopping a stdio child
+	// around each run. They are used verbatim when set and never closed: the caller owns
+	// them and closes them when it is done with them. They must be safe for concurrent
+	// use, which mcpclient.Sessions is: the runs sharing them call tools over them
+	// concurrently. When nil, Run connects to the configured servers at run start and
+	// closes those sessions at run end, so the CLI path is unchanged. They are consulted
+	// only when the config declares mcp_servers; with none they are ignored, so injecting
+	// them into a run with no MCP servers is a no-op.
+	MCPSessions *mcpclient.Sessions
+
 	// CustomTools are application tools a Go caller injects into the run, addressed by
 	// the model by name alongside the wrapped application's command tools, the built-ins
 	// and any remote tools. The recommended way to build one is functool.New (whose
@@ -395,13 +409,15 @@ type Options struct {
 	// subprocess-only and never reaches in-process code). It is trusted code, not a
 	// sandbox; the caller owns what it reads and what it hands to a child process.
 	//
-	// A name may not collide with an application, built-in, or remote tool, nor with
-	// another custom tool: a collision aborts the run rather than silently shadowing one
+	// A name may not collide with an application, built-in, remote or MCP-imported tool,
+	// nor with another custom tool: a collision aborts the run rather than shadowing one
 	// (shadowing a confirm-gated tool would strip its gate). Each tool's Definition() JSON
-	// (name, description, schema, deferral) must be deterministic across process restarts:
-	// a checkpointed run fingerprints the tool set, so a Definition that varies run to run
-	// makes a resume refuse. The slice order does not matter; the tools are ordered by name
-	// internally, so a set built by ranging a map still fingerprints identically.
+	// (name, description, schema, deferral) should be deterministic across process
+	// restarts: a checkpointed run fingerprints the tool set, and a Definition that varies
+	// run to run moves that hash, so every resume warns that the tool set changed and drops
+	// the standing approvals, leaving the operator to approve each gated tool again. The
+	// resume itself continues. The slice order does not matter; the tools are ordered by
+	// name internally, so a set built by ranging a map still fingerprints identically.
 	//
 	// A custom tool built by functool.New with no Trace renderer runs silently: its call
 	// and result line are suppressed except under verbose, as a human-in-the-loop built-in
@@ -935,10 +951,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		byName[t.Name()] = t
 	}
 
-	// taken tracks every tool name already claimed (local tools, then built-ins,
-	// then imported remote tools), so a clash across those namespaces is caught
-	// rather than silently shadowing one with another, since the model addresses
-	// every tool by a single flat name.
+	// taken tracks every tool name already claimed (local tools, then built-ins, then
+	// the tools imported from remote agents and from MCP servers), so a clash across
+	// those namespaces is caught rather than silently shadowing one with another, since
+	// the model addresses every tool by a single flat name.
 	taken := make(map[string]bool, len(tools))
 	for name := range byName {
 		taken[name] = true
@@ -1121,6 +1137,57 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	// Import the tools of the configured MCP servers, after the remote agents so a
+	// name is checked against everything claimed so far. A run is as strict about a
+	// server as it is about a remote agent: one that cannot be started, reached or
+	// listed aborts the run rather than dropping tools the prompt may depend on. A tool
+	// the server described badly does not abort it, since the server answered: that one
+	// is skipped and reported.
+	var mcpTools []*functool.Tool
+	mcpByName := map[string]*functool.Tool{}
+	if len(cfg.MCPServers) > 0 {
+		// Caller-injected sessions are borrowed: a server process connects once and hands
+		// the same sessions to every run it hosts rather than starting a stdio child around
+		// each one. They are used verbatim and never closed (the caller owns them).
+		// Otherwise Run connects here and closes at the end of the run, the CLI path.
+		sessions := opts.MCPSessions
+		if sessions == nil {
+			sessions, err = mcpclient.Connect(ctx, mcpclient.Options{
+				Servers:            cfg.MCPServers,
+				Identity:           cfg.Identity,
+				Version:            util.Version(),
+				CredentialEnvNames: cfg.CredentialEnvNames(),
+			})
+			if err != nil {
+				return res, err
+			}
+			defer sessions.Close()
+		}
+
+		// The names the remote import settled on are never written into taken, so the
+		// naming pass is given both lookups. The names this import settles on are added to
+		// taken below, which keeps it the whole set of claimed names.
+		var imports []mcpclient.ServerImport
+		mcpTools, mcpByName, imports, err = mcpclient.ImportForRun(ctx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+
+		// ImportForRun returns the per-server outcomes with its error as well as without
+		// one, so the notes are reported before the error is: an operator deciding whether
+		// to set an alias or drop a filter needs the skipped tools and round trips that came
+		// back with the failure, not the failure alone.
+		reporter, ok := events.(MCPServerReporter)
+		if ok {
+			reporter.MCPServerNotes(imports)
+		}
+
+		if err != nil {
+			return res, err
+		}
+
+		for name := range mcpByName {
+			taken[name] = true
+		}
+	}
+
 	// Caller-injected custom tools are registered last, after every other source has
 	// claimed its names, so a collision is caught against all of them and the clashing
 	// kind can be named. A custom tool may never shadow an existing one: shadowing a
@@ -1151,6 +1218,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing built-in tool of the same name; a custom tool may not shadow it", i, name)
 		case remoteByName[name] != nil:
 			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing remote tool of the same name; a custom tool may not shadow it", i, name)
+		case mcpByName[name] != nil:
+			return res, fmt.Errorf("custom tool at index %d (%q) collides with a tool of the same name imported from an mcp server; a custom tool may not shadow it", i, name)
 		case customByName[name] != nil:
 			return res, fmt.Errorf("custom tool at index %d (%q) duplicates an earlier custom tool of the same name", i, name)
 		}
@@ -1177,12 +1246,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// The run needs at least one callable tool, counting every source the model can
 	// address: filtered application tools, the built-in HITL/memory/knowledge tools,
-	// imported remote tools, and caller-injected custom tools. Checking only the
-	// application tools would abort a run whose sole tools are native (e.g.
-	// knowledge_search), remote, or injected by the caller.
-	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(opts.CustomTools) == 0 {
+	// tools imported from remote agents and from MCP servers, and caller-injected custom
+	// tools. Checking only the application tools would abort a run whose sole tools are
+	// native (e.g. knowledge_search), imported, or injected by the caller.
+	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(mcpTools)+len(opts.CustomTools) == 0 {
 		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in or remote tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, or remote_tools in %q", opts.ConfigFile)
+			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_servers in %q", opts.ConfigFile)
 		}
 		return res, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
 	}
@@ -1341,12 +1410,15 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	runSpan.SetProvider(caps.SemconvProviderName())
 
 	toolSearchAllowed := caps.SupportsToolSearch && cfg.ToolSearchEnabled()
-	deferrable := make([]toolkit.Tool, 0, len(tools)+len(remoteTools)+len(customByName))
+	deferrable := make([]toolkit.Tool, 0, len(tools)+len(remoteTools)+len(mcpTools)+len(customByName))
 	for _, t := range tools {
 		deferrable = append(deferrable, t)
 	}
 	for _, rt := range remoteTools {
 		deferrable = append(deferrable, rt)
+	}
+	for _, mt := range mcpTools {
+		deferrable = append(deferrable, mt)
 	}
 	// Custom tools are appended in name order rather than the caller's slice order, so the
 	// tool set the run fingerprints is identical whether the caller built the slice in a
@@ -1871,10 +1943,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// The runner dispatches over a single registry keyed by the unique name the model
 	// addresses each tool by. Names were made unique across the kinds as each was
-	// added (the taken set), so merging local, built-in and remote tools cannot
+	// added (the taken set), so merging local, built-in, remote and MCP tools cannot
 	// shadow one another. The per-kind maps above are kept only where a consumer still
 	// needs the concrete kind: byName feeds the resume transcript renderer.
-	allTools := make(map[string]toolkit.Tool, len(byName)+len(builtinByName)+len(remoteByName)+len(customByName))
+	allTools := make(map[string]toolkit.Tool, len(byName)+len(builtinByName)+len(remoteByName)+len(mcpByName)+len(customByName))
 	for name, t := range byName {
 		allTools[name] = t
 	}
@@ -1883,6 +1955,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	}
 	for name, rt := range remoteByName {
 		allTools[name] = rt
+	}
+	for name, mt := range mcpByName {
+		allTools[name] = mt
 	}
 	for name, t := range customByName {
 		allTools[name] = t
