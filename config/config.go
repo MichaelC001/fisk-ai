@@ -1178,9 +1178,11 @@ type MCPServer struct {
 	// third party's server can do in a run, since an imported tool is never confirm
 	// gated locally. A tags filter is rejected: MCP tools carry no tags.
 	Include *ToolFilter `yaml:"include,omitempty" json:"include,omitempty"`
-	// TimeoutString is how long this server gets to start or be reached, to finish the
-	// initialize handshake and to list its tools, as a duration string (e.g. 30s, or 1d
-	// for the day, week, month and year units fisk parses on top of Go's). Unset takes
+	// TimeoutString is how long this server gets to start or be reached and finish the
+	// initialize handshake, and again how long it gets to list its tools, as a duration
+	// string (e.g. 30s, or 1d for the day, week, month and year units fisk parses on top
+	// of Go's). It is applied once around each of those two steps, so a server that is
+	// slow at both takes up to twice this value before a run gives up on it. Unset takes
 	// the default of 30s; zero and negative are refused, since an unlimited startup
 	// holds up the start of a run against a server that never answers.
 	//
@@ -1209,6 +1211,10 @@ func (s MCPServer) EffectiveAlias() string {
 // StartupTimeout is how long this server gets to start or be reached, to finish the
 // initialize handshake and to list its tools, from its timeout, or 30 seconds when it
 // sets none.
+//
+// It is applied once around each of those two steps, the connect with its handshake and
+// then the listing, so a server that is slow at both takes up to twice this value before
+// a run gives up on it.
 //
 // It covers everything that happens before the run starts and nothing after it. A call
 // to a tool imported from this server is limited by harness.tool_timeout, like every
