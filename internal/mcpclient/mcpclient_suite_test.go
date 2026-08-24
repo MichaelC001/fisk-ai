@@ -30,6 +30,18 @@ func TestMCPClient(t *testing.T) {
 // a real provider or duplicating its list.
 const fakeCredEnvVar = "FISK_MCPCLIENT_PROVIDER_SECRET"
 
+// literalToken stands in for a credential an operator wrote into a url as literal text
+// rather than as a "${VAR}" reference, so a spec can assert that it reaches no error.
+const literalToken = "fisk-mcpclient-literal-token"
+
+// referencedToken stands in for a credential an operator kept in a variable and
+// referenced from a url, so a spec can assert that its value reaches no error even
+// where a url's structure gives no clue that a segment holds a credential.
+const referencedToken = "fisk-mcpclient-referenced-token"
+
+// referencedTokenVar is the variable referencedToken is read from.
+const referencedTokenVar = "FISK_MCPCLIENT_PATH_TOKEN"
+
 type fakeProvider struct{}
 
 func (fakeProvider) Call(context.Context, llm.Request) (*llm.Response, error) { return nil, nil }

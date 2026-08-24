@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"slices"
@@ -115,10 +114,26 @@ func childEnv(server config.MCPServer, credentials []string, lookup func(string)
 
 // httpTransport builds the streamable HTTP transport for a server reached at a
 // url, with an http.Client that carries the entry's resolved headers.
+//
+// The url's own "${VAR}" references are resolved here, as the headers are, because a
+// service that authenticates by query parameter puts the credential in the endpoint.
+// The expanded endpoint is what the transport dials and is never put in an error: what
+// the errors quote is the configured text, redacted, which names the variable an
+// operator has to set.
+//
+// Whether the endpoint is one this transport can reach is decided on the expanded form
+// too, since a reference may supply the scheme or the host, so a config that parsed is
+// still told here that "${DOCS_ENDPOINT}" expanded to something that is not an http
+// url.
 func httpTransport(server config.MCPServer, lookup func(string) (string, bool)) (mcp.Transport, error) {
-	endpoint, err := url.Parse(server.URL)
+	endpoint, err := config.ExpandEnvReferences(server.URL, lookup)
 	if err != nil {
-		return nil, fmt.Errorf("mcp server %q has an unusable url %q: %w", server.Name, server.URL, err)
+		return nil, fmt.Errorf("mcp server %q: url: %w", server.Name, err)
+	}
+
+	parsed, err := config.ParseMCPServerURL(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("mcp server %q has an unusable url %q: %w", server.Name, server.SafeURL(), err)
 	}
 
 	headers, err := resolveValues(server.Name, "headers", server.Headers, lookup)
@@ -127,8 +142,8 @@ func httpTransport(server config.MCPServer, lookup func(string) (string, bool)) 
 	}
 
 	return &mcp.StreamableClientTransport{
-		Endpoint:   server.URL,
-		HTTPClient: newHTTPClient(endpoint.Host, headers),
+		Endpoint:   endpoint,
+		HTTPClient: newHTTPClient(parsed.Host, headers),
 	}, nil
 }
 

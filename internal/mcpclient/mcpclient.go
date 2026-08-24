@@ -63,7 +63,7 @@ type Options struct {
 	// the ones every llm provider linked into the build declares. Pass
 	// config.Config.CredentialEnvNames.
 	CredentialEnvNames []string
-	// LookupEnv resolves the "${VAR}" references in an entry's env and headers.
+	// LookupEnv resolves the "${VAR}" references in an entry's env, headers and url.
 	// Nil reads the process environment through os.LookupEnv.
 	LookupEnv func(name string) (string, bool)
 	// Dialer overrides how a transport is built for a server. Nil builds the stdio
@@ -92,6 +92,9 @@ type Sessions struct {
 // to every other server running.
 type entry struct {
 	server config.MCPServer
+	// secrets are the values this server's url references resolve to, replaced in
+	// every error this package returns for it.
+	secrets []string
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
@@ -106,6 +109,10 @@ type entry struct {
 // handshake, and its "${VAR}" references are resolved here rather than when the
 // config was parsed, so a variable that is not set fails this call naming the
 // variable and the server.
+//
+// What the references in a url resolve to is kept for the life of the sessions and
+// replaced with "REDACTED" in every error they return, so a credential a service
+// takes in the path rather than in the query is not printed either.
 //
 // A server that cannot be connected fails the call: the sessions already opened
 // are closed, so a failed Connect leaves nothing running. The error is returned
@@ -132,7 +139,7 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 			return nil, fmt.Errorf("mcp server %q is configured more than once", server.Name)
 		}
 
-		e := &entry{server: server}
+		e := &entry{server: server, secrets: serverSecrets(server, opts.LookupEnv)}
 		err := s.open(ctx, e)
 		if err != nil {
 			_ = s.Close()
@@ -219,16 +226,32 @@ func (s *Sessions) configured() []config.MCPServer {
 // is always given one that was live when it was handed over, which a caller
 // holding a session value from an earlier call would not be.
 //
-// fn's error is returned as it is. An unknown name, a session that cannot be
-// replaced, and a Sessions that has been closed are reported without calling fn.
-// A Close that lands while the call is in flight is reported the same way.
+// fn's error comes back with this server's credentials redacted, which is where a
+// transport error quoting the endpoint it dialed is caught, and errors.Is and
+// errors.As still see through it to what fn returned. An unknown name, a session that
+// cannot be replaced, and a Sessions that has been closed are reported without calling
+// fn. A Close that lands while the call is in flight is reported the same way.
 func (s *Sessions) Use(ctx context.Context, name string, fn func(session *mcp.ClientSession) error) error {
 	session, err := s.live(ctx, name)
 	if err != nil {
 		return err
 	}
 
-	return fn(session)
+	return redacted(fn(session), s.secrets(name))
+}
+
+// secrets are the credential values of the named server, and none for a name that is
+// not configured.
+func (s *Sessions) secrets(name string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, known := s.entries[name]
+	if !known {
+		return nil
+	}
+
+	return e.secrets
 }
 
 // Close ends every session, which closes the stdin of each stdio child and gives
@@ -256,7 +279,7 @@ func (s *Sessions) Close() error {
 		if e.session != nil {
 			err := e.session.Close()
 			if err != nil {
-				errs = append(errs, fmt.Errorf("closing the session with mcp server %q: %w", e.server.Name, err))
+				errs = append(errs, redacted(fmt.Errorf("closing the session with mcp server %q: %w", e.server.Name, err), e.secrets))
 			}
 			e.session = nil
 		}
@@ -325,16 +348,16 @@ func (s *Sessions) open(ctx context.Context, e *entry) error {
 
 	transport, err := s.transport(ctx, e.server)
 	if err != nil {
-		return err
+		return redacted(err, e.secrets)
 	}
 
 	session, err := s.client().Connect(ctx, transport, nil)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("connecting to mcp server %q: it did not answer the initialize handshake within %v: %w", e.server.Name, e.server.StartupTimeout(), err)
+			return redacted(fmt.Errorf("connecting to mcp server %q: it did not answer the initialize handshake within %v: %w", e.server.Name, e.server.StartupTimeout(), err), e.secrets)
 		}
 
-		return fmt.Errorf("connecting to mcp server %q: %w", e.server.Name, err)
+		return redacted(fmt.Errorf("connecting to mcp server %q: %w", e.server.Name, err), e.secrets)
 	}
 
 	done := make(chan struct{})

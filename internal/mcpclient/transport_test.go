@@ -150,6 +150,58 @@ var _ = Describe("Transports", func() {
 			Expect(headers.Get("Authorization")).To(BeEmpty())
 		})
 
+		It("should resolve the references in the url", func() {
+			transport, err := httpTransport(config.MCPServer{
+				Name: "docs",
+				URL:  "https://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_TOKEN}",
+			}, func(string) (string, bool) { return "secret-token", true })
+			Expect(err).ToNot(HaveOccurred())
+
+			streamable, ok := transport.(*mcp.StreamableClientTransport)
+			Expect(ok).To(BeTrue())
+			Expect(streamable.Endpoint).To(Equal("https://mcp.example.net/mcp/?apiKey=secret-token"))
+		})
+
+		It("should resolve a reference mixed with literal text in the url", func() {
+			transport, err := httpTransport(config.MCPServer{
+				Name: "docs",
+				URL:  "https://${FISK_MCPCLIENT_TOKEN}.example.net/mcp/?apiKey=prefix-${FISK_MCPCLIENT_TOKEN}",
+			}, func(string) (string, bool) { return "docs", true })
+			Expect(err).ToNot(HaveOccurred())
+
+			streamable, ok := transport.(*mcp.StreamableClientTransport)
+			Expect(ok).To(BeTrue())
+			Expect(streamable.Endpoint).To(Equal("https://docs.example.net/mcp/?apiKey=prefix-docs"))
+		})
+
+		It("should name the variable and the server a url references but is not set", func() {
+			_, err := httpTransport(config.MCPServer{
+				Name: "docs",
+				URL:  "https://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_ABSENT}",
+			}, func(string) (string, bool) { return "", false })
+			Expect(err).To(MatchError(`mcp server "docs": url: environment variable "FISK_MCPCLIENT_ABSENT" is not set`))
+		})
+
+		// A url whose scheme or host comes from a variable is not checked when the file is
+		// parsed, since the configured text is not what gets dialed.
+		It("should refuse a url that expands to an endpoint it cannot reach", func() {
+			_, err := httpTransport(config.MCPServer{
+				Name: "docs",
+				URL:  "${FISK_MCPCLIENT_ENDPOINT}",
+			}, func(string) (string, bool) { return "localhost:9000", true })
+			Expect(err).To(MatchError(ContainSubstring(`mcp server "docs" has an unusable url "${FISK_MCPCLIENT_ENDPOINT}"`)))
+			Expect(err).To(MatchError(ContainSubstring("http:// or https:// endpoint")))
+		})
+
+		It("should quote the configured url rather than the expanded one", func() {
+			_, err := httpTransport(config.MCPServer{
+				Name: "docs",
+				URL:  "ftp://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_TOKEN}",
+			}, func(string) (string, bool) { return "secret-token", true })
+			Expect(err).To(MatchError(ContainSubstring(`has an unusable url "ftp://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_TOKEN}"`)))
+			Expect(err.Error()).ToNot(ContainSubstring("secret-token"))
+		})
+
 		It("should name the variable and the server a header references but is not set", func() {
 			_, err := httpTransport(config.MCPServer{
 				Name:    "docs",

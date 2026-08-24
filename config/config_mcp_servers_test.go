@@ -197,6 +197,41 @@ var _ = Describe("MCP servers", func() {
 			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
 		})
 
+		It("Should accept a url whose query holds a reference", func() {
+			cfg := prepared(MCPServer{Name: "tavily", URL: "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}"})
+			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
+			Expect(cfg.MCPServers[0].URL).To(Equal("https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}"))
+		})
+
+		It("Should accept a url mixing a reference with literal text", func() {
+			cfg := prepared(MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp/?apiKey=prefix-${DOCS_TOKEN}"})
+			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
+		})
+
+		// The scheme and the host can come from a variable, so what the configured text
+		// parses as says nothing about the endpoint that will be dialed. mcpclient checks
+		// the expanded form when it builds the session.
+		It("Should leave the structure of a url holding a reference to the connect", func() {
+			cfg := prepared(MCPServer{Name: "docs", URL: "${DOCS_ENDPOINT}"})
+			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
+		})
+
+		It("Should reject a reference in a url whose syntax is wrong", func() {
+			cfg := prepared(MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp/?apiKey=${DOCS-TOKEN}"})
+			err := ValidateForMode(cfg, ModeAgent)
+			Expect(err).To(MatchError(ContainSubstring("mcp_servers server \"docs\" has an invalid url")))
+			Expect(err).To(MatchError(ContainSubstring("\"DOCS-TOKEN\" is not a variable name")))
+		})
+
+		// The url is quoted back to the operator, so a token written into the file as a
+		// literal is not printed by the error that rejects the entry around it.
+		It("Should redact the url it quotes", func() {
+			cfg := prepared(MCPServer{Name: "docs", URL: "ftp://mcp.example.net/mcp?apiKey=literal-token"})
+			err := ValidateForMode(cfg, ModeAgent)
+			Expect(err).To(MatchError(ContainSubstring("has an invalid url \"ftp://mcp.example.net/mcp?apiKey=REDACTED\"")))
+			Expect(err.Error()).ToNot(ContainSubstring("literal-token"))
+		})
+
 		It("Should reject an illegal variable name in a reference", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx", Env: map[string]string{"FS_TOKEN": "${FS-TOKEN}"}})
 			err := ValidateForMode(cfg, ModeAgent)
@@ -234,6 +269,87 @@ var _ = Describe("MCP servers", func() {
 		It("Should accept a bare $VAR as literal text", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx", Env: map[string]string{"FS_HOME": "$HOME/cache"}})
 			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
+		})
+	})
+
+	Describe("RedactURL", func() {
+		It("Should redact the value of every query parameter", func() {
+			Expect(RedactURL("https://mcp.tavily.com/mcp/?tavilyApiKey=abc123")).To(Equal("https://mcp.tavily.com/mcp/?tavilyApiKey=REDACTED"))
+			Expect(RedactURL("https://mcp.example.net/mcp?tenant=acme&apiKey=abc123")).To(Equal("https://mcp.example.net/mcp?tenant=REDACTED&apiKey=REDACTED"))
+			Expect(RedactURL("https://mcp.example.net/mcp?abc123")).To(Equal("https://mcp.example.net/mcp?REDACTED"))
+		})
+
+		It("Should redact the userinfo", func() {
+			Expect(RedactURL("https://operator:hunter2@mcp.example.net/mcp")).To(Equal("https://REDACTED@mcp.example.net/mcp"))
+			Expect(RedactURL("https://operator@mcp.example.net/mcp")).To(Equal("https://REDACTED@mcp.example.net/mcp"))
+		})
+
+		It("Should redact a userinfo and a query together", func() {
+			Expect(RedactURL("https://operator:hunter2@mcp.example.net/mcp?apiKey=abc123#tail")).To(Equal("https://REDACTED@mcp.example.net/mcp?apiKey=REDACTED#REDACTED"))
+		})
+
+		It("Should leave a url carrying neither alone", func() {
+			Expect(RedactURL("https://mcp.example.net/mcp")).To(Equal("https://mcp.example.net/mcp"))
+			Expect(RedactURL("http://127.0.0.1:9000/mcp/")).To(Equal("http://127.0.0.1:9000/mcp/"))
+			Expect(RedactURL("localhost:9000")).To(Equal("localhost:9000"))
+			Expect(RedactURL("")).To(BeEmpty())
+		})
+
+		// A reference names the variable rather than holding its value, and it is what an
+		// operator has in their own file, so it survives to be recognized.
+		It("Should keep a bare reference as it was written", func() {
+			Expect(RedactURL("https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}")).To(Equal("https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}"))
+			Expect(RedactURL("${DOCS_ENDPOINT}")).To(Equal("${DOCS_ENDPOINT}"))
+		})
+
+		It("Should redact a value that only holds a reference in part", func() {
+			Expect(RedactURL("https://mcp.example.net/mcp?apiKey=prefix-${DOCS_TOKEN}")).To(Equal("https://mcp.example.net/mcp?apiKey=REDACTED"))
+		})
+
+		It("Should keep an empty value empty", func() {
+			Expect(RedactURL("https://mcp.example.net/mcp?debug=")).To(Equal("https://mcp.example.net/mcp?debug="))
+		})
+
+		// Zapier and Composio take the credential in a path segment, and nothing here
+		// tells a segment holding a token from one naming a route, so the path is left
+		// as it stands. A reference is covered by internal/mcpclient, which searches an
+		// error for the value it resolved to; a literal is the residue.
+		It("Should leave the path as it is, credential and all", func() {
+			Expect(RedactURL("https://mcp.zapier.com/api/mcp/s/abc123secret/mcp")).To(Equal("https://mcp.zapier.com/api/mcp/s/abc123secret/mcp"))
+			Expect(RedactURL("https://mcp.zapier.com/api/mcp/s/${ZAPIER_KEY}/mcp")).To(Equal("https://mcp.zapier.com/api/mcp/s/${ZAPIER_KEY}/mcp"))
+		})
+
+		It("Should be what MCPServer.SafeURL shows", func() {
+			server := MCPServer{Name: "tavily", URL: "https://mcp.tavily.com/mcp/?tavilyApiKey=abc123"}
+			Expect(server.SafeURL()).To(Equal("https://mcp.tavily.com/mcp/?tavilyApiKey=REDACTED"))
+		})
+	})
+
+	Describe("ParseMCPServerURL", func() {
+		It("Should return the parsed endpoint", func() {
+			parsed, err := ParseMCPServerURL("https://mcp.example.net:8443/mcp?apiKey=abc123")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(parsed.Host).To(Equal("mcp.example.net:8443"))
+		})
+
+		It("Should reject a url the transport cannot reach", func() {
+			_, err := ParseMCPServerURL("localhost:9000")
+			Expect(err).To(MatchError(ContainSubstring("http:// or https:// endpoint")))
+
+			_, err = ParseMCPServerURL("https:///mcp")
+			Expect(err).To(MatchError(ContainSubstring("it names no host")))
+		})
+
+		// The caller decides which form of the url is safe to quote, so the error carries
+		// none of it, not even the one url.Error would have printed for it.
+		It("Should never quote the url it was given", func() {
+			_, err := ParseMCPServerURL("ftp://mcp.example.net/mcp?apiKey=abc123")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).ToNot(ContainSubstring("abc123"))
+
+			_, err = ParseMCPServerURL("http://[::1/mcp?apiKey=abc123")
+			Expect(err).To(MatchError(ContainSubstring("it cannot be parsed as a url")))
+			Expect(err.Error()).ToNot(ContainSubstring("abc123"))
 		})
 	})
 

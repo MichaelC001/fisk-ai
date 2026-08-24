@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -123,6 +124,116 @@ var _ = Describe("Sessions", func() {
 				}},
 			})
 			Expect(err).To(MatchError(ContainSubstring(`mcp server "docs": env "DOCS_TOKEN": environment variable "FISK_MCPCLIENT_ABSENT" is not set`)))
+		})
+
+		It("should resolve a ${VAR} reference in the url and name one that is not set", func() {
+			_, err := Connect(ctx, Options{
+				Servers: []config.MCPServer{{
+					Name: "docs",
+					URL:  "https://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_ABSENT}",
+				}},
+			})
+			Expect(err).To(MatchError(ContainSubstring(`mcp server "docs": url: environment variable "FISK_MCPCLIENT_ABSENT" is not set`)))
+		})
+
+		// The endpoint of a server that authenticates by query parameter carries the
+		// credential itself, and net/http quotes the url it was dialing in the error it
+		// returns, so a failed connect is the surface the token would reach a terminal and
+		// a log through.
+		It("should keep a credential in the url out of a failed connect", func() {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			Expect(err).ToNot(HaveOccurred())
+
+			// The port is released before anything dials it, so the connect fails on a
+			// refused connection rather than on the entry's timeout.
+			endpoint := fmt.Sprintf("http://%s/mcp?apiKey=%s", listener.Addr().String(), literalToken)
+			Expect(listener.Close()).To(Succeed())
+
+			_, err = Connect(ctx, Options{
+				Servers:  []config.MCPServer{{Name: "docs", URL: endpoint, TimeoutParsed: 10 * time.Second}},
+				Identity: "fisk-test",
+				Version:  "0.0.1",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).ToNot(ContainSubstring(literalToken))
+			Expect(err).To(MatchError(ContainSubstring(`connecting to mcp server "docs"`)))
+			Expect(err).To(MatchError(ContainSubstring("apiKey=REDACTED")))
+		})
+
+		// Zapier and Composio take the credential in a path segment, where redacting on
+		// the shape of a url alone would print it: the endpoint is
+		// "https://mcp.zapier.com/api/mcp/s/<token>/mcp" and nothing in it says which
+		// segment is the token. What the reference resolved to is searched for instead.
+		It("should keep a credential a reference put in the url path out of a failed connect", func() {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			Expect(err).ToNot(HaveOccurred())
+
+			endpoint := fmt.Sprintf("http://%s/api/mcp/s/${%s}/mcp", listener.Addr().String(), referencedTokenVar)
+			Expect(listener.Close()).To(Succeed())
+
+			_, err = Connect(ctx, Options{
+				Servers:  []config.MCPServer{{Name: "docs", URL: endpoint, TimeoutParsed: 10 * time.Second}},
+				Identity: "fisk-test",
+				Version:  "0.0.1",
+				LookupEnv: func(name string) (string, bool) {
+					if name == referencedTokenVar {
+						return referencedToken, true
+					}
+
+					return "", false
+				},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).ToNot(ContainSubstring(referencedToken))
+			Expect(err).To(MatchError(ContainSubstring(`connecting to mcp server "docs"`)))
+			Expect(err).To(MatchError(ContainSubstring("/api/mcp/s/REDACTED/mcp")))
+		})
+
+		// A reference in the query string is covered twice over, by the value it
+		// resolved to and by the structure of the url, and both were true before the
+		// path case was answered.
+		It("should keep a credential a reference put in the url query out of a failed connect", func() {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			Expect(err).ToNot(HaveOccurred())
+
+			endpoint := fmt.Sprintf("http://%s/mcp?apiKey=${%s}", listener.Addr().String(), referencedTokenVar)
+			Expect(listener.Close()).To(Succeed())
+
+			_, err = Connect(ctx, Options{
+				Servers:  []config.MCPServer{{Name: "docs", URL: endpoint, TimeoutParsed: 10 * time.Second}},
+				Identity: "fisk-test",
+				Version:  "0.0.1",
+				LookupEnv: func(name string) (string, bool) {
+					if name == referencedTokenVar {
+						return referencedToken, true
+					}
+
+					return "", false
+				},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).ToNot(ContainSubstring(referencedToken))
+			Expect(err).To(MatchError(ContainSubstring("apiKey=REDACTED")))
+		})
+
+		// The residue: an operator who wrote the token into the path as a literal has
+		// nothing that identifies it as one, and it reaches the error. It is pinned so
+		// the limit stays a decision, and the doc comments on config.RedactURL,
+		// MCPServer.SafeURL and MCPServer.URL say the same.
+		It("should print a literal credential in the url path of a failed connect", func() {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			Expect(err).ToNot(HaveOccurred())
+
+			endpoint := fmt.Sprintf("http://%s/api/mcp/s/%s/mcp", listener.Addr().String(), literalToken)
+			Expect(listener.Close()).To(Succeed())
+
+			_, err = Connect(ctx, Options{
+				Servers:  []config.MCPServer{{Name: "docs", URL: endpoint, TimeoutParsed: 10 * time.Second}},
+				Identity: "fisk-test",
+				Version:  "0.0.1",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(literalToken))
 		})
 
 		It("should bound the connect with the entry's timeout", func() {

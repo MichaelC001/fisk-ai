@@ -6,6 +6,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -125,8 +126,8 @@ type Config struct {
 	// each reached over stdio or streamable HTTP. Their tools are named
 	// "<alias>_<tool>" and are only ever available to the agent loop: fisk mcp and the
 	// a2a tool server never pass an imported tool on to their own clients. A "${VAR}"
-	// reference is recognized in an entry's env and headers values only, and one
-	// written in command, args or url is taken literally.
+	// reference is recognized in an entry's env, headers and url values, and one
+	// written in command or args is taken literally.
 	MCPServers []MCPServer `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
 	// Expose makes this agent discoverable to other agents and/or over MCP.
 	Expose *ExposeConfig `json:"expose,omitempty" yaml:"expose,omitempty"`
@@ -1139,6 +1140,22 @@ type MCPServer struct {
 	// URL is the endpoint of an already-running server reached over streamable HTTP,
 	// such as https://mcp.example.net/mcp. Setting it selects the HTTP transport; leave
 	// Command unset.
+	//
+	// A value carries "${VAR}" references the way Env's does, because some services
+	// authenticate by query parameter or by a path segment rather than by header, so
+	// the credential is part of the endpoint, as in
+	// "https://mcp.example.net/mcp/?apiKey=${DOCS_TOKEN}" and in Zapier's
+	// "https://mcp.zapier.com/api/mcp/s/${ZAPIER_KEY}/mcp". The references are resolved
+	// when the session is built, so the expanded endpoint holds the credential: print
+	// SafeURL instead, which is this text with its query values and any userinfo
+	// redacted, leaving a reference as written so it names the variable rather than its
+	// value. internal/mcpclient also replaces what each reference resolved to wherever
+	// it appears in an error it returns, which is what covers a credential in the path.
+	//
+	// Keep a credential in a variable. One written into the path as a literal is
+	// redacted by neither rule, since nothing can tell a path segment holding a token
+	// from one naming a route, and it is printed in full by any error that quotes the
+	// endpoint.
 	URL string `yaml:"url,omitempty" json:"url,omitempty"`
 	// Env sets environment variables on the stdio child, applied on top of the
 	// environment a command tool gets. A value may mix literal text with any number of
@@ -1202,6 +1219,20 @@ func (s MCPServer) StartupTimeout() time.Duration {
 	}
 
 	return s.TimeoutParsed
+}
+
+// SafeURL is this server's configured endpoint with RedactURL applied: the userinfo,
+// the value of every query parameter and the fragment are replaced, and a "${VAR}"
+// reference is left as written so it names the variable rather than its value. An
+// operator recognizes the entry from their own file, and the expanded endpoint is
+// never returned here.
+//
+// The path is not redacted, so this is safe to print for an endpoint whose credential
+// is a reference, sits in the query string or sits in the userinfo, and no further. A
+// credential an operator wrote into the path as a literal, which is where Zapier and
+// Composio take theirs, is returned in full.
+func (s MCPServer) SafeURL() string {
+	return RedactURL(s.URL)
 }
 
 // envNamePattern matches an environment variable name inside a "${VAR}" reference.
@@ -1313,6 +1344,142 @@ func ExpandEnvReferences(value string, lookup func(string) (string, bool)) (stri
 	out.WriteString(value[at:])
 
 	return out.String(), nil
+}
+
+// redactedValue replaces the parts of a url that can carry a credential.
+const redactedValue = "REDACTED"
+
+// RedactURL returns value with the userinfo before the host, the value of every query
+// parameter and the fragment replaced by "REDACTED". The scheme, host, port, path and
+// the parameter names are left as they are, so an operator still reads the endpoint
+// and the name of the parameter it expects.
+//
+// The path is not redacted, and several services take the credential there rather than
+// in the query: Zapier's endpoint is "https://mcp.zapier.com/api/mcp/s/<token>/mcp"
+// and Composio's is shaped the same way. A "${VAR}" reference in the path is kept as
+// written here, because this reads the configured text, and internal/mcpclient
+// replaces what that reference resolved to wherever it appears in an error, so a
+// credential kept in a variable is covered. A credential written into the path as a
+// literal is redacted by neither: nothing can tell a path segment holding a token from
+// one naming a route.
+//
+// A value that is exactly one "${VAR}" reference is kept as written, since it names a
+// variable rather than holding its value, and that is the form an operator has in
+// their own file. Anything else is replaced, whether it came from a reference or was
+// written into the file as a literal, because nothing here can tell a token from a
+// tenant name.
+//
+// Every surface that renders an MCP server's endpoint, and every error that quotes one,
+// redacts it here rather than deciding for itself what to keep.
+func RedactURL(value string) string {
+	if value == "" {
+		return value
+	}
+
+	rest, fragment, hasFragment := strings.Cut(value, "#")
+	rest, query, hasQuery := strings.Cut(rest, "?")
+
+	out := redactUserinfo(rest)
+	if hasQuery {
+		out += "?" + redactQuery(query)
+	}
+	if hasFragment {
+		out += "#" + redactValue(fragment)
+	}
+
+	return out
+}
+
+// redactUserinfo replaces the userinfo of a url with "REDACTED", leaving a url that
+// has none untouched. The whole userinfo goes, not only the password: a user name is
+// an identity the endpoint is reached under and is nobody's business in a log line.
+func redactUserinfo(value string) string {
+	slashes := strings.Index(value, "//")
+	if slashes < 0 {
+		return value
+	}
+
+	start := slashes + 2
+	authority := value[start:]
+	end := strings.Index(authority, "/")
+	if end >= 0 {
+		authority = authority[:end]
+	}
+
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return value
+	}
+
+	return value[:start] + redactValue(authority[:at]) + value[start+at:]
+}
+
+// redactQuery replaces the value of every query parameter, keeping the names so an
+// operator is told which parameter the endpoint expects. A segment with no "=" is one
+// value with no name, and goes whole.
+func redactQuery(query string) string {
+	if query == "" {
+		return query
+	}
+
+	params := strings.Split(query, "&")
+	for i, param := range params {
+		name, value, named := strings.Cut(param, "=")
+		if !named || name == "" {
+			params[i] = redactValue(param)
+			continue
+		}
+
+		params[i] = name + "=" + redactValue(value)
+	}
+
+	return strings.Join(params, "&")
+}
+
+// redactValue replaces one value, keeping an empty one empty, since there is nothing
+// to hide, and a bare "${VAR}" reference as written, since it names a variable.
+func redactValue(value string) string {
+	if value == "" {
+		return value
+	}
+
+	refs, err := scanEnvReferences(value)
+	if err == nil && len(refs) == 1 && refs[0].start == 0 && refs[0].end == len(value) {
+		return value
+	}
+
+	return redactedValue
+}
+
+// ParseMCPServerURL parses value as the endpoint of an MCP server reached over
+// streamable HTTP, and checks that it is one the transport can reach: an absolute http
+// or https url naming a host. A host and port with no scheme parses as a url whose
+// scheme is the host name, so an unchecked "localhost:9000" would reach the connect and
+// fail there instead.
+//
+// The error says what is wrong with the url and never quotes it, so a caller adds the
+// form of it that is safe to show: MCPServer.SafeURL for the configured text, which is
+// what an operator has in their file, rather than the expanded endpoint, which holds
+// the value of every reference in it. That is also why the parse failure is reported
+// through url.Error's own cause: url.Error prints the url it was given.
+func ParseMCPServerURL(value string) (*url.URL, error) {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		var perr *url.Error
+		if errors.As(err, &perr) && perr.Err != nil {
+			err = perr.Err
+		}
+
+		return nil, fmt.Errorf("it cannot be parsed as a url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("a url is the http:// or https:// endpoint of a running server, such as https://mcp.example.net/mcp")
+	}
+	if parsed.Host == "" {
+		return nil, errors.New("it names no host, so there is nothing to connect to")
+	}
+
+	return parsed, nil
 }
 
 // ToolFilter is a generic filter selecting tools by name or tag. It is used at
@@ -1630,8 +1797,9 @@ func validateRemoteToolHosts(hosts []RemoteToolHost) error {
 // tools and only discovery cannot carry it, while MCP has no tag vocabulary at all, so
 // neither filter could ever be honored.
 //
-// A value in env or headers is checked for the syntax of its "${VAR}" references and
-// nothing more; see EnvReferences for why the variables themselves are read elsewhere.
+// A value in env, headers or url is checked for the syntax of its "${VAR}" references
+// and nothing more; see EnvReferences for why the variables themselves are read
+// elsewhere.
 func validateMCPServers(servers []MCPServer) error {
 	names := make(map[string]struct{}, len(servers))
 	aliases := make(map[string]string, len(servers))
@@ -1722,20 +1890,34 @@ func validateMCPServerValues(server string, key string, values map[string]string
 	return nil
 }
 
-// validateMCPServerURL checks that a server's url is one the HTTP transport can reach:
-// an absolute http or https URL naming a host. A host and port with no scheme parses
-// as a URL whose scheme is the host name, so an unchecked "localhost:9000" would reach
-// connect and fail there instead.
+// validateMCPServerURL checks a server's url as far as parsing a file can.
+//
+// The syntax of its "${VAR}" references is always checked, so a typo in one is an error
+// on the file rather than a dollar sign handed to a server.
+//
+// Whether it is a url the HTTP transport can reach is checked only when it holds no
+// reference. A reference can stand anywhere in the url, including in the scheme and the
+// host, so the configured text of an entry that has one is not the string that will be
+// dialed and answering "is this an http endpoint naming a host" about it says nothing.
+// mcpclient asks that question of the expanded endpoint instead, when the session is
+// built, which is where every entry is asked it: an entry with no reference expands to
+// itself.
+//
+// The error quotes the redacted url rather than the configured text, since a url with a
+// literal credential in its query string is exactly the case that cannot be helped by
+// naming a variable.
 func validateMCPServerURL(server string, value string) error {
-	parsed, err := url.Parse(value)
+	refs, err := EnvReferences(value)
 	if err != nil {
-		return fmt.Errorf("mcp_servers server %q has an invalid url %q: %w", server, value, err)
+		return fmt.Errorf("mcp_servers server %q has an invalid url: %w", server, err)
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("mcp_servers server %q has an invalid url %q: a url is the http:// or https:// endpoint of a running server, such as https://mcp.example.net/mcp", server, value)
+	if len(refs) > 0 {
+		return nil
 	}
-	if parsed.Host == "" {
-		return fmt.Errorf("mcp_servers server %q has an invalid url %q: it names no host, so there is nothing to connect to", server, value)
+
+	_, err = ParseMCPServerURL(value)
+	if err != nil {
+		return fmt.Errorf("mcp_servers server %q has an invalid url %q: %w", server, RedactURL(value), err)
 	}
 
 	return nil

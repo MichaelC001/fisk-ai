@@ -236,6 +236,10 @@ func importServer(ctx context.Context, caller Caller, server config.MCPServer, c
 // pages: a server that never answers, or that answers with a cursor chain that
 // never ends, fails this server's import instead of holding up every server after
 // it.
+//
+// A failure is redacted on the url's structure alone, since a Caller is reached by
+// name and its credentials belong to whoever opened the session: Sessions.Use has
+// already replaced them in what it returns.
 func discover(ctx context.Context, caller Caller, server config.MCPServer) ([]*mcp.Tool, error) {
 	timeout := server.StartupTimeout()
 
@@ -258,10 +262,10 @@ func discover(ctx context.Context, caller Caller, server config.MCPServer) ([]*m
 		// The caller's own context expiring is reported as it arrived: the entry's
 		// timeout had nothing to do with it.
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return nil, fmt.Errorf("listing the tools of mcp server %q: it did not answer within %v: %w", server.Name, timeout, err)
+			return nil, redacted(fmt.Errorf("listing the tools of mcp server %q: it did not answer within %v: %w", server.Name, timeout, err), nil)
 		}
 
-		return nil, fmt.Errorf("listing the tools of mcp server %q: %w", server.Name, err)
+		return nil, redacted(fmt.Errorf("listing the tools of mcp server %q: %w", server.Name, err), nil)
 	}
 
 	return tools, nil
@@ -435,7 +439,7 @@ func NewTool(localName string, server string, desc *mcp.Tool, caller Caller) (*f
 			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("calling tool %q on mcp server %q: %w", remoteName, server, err)
+			return "", redacted(fmt.Errorf("calling tool %q on mcp server %q: %w", remoteName, server, err), nil)
 		}
 
 		out, err := toolOutput(res, remoteName, server)
