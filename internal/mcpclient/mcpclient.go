@@ -7,7 +7,10 @@
 // Context Protocol SDK: it builds a transport from an mcp_servers entry,
 // resolves that entry's "${VAR}" references against the process environment,
 // connects one session per server and holds those sessions for the caller to
-// reach by name and close when the run ends.
+// reach by name and close when the run ends. Over those sessions it lists each
+// server's tools, applies the entry's include and exclude filters, names each
+// survivor "<alias>_<tool>", and builds it as a functool.Tool the model calls like
+// any other.
 //
 // It is the counterpart of internal/remotetools, which is the same layer for the
 // tools an agent imports from a2a peers, and it copies that package's shape:
@@ -98,7 +101,7 @@ type entry struct {
 
 // Connect opens a session with every configured server, in the order they were
 // configured, and returns them keyed by name. Each server gets its own
-// ConnectTimeout to be started or reached and to finish the initialize
+// StartupTimeout to be started or reached and to finish the initialize
 // handshake, and its "${VAR}" references are resolved here rather than when the
 // config was parsed, so a variable that is not set fails this call naming the
 // variable and the server.
@@ -145,6 +148,20 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 // Names are the configured server names, in the order they were configured.
 func (s *Sessions) Names() []string {
 	return slices.Clone(s.names)
+}
+
+// configured are the entries the sessions were opened for, in the order they were
+// configured, for the import to read each one's alias and filters.
+func (s *Sessions) configured() []config.MCPServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]config.MCPServer, 0, len(s.names))
+	for _, name := range s.names {
+		out = append(out, s.entries[name].server)
+	}
+
+	return out
 }
 
 // Use calls fn with the live session for the named server. It is how a tool
@@ -248,11 +265,12 @@ func (s *Sessions) live(ctx context.Context, name string) (*mcp.ClientSession, e
 // open connects a session for e and records it. The caller holds e's lock, except
 // in Connect where e is not yet reachable.
 //
-// The context it connects under carries the entry's connect timeout, and is
+// The context it connects under carries the entry's startup timeout, and is
 // canceled as soon as the handshake is done: the SDK detaches the session from
-// it, so the deadline bounds the connect and not the life of the session.
+// it, so the deadline limits the connect and not the life of the session. The
+// import applies the same timeout again when it lists the server's tools.
 func (s *Sessions) open(ctx context.Context, e *entry) error {
-	ctx, cancel := context.WithTimeout(ctx, e.server.ConnectTimeout())
+	ctx, cancel := context.WithTimeout(ctx, e.server.StartupTimeout())
 	defer cancel()
 
 	transport, err := s.transport(ctx, e.server)
@@ -263,7 +281,7 @@ func (s *Sessions) open(ctx context.Context, e *entry) error {
 	session, err := s.client().Connect(ctx, transport, nil)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("connecting to mcp server %q: it did not answer the initialize handshake within %v: %w", e.server.Name, e.server.ConnectTimeout(), err)
+			return fmt.Errorf("connecting to mcp server %q: it did not answer the initialize handshake within %v: %w", e.server.Name, e.server.StartupTimeout(), err)
 		}
 
 		return fmt.Errorf("connecting to mcp server %q: %w", e.server.Name, err)

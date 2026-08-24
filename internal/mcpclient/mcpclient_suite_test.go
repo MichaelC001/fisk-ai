@@ -53,10 +53,93 @@ type fakeServers struct {
 	sessions []*mcp.ServerSession
 	dials    map[string]int
 	fail     map[string]error
+	tools    map[string][]fakeTool
+	pageSize map[string]int
+	listing  map[string]func(*mcp.ListToolsResult)
+	stall    map[string]chan struct{}
+}
+
+// fakeTool is one tool a fake server offers: the descriptor it advertises and the
+// handler that answers a call to it.
+type fakeTool struct {
+	tool    *mcp.Tool
+	handler mcp.ToolHandler
 }
 
 func newFakeServers() *fakeServers {
-	return &fakeServers{dials: map[string]int{}, fail: map[string]error{}}
+	return &fakeServers{
+		dials:    map[string]int{},
+		fail:     map[string]error{},
+		tools:    map[string][]fakeTool{},
+		pageSize: map[string]int{},
+		listing:  map[string]func(*mcp.ListToolsResult){},
+		stall:    map[string]chan struct{}{},
+	}
+}
+
+// stallList makes the named server accept its connection, answer the handshake and
+// then never answer tools/list, so a spec can drive a server that goes quiet once it
+// is connected. The stall is released when the spec ends, so the handler it holds
+// does not outlive it.
+func (f *fakeServers) stallList(server string) {
+	GinkgoHelper()
+
+	release := make(chan struct{})
+
+	f.mu.Lock()
+	f.stall[server] = release
+	f.mu.Unlock()
+
+	DeferCleanup(func() { close(release) })
+}
+
+// listStaller holds every tools/list answer until release is closed or the request
+// is canceled.
+func listStaller(release <-chan struct{}) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/list" {
+				return next(ctx, method, req)
+			}
+
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+
+			return next(ctx, method, req)
+		}
+	}
+}
+
+// listRewriter edits the tools/list answer on its way out, so a spec can serve a
+// descriptor mcp.Server.AddTool refuses to register, such as one whose input schema
+// is not an object. It edits a copy, leaving the server's own registry alone.
+func listRewriter(edit func(*mcp.ListToolsResult)) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if err != nil || method != "tools/list" {
+				return res, err
+			}
+
+			list, ok := res.(*mcp.ListToolsResult)
+			if !ok {
+				return res, nil
+			}
+
+			copied := *list
+			copied.Tools = make([]*mcp.Tool, 0, len(list.Tools))
+			for _, tool := range list.Tools {
+				dup := *tool
+				copied.Tools = append(copied.Tools, &dup)
+			}
+			edit(&copied)
+
+			return &copied, nil
+		}
+	}
 }
 
 // dialer builds the Dialer to hand to Options.
@@ -65,22 +148,41 @@ func (f *fakeServers) dialer() Dialer {
 		f.mu.Lock()
 		f.dials[server.Name]++
 		err := f.fail[server.Name]
+		tools, custom := f.tools[server.Name]
+		pageSize := f.pageSize[server.Name]
+		rewrite := f.listing[server.Name]
+		stall := f.stall[server.Name]
 		f.mu.Unlock()
 
 		if err != nil {
 			return nil, err
 		}
 
+		if !custom {
+			tools = []fakeTool{{
+				tool: &mcp.Tool{
+					Name:        "search",
+					Description: "Searches the documentation",
+					InputSchema: json.RawMessage(`{"type":"object"}`),
+				},
+				handler: func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "found"}}}, nil
+				},
+			}}
+		}
+
 		clientSide, serverSide := mcp.NewInMemoryTransports()
 
-		srv := mcp.NewServer(&mcp.Implementation{Name: server.Name, Version: "9.9.9"}, nil)
-		srv.AddTool(&mcp.Tool{
-			Name:        "search",
-			Description: "Searches the documentation",
-			InputSchema: json.RawMessage(`{"type":"object"}`),
-		}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "found"}}}, nil
-		})
+		srv := mcp.NewServer(&mcp.Implementation{Name: server.Name, Version: "9.9.9"}, &mcp.ServerOptions{PageSize: pageSize})
+		for _, t := range tools {
+			srv.AddTool(t.tool, t.handler)
+		}
+		if rewrite != nil {
+			srv.AddReceivingMiddleware(listRewriter(rewrite))
+		}
+		if stall != nil {
+			srv.AddReceivingMiddleware(listStaller(stall))
+		}
 
 		// The server side is connected before the client, as in-memory transports
 		// require, and under a context of its own: the caller's carries the connect

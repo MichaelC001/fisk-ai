@@ -63,13 +63,14 @@ const defaultToolTimeout = 5 * time.Minute
 // than giving up first.
 const defaultA2ARequestTimeout = 120 * time.Second
 
-// defaultMCPConnectTimeout is how long an mcp_servers entry with no timeout of its own
-// gets to start or be reached and to finish the initialize handshake. It is a bound on
-// a server that never answers rather than on a slow one: a stdio command that does not
-// speak the protocol and an HTTP endpoint that accepts the connection and then goes
-// quiet both hold up the start of the run until it fires. It does not bound a tool
-// call, which harness.tool_timeout does.
-const defaultMCPConnectTimeout = 30 * time.Second
+// defaultMCPStartupTimeout is how long an mcp_servers entry with no timeout of its own
+// gets to start or be reached, to finish the initialize handshake and to list its
+// tools. It is a limit on a server that never answers rather than on a slow one: a
+// stdio command that does not speak the protocol, an HTTP endpoint that accepts the
+// connection and then goes quiet, and a server that answers the handshake and then
+// never returns a tool list all hold up the start of the run until it fires. It does
+// not limit a tool call, which harness.tool_timeout does.
+const defaultMCPStartupTimeout = 30 * time.Second
 
 // Config is the top-level agent configuration.
 type Config struct {
@@ -1160,15 +1161,15 @@ type MCPServer struct {
 	// third party's server can do in a run, since an imported tool is never confirm
 	// gated locally. A tags filter is rejected: MCP tools carry no tags.
 	Include *ToolFilter `yaml:"include,omitempty" json:"include,omitempty"`
-	// TimeoutString is how long this server gets to start or be reached and to finish
-	// the initialize handshake, as a duration string (e.g. 30s, or 1d for the day,
-	// week, month and year units fisk parses on top of Go's). Unset takes the default
-	// of 30s; zero and negative are refused, since a connect with no bound holds up the
-	// start of a run against a server that never answers.
+	// TimeoutString is how long this server gets to start or be reached, to finish the
+	// initialize handshake and to list its tools, as a duration string (e.g. 30s, or 1d
+	// for the day, week, month and year units fisk parses on top of Go's). Unset takes
+	// the default of 30s; zero and negative are refused, since an unlimited startup
+	// holds up the start of a run against a server that never answers.
 	//
-	// It bounds connect and initialize only. A call to a tool imported from this server
-	// is bounded by harness.tool_timeout, like every other tool, so one number says how
-	// long any tool may take.
+	// It covers everything that happens before the run starts and nothing after it. A
+	// call to a tool imported from this server is limited by harness.tool_timeout, like
+	// every other tool, so one number says how long any tool may take.
 	TimeoutString string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	// TimeoutParsed is the parsed form of TimeoutString, filled by prepare().
 	TimeoutParsed time.Duration `yaml:"-" json:"-"`
@@ -1188,14 +1189,16 @@ func (s MCPServer) EffectiveAlias() string {
 	return s.Name
 }
 
-// ConnectTimeout is how long this server gets to start or be reached and to finish the
-// initialize handshake, from its timeout, or 30 seconds when it sets none.
+// StartupTimeout is how long this server gets to start or be reached, to finish the
+// initialize handshake and to list its tools, from its timeout, or 30 seconds when it
+// sets none.
 //
-// It bounds connect and initialize only. A call to a tool imported from this server is
-// bounded by harness.tool_timeout, like every other tool.
-func (s MCPServer) ConnectTimeout() time.Duration {
+// It covers everything that happens before the run starts and nothing after it. A call
+// to a tool imported from this server is limited by harness.tool_timeout, like every
+// other tool.
+func (s MCPServer) StartupTimeout() time.Duration {
 	if s.TimeoutParsed <= 0 {
-		return defaultMCPConnectTimeout
+		return defaultMCPStartupTimeout
 	}
 
 	return s.TimeoutParsed
@@ -2466,10 +2469,10 @@ func (c *Config) prepare() error {
 		c.Harness.ToolTimeoutParsed = d
 	}
 
-	// An mcp_servers timeout bounds connect and initialize only, so an unset key leaves
-	// zero, which MCPServer.ConnectTimeout reads as the default. Zero is refused along
-	// with a negative, unlike harness.tool_timeout where it means unbounded: a connect
-	// with no bound holds up the start of a run against a server that never answers.
+	// An mcp_servers timeout covers a server's startup only, so an unset key leaves
+	// zero, which MCPServer.StartupTimeout reads as the default. Zero is refused along
+	// with a negative, unlike harness.tool_timeout where it means unlimited: a startup
+	// with no limit holds up the start of a run against a server that never answers.
 	for i, server := range c.MCPServers {
 		if server.TimeoutString == "" {
 			continue

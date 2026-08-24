@@ -42,16 +42,16 @@ var _ = Describe("MCP servers", func() {
 		})
 	})
 
-	Describe("MCPServer.ConnectTimeout", func() {
+	Describe("MCPServer.StartupTimeout", func() {
 		It("Should default to 30 seconds when no timeout is set", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx"})
-			Expect(cfg.MCPServers[0].ConnectTimeout()).To(Equal(30 * time.Second))
+			Expect(cfg.MCPServers[0].StartupTimeout()).To(Equal(30 * time.Second))
 		})
 
 		It("Should use an explicit timeout parsed by prepare", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "5s"})
 			Expect(cfg.MCPServers[0].TimeoutParsed).To(Equal(5 * time.Second))
-			Expect(cfg.MCPServers[0].ConnectTimeout()).To(Equal(5 * time.Second))
+			Expect(cfg.MCPServers[0].StartupTimeout()).To(Equal(5 * time.Second))
 		})
 
 		It("Should reject an unparseable timeout", func() {
@@ -59,7 +59,7 @@ var _ = Describe("MCP servers", func() {
 			Expect(cfg.prepare()).To(MatchError(ContainSubstring("invalid mcp_servers timeout \"soon\" on server \"filesystem\"")))
 		})
 
-		It("Should reject a zero timeout, which would leave the connect unbounded", func() {
+		It("Should reject a zero timeout, which would leave the startup unlimited", func() {
 			cfg := base(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "0s"})
 			Expect(cfg.prepare()).To(MatchError(ContainSubstring("must be greater than zero")))
 		})
@@ -335,7 +335,7 @@ mcp_servers:
 			Expect(cfg.MCPServers).To(HaveLen(1))
 			Expect(cfg.MCPServers[0].Env).To(Equal(map[string]string{"FS_TOKEN": "${FISK_AI_MCP_TEST_ABSENT}"}))
 			Expect(cfg.MCPServers[0].Args).To(Equal([]string{"-y", "@modelcontextprotocol/server-filesystem"}))
-			Expect(cfg.MCPServers[0].ConnectTimeout()).To(Equal(10 * time.Second))
+			Expect(cfg.MCPServers[0].StartupTimeout()).To(Equal(10 * time.Second))
 		})
 	})
 })
