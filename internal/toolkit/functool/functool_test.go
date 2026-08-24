@@ -121,6 +121,36 @@ var _ = Describe("New", func() {
 		Expect(err).To(MatchError(ContainSubstring("remote and cannot be confirm-gated")))
 	})
 
+	It("Should reject an MCP tool that is also confirm-gated", func() {
+		spec := base()
+		spec.MCP = &MCPSpec{Server: "docs"}
+		spec.Confirm = &ConfirmSpec{}
+		_, err := New(spec)
+		Expect(err).To(MatchError(ContainSubstring("cannot be confirm-gated")))
+	})
+
+	It("Should reject an MCP tool exposed on either serving surface", func() {
+		spec := base()
+		spec.MCP = &MCPSpec{Server: "docs"}
+		spec.Expose = &ExposeSpec{MCP: true}
+		_, err := New(spec)
+		Expect(err).To(MatchError(ContainSubstring("cannot be exposed on a serving surface")))
+
+		spec = base()
+		spec.MCP = &MCPSpec{Server: "docs"}
+		spec.Expose = &ExposeSpec{A2A: true}
+		_, err = New(spec)
+		Expect(err).To(MatchError(ContainSubstring("cannot be exposed on a serving surface")))
+	})
+
+	It("Should reject a tool that claims both a serving agent and an MCP server", func() {
+		spec := base()
+		spec.Remote = &RemoteSpec{Agent: "billing"}
+		spec.MCP = &MCPSpec{Server: "docs"}
+		_, err := New(spec)
+		Expect(err).To(MatchError(ContainSubstring("cannot be both remote and served by an MCP server")))
+	})
+
 	It("Should reject a behavior that is both read-only and destructive", func() {
 		spec := base()
 		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, Destructive: toolkit.HintTrue}
@@ -165,6 +195,13 @@ var _ = Describe("ModelDescription", func() {
 	It("Should not append a remote tool's behavior, which its description already carries", func() {
 		spec := base()
 		spec.Remote = &RemoteSpec{Agent: "billing"}
+		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue}
+		Expect(mustNew(spec).ModelDescription()).To(Equal("does a thing"))
+	})
+
+	It("Should not append an MCP tool's behavior, which its server's description already carries", func() {
+		spec := base()
+		spec.MCP = &MCPSpec{Server: "docs"}
 		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue}
 		Expect(mustNew(spec).ModelDescription()).To(Equal("does a thing"))
 	})
@@ -284,6 +321,17 @@ var _ = Describe("Describe", func() {
 		info := tool.Describe(input)
 		Expect(info.Present).To(Equal(toolkit.PresentRemote))
 		Expect(info.Agent).To(Equal(""))
+	})
+
+	It("Should present an MCP tool as remote, naming its server, but account it under its own kind", func() {
+		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, MCP: &MCPSpec{Server: "docs"}})
+		info := tool.Describe(input)
+		Expect(info.Present).To(Equal(toolkit.PresentRemote))
+		Expect(info.Kind).To(Equal(toolkit.KindMCP))
+		Expect(info.Agent).To(Equal("docs"))
+		Expect(info.NeedsPrompter).To(BeFalse())
+		Expect(info.NeedsWorkDir).To(BeFalse())
+		Expect(info.Display).To(Equal(""))
 	})
 
 	It("Should present a traced tool like a command and request the dependencies", func() {

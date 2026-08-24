@@ -5,13 +5,14 @@
 package toolkit
 
 // Kind identifies which provider supplies a tool: the wrapped application, the
-// harness itself, another agent, or the embedding caller. It is the accounting axis
-// and the value behind the machine-readable kind= log token, kept deliberately
-// distinct from Presentation, which is the visibility axis (how a call is shown and
-// suppressed). A single provider can present in more than one way: a Builtin tool
-// self-renders for the human-in-the-loop tools and is traced for the memory and
-// knowledge tools. Accounting therefore keys off Kind and suppression off
-// Presentation, and neither is ever derived from the other.
+// harness itself, another agent, an MCP server, or the embedding caller. It is the
+// accounting axis and the value behind the machine-readable kind= log token, kept
+// deliberately distinct from Presentation, which is the visibility axis (how a call
+// is shown and suppressed). A single provider can present in more than one way: a
+// Builtin tool self-renders for the human-in-the-loop tools and is traced for the
+// memory and knowledge tools, and an MCP tool presents the way a remote one does
+// while being accounted under its own kind. Accounting therefore keys off Kind and
+// suppression off Presentation, and neither is ever derived from the other.
 type Kind int
 
 const (
@@ -31,6 +32,11 @@ const (
 	// KindCustom is a tool supplied by the embedding caller through the run's
 	// custom tools.
 	KindCustom
+	// KindMCP is a tool served by an MCP server the operator configured. It is a
+	// provider of its own rather than a flavor of KindRemote: a call to a third
+	// party's server and a call to another agent over a2a are different providers,
+	// and an operator reading the accounting wants to tell them apart.
+	KindMCP
 )
 
 // String returns the stable, lowercase, machine-readable token for a Kind, used for
@@ -48,6 +54,8 @@ func (k Kind) String() string {
 		return "remote"
 	case KindCustom:
 		return "custom"
+	case KindMCP:
+		return "mcp"
 	default:
 		return "unknown"
 	}

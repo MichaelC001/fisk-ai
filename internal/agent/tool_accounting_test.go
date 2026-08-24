@@ -89,6 +89,23 @@ var _ = Describe("runner tool accounting", func() {
 		}))
 	})
 
+	It("Should count an MCP call under its own kind and leave the remote counter to a2a peers", func() {
+		remote := mustFunc(functool.Spec{Name: "remote_tool", Description: "remote", Schema: obj(), Handler: okHandler, Remote: &functool.RemoteSpec{Agent: "peer"}})
+		served := mustFunc(functool.Spec{Name: "mcp_tool", Description: "mcp", Schema: obj(), Handler: okHandler, MCP: &functool.MCPSpec{Server: "docs"}})
+
+		r := newRunner(map[string]toolkit.Tool{"remote_tool": remote, "mcp_tool": served})
+
+		call(r, "remote_tool")
+		call(r, "mcp_tool")
+
+		Expect(r.stats.ToolCalls).To(BeEquivalentTo(2))
+		Expect(r.stats.RemoteToolCalls).To(BeEquivalentTo(1))
+		Expect(r.stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
+			toolkit.KindRemote: 1,
+			toolkit.KindMCP:    1,
+		}))
+	})
+
 	It("Should count the rejected paths so the buckets still partition tool_calls", func() {
 		needy := mustFunc(functool.Spec{
 			Name: "needy_tool", Description: "needs an arg", Handler: okHandler,

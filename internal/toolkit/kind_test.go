@@ -13,7 +13,7 @@ var _ = Describe("Kind", func() {
 	// allKinds is every provider kind. Go cannot force a switch to be exhaustive, so
 	// the token test walks this list to assert every kind resolves to a token; a new
 	// kind added without a String case or an entry here is what these tests catch.
-	allKinds := []Kind{KindUnknown, KindApplication, KindBuiltin, KindRemote, KindCustom}
+	allKinds := []Kind{KindUnknown, KindApplication, KindBuiltin, KindRemote, KindCustom, KindMCP}
 
 	It("Should give every kind a distinct, non-empty token", func() {
 		seen := map[string]Kind{}
@@ -32,6 +32,7 @@ var _ = Describe("Kind", func() {
 		Expect(KindBuiltin.String()).To(Equal("builtin"))
 		Expect(KindRemote.String()).To(Equal("remote"))
 		Expect(KindCustom.String()).To(Equal("custom"))
+		Expect(KindMCP.String()).To(Equal("mcp"))
 	})
 
 	It("Should be the safe sentinel at the zero value", func() {

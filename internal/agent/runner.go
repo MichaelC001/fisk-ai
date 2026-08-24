@@ -1495,7 +1495,11 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		r.stats.RemoteToolCalls++
 	}
 	outcome.Remote = remote
-	outcome.RemoteAgent = effInfo.Agent
+	if remote {
+		// CallInfo.Agent names whoever serves the call, and other providers present
+		// like a remote one, so the journal takes the name only for an a2a peer.
+		outcome.RemoteAgent = effInfo.Agent
+	}
 
 	// Last check before an effect this process cannot take back. A journaled run on a
 	// shared store can be taken over between tools, and the append that would tell us
@@ -1753,9 +1757,10 @@ func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit
 
 	// A kind receives only the dependencies it asked for: a command tool the per-run
 	// working directory, a built-in the operator prompter (and a working directory it
-	// ignores), a remote tool neither. The remote flag is taken from the presentation
-	// explicitly and never inferred from the agent name, which a remote tool may leave
-	// empty.
+	// ignores), a remote tool neither. The remote flag is taken from the provider kind
+	// and never from the presentation or the agent name: presentation is the visibility
+	// axis, and other providers present the same way a remote call does while being
+	// accounted under their own kind.
 	var deps toolkit.ExecDeps
 	if info.NeedsPrompter {
 		deps.Prompter = r.prompter
@@ -1764,7 +1769,7 @@ func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) (toolkit
 		deps.WorkDir = r.toolWorkDir
 	}
 
-	return deps, info.Present == toolkit.PresentRemote
+	return deps, info.Kind == toolkit.KindRemote
 }
 
 // toolResultTrace extracts the display fields from a tool result: its presentation

@@ -76,9 +76,9 @@ func anyDeferred(defs []llm.ToolDef) bool {
 
 // TestCustomTools_RegistrationRejections covers every way registering a custom tool is
 // refused: a nil entry, an empty or mismatched name, a duplicate within the slice, a
-// collision with an application or built-in tool, and a tool that claims remote
-// presentation. Each aborts the run rather than silently shadowing or mis-accounting a
-// tool. (A collision with a remote tool takes the same path but needs a broker, so it is
+// collision with an application or built-in tool, and a tool that claims a provider
+// whose work happens outside this process. Each aborts the run rather than silently
+// shadowing or mis-accounting a tool. (A collision with a remote tool takes the same path but needs a broker, so it is
 // covered by an Integration test rather than here.)
 func TestCustomTools_RegistrationRejections(t *testing.T) {
 	g := NewWithT(t)
@@ -98,6 +98,27 @@ func TestCustomTools_RegistrationRejections(t *testing.T) {
 	})
 	g.Expect(err).NotTo(HaveOccurred())
 
+	// An in-process tool that declares the remote kind without a RemoteSpec presents as
+	// self-rendered, so a check on the presentation would pass it through to be counted
+	// and journaled as another agent's call.
+	remoteKindTool, err := functool.New(functool.Spec{
+		Name:        "remote_kind_thing",
+		Description: "runs here, claims to be a peer's",
+		Schema:      map[string]any{"type": "object"},
+		Handler:     noopCustomHandler,
+		Kind:        toolkit.KindRemote,
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	mcpTool, err := functool.New(functool.Spec{
+		Name:        "mcp_thing",
+		Description: "served by an mcp server",
+		Schema:      map[string]any{"type": "object"},
+		Handler:     noopCustomHandler,
+		MCP:         &functool.MCPSpec{Server: "docs"},
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+
 	cases := []struct {
 		name       string
 		app        *fisk.Application
@@ -111,7 +132,9 @@ func TestCustomTools_RegistrationRejections(t *testing.T) {
 		{"duplicate within slice", exampleApp(), false, []toolkit.Tool{mkTool("dup"), mkTool("dup")}, "duplicates an earlier custom tool"},
 		{"collides with application tool", exampleApp(), false, []toolkit.Tool{mkTool("do")}, "existing application tool"},
 		{"collides with built-in tool", exampleApp(), true, []toolkit.Tool{mkTool("memory_write")}, "existing built-in tool"},
-		{"presents as remote", exampleApp(), false, []toolkit.Tool{remoteTool}, "presents as remote"},
+		{"declares the remote kind through a remote spec", exampleApp(), false, []toolkit.Tool{remoteTool}, "declares the remote kind"},
+		{"declares the remote kind without a remote spec", exampleApp(), false, []toolkit.Tool{remoteKindTool}, "declares the remote kind"},
+		{"declares the mcp kind", exampleApp(), false, []toolkit.Tool{mcpTool}, "declares the mcp kind"},
 	}
 
 	for _, tc := range cases {

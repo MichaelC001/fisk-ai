@@ -6,18 +6,20 @@ package toolkit
 
 import "encoding/json"
 
-// Presentation is how a tool's call is shown to the operator and accounted by the
-// runner. A tool declares its own through Describe, so the runner traces and
-// accounts a call without importing the tool's package or switching on its concrete
-// type.
+// Presentation is how a tool's call is shown to the operator. A tool declares its
+// own through Describe, so the runner traces a call without importing the tool's
+// package or switching on its concrete type. It is the visibility axis only:
+// accounting keys off Kind, and neither is derived from the other.
 type Presentation int
 
 const (
 	// PresentCommand is an application command tool: its call is traced with the
 	// resolved command line (Display) and a middle-elided short form (DisplayShort).
 	PresentCommand Presentation = iota
-	// PresentRemote is a tool served by another agent: its call is traced by naming
-	// that agent (Agent) and is accounted as a remote call.
+	// PresentRemote is a tool whose work happens outside this process: its call is
+	// traced by naming the peer that serves it (Agent). More than one provider
+	// presents this way, an a2a peer agent and an MCP server among them, so it says
+	// how a call is shown and never which Kind it is accounted under.
 	PresentRemote
 	// PresentSelfRendered is an in-process tool that renders its own operator
 	// interaction (the human-in-the-loop tools), so its call and result are not
@@ -34,8 +36,7 @@ const (
 // switching on the concrete tool type, so a new tool kind carries its own
 // presentation and dependency needs rather than teaching the runner about itself.
 type CallInfo struct {
-	// Present is how the call is shown and accounted for visibility (renderer
-	// suppression and call-text).
+	// Present is how the call is shown: renderer suppression and call text.
 	Present Presentation
 	// Kind is the provider of the tool, the accounting axis and the value behind the
 	// kind= log token. It is independent of Present: a built-in may present as
@@ -49,9 +50,10 @@ type CallInfo struct {
 	// already sanitized; an empty string means fall back to Display. Only a command
 	// tool produces one.
 	DisplayShort string
-	// Agent is the identity of the remote agent serving the call, set only when
-	// Present is PresentRemote. It may be empty when the serving agent is not named,
-	// so it is never itself the signal that a call is remote.
+	// Agent identifies the peer serving the call, set only when Present is
+	// PresentRemote: the remote agent for an a2a tool, the configured server name for
+	// an MCP one. It may be empty when the peer is not named, so it is never itself
+	// the signal that a call left this process.
 	Agent string
 	// NeedsPrompter asks the runner to supply the operator Prompter in ExecDeps.
 	NeedsPrompter bool

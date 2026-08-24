@@ -1155,12 +1155,20 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			return res, fmt.Errorf("custom tool at index %d (%q) duplicates an earlier custom tool of the same name", i, name)
 		}
 
-		// A custom tool runs in-process; one that presents as remote would be counted as
-		// an a2a call and journaled remote, corrupting the remote-call accounting the
-		// resume path recomputes. Remote presentation is reserved for tools a remote
-		// agent actually serves.
-		if d, ok := t.(toolkit.Describer); ok && d.Describe(json.RawMessage("{}")).Present == toolkit.PresentRemote {
-			return res, fmt.Errorf("custom tool %q presents as remote; injected tools run in-process and may not claim remote presentation", name)
+		// A custom tool runs in-process, so it may not claim a provider whose work
+		// happens elsewhere. KindRemote is journaled remote and recomputed into the
+		// remote-call counters on resume, and KindMCP owns its own bucket in the per-kind
+		// accounting; either one declared by an injected tool reports work this process
+		// did as work a peer did. The check is on the kind rather than the presentation
+		// because the kind is what the accounting reads.
+		d, ok := t.(toolkit.Describer)
+		if ok {
+			switch d.Describe(json.RawMessage("{}")).Kind {
+			case toolkit.KindRemote:
+				return res, fmt.Errorf("custom tool %q declares the remote kind; injected tools run in-process and may not be accounted as another agent's", name)
+			case toolkit.KindMCP:
+				return res, fmt.Errorf("custom tool %q declares the mcp kind; injected tools run in-process and may not be accounted as an MCP server's", name)
+			}
 		}
 
 		customByName[name] = t
