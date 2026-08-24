@@ -371,6 +371,35 @@ var _ = Describe("Tools", func() {
 		})
 	})
 
+	Describe("DiscoverForInfo", func() {
+		// The sessions this opens are its own and nobody else can close them: it returns
+		// outcomes rather than a Sessions, so a session it left open would hold a stdio
+		// child for the life of the command. The server side of each in-memory pair is
+		// what reports it, so this reads the end of the session rather than the client's
+		// bookkeeping about it.
+		It("should close every session it opened", func() {
+			servers.tools["docs"] = []fakeTool{textTool("search", "Searches the pages", "found")}
+			servers.tools["issues"] = []fakeTool{textTool("open", "Opens an issue", "opened")}
+
+			imports := DiscoverForInfo(ctx, Options{
+				Servers:  []config.MCPServer{{Name: "docs", Command: "unused"}, {Name: "issues", Command: "unused"}},
+				Identity: "fisk-test",
+				Version:  "0.0.1",
+				Dialer:   servers.dialer(),
+			}, NewClaimedNames(nil, nil))
+			Expect(imports).To(HaveLen(2))
+			Expect(imports[0].Err).ToNot(HaveOccurred())
+			Expect(imports[1].Err).ToNot(HaveOccurred())
+
+			served := servers.served()
+			Expect(served).To(HaveLen(2))
+
+			for _, session := range served {
+				Eventually(ended(session)).Should(BeClosed())
+			}
+		})
+	})
+
 	Describe("NewTool", func() {
 		// built imports one server and returns the single tool it built, for the specs
 		// that drive a call through the real protocol.

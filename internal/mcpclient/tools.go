@@ -68,6 +68,12 @@ func (c ClaimedNames) Claimed(name string) bool {
 	return c.taken[name] || c.remote[name] != nil
 }
 
+// errClaimedNamesUnbuilt refuses a ClaimedNames the caller did not build with
+// NewClaimedNames. The zero value would read as nothing being claimed, so every
+// entry point that names tools refuses it rather than naming a tool over whatever
+// answers to that name now.
+var errClaimedNamesUnbuilt = errors.New("the claimed tool names must be built with mcpclient.NewClaimedNames, which takes both of the lookups a run keeps them in")
+
 // SkippedTool is one tool a server advertised that was not imported.
 type SkippedTool struct {
 	// Name is the tool's own name on the server, before the alias prefix.
@@ -119,7 +125,7 @@ type ServerImport struct {
 // came from and nothing is renamed when another server's tool list changes.
 func Import(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]ServerImport, error) {
 	if !claimed.built {
-		return nil, fmt.Errorf("the claimed tool names must be built with mcpclient.NewClaimedNames, which takes both of the lookups a run keeps them in")
+		return nil, errClaimedNamesUnbuilt
 	}
 
 	servers := sessions.configured()
@@ -173,6 +179,70 @@ func ImportForRun(ctx context.Context, sessions *Sessions, claimed ClaimedNames)
 	return tools, byName, imports, nil
 }
 
+// DiscoverForInfo connects every configured server and imports its tools for a
+// command that inspects a configuration rather than running it, such as fisk info.
+// It is the lenient counterpart of ImportForRun and names every tool through the
+// same pass, so the names it reports are the names a run would give the model.
+// claimed carries both of the lookups a run keeps its claimed names in, for that
+// reason.
+//
+// Nothing here is fatal. A server that cannot be started, reached or listed comes
+// back as its own outcome carrying the error, and the servers configured after it
+// are still connected: a configuration is inspected precisely when it may not be
+// runnable, and an operator reaches for this to find out that a server is down. A
+// name collision is recorded in the colliding tool's Skipped entry, as every other
+// reason a tool was left out is, rather than returned: there is no run to refuse.
+//
+// Each server is connected on its own and its session is closed as soon as its
+// tools are named, so this leaves no session open and no stdio child running. The
+// tools it returns are therefore not callable: read their names, descriptions and
+// schemas and call nothing.
+//
+// An empty server list connects to nothing, and claimed names that were not built
+// with NewClaimedNames fail every server before anything is connected.
+func DiscoverForInfo(ctx context.Context, opts Options, claimed ClaimedNames) []ServerImport {
+	if len(opts.Servers) == 0 {
+		return nil
+	}
+
+	out := make([]ServerImport, 0, len(opts.Servers))
+
+	if !claimed.built {
+		for _, server := range opts.Servers {
+			out = append(out, ServerImport{Server: server, Err: errClaimedNamesUnbuilt})
+		}
+
+		return out
+	}
+
+	byName := map[string]*functool.Tool{}
+
+	for _, server := range opts.Servers {
+		// One server per Connect, so the one that will not answer fails its own outcome
+		// and the rest are still reached. Connect closes what it opened when it fails,
+		// so nothing is left running by a server that did not come up.
+		one := opts
+		one.Servers = []config.MCPServer{server}
+
+		sessions, err := Connect(ctx, one)
+		if err != nil {
+			out = append(out, ServerImport{Server: server, Err: err})
+			continue
+		}
+
+		// byName is carried across the servers so the second server to offer a name is
+		// told it is taken, which is what a run would tell it.
+		imported, _ := importServer(ctx, sessions, server, claimed, byName)
+		out = append(out, imported)
+
+		// The close error describes tearing down a session whose tools have already been
+		// read, which has nothing to say to someone reading a configuration.
+		_ = sessions.Close()
+	}
+
+	return out
+}
+
 // ToolListChange is one server's tool list as it stands after that server reported
 // it changed, with the entry's include and exclude filters already applied. It is
 // what Sessions.OnToolListChanged hands a caller, and ImportChanged names and builds
@@ -212,7 +282,7 @@ type ToolListChange struct {
 // nothing already offered to the model is renamed.
 func ImportChanged(change ToolListChange, claimed ClaimedNames, caller Caller) ServerImport {
 	if !claimed.built {
-		return ServerImport{Server: change.Server, Err: fmt.Errorf("the claimed tool names must be built with mcpclient.NewClaimedNames, which takes both of the lookups a run keeps them in")}
+		return ServerImport{Server: change.Server, Err: errClaimedNamesUnbuilt}
 	}
 	if change.Err != nil {
 		return ServerImport{Server: change.Server, Err: change.Err, RTT: change.RTT}
