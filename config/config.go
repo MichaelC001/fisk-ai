@@ -7,6 +7,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -62,6 +63,14 @@ const defaultToolTimeout = 5 * time.Minute
 // than giving up first.
 const defaultA2ARequestTimeout = 120 * time.Second
 
+// defaultMCPConnectTimeout is how long an mcp_servers entry with no timeout of its own
+// gets to start or be reached and to finish the initialize handshake. It is a bound on
+// a server that never answers rather than on a slow one: a stdio command that does not
+// speak the protocol and an HTTP endpoint that accepts the connection and then goes
+// quiet both hold up the start of the run until it fires. It does not bound a tool
+// call, which harness.tool_timeout does.
+const defaultMCPConnectTimeout = 30 * time.Second
+
 // Config is the top-level agent configuration.
 type Config struct {
 	// Identity is the name used in discovery; it doubles as a queue group so
@@ -111,6 +120,13 @@ type Config struct {
 	RemoteAgents []RemoteAgent `json:"remote_agents,omitempty" yaml:"remote_agents,omitempty"`
 	// RemoteTools are remote agents we pull in all the tools of.
 	RemoteTools []RemoteToolHost `json:"remote_tools,omitempty" yaml:"remote_tools,omitempty"`
+	// MCPServers are third-party MCP servers whose tools are pulled into an agent run,
+	// each reached over stdio or streamable HTTP. Their tools are named
+	// "<alias>_<tool>" and are only ever available to the agent loop: fisk mcp and the
+	// a2a tool server never pass an imported tool on to their own clients. A "${VAR}"
+	// reference is recognized in an entry's env and headers values only, and one
+	// written in command, args or url is taken literally.
+	MCPServers []MCPServer `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
 	// Expose makes this agent discoverable to other agents and/or over MCP.
 	Expose *ExposeConfig `json:"expose,omitempty" yaml:"expose,omitempty"`
 	// Harness groups the settings that govern how the agent harness itself behaves
@@ -1098,6 +1114,204 @@ func (h RemoteToolHost) EffectiveAlias() string {
 	return h.Name
 }
 
+// MCPServer is a third-party MCP server whose tools are pulled into an agent run.
+//
+// The transport is selected by which of Command and URL is set: Command starts the
+// server as a child process and speaks stdio to it, URL reaches an already-running
+// server over streamable HTTP. Setting neither, or both, is an error.
+type MCPServer struct {
+	// Name identifies the server in errors and warnings, and prefixes every tool
+	// imported from it unless Alias is set. It is required and must contain only
+	// letters, digits, '-' or '_'.
+	Name string `yaml:"name" json:"name"`
+	// Alias is a short local name used in place of Name as the prefix on imported tool
+	// names, for a server whose own name is long or reads badly inside a tool name. It
+	// faces the same character rules as Name.
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
+	// Command is the program to start for a server spoken to over stdio, such as npx or
+	// uvx. Setting it selects the stdio transport; leave URL unset.
+	Command string `yaml:"command,omitempty" json:"command,omitempty"`
+	// Args are the arguments passed to Command, one per list entry rather than as a
+	// single line the agent would have to split. They belong to the stdio transport:
+	// setting them alongside URL is an error.
+	Args []string `yaml:"args,omitempty" json:"args,omitempty"`
+	// URL is the endpoint of an already-running server reached over streamable HTTP,
+	// such as https://mcp.example.net/mcp. Setting it selects the HTTP transport; leave
+	// Command unset.
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
+	// Env sets environment variables on the stdio child, applied on top of the
+	// environment a command tool gets. A value may mix literal text with any number of
+	// "${VAR}" references, as in "${HOME}/cache", so a variable holds the part that
+	// varies rather than the whole value; a "$VAR" without braces is literal text. A
+	// reference is read from the process environment when the session is built rather
+	// than when the file is parsed, so a credential need not sit in the file as a
+	// literal. Env belongs to the stdio transport: setting it alongside URL is an error.
+	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	// Headers are sent on every HTTP request to URL. A value carries "${VAR}"
+	// references the way Env's does, so an "Authorization" of "Bearer ${DOCS_TOKEN}"
+	// keeps the scheme in the file and the token in the variable. Headers belong to the
+	// HTTP transport: setting them alongside Command is an error.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// Exclude filters out tools from this server by name (same semantics as the top
+	// level). A tags filter is rejected: MCP tools carry no tags.
+	Exclude *ToolFilter `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+	// Include restricts the tools imported from this server to those matching by name
+	// (same semantics as the top level). It is the control an operator has over what a
+	// third party's server can do in a run, since an imported tool is never confirm
+	// gated locally. A tags filter is rejected: MCP tools carry no tags.
+	Include *ToolFilter `yaml:"include,omitempty" json:"include,omitempty"`
+	// TimeoutString is how long this server gets to start or be reached and to finish
+	// the initialize handshake, as a duration string (e.g. 30s, or 1d for the day,
+	// week, month and year units fisk parses on top of Go's). Unset takes the default
+	// of 30s; zero and negative are refused, since a connect with no bound holds up the
+	// start of a run against a server that never answers.
+	//
+	// It bounds connect and initialize only. A call to a tool imported from this server
+	// is bounded by harness.tool_timeout, like every other tool, so one number says how
+	// long any tool may take.
+	TimeoutString string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// TimeoutParsed is the parsed form of TimeoutString, filled by prepare().
+	TimeoutParsed time.Duration `yaml:"-" json:"-"`
+}
+
+// EffectiveAlias is the prefix applied to tools imported from this server: the
+// configured Alias when set, otherwise the server's name. An imported tool is always
+// named "<alias>_<tool name>", rather than only when a name clashes, because MCP
+// servers use short generic tool names such as search and read, and because a name
+// derived only from its own server does not change when another server's tool list
+// does.
+func (s MCPServer) EffectiveAlias() string {
+	if s.Alias != "" {
+		return s.Alias
+	}
+
+	return s.Name
+}
+
+// ConnectTimeout is how long this server gets to start or be reached and to finish the
+// initialize handshake, from its timeout, or 30 seconds when it sets none.
+//
+// It bounds connect and initialize only. A call to a tool imported from this server is
+// bounded by harness.tool_timeout, like every other tool.
+func (s MCPServer) ConnectTimeout() time.Duration {
+	if s.TimeoutParsed <= 0 {
+		return defaultMCPConnectTimeout
+	}
+
+	return s.TimeoutParsed
+}
+
+// envNamePattern matches an environment variable name inside a "${VAR}" reference.
+// The name follows the shell's rules: a letter or underscore followed by letters,
+// digits and underscores.
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// envReferenceSyntax is the tail every reference syntax error ends with, so an
+// operator reading any of them is told the same rule.
+const envReferenceSyntax = `a reference is written ${VAR}, where VAR is a letter or '_' followed by letters, digits and '_'`
+
+// envReference is one "${VAR}" found in a value, with the name it carries and the
+// half-open range of the whole reference in the value it came from.
+type envReference struct {
+	name  string
+	start int
+	end   int
+}
+
+// scanEnvReferences finds every "${VAR}" in value, in the order they appear. A "${"
+// that is never closed, a "${}" that names nothing, and a name the shell would not
+// accept are errors, so a typo becomes an error rather than a dollar sign handed to a
+// server. A "$VAR" without braces is literal text and is not a reference.
+func scanEnvReferences(value string) ([]envReference, error) {
+	var refs []envReference
+
+	for i := 0; i < len(value); {
+		opened := strings.Index(value[i:], "${")
+		if opened < 0 {
+			break
+		}
+		opened += i
+
+		closed := strings.Index(value[opened:], "}")
+		if closed < 0 {
+			return nil, fmt.Errorf(`a "${" is never closed: %s`, envReferenceSyntax)
+		}
+		closed += opened
+
+		name := value[opened+2 : closed]
+		if name == "" {
+			return nil, fmt.Errorf(`"${}" names no variable: %s`, envReferenceSyntax)
+		}
+		if !envNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("%q is not a variable name: %s", name, envReferenceSyntax)
+		}
+
+		refs = append(refs, envReference{name: name, start: opened, end: closed + 1})
+		i = closed + 1
+	}
+
+	return refs, nil
+}
+
+// EnvReferences returns the environment variables a value references, in the order
+// they appear, and an error when the value's reference syntax is wrong. A value in an
+// MCP server's env or headers map mixes literal text with any number of "${VAR}"
+// references, so "Bearer ${DOCS_TOKEN}" references DOCS_TOKEN and a value with no
+// braces references nothing. A "$VAR" without braces is literal text.
+//
+// Parsing a config checks that syntax and stops there, and nothing in this package
+// reads the environment. Resolving belongs to whoever builds the session, because the
+// commands that parse a config are not all the commands that connect: fisk info parses
+// in the most lenient mode precisely so it can inspect a configuration it cannot run,
+// and fisk mcp serves this agent's own tools. Neither should refuse to load a file
+// over a credential it never uses. An unresolvable reference fails the connect, naming
+// the variable and the server.
+func EnvReferences(value string) ([]string, error) {
+	refs, err := scanEnvReferences(value)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.name)
+	}
+
+	return names, nil
+}
+
+// ExpandEnvReferences replaces every "${VAR}" in value with what lookup returns for
+// VAR, leaving the literal text around them as it is, and returns an error naming the
+// first variable lookup does not have. Pass os.LookupEnv to read the process
+// environment: this package never reads it itself, so the command that connects to a
+// server decides where a value comes from.
+func ExpandEnvReferences(value string, lookup func(string) (string, bool)) (string, error) {
+	refs, err := scanEnvReferences(value)
+	if err != nil {
+		return "", err
+	}
+	if len(refs) == 0 {
+		return value, nil
+	}
+
+	var out strings.Builder
+	at := 0
+
+	for _, ref := range refs {
+		resolved, ok := lookup(ref.name)
+		if !ok {
+			return "", fmt.Errorf("environment variable %q is not set", ref.name)
+		}
+
+		out.WriteString(value[at:ref.start])
+		out.WriteString(resolved)
+		at = ref.end
+	}
+	out.WriteString(value[at:])
+
+	return out.String(), nil
+}
+
 // ToolFilter is a generic filter selecting tools by name or tag. It is used at
 // several levels: top-level include/exclude, per remote tool host, and when
 // exposing tools.
@@ -1224,6 +1438,13 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	// Remote tool hosts are consulted whenever the agent runs or is inspected, so
 	// validate them in every mode rather than only where they are imported.
 	if err := validateRemoteToolHosts(cfg.RemoteTools); err != nil {
+		return err
+	}
+
+	// One file drives fisk run, fisk serve and fisk mcp, so a bad mcp_servers entry
+	// fails the same way whichever command reads it, even though only the agent loop
+	// imports the servers.
+	if err := validateMCPServers(cfg.MCPServers); err != nil {
 		return err
 	}
 
@@ -1388,6 +1609,130 @@ func validateRemoteToolHosts(hosts []RemoteToolHost) error {
 		if host.Exclude != nil && len(host.Exclude.Tags) > 0 {
 			return fmt.Errorf("remote_tools host %q has an exclude.tags filter, which cannot be honored: discovery does not carry tags, so a tool excluded by tag would be imported anyway; exclude by tool name instead", host.Name)
 		}
+	}
+
+	return nil
+}
+
+// validateMCPServers checks each configured MCP server's identity, transport,
+// credentials and filters. The name is required and must be a legal tool-name token,
+// as must the alias when set, since one of the two prefixes every tool imported from
+// the server. A duplicate name is an error, and so is a duplicate effective alias:
+// every imported tool is prefixed, so two entries sharing an alias produce colliding
+// tool names for every tool they both expose.
+//
+// Both include.tags and exclude.tags are rejected. This goes further than
+// remote_tools, which rejects only exclude.tags and leaves the importing command to
+// warn that an include.tags was ignored. There a tag filter is meaningful for local
+// tools and only discovery cannot carry it, while MCP has no tag vocabulary at all, so
+// neither filter could ever be honored.
+//
+// A value in env or headers is checked for the syntax of its "${VAR}" references and
+// nothing more; see EnvReferences for why the variables themselves are read elsewhere.
+func validateMCPServers(servers []MCPServer) error {
+	names := make(map[string]struct{}, len(servers))
+	aliases := make(map[string]string, len(servers))
+
+	for _, server := range servers {
+		if server.Name == "" {
+			return fmt.Errorf("mcp_servers server is missing a name")
+		}
+		if !identityPattern.MatchString(server.Name) {
+			return fmt.Errorf("mcp_servers server name %q is invalid: it must contain only letters, digits, '-' or '_' (it prefixes imported tool names)", server.Name)
+		}
+		if server.Alias != "" && !identityPattern.MatchString(server.Alias) {
+			return fmt.Errorf("mcp_servers server %q has an invalid alias %q: it must contain only letters, digits, '-' or '_' (it prefixes imported tool names)", server.Name, server.Alias)
+		}
+
+		_, dupName := names[server.Name]
+		if dupName {
+			return fmt.Errorf("mcp_servers has more than one server named %q: give each entry its own name", server.Name)
+		}
+		names[server.Name] = struct{}{}
+
+		alias := server.EffectiveAlias()
+		first, dupAlias := aliases[alias]
+		if dupAlias {
+			return fmt.Errorf("mcp_servers servers %q and %q both use the alias %q: every imported tool is named \"<alias>_<tool>\", so two servers sharing an alias name the same tool twice; set a different alias on one of them", first, server.Name, alias)
+		}
+		aliases[alias] = server.Name
+
+		if server.Command == "" && server.URL == "" {
+			return fmt.Errorf("mcp_servers server %q sets neither command nor url: set command to start the server and speak stdio to it, or url to reach a running server over streamable HTTP", server.Name)
+		}
+		if server.Command != "" && server.URL != "" {
+			return fmt.Errorf("mcp_servers server %q sets both command and url: a server is reached one way, so remove whichever of the two is not the transport you want", server.Name)
+		}
+
+		if server.URL != "" {
+			err := validateMCPServerURL(server.Name, server.URL)
+			if err != nil {
+				return err
+			}
+		}
+
+		if len(server.Env) > 0 && server.Command == "" {
+			return fmt.Errorf("mcp_servers server %q sets env alongside url: env is the environment of a stdio child process, so pass values to a server reached over HTTP in headers instead", server.Name)
+		}
+		if len(server.Args) > 0 && server.Command == "" {
+			return fmt.Errorf("mcp_servers server %q sets args alongside url: args are the arguments of a stdio child process, so remove them from a server reached over HTTP", server.Name)
+		}
+		if len(server.Headers) > 0 && server.URL == "" {
+			return fmt.Errorf("mcp_servers server %q sets headers alongside command: headers are sent on HTTP requests, so pass values to a server spoken to over stdio in env instead", server.Name)
+		}
+
+		if server.Include != nil && len(server.Include.Tags) > 0 {
+			return fmt.Errorf("mcp_servers server %q has an include.tags filter, which cannot be honored: MCP has no tags, so a tool would never match one; include by tool name instead", server.Name)
+		}
+		if server.Exclude != nil && len(server.Exclude.Tags) > 0 {
+			return fmt.Errorf("mcp_servers server %q has an exclude.tags filter, which cannot be honored: MCP has no tags, so a tool excluded by tag would be imported anyway; exclude by tool name instead", server.Name)
+		}
+
+		if err := validateMCPServerValues(server.Name, "env", server.Env); err != nil {
+			return err
+		}
+		if err := validateMCPServerValues(server.Name, "headers", server.Headers); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateMCPServerValues checks the syntax of the "${VAR}" references in one server's
+// env or headers map, key naming which of the two for the error message. Keys are
+// checked in sorted order so a map with two bad values names the same one every time.
+func validateMCPServerValues(server string, key string, values map[string]string) error {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		_, err := EnvReferences(values[name])
+		if err != nil {
+			return fmt.Errorf("mcp_servers server %q has an invalid %s value for %q: %w", server, key, name, err)
+		}
+	}
+
+	return nil
+}
+
+// validateMCPServerURL checks that a server's url is one the HTTP transport can reach:
+// an absolute http or https URL naming a host. A host and port with no scheme parses
+// as a URL whose scheme is the host name, so an unchecked "localhost:9000" would reach
+// connect and fail there instead.
+func validateMCPServerURL(server string, value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("mcp_servers server %q has an invalid url %q: %w", server, value, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("mcp_servers server %q has an invalid url %q: a url is the http:// or https:// endpoint of a running server, such as https://mcp.example.net/mcp", server, value)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("mcp_servers server %q has an invalid url %q: it names no host, so there is nothing to connect to", server, value)
 	}
 
 	return nil
@@ -2119,6 +2464,25 @@ func (c *Config) prepare() error {
 			return fmt.Errorf("invalid harness.tool_timeout %q: must not be negative", c.Harness.ToolTimeoutString)
 		}
 		c.Harness.ToolTimeoutParsed = d
+	}
+
+	// An mcp_servers timeout bounds connect and initialize only, so an unset key leaves
+	// zero, which MCPServer.ConnectTimeout reads as the default. Zero is refused along
+	// with a negative, unlike harness.tool_timeout where it means unbounded: a connect
+	// with no bound holds up the start of a run against a server that never answers.
+	for i, server := range c.MCPServers {
+		if server.TimeoutString == "" {
+			continue
+		}
+
+		d, err := fisk.ParseDuration(server.TimeoutString)
+		if err != nil {
+			return fmt.Errorf("invalid mcp_servers timeout %q on server %q: %w", server.TimeoutString, server.Name, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("invalid mcp_servers timeout %q on server %q: must be greater than zero", server.TimeoutString, server.Name)
+		}
+		c.MCPServers[i].TimeoutParsed = d
 	}
 
 	if err := c.LLM.Budget.prepare(); err != nil {
