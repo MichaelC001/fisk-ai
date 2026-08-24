@@ -85,6 +85,18 @@ func mcpAction(_ *fisk.ParseContext) error {
 		fmt.Fprintf(os.Stderr, "note: %d built-in tool(s) this config enables are not served over MCP: %s. They need operator state or an operator at a terminal, so they are reachable only in an agent run\n", len(withheld), strings.Join(withheld, ", "))
 	}
 
+	// The refusal is structural rather than a policy this command applies, so this is a
+	// note about where those tools are reachable. A client here cannot tell which of
+	// the tools it is offered belong to the wrapped application and which came from a
+	// third party the operator wired in, which is why they are not offered at all.
+	if len(cfg.MCPServers) > 0 {
+		servers := make([]string, 0, len(cfg.MCPServers))
+		for _, server := range cfg.MCPServers {
+			servers = append(servers, server.Name)
+		}
+		fmt.Fprintf(os.Stderr, "note: %d configured MCP server(s) are not served over MCP: %s. Their tools are imported into an agent run, so they are reachable only there\n", len(servers), strings.Join(servers, ", "))
+	}
+
 	tools, err := fisktool.ServedTools(ctx, cfg)
 	if err != nil {
 		return err

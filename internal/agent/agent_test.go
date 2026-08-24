@@ -8,8 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +38,29 @@ import (
 func TestAgent(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Agent")
+}
+
+// toolSetOf builds a runner's tool set from the name-keyed dispatch map these tests
+// write, in name order so the definitions it sends are stable. Each key must be the
+// tool's own Name, which is the name the set registers it under.
+func toolSetOf(tools map[string]toolkit.Tool) *ToolSet {
+	GinkgoHelper()
+
+	out := make([]toolkit.Tool, 0, len(tools))
+	for _, name := range slices.Sorted(maps.Keys(tools)) {
+		Expect(tools[name].Name()).To(Equal(name))
+		out = append(out, tools[name])
+	}
+
+	return NewToolSet(out, nil, false)
+}
+
+// toolSrcOf is toolSetOf published to a source, for a test that drives the loop
+// rather than a single tool call.
+func toolSrcOf(tools map[string]toolkit.Tool) *ToolSource {
+	GinkgoHelper()
+
+	return NewToolSource(toolSetOf(tools))
 }
 
 // nopEvents discards every event, for tests that exercise the loop rather than
@@ -241,8 +266,11 @@ var _ = Describe("runner", func() {
 			toolMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"missing","input":{}}],"usage":{"input_tokens":10,"output_tokens":5}}`
 			finalMsg := `{"id":"m2","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"all done"}],"usage":{"input_tokens":3,"output_tokens":2}}`
 
+			// Both fields: the loop takes its own snapshot per model call, while a
+			// restored in-flight batch runs against the set the runner was built with.
 			emptyTools := func(r *runner) {
-				r.tools = map[string]toolkit.Tool{}
+				r.set = toolSetOf(nil)
+				r.toolSrc = NewToolSource(r.set)
 			}
 
 			// Runner A: one tool-using turn, then a suspend request lands, so the
@@ -311,12 +339,12 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				stats:  &util.RunStats{},
 				events: ev,
-				tools:  map[string]toolkit.Tool{},
+				set:    toolSetOf(nil),
 			}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nope"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nope"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeTrue())
 
@@ -343,12 +371,12 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				stats:  &util.RunStats{},
 				events: ev,
-				tools:  map[string]toolkit.Tool{"do": tool},
+				set:    toolSetOf(map[string]toolkit.Tool{"do": tool}),
 			}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"level":"info"}`)})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"level":"info"}`)})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeTrue())
 
@@ -368,11 +396,11 @@ var _ = Describe("runner", func() {
 
 			ev := &captureEvents{}
 			tool := &fisk2.FiskCommandTool{Path: []string{"do"}, AppPath: app, Model: &fisk.CmdModel{}}
-			r := &runner{stats: &util.RunStats{}, events: ev, tools: map[string]toolkit.Tool{"do": tool}}
+			r := &runner{stats: &util.RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"do": tool})}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeTrue())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
 
@@ -383,17 +411,17 @@ var _ = Describe("runner", func() {
 			Expect(ev.results[0].Present).To(Equal(toolkit.PresentCommand))
 		})
 
-		It("dispatches a remote tool: flags it remote, counts it, and traces the agent", func() {
+		It("dispatches a remote tool: reports the dispatch, counts it, and traces the agent", func() {
 			ev := &captureEvents{}
 			desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
 			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
 			Expect(err).NotTo(HaveOccurred())
 
-			r := &runner{stats: &util.RunStats{}, events: ev, tools: map[string]toolkit.Tool{"nats_info": rt}}
+			r := &runner{stats: &util.RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"nats_info": rt})}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeTrue())
+			Expect(dispatched).To(BeTrue())
 			Expect(r.stats.RemoteToolCalls).To(Equal(int64(1)))
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
@@ -415,7 +443,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				stats:  &util.RunStats{},
 				events: ev,
-				tools:  map[string]toolkit.Tool{"stream_rm": tool},
+				set:    toolSetOf(map[string]toolkit.Tool{"stream_rm": tool}),
 				gate:   util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 			}
 
@@ -423,9 +451,9 @@ var _ = Describe("runner", func() {
 			// there is no one to approve, so the gate denies. The gated tool is never run:
 			// no call or result line is emitted, and the denial is an authoritative
 			// non-error result to the model.
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse())
 			Expect(ev.calls).To(BeEmpty())
@@ -456,7 +484,7 @@ var _ = Describe("runner", func() {
 				messages: []llm.Message{userMsg("go")},
 				journal:  j,
 				seq:      1,
-				tools:    map[string]toolkit.Tool{"danger": tool},
+				toolSrc:  toolSrcOf(map[string]toolkit.Tool{"danger": tool}),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
 						Expect(in.ToolName).To(Equal("danger"))
@@ -498,7 +526,7 @@ var _ = Describe("runner", func() {
 			ev := &captureEvents{}
 			r := &runner{
 				stats: &util.RunStats{}, events: ev,
-				tools: map[string]toolkit.Tool{"orig": orig, "safe": safe},
+				set: toolSetOf(map[string]toolkit.Tool{"orig": orig, "safe": safe}),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
 						Expect(in.ToolName).To(Equal("orig"))
@@ -507,9 +535,9 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "orig", Input: json.RawMessage(`{"x":1}`)})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "orig", Input: json.RawMessage(`{"x":1}`)})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeTrue())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.Content).To(Equal("safe-out"))
 
@@ -535,8 +563,8 @@ var _ = Describe("runner", func() {
 			ev := &captureEvents{}
 			r := &runner{
 				stats: &util.RunStats{}, events: ev,
-				tools: map[string]toolkit.Tool{"stream_rm": orig, "safe": safe},
-				gate:  util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
+				set:  toolSetOf(map[string]toolkit.Tool{"stream_rm": orig, "safe": safe}),
+				gate: util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
 						// The original tool is confirm-gated, which the hook observes.
@@ -548,9 +576,9 @@ var _ = Describe("runner", func() {
 
 			// With no operator reachable the union gate denies, and the ungated effective
 			// tool never runs: a hook cannot strip a gate by redirecting.
-			block, remote, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
+			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "stream_rm"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(remote).To(BeFalse())
+			Expect(dispatched).To(BeFalse())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.IsError).To(BeFalse()) // an authoritative confirm denial, not an error
 			Expect(safe.ranInputs).To(BeEmpty())
@@ -563,7 +591,7 @@ var _ = Describe("runner", func() {
 			ev := &captureEvents{}
 			r := &runner{
 				stats: &util.RunStats{}, events: ev,
-				tools: map[string]toolkit.Tool{"leaky": tool},
+				set: toolSetOf(map[string]toolkit.Tool{"leaky": tool}),
 				hooks: Hooks{
 					PostToolUse: func(_ context.Context, in PostToolUseInfo) (PostToolUseResult, error) {
 						Expect(in.Output).To(ContainSubstring("PRIVATE KEY"))
@@ -572,7 +600,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			block, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "leaky", Input: json.RawMessage(`{}`)})
+			block, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "leaky", Input: json.RawMessage(`{}`)})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(block.ToolUseID).To(Equal("t1"))
 			Expect(block.Content).To(Equal("[redacted]"))
@@ -587,7 +615,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
 				stats: &util.RunStats{}, events: &captureEvents{},
-				tools: map[string]toolkit.Tool{"do": tool},
+				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
 						// Scribbling over the snapshot's buffer must not reach the tool.
@@ -599,7 +627,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			block, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"a":1}`)})
+			block, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{"a":1}`)})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(block.IsError).To(BeFalse())
 			Expect(tool.ranInputs).To(ConsistOf(`{"a":1}`))
@@ -609,7 +637,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
 				stats: &util.RunStats{}, events: &captureEvents{},
-				tools: map[string]toolkit.Tool{"do": tool},
+				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
 						return PreToolUseResult{}, errors.New("boom")
@@ -617,7 +645,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			_, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("PreToolUse hook"))
 			Expect(tool.ranInputs).To(BeEmpty())
@@ -627,7 +655,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
 				stats: &util.RunStats{}, events: &captureEvents{},
-				tools: map[string]toolkit.Tool{"do": tool},
+				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
 						return PreToolUseResult{RewriteTool: "ghost"}, nil
@@ -635,7 +663,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			_, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("unregistered"))
 			Expect(tool.ranInputs).To(BeEmpty())
@@ -645,7 +673,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
 				stats: &util.RunStats{}, events: &captureEvents{},
-				tools: map[string]toolkit.Tool{"do": tool},
+				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
 						return PreToolUseResult{RewriteInput: json.RawMessage(`{not json`)}, nil
@@ -653,7 +681,7 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			_, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
+			_, _, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("invalid JSON"))
 			Expect(tool.ranInputs).To(BeEmpty())
@@ -691,7 +719,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				stats:    &util.RunStats{},
 				events:   nopEvents{},
-				tools:    map[string]toolkit.Tool{"echo": tool},
+				set:      toolSetOf(map[string]toolkit.Tool{"echo": tool}),
 				messages: rs.Messages,
 				journal:  resumeJ,
 				seq:      resumeJ.LastSeq(),
@@ -737,7 +765,10 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
-				toolDefs: []llm.ToolDef{{Name: "a"}, {Name: "b"}},
+				toolSrc: toolSrcOf(map[string]toolkit.Tool{
+					"a": &recordingTool{name: "a"},
+					"b": &recordingTool{name: "b"},
+				}),
 				hooks: Hooks{
 					PreModelCall: func(_ context.Context, in PreModelCallInfo) error {
 						pre = append(pre, in)
@@ -778,7 +809,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
-				tools:    map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}},
+				toolSrc:  toolSrcOf(map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}}),
 				hooks: Hooks{
 					PreModelCall: func(_ context.Context, in PreModelCallInfo) error {
 						pre = append(pre, in)
@@ -821,6 +852,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
+				toolSrc:  toolSrcOf(nil),
 				hooks: Hooks{
 					PostModelCall: func(_ context.Context, in PostModelCallInfo) error {
 						post = append(post, in)
@@ -849,7 +881,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
-				tools:    map[string]toolkit.Tool{"echo": tool},
+				toolSrc:  toolSrcOf(map[string]toolkit.Tool{"echo": tool}),
 				hooks: Hooks{
 					PostModelCall: func(_ context.Context, in PostModelCallInfo) error {
 						// Scribble over every mutable surface of the snapshot; none of it
@@ -911,6 +943,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
+				toolSrc:  toolSrcOf(nil),
 				hooks: Hooks{
 					PreModelCall: func(context.Context, PreModelCallInfo) error {
 						return errors.New("boom")
@@ -934,6 +967,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
+				toolSrc:  toolSrcOf(nil),
 				hooks: Hooks{
 					PostModelCall: func(context.Context, PostModelCallInfo) error {
 						return errors.New("boom")
@@ -979,7 +1013,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
-				tools:      map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}},
+				toolSrc:    toolSrcOf(map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}}),
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "again"}, Continuation{Continue: false}),
 				hooks: Hooks{
 					TurnEnd: func(_ context.Context, in TurnEndInfo) error {
@@ -1030,7 +1064,7 @@ var _ = Describe("runner", func() {
 				messages:   []llm.Message{userMsg("go")},
 				journal:    j,
 				seq:        1,
-				tools:      map[string]toolkit.Tool{},
+				toolSrc:    toolSrcOf(nil),
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "blocked"}, Continuation{Continue: true, Text: "allowed"}, Continuation{Continue: false}),
 				hooks: Hooks{
 					UserPromptSubmit: func(_ context.Context, in UserPromptSubmitInfo) (UserPromptSubmitResult, error) {
@@ -1077,6 +1111,7 @@ var _ = Describe("runner", func() {
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "x"}),
+				toolSrc:    toolSrcOf(nil),
 				hooks: Hooks{
 					TurnEnd: func(context.Context, TurnEndInfo) error {
 						return errors.New("boom")
@@ -1098,6 +1133,7 @@ var _ = Describe("runner", func() {
 				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "x"}),
+				toolSrc:    toolSrcOf(nil),
 				hooks: Hooks{
 					UserPromptSubmit: func(context.Context, UserPromptSubmitInfo) (UserPromptSubmitResult, error) {
 						return UserPromptSubmitResult{}, errors.New("boom")
@@ -1147,7 +1183,7 @@ var _ = Describe("runner", func() {
 			r := &runner{
 				stats:    &util.RunStats{},
 				events:   nopEvents{},
-				tools:    map[string]toolkit.Tool{},
+				set:      toolSetOf(nil),
 				messages: rs.Messages,
 				journal:  resumeJ,
 				seq:      resumeJ.LastSeq(),
@@ -1183,7 +1219,8 @@ var _ = Describe("runner", func() {
 			return cfg
 		}
 		emptyTools := func(r *runner) {
-			r.tools = map[string]toolkit.Tool{}
+			r.set = toolSetOf(nil)
+			r.toolSrc = NewToolSource(r.set)
 		}
 		finalMsg := func(text string) string {
 			return `{"id":"x","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"` + text + `"}],"usage":{"input_tokens":1,"output_tokens":1}}`
@@ -1683,7 +1720,8 @@ var _ = Describe("runner", func() {
 
 	Describe("cache accounting", func() {
 		emptyTools := func(r *runner) {
-			r.tools = map[string]toolkit.Tool{}
+			r.set = toolSetOf(nil)
+			r.toolSrc = NewToolSource(r.set)
 		}
 
 		It("flows the cache split into stats, the journal, folded counters and the budget", func() {
@@ -2009,7 +2047,7 @@ var _ = Describe("the conversation token budget", func() {
 			stats:    &util.RunStats{InTokens: 200},
 			followUp: "and what about the second one",
 			messages: []llm.Message{userMsg("go")},
-			tools:    map[string]toolkit.Tool{},
+			toolSrc:  toolSrcOf(nil),
 			provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
 				Fail("the model must not be called for a turn that is refused")
 
@@ -2061,7 +2099,7 @@ var _ = Describe("HumanPaced", func() {
 			cfg: cfg, stats: &util.RunStats{}, maxIter: 2, events: nopEvents{},
 			humanPaced: true,
 			messages:   []llm.Message{userMsg("go")},
-			tools:      map[string]toolkit.Tool{},
+			toolSrc:    toolSrcOf(nil),
 			provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
 				seen = append(seen, req.Interactive)
 

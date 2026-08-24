@@ -13,7 +13,7 @@ var _ = Describe("Kind", func() {
 	// allKinds is every provider kind. Go cannot force a switch to be exhaustive, so
 	// the token test walks this list to assert every kind resolves to a token; a new
 	// kind added without a String case or an entry here is what these tests catch.
-	allKinds := []Kind{KindUnknown, KindApplication, KindBuiltin, KindRemote, KindCustom}
+	allKinds := []Kind{KindUnknown, KindApplication, KindBuiltin, KindRemote, KindCustom, KindMCP}
 
 	It("Should give every kind a distinct, non-empty token", func() {
 		seen := map[string]Kind{}
@@ -32,6 +32,7 @@ var _ = Describe("Kind", func() {
 		Expect(KindBuiltin.String()).To(Equal("builtin"))
 		Expect(KindRemote.String()).To(Equal("remote"))
 		Expect(KindCustom.String()).To(Equal("custom"))
+		Expect(KindMCP.String()).To(Equal("mcp"))
 	})
 
 	It("Should be the safe sentinel at the zero value", func() {
@@ -42,5 +43,18 @@ var _ = Describe("Kind", func() {
 
 	It("Should fall back to the unknown token for an unrecognized value", func() {
 		Expect(Kind(99).String()).To(Equal("unknown"))
+	})
+
+	It("Should read every kind back from its own token", func() {
+		for _, k := range allKinds {
+			Expect(ParseKind(k.String())).To(Equal(k), "kind %q did not survive the round trip", k)
+		}
+	})
+
+	It("Should parse an unrecognized token as the unknown kind", func() {
+		// The token a journal from a newer build carries. It is counted under the
+		// sentinel rather than failing the fold or landing under a provider it was not.
+		Expect(ParseKind("something_new")).To(Equal(KindUnknown))
+		Expect(ParseKind("")).To(Equal(KindUnknown))
 	})
 })

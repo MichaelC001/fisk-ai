@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 var (
@@ -27,15 +28,80 @@ var (
 
 // Counters are the run's cumulative statistics, derived from the journal rather
 // than stored separately so they can never drift from the recorded events.
+//
+// Tool calls are counted on two axes that answer different questions, as they are in a
+// live run: ToolCallsByKind partitions ToolCalls over the provider that supplied each
+// tool, while RemoteToolCalls and MCPToolCalls count the calls that actually left the
+// process that made them. A call a policy hook denied or the operator refused is in its
+// bucket and in neither counter, so a counter is a subset of the bucket of the same kind
+// and never that bucket. util.RunStats.ToolCallsByKind states the distinction in full,
+// and these counters seed those.
 type Counters struct {
-	LlmCalls          int64
-	ToolCalls         int64
-	RemoteToolCalls   int64
+	LlmCalls  int64
+	ToolCalls int64
+	// RemoteToolCalls is the number of calls dispatched to another agent over a2a, a
+	// subset of the KindRemote bucket of ToolCallsByKind rather than that bucket.
+	RemoteToolCalls int64
+	// MCPToolCalls is the number of calls dispatched to an MCP server, a subset of the
+	// KindMCP bucket of ToolCallsByKind rather than that bucket.
+	MCPToolCalls int64
+	// ToolCallsByKind counts each tool result by the provider that served it, keyed
+	// the way util.RunStats keys its own buckets so a resume seeds those without
+	// re-keying. Every call ToolCalls counts is counted here too, the ones answered
+	// without running included, so the buckets partition ToolCalls. It is nil for a
+	// journal that recorded no tool result.
+	//
+	// A record written before the kind field existed contributes its Remote flag as
+	// KindRemote and everything else as KindUnknown, so a journal from an older build
+	// still partitions rather than leaving the buckets short of the total.
+	ToolCallsByKind   map[toolkit.Kind]int64
 	InTokens          int64
 	OutTokens         int64
 	CacheReadTokens   int64
 	CacheCreateTokens int64
 	ThinkingTokens    int64
+}
+
+// countKind records one tool result against the provider that served it, allocating
+// the map on first use. It leaves the two dispatch counters alone; countDispatch keeps
+// those, so the two axes are folded the way util.RunStats counts them live.
+func (c *Counters) countKind(kind toolkit.Kind) {
+	if c.ToolCallsByKind == nil {
+		c.ToolCallsByKind = make(map[toolkit.Kind]int64)
+	}
+
+	c.ToolCallsByKind[kind]++
+}
+
+// countDispatch records one call that left the process against the counter its provider
+// kind has, for the kinds that have one. A kind served in-process reaches this and
+// increments nothing, which is what leaves RemoteToolCalls and MCPToolCalls counting
+// only the two providers named for them.
+func (c *Counters) countDispatch(kind toolkit.Kind) {
+	switch kind {
+	case toolkit.KindRemote:
+		c.RemoteToolCalls++
+	case toolkit.KindMCP:
+		c.MCPToolCalls++
+	}
+}
+
+// resultKind returns the provider kind a tool result was served by and whether the call
+// was dispatched to that provider rather than answered before it ran.
+//
+// A record written before the kind field existed carries no token. Its Remote flag reads
+// as KindRemote and dispatched, which is what such a journal has always reported, and
+// anything else as KindUnknown and not dispatched rather than being guessed at from the
+// tool name.
+func resultKind(rec ToolResultRecord) (toolkit.Kind, bool) {
+	if rec.Kind != "" {
+		return toolkit.ParseKind(rec.Kind), rec.Dispatched
+	}
+	if rec.Remote {
+		return toolkit.KindRemote, true
+	}
+
+	return toolkit.KindUnknown, false
 }
 
 // PendingTurn is an assistant turn whose tool calls are not yet all answered:
@@ -268,8 +334,16 @@ func Fold(records []Record) (*RunState, error) {
 			curResults = append(curResults, r.ToolResult.Result)
 			curAnswer[r.ToolResult.ToolUseID] = true
 			rs.Counters.ToolCalls++
-			if r.ToolResult.Remote {
-				rs.Counters.RemoteToolCalls++
+
+			// The record carries the kind of every call and a flag for the ones that were
+			// dispatched, so the two axes are recomputed apart: the bucket takes the call
+			// whatever became of it, and the remote or MCP counter takes it only if it
+			// reached the provider. A denied or refused call therefore folds back into its
+			// bucket and into neither counter, as it was counted live. See Counters.
+			kind, dispatched := resultKind(*r.ToolResult)
+			rs.Counters.countKind(kind)
+			if dispatched {
+				rs.Counters.countDispatch(kind)
 			}
 
 		case DeferredProtocol:

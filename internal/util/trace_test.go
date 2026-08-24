@@ -6,10 +6,12 @@ package util
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -80,7 +82,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should record a paired request and response sharing an id and restore the body", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		req := newTraceReq(`{"model":"x"}`)
@@ -105,7 +107,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should label events with the iteration and retry attempt", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		req := newTraceReq(`{}`)
@@ -124,7 +126,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should wrap a non-JSON body as a JSON string", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		_, err = tr.Middleware(newTraceReq(`{}`), okNext(500, "boom not json"))
@@ -138,7 +140,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should record an error line and propagate the transport error", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		boom := errors.New("dial fail")
@@ -156,7 +158,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should not turn a response body read failure into a call failure", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		next := func(_ *http.Request) (*http.Response, error) {
@@ -174,7 +176,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should drop events written after Close", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		tr.RecordSession("m", "c", "v")
@@ -189,7 +191,7 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should write session and summary lines", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		tr.RecordSession("claude-x", "agent.yaml", "1.2.3")
@@ -210,19 +212,21 @@ var _ = Describe("Tracer", func() {
 	})
 
 	It("Should partition tool_calls into per-kind tokens in the summary", func() {
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
-		stats := &RunStats{ToolCalls: 3, RemoteToolCalls: 1, Start: time.Now()}
+		stats := &RunStats{ToolCalls: 4, RemoteToolCalls: 1, MCPToolCalls: 1, Start: time.Now()}
 		stats.CountToolKind(toolkit.KindApplication)
 		stats.CountToolKind(toolkit.KindApplication)
 		stats.CountToolKind(toolkit.KindRemote)
+		stats.CountToolKind(toolkit.KindMCP)
 		tr.RecordSummary(stats)
 		Expect(tr.Close()).To(Succeed())
 
 		events := readTrace(path)
 		Expect(events).To(HaveLen(1))
-		Expect(events[0].ToolCallsByKind).To(Equal(map[string]int64{"application": 2, "remote": 1}))
+		Expect(events[0].ToolCallsByKind).To(Equal(map[string]int64{"application": 2, "remote": 1, "mcp": 1}))
+		Expect(events[0].MCPToolCalls).To(Equal(int64(1)))
 
 		var summed int64
 		for _, n := range events[0].ToolCallsByKind {
@@ -231,11 +235,12 @@ var _ = Describe("Tracer", func() {
 		Expect(summed).To(Equal(events[0].ToolCalls), "per-kind map must partition tool_calls")
 	})
 
-	It("Should omit the per-kind map when there were no live per-kind counts", func() {
-		tr, err := NewTracer(path, nil)
+	It("Should omit the per-kind map when there are no per-kind counts", func() {
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
-		// A resumed run seeds only the coarse totals, so it has no live per-kind counts.
+		// An empty map is omitted rather than emitted, so nothing reads a run that
+		// counted no kind as a partition that does not sum.
 		tr.RecordSummary(&RunStats{ToolCalls: 5, Start: time.Now()})
 		Expect(tr.Close()).To(Succeed())
 
@@ -247,7 +252,7 @@ var _ = Describe("Tracer", func() {
 	It("Should error when the trace file already exists", func() {
 		Expect(os.WriteFile(path, []byte("x"), 0o600)).To(Succeed())
 
-		tr, err := NewTracer(path, nil)
+		tr, err := NewTracer(path, nil, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("creating trace file"))
 		Expect(tr).To(BeNil())
@@ -271,10 +276,11 @@ func (failWriteCloser) Write([]byte) (int, error) { return 0, errors.New("disk f
 func (failWriteCloser) Close() error              { return nil }
 
 var _ = Describe("Tracer write-failure warn sink", func() {
-	It("routes the first write failure to the injected sink instead of stderr", func() {
+	It("routes the first write failure to the injected sink instead of the logger", func() {
 		var got error
 		count := 0
-		tr := &Tracer{w: failWriteCloser{}, warn: func(e error) {
+		logged := &bytes.Buffer{}
+		tr := &Tracer{w: failWriteCloser{}, log: slog.New(slog.NewTextHandler(logged, nil)), warn: func(e error) {
 			got = e
 			count++
 		}}
@@ -285,5 +291,45 @@ var _ = Describe("Tracer write-failure warn sink", func() {
 		Expect(got).To(HaveOccurred())
 		// warnOnce: only the first failure is reported.
 		Expect(count).To(Equal(1))
+		Expect(logged.String()).To(BeEmpty())
+	})
+
+	It("logs the first write failure on the caller's logger when there is no sink", func() {
+		logged := &bytes.Buffer{}
+		tr := &Tracer{w: failWriteCloser{}, log: slog.New(slog.NewTextHandler(logged, nil))}
+
+		tr.RecordSession("model", "config", "version")
+		tr.RecordSession("model", "config", "version")
+
+		Expect(logged.String()).To(ContainSubstring("Trace write failed"))
+		Expect(logged.String()).To(ContainSubstring(`error="writing trace: disk full"`))
+		Expect(strings.Count(logged.String(), "Trace write failed")).To(Equal(1))
+	})
+
+	It("warns on stderr when neither a sink nor a logger was supplied", func() {
+		tr, err := NewTracer(filepath.Join(GinkgoT().TempDir(), "trace.jsonl"), nil, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tr.log).To(BeNil())
+		tr.w = failWriteCloser{}
+
+		r, w, err := os.Pipe()
+		Expect(err).ToNot(HaveOccurred())
+
+		orig := os.Stderr
+		os.Stderr = w
+
+		done := make(chan string, 1)
+		go func() {
+			var b bytes.Buffer
+			_, _ = b.ReadFrom(r)
+			done <- b.String()
+		}()
+
+		tr.RecordSession("model", "config", "version")
+
+		Expect(w.Close()).To(Succeed())
+		os.Stderr = orig
+
+		Expect(<-done).To(ContainSubstring("Trace write failed"))
 	})
 })

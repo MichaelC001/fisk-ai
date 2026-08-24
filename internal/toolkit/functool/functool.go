@@ -60,6 +60,18 @@ type RemoteSpec struct {
 	Agent string
 }
 
+// MCPSpec marks a function tool as served by a configured MCP server rather than run
+// in this process. Its presence is the explicit signal the runner accounts as an MCP
+// call, under a kind of its own rather than the remote one an a2a peer's tool is
+// counted under. An MCP tool's handler makes a call to that server and touches no
+// local environment or subprocess; its schema, description and declared behavior come
+// from the server, which advertises and gates the tool rather than this process.
+type MCPSpec struct {
+	// Server names the configured MCP server serving the tool, shown in the call
+	// trace.
+	Server string
+}
+
 // ExposeSpec declares the serving surfaces a function tool may ever be carried on.
 // It is the capability ceiling, not the selection: an operator's allowlist narrows
 // it further and can never widen past it, so a tool reaches a client only when the
@@ -77,8 +89,8 @@ type ExposeSpec struct {
 
 // Spec describes a function tool: its model-facing identity and handler, and the
 // optional hooks that give it operator confirmation, argument validation, a call
-// trace, deferral control, remote presentation, or exposure on a serving surface.
-// New validates it into a *Tool.
+// trace, deferral control, remote or MCP presentation, or exposure on a serving
+// surface. New validates it into a *Tool.
 type Spec struct {
 	// Name is the model-facing tool name, unique within a run; it is the key the
 	// runner dispatches on. Required.
@@ -112,8 +124,11 @@ type Spec struct {
 	// whose whole purpose is to put a question to an operator and wait: a tool that is
 	// merely slow, however slow, is not operator paced and wants the bound.
 	OperatorPaced bool
-	// Remote, when set, marks the tool as served by another agent.
+	// Remote, when set, marks the tool as served by another agent. It is mutually
+	// exclusive with MCP: a tool has one provider.
 	Remote *RemoteSpec
+	// MCP, when set, marks the tool as served by a configured MCP server.
+	MCP *MCPSpec
 	// Expose declares the serving surfaces that may carry the tool. Nil exposes it
 	// nowhere, so a tool is reachable only from an agent run until someone says
 	// otherwise. Built-ins must state it explicitly; see builtin.mustNew.
@@ -125,25 +140,27 @@ type Spec struct {
 	Behavior toolkit.Behavior
 	// Kind is the provider the tool is accounted under. It is left unset by a caller's
 	// own tool, which is accounted as toolkit.KindCustom; a remote tool is always
-	// accounted remote regardless of this field; the harness sets toolkit.KindBuiltin
-	// for its own built-in tools.
+	// accounted remote and an MCP tool always accounted MCP regardless of this field;
+	// the harness sets toolkit.KindBuiltin for its own built-in tools.
 	Kind toolkit.Kind
 }
 
 // Tool is a function tool built from a Spec: a name, description, schema and Go
 // handler exposed to the model as a toolkit.Tool, with optional confirmation,
 // argument validation, tracing and remote presentation. A local function tool (one
-// with no RemoteSpec) runs in-process with the agent's own privileges and unscrubbed
-// ambient environment (the subprocess credential scrub that protects command tools
-// does not apply here), so its handler is trusted code, not sandboxed: it must never
-// read a secret from the environment or hand the ambient environment to a subprocess.
-// A remote tool's handler instead calls out to its serving agent (see RemoteSpec) and
-// runs no local code.
+// with neither a RemoteSpec nor an MCPSpec) runs in-process with the agent's own
+// privileges and unscrubbed ambient environment (the subprocess credential scrub that
+// protects command tools does not apply here), so its handler is trusted code, not
+// sandboxed: it must never read a secret from the environment or hand the ambient
+// environment to a subprocess. A remote tool's handler instead calls out to its
+// serving agent (see RemoteSpec) and an MCP tool's to its configured server (see
+// MCPSpec), and neither runs local code.
 //
-// A tool's Definition JSON (name, description, schema, deferral) must be
-// deterministic across process restarts. The agent fingerprints the tool set to
-// decide whether a checkpointed run may resume; a Definition that varies run to run
-// flips that fingerprint and makes a resume refuse.
+// A tool's Definition JSON (name, description, schema, deferral) should be
+// deterministic across process restarts. A checkpointed run fingerprints the tool set,
+// and a Definition that varies run to run moves that hash, so every resume warns that
+// the tool set changed and drops the standing approvals, leaving the operator to
+// approve each gated tool again. The resume itself continues.
 type Tool struct {
 	name        string
 	description string
@@ -156,6 +173,7 @@ type Tool struct {
 	noDefer          bool
 	operatorPaced    bool
 	remote           *RemoteSpec
+	mcp              *MCPSpec
 	expose           ExposeSpec
 	behavior         toolkit.Behavior
 	kind             toolkit.Kind
@@ -175,9 +193,10 @@ var (
 
 // New validates a Spec and returns the function tool it describes. It fails when a
 // required field is missing, when ValidateRequired is set but the schema declares no
-// required parameters (which would silently validate nothing), when a remote tool
-// is also marked confirm-gated (a remote tool is gated by its serving agent, never
-// locally), or when the declared Behavior contradicts itself.
+// required parameters (which would silently validate nothing), when a remote or MCP
+// tool is also marked confirm-gated (such a tool is gated by whoever serves it, never
+// locally), when a Spec claims both a serving agent and an MCP server, or when the
+// declared Behavior contradicts itself.
 //
 // The contradictory Behavior is a hard error here because a Spec is code its author
 // owns, and a tool that claims to be both read-only and destructive is a bug worth
@@ -203,8 +222,16 @@ func New(spec Spec) (*Tool, error) {
 		return nil, fmt.Errorf("tool %q sets ValidateRequired but its schema declares no required parameters", spec.Name)
 	}
 
+	if spec.Remote != nil && spec.MCP != nil {
+		return nil, fmt.Errorf("tool %q cannot be both remote and served by an MCP server; a tool has one provider", spec.Name)
+	}
+
 	if spec.Remote != nil && spec.Confirm != nil {
 		return nil, fmt.Errorf("tool %q is remote and cannot be confirm-gated; a remote tool is gated by its serving agent", spec.Name)
+	}
+
+	if spec.MCP != nil && spec.Confirm != nil {
+		return nil, fmt.Errorf("tool %q is served by an MCP server and cannot be confirm-gated; the tool is not this process's to gate", spec.Name)
 	}
 
 	expose := ExposeSpec{}
@@ -212,13 +239,16 @@ func New(spec Spec) (*Tool, error) {
 		expose = *spec.Expose
 	}
 
-	// Re-serving another agent's tool under this agent's identity is a proxying
-	// decision, and confirming a call needs an operator that a served surface does
-	// not have. Both are refused here rather than left to each surface to remember.
+	// Re-serving another agent's or an MCP server's tool under this agent's identity
+	// is a proxying decision, and confirming a call needs an operator that a served
+	// surface does not have. Both are refused here rather than left to each surface to
+	// remember.
 	if expose.MCP || expose.A2A {
 		switch {
 		case spec.Remote != nil:
 			return nil, fmt.Errorf("tool %q is remote and cannot be exposed on a serving surface; serving it would re-advertise another agent's tool as this agent's own", spec.Name)
+		case spec.MCP != nil:
+			return nil, fmt.Errorf("tool %q is served by an MCP server and cannot be exposed on a serving surface; serving it would re-advertise a third party's tool as this agent's own", spec.Name)
 		case spec.Confirm != nil:
 			return nil, fmt.Errorf("tool %q is confirm-gated and cannot be exposed on a serving surface; there is no operator to approve a served call", spec.Name)
 		}
@@ -235,6 +265,7 @@ func New(spec Spec) (*Tool, error) {
 		noDefer:          spec.NoDefer,
 		operatorPaced:    spec.OperatorPaced,
 		remote:           spec.Remote,
+		mcp:              spec.MCP,
 		expose:           expose,
 		behavior:         spec.Behavior,
 		kind:             spec.Kind,
@@ -253,13 +284,13 @@ func (t *Tool) Description() string { return t.description }
 // tags, so the declaration it does carry is rendered here instead. Without it a
 // built-in's and a caller's own tool's behavior would reach nothing the model reads.
 //
-// A remote tool is the exception: its description is the serving agent's own
-// model-facing text, which already says whatever that agent says about the tool's
-// behavior. Its declaration travels structurally beside that text, so appending it
-// here would show the model the same claim twice.
+// A tool someone else serves is the exception: its description is the serving agent's
+// or MCP server's own model-facing text, which already says whatever they say about
+// the tool's behavior. Its declaration travels structurally beside that text, so
+// appending it here would show the model the same claim twice.
 func (t *Tool) ModelDescription() string {
 	behavior := t.behavior.String()
-	if behavior == "" || t.remote != nil {
+	if behavior == "" || t.remote != nil || t.mcp != nil {
 		return t.description
 	}
 
@@ -338,9 +369,11 @@ func (t *Tool) TraceLine(input json.RawMessage) string {
 
 // Describe reports how a call is presented, which provider it is accounted under, and
 // what per-run dependencies it needs. A remote tool is presented as remote, named by
-// its agent, and accounted remote; an in-process tool with a Trace renderer is traced
-// like a command; an in-process tool without one is treated as rendering its own
-// operator interaction. Its provider is the explicit Spec.Kind when set (the harness
+// its agent, and accounted remote; an MCP tool is presented as remote too, named by
+// its server, and accounted under toolkit.KindMCP, since the two are one presentation
+// and two providers; an in-process tool with a Trace renderer is traced like a
+// command; an in-process tool without one is treated as rendering its own operator
+// interaction. Its provider is the explicit Spec.Kind when set (the harness
 // tags its built-ins), and toolkit.KindCustom otherwise, so a caller's own function
 // tool is accounted custom with no extra effort. Every in-process tool is offered the
 // operator Prompter and the per-run working directory, which a handler that needs
@@ -349,6 +382,10 @@ func (t *Tool) TraceLine(input json.RawMessage) string {
 func (t *Tool) Describe(input json.RawMessage) toolkit.CallInfo {
 	if t.remote != nil {
 		return toolkit.CallInfo{Present: toolkit.PresentRemote, Kind: toolkit.KindRemote, Agent: t.remote.Agent}
+	}
+
+	if t.mcp != nil {
+		return toolkit.CallInfo{Present: toolkit.PresentRemote, Kind: toolkit.KindMCP, Agent: t.mcp.Server}
 	}
 
 	kind := t.kind

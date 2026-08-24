@@ -22,6 +22,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -140,15 +141,21 @@ type Options struct {
 	// long-lived process no connection reuse.
 	Provider llm.Provider
 
-	// Conns, RAGStore, MemoryStore, SessionStore and A2ATransport are shared across
-	// every run. Each must be safe for concurrent use and is owned by the caller: the
-	// server uses them and never closes them. See agent.Options for what each one
-	// changes when it is nil.
+	// Conns, RAGStore, MemoryStore, SessionStore, A2ATransport and MCPSessions are
+	// shared across every run. Each must be safe for concurrent use and is owned by the
+	// caller: the server uses them and never closes them, and Drain does not touch them
+	// either, since a run still in flight is still using them. See agent.Options for
+	// what each one changes when it is nil.
+	//
+	// MCPSessions is one live session per configured MCP server, which the runs call
+	// tools over concurrently. A run given them never opens or closes a session, so a
+	// stdio child is started once for the worker rather than once per job.
 	Conns        *conns.Provider
 	RAGStore     *rag.Store
 	MemoryStore  memory.Store
 	SessionStore runstate.Store
 	A2ATransport a2a.Transport
+	MCPSessions  *mcpclient.Sessions
 
 	// StoreDir is the base directory the persistent stores resolve their paths
 	// under. Unlike the per-run tool working directory it is shared, since those
@@ -660,6 +667,7 @@ func (s *Server) runOptions(work *Work) agent.Options {
 		MemoryStore:      s.opts.MemoryStore,
 		SessionStore:     s.opts.SessionStore,
 		A2ATransport:     s.opts.A2ATransport,
+		MCPSessions:      s.opts.MCPSessions,
 		Telemetry:        s.opts.Telemetry,
 		TraceFile:        s.opts.TraceFile,
 		HTTPDebugOut:     s.opts.HTTPDebugOut,

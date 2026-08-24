@@ -414,8 +414,10 @@ func TestApprovals_DroppedByAForcedResume(t *testing.T) {
 	), agenttest.NewRecordingEvents(), alwaysPrompter(t, &asked))
 	g.Expect(err).NotTo(HaveOccurred())
 
-	// The tool set changed, so the fingerprint no longer matches and only --force gets
-	// in. The same command is asked about again.
+	// The tool set changed, so the resume warns and drops the standing approvals: a
+	// grant is keyed on a tool name, and the tool set moved under it. The resume itself
+	// continues either way, the tools hash not being a blocking difference, so the same
+	// command is asked about again.
 	var asked2 atomic.Int64
 	events := agenttest.NewRecordingEvents()
 	res2, err := agent.Run(ctx, opts(

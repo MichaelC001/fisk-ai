@@ -59,12 +59,13 @@ var _ = Describe("Provider", func() {
 			_, search := p.StartSearch(ctx, SearchInfo{Hybrid: true, TopK: 5})
 			_, enumerate := p.StartEnumerate(ctx, EnumerateInfo{Limit: 5})
 			_, embeddings := p.StartEmbeddings(ctx, EmbeddingsInfo{Model: "m", Inputs: 1})
+			_, mcp := p.StartMCPConnect(ctx, MCPServerInfo{Server: "docs", Transport: MCPTransportStdio})
 
 			Expect(func() {
 				for _, s := range []interface {
 					End()
 					Fail(error, ErrorClass)
-				}{remote, chat, tool, turn, run, search, enumerate, embeddings} {
+				}{remote, chat, tool, turn, run, search, enumerate, embeddings, mcp} {
 					s.Fail(errors.New("boom"), ClassOther)
 					s.End()
 				}
@@ -82,11 +83,13 @@ var _ = Describe("Provider", func() {
 			_, search := p.StartSearch(ctx, SearchInfo{Hybrid: true, TopK: 5})
 			_, enumerate := p.StartEnumerate(ctx, EnumerateInfo{})
 			_, embeddings := p.StartEmbeddings(ctx, EmbeddingsInfo{Model: "m"})
+			_, mcp := p.StartMCPImport(ctx, MCPServerInfo{Server: "docs"})
 
 			Expect(func() {
 				search.Finish(ctx, SearchOutcome{Degraded: true, Degrade: DegradeEmbeddings})
 				enumerate.Finish(EnumerateOutcome{Failed: true, Class: ClassStore})
 				embeddings.Finish(EmbeddingsOutcome{Failed: true, Class: ClassProvider})
+				mcp.Finish(MCPServerOutcome{Failed: true, Class: ClassRemoteUnavailable})
 			}).ToNot(Panic())
 		})
 

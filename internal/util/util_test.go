@@ -5,221 +5,26 @@
 package util
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
 	"os"
 	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-// captureStdoutStderr swaps os.Stdout and os.Stderr for pipes while fn runs and
-// returns what each received. The pipes are not terminals, so markdown rendering
-// stays raw and the captured output is deterministic. The drains run before fn so
-// large writes cannot deadlock on a full pipe buffer.
-func captureStdoutStderr(fn func()) (string, string) {
-	GinkgoHelper()
-
-	origOut, origErr := os.Stdout, os.Stderr
-
-	outR, outW, err := os.Pipe()
-	Expect(err).NotTo(HaveOccurred())
-	errR, errW, err := os.Pipe()
-	Expect(err).NotTo(HaveOccurred())
-
-	os.Stdout, os.Stderr = outW, errW
-
-	outCh := make(chan string, 1)
-	errCh := make(chan string, 1)
-	go func() {
-		var b bytes.Buffer
-		_, _ = io.Copy(&b, outR)
-		outCh <- b.String()
-	}()
-	go func() {
-		var b bytes.Buffer
-		_, _ = io.Copy(&b, errR)
-		errCh <- b.String()
-	}()
-
-	fn()
-
-	Expect(outW.Close()).To(Succeed())
-	Expect(errW.Close()).To(Succeed())
-	os.Stdout, os.Stderr = origOut, origErr
-
-	return <-outCh, <-errCh
-}
-
-func newResponse(blocks ...llm.ContentBlock) llm.Response {
-	return llm.Response{Content: blocks}
-}
-
-func textBlock(text string) llm.ContentBlock {
-	return llm.ContentBlock{Text: &llm.TextBlock{Text: text}}
-}
-
-func thinkingBlock(thinking string) llm.ContentBlock {
-	return llm.ContentBlock{Thinking: &llm.ThinkingBlock{Text: thinking, Signature: []byte("sig")}}
-}
-
-func toolUseBlock(name string) llm.ContentBlock {
-	return llm.ContentBlock{ToolUse: &llm.ToolUseBlock{ID: "tool-1", Name: name, Input: json.RawMessage("{}")}}
-}
-
-var _ = Describe("PrintText", func() {
-	It("Should render the final answer as markdown on stdout", func() {
-		msg := newResponse(textBlock("# Title\n\nhello"))
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true, true)
-		})
-
-		Expect(stdout).To(ContainSubstring("# Title"))
-		Expect(stdout).To(ContainSubstring("hello"))
-		Expect(stderr).NotTo(ContainSubstring("💭"))
+var _ = Describe("RenderMarkdownTo", func() {
+	// The test process writes to a pipe or a file rather than a terminal, so this is
+	// also the path a piped or redirected run takes.
+	It("Should return the markdown unchanged when the destination is not a terminal", func() {
+		Expect(RenderMarkdownTo("# Title\n\nhello", os.Stdout, false)).To(Equal("# Title\n\nhello"))
 	})
 
-	It("Should keep intermediate prose on stderr so a piped result carries only the answer", func() {
-		msg := newResponse(textBlock("mid-conversation update"))
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, false, true, true)
-		})
-
-		Expect(stdout).To(BeEmpty())
-		Expect(stderr).To(ContainSubstring("mid-conversation update"))
-		Expect(stderr).NotTo(ContainSubstring("💭"))
+	It("Should return the markdown unchanged when color is off", func() {
+		Expect(RenderMarkdownTo("# Title\n\nhello", os.Stdout, true)).To(Equal("# Title\n\nhello"))
 	})
 
-	It("Should mark thinking with a bubble on stderr while the answer stays on stdout", func() {
-		msg := newResponse(
-			thinkingBlock("weighing the options"),
-			textBlock("the answer"),
-		)
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true, true)
-		})
-
-		Expect(stderr).To(ContainSubstring("💭 weighing the options"))
-		Expect(stdout).To(ContainSubstring("the answer"))
-		Expect(stdout).NotTo(ContainSubstring("💭"))
-	})
-
-	// The default for this renderer, which is what a script calls: reasoning is
-	// unbounded prose nobody asked for, and it must leave no trace at all rather than a
-	// marker saying something was withheld.
-	It("Should print nothing about thinking when it is not asked for", func() {
-		msg := newResponse(
-			thinkingBlock("weighing the options"),
-			textBlock("the answer"),
-		)
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true, false)
-		})
-
-		Expect(stderr).NotTo(ContainSubstring("💭"))
-		Expect(stderr).NotTo(ContainSubstring("weighing"))
-		Expect(stdout).To(ContainSubstring("the answer"))
-	})
-
-	It("Should still print the answer for a turn that was nothing but thinking", func() {
-		msg := newResponse(thinkingBlock("thought about it"), textBlock("done"))
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true, false)
-		})
-
-		Expect(stderr).NotTo(ContainSubstring("thought about it"))
-		Expect(stderr).NotTo(ContainSubstring("💭"))
-		Expect(stdout).To(ContainSubstring("done"))
-	})
-
-	// A turn that calls a tool often carries a text block holding only a separator.
-	// Printing it spends the leading blank line and a rendered blank on nothing, which
-	// an operator sees as a run of blank lines before every trace line.
-	It("Should print nothing for a turn whose text is only whitespace", func() {
-		for _, text := range []string{"", " ", "\n", "\n\n", "  \n\t"} {
-			msg := newResponse(textBlock(text), toolUseBlock("cowsay"))
-
-			stdout, stderr := captureStdoutStderr(func() {
-				PrintText(msg, true, true, false)
-			})
-
-			Expect(stdout).To(BeEmpty(), "text %q", text)
-			Expect(stderr).To(BeEmpty(), "text %q", text)
-		}
-	})
-
-	It("Should strip terminal escapes the model emits so a style cannot bleed past the answer", func() {
-		msg := newResponse(textBlock("safe \x1b[31mred-injection\x1b[0m tail"))
-
-		stdout, _ := captureStdoutStderr(func() {
-			PrintText(msg, true, true, true)
-		})
-
-		Expect(stdout).To(ContainSubstring("safe red-injection tail"))
-		Expect(stdout).NotTo(ContainSubstring("\x1b["))
-	})
-
-	It("Should strip terminal escapes from thinking so an injected style cannot bleed on stderr", func() {
-		msg := newResponse(
-			thinkingBlock("mulling \x1b[32mgreen\x1b[0m over it"),
-			textBlock("answer"),
-		)
-
-		_, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true, true)
-		})
-
-		Expect(stderr).To(ContainSubstring("💭 mulling green over it"))
-		Expect(stderr).NotTo(ContainSubstring("\x1b["))
-	})
-
-	It("Should skip empty thinking blocks so no stray bubble is shown", func() {
-		msg := newResponse(
-			thinkingBlock(""),
-			textBlock("answer"),
-		)
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, true, true, true)
-		})
-
-		Expect(stderr).NotTo(ContainSubstring("💭"))
-		Expect(stdout).To(ContainSubstring("answer"))
-	})
-
-	It("Should concatenate text blocks so markdown spanning blocks is not split", func() {
-		msg := newResponse(
-			textBlock("| a | b |\n"),
-			textBlock("|---|---|\n"),
-			textBlock("| 1 | 2 |\n"),
-		)
-
-		stdout, _ := captureStdoutStderr(func() {
-			PrintText(msg, true, true, true)
-		})
-
-		Expect(stdout).To(ContainSubstring("| a | b |"))
-		Expect(stdout).To(ContainSubstring("| 1 | 2 |"))
-	})
-
-	It("Should emit nothing for a turn carrying neither text nor thinking", func() {
-		msg := newResponse(toolUseBlock("foo"))
-
-		stdout, stderr := captureStdoutStderr(func() {
-			PrintText(msg, false, true, true)
-		})
-
-		Expect(stdout).To(BeEmpty())
-		Expect(stderr).To(BeEmpty())
+	It("Should strip terminal escapes the model emitted so a style cannot outlive the message", func() {
+		Expect(RenderMarkdownTo("safe \x1b[31mred-injection\x1b[0m tail", os.Stdout, true)).To(Equal("safe red-injection tail"))
 	})
 })
 

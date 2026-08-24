@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -39,6 +40,7 @@ import (
 	// Link the anthropic provider in so it registers itself; llm.NewProvider resolves
 	// the configured provider from the registry, and this is the sole provider today.
 	_ "github.com/choria-io/fisk-ai/internal/llm/anthropic"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	// Link the file memory backend in so it registers itself; memory.New resolves
 	// the configured backend from the registry, and this is the default backend.
@@ -381,6 +383,19 @@ type Options struct {
 	// this field replaces.
 	A2ATransport a2a.Transport
 
+	// MCPSessions, when non-nil, are the already-connected sessions with the configured
+	// MCP servers that Run borrows for importing their tools instead of connecting its
+	// own. A server process connects once at start and hands the same sessions to every
+	// run it hosts, so a long-lived process is not starting and stopping a stdio child
+	// around each run. They are used verbatim when set and never closed: the caller owns
+	// them and closes them when it is done with them. They must be safe for concurrent
+	// use, which mcpclient.Sessions is: the runs sharing them call tools over them
+	// concurrently. When nil, Run connects to the configured servers at run start and
+	// closes those sessions at run end, so the CLI path is unchanged. They are consulted
+	// only when the config declares mcp_servers; with none they are ignored, so injecting
+	// them into a run with no MCP servers is a no-op.
+	MCPSessions *mcpclient.Sessions
+
 	// CustomTools are application tools a Go caller injects into the run, addressed by
 	// the model by name alongside the wrapped application's command tools, the built-ins
 	// and any remote tools. The recommended way to build one is functool.New (whose
@@ -395,13 +410,15 @@ type Options struct {
 	// subprocess-only and never reaches in-process code). It is trusted code, not a
 	// sandbox; the caller owns what it reads and what it hands to a child process.
 	//
-	// A name may not collide with an application, built-in, or remote tool, nor with
-	// another custom tool: a collision aborts the run rather than silently shadowing one
+	// A name may not collide with an application, built-in, remote or MCP-imported tool,
+	// nor with another custom tool: a collision aborts the run rather than shadowing one
 	// (shadowing a confirm-gated tool would strip its gate). Each tool's Definition() JSON
-	// (name, description, schema, deferral) must be deterministic across process restarts:
-	// a checkpointed run fingerprints the tool set, so a Definition that varies run to run
-	// makes a resume refuse. The slice order does not matter; the tools are ordered by name
-	// internally, so a set built by ranging a map still fingerprints identically.
+	// (name, description, schema, deferral) should be deterministic across process
+	// restarts: a checkpointed run fingerprints the tool set, and a Definition that varies
+	// run to run moves that hash, so every resume warns that the tool set changed and drops
+	// the standing approvals, leaving the operator to approve each gated tool again. The
+	// resume itself continues. The slice order does not matter; the tools are ordered by
+	// name internally, so a set built by ranging a map still fingerprints identically.
 	//
 	// A custom tool built by functool.New with no Trace renderer runs silently: its call
 	// and result line are suppressed except under verbose, as a human-in-the-loop built-in
@@ -610,11 +627,12 @@ const setupFailedReason = "setup_failed"
 // res.Reason cannot: a crash deliberately leaves the reason unset, because a crash is
 // not an outcome, so without this every crash would be reported as a setup failure.
 //
-// seed is the counter state a resume restored, nil for a fresh run. Where it is set,
-// the token attributes carry this process's own consumption and the session totals are
-// reported separately, so that summing either one across a session's traces gives an
-// answer that means something.
-func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls int64) telemetry.RunOutcome {
+// seed is the token state a resume restored, nil for a fresh run, and seedCalls,
+// seedRemoteCalls and seedMCPCalls are the tool call counts it restored. Where seed is
+// set, the token and tool call attributes carry this process's own consumption and the
+// session totals are reported separately, so that summing either one across a session's
+// traces gives an answer that means something.
+func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls, seedRemoteCalls, seedMCPCalls int64) telemetry.RunOutcome {
 	out := telemetry.RunOutcome{TerminalReason: string(res.Reason)}
 
 	var panicErr *PanicError
@@ -641,6 +659,7 @@ func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.Toke
 
 	out.ToolCalls = res.Stats.ToolCalls
 	out.RemoteToolCalls = res.Stats.RemoteToolCalls
+	out.MCPToolCalls = res.Stats.MCPToolCalls
 	out.Usage = telemetry.TokenUsage{
 		Input:       res.Stats.InTokens + res.Stats.CacheReadTokens + res.Stats.CacheCreateTokens,
 		Output:      res.Stats.OutTokens,
@@ -670,6 +689,8 @@ func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.Toke
 		Reasoning:   session.Reasoning - seed.Reasoning,
 	}
 	out.ToolCalls = res.Stats.ToolCalls - seedCalls
+	out.RemoteToolCalls = res.Stats.RemoteToolCalls - seedRemoteCalls
+	out.MCPToolCalls = res.Stats.MCPToolCalls - seedMCPCalls
 
 	return out
 }
@@ -731,8 +752,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// session's traces counts the restored prefix once per resume, so a session resumed
 	// five times reports roughly fifteen times its true input tokens. It is nil for a
 	// fresh run, which is also what suppresses the session-cumulative attributes.
+	//
+	// The three tool call seeds are the same thing for the call counts, and all three
+	// are subtracted: a total with the restored prefix taken out beside per-kind counts
+	// that still carried it would report more MCP calls than tool calls.
 	var resumeSeed *telemetry.TokenUsage
-	var resumeSeedCalls int64
+	var resumeSeedCalls, resumeSeedRemoteCalls, resumeSeedMCPCalls int64
 
 	// Resolved here rather than where it is first used, because the root span's
 	// operation name turns on it: a one-shot run is a single agent invocation, so its
@@ -812,7 +837,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		Model:       cfg.LLM.Model,
 	})
 	defer func() {
-		runSpan.Finish(runOutcome(res, err, activeRunner != nil, resumeSeed, resumeSeedCalls))
+		runSpan.Finish(runOutcome(res, err, activeRunner != nil, resumeSeed, resumeSeedCalls, resumeSeedRemoteCalls, resumeSeedMCPCalls))
 	}()
 
 	// The startup span covers everything from here to the handoff to the run loop:
@@ -935,10 +960,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		byName[t.Name()] = t
 	}
 
-	// taken tracks every tool name already claimed (local tools, then built-ins,
-	// then imported remote tools), so a clash across those namespaces is caught
-	// rather than silently shadowing one with another, since the model addresses
-	// every tool by a single flat name.
+	// taken tracks every tool name already claimed (local tools, then built-ins, then
+	// the tools imported from remote agents and from MCP servers), so a clash across
+	// those namespaces is caught rather than silently shadowing one with another, since
+	// the model addresses every tool by a single flat name.
 	taken := make(map[string]bool, len(tools))
 	for name := range byName {
 		taken[name] = true
@@ -1121,6 +1146,75 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
+	// Import the tools of the configured MCP servers, after the remote agents so a
+	// name is checked against everything claimed so far. A run is as strict about a
+	// server as it is about a remote agent: one that cannot be started, reached or
+	// listed aborts the run rather than dropping tools the prompt may depend on. A tool
+	// the server described badly does not abort it, since the server answered: that one
+	// is skipped and reported.
+	var mcpTools []*functool.Tool
+	var mcpSessions *mcpclient.Sessions
+	var mcpImports []mcpclient.ServerImport
+	mcpByName := map[string]*functool.Tool{}
+	if len(cfg.MCPServers) > 0 {
+		// Caller-injected sessions are borrowed: a server process connects once and hands
+		// the same sessions to every run it hosts rather than starting a stdio child around
+		// each one. They are used verbatim and never closed (the caller owns them).
+		// Otherwise Run connects here and closes at the end of the run, the CLI path.
+		// setupCtx, not ctx: the per-server connect and import spans nest under startup,
+		// as the memory index load does. A run given sessions somebody else opened opens
+		// no connect span, since the connect happened before this run existed.
+		sessions := opts.MCPSessions
+		if sessions == nil {
+			sessions, err = mcpclient.Connect(setupCtx, mcpclient.Options{
+				Servers:            cfg.MCPServers,
+				Identity:           cfg.Identity,
+				Version:            util.Version(),
+				CredentialEnvNames: cfg.CredentialEnvNames(),
+			})
+			if err != nil {
+				return res, err
+			}
+			defer sessions.Close()
+		}
+
+		// The import walks the server list the sessions carry, not cfg.MCPServers, so a
+		// set opened from another configuration would import its servers under its
+		// aliases and filters in a run that never declared them. That is refused rather
+		// than substituted. The check is here rather than in the host that injects
+		// because this is the one path every injected set reaches the import through, so
+		// a second host, or an embedder passing Options.MCPSessions directly, gets it
+		// without arranging anything.
+		err = sessions.CheckServers(cfg.MCPServers)
+		if err != nil {
+			return res, err
+		}
+
+		mcpSessions = sessions
+
+		// The names the remote import settled on are never written into taken, so the
+		// naming pass is given both lookups. The names this import settles on are added to
+		// taken below, which keeps it the whole set of claimed names.
+		mcpTools, mcpByName, mcpImports, err = mcpclient.ImportForRun(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+
+		// ImportForRun returns the per-server outcomes with its error as well as without
+		// one, so the notes are reported before the error is: an operator deciding whether
+		// to set an alias or drop a filter needs the skipped tools and round trips that came
+		// back with the failure, not the failure alone.
+		reporter, ok := events.(MCPServerReporter)
+		if ok {
+			reporter.MCPServerNotes(mcpImports)
+		}
+
+		if err != nil {
+			return res, err
+		}
+
+		for name := range mcpByName {
+			taken[name] = true
+		}
+	}
+
 	// Caller-injected custom tools are registered last, after every other source has
 	// claimed its names, so a collision is caught against all of them and the clashing
 	// kind can be named. A custom tool may never shadow an existing one: shadowing a
@@ -1151,16 +1245,26 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing built-in tool of the same name; a custom tool may not shadow it", i, name)
 		case remoteByName[name] != nil:
 			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing remote tool of the same name; a custom tool may not shadow it", i, name)
+		case mcpByName[name] != nil:
+			return res, fmt.Errorf("custom tool at index %d (%q) collides with a tool of the same name imported from an mcp server; a custom tool may not shadow it", i, name)
 		case customByName[name] != nil:
 			return res, fmt.Errorf("custom tool at index %d (%q) duplicates an earlier custom tool of the same name", i, name)
 		}
 
-		// A custom tool runs in-process; one that presents as remote would be counted as
-		// an a2a call and journaled remote, corrupting the remote-call accounting the
-		// resume path recomputes. Remote presentation is reserved for tools a remote
-		// agent actually serves.
-		if d, ok := t.(toolkit.Describer); ok && d.Describe(json.RawMessage("{}")).Present == toolkit.PresentRemote {
-			return res, fmt.Errorf("custom tool %q presents as remote; injected tools run in-process and may not claim remote presentation", name)
+		// A custom tool runs in-process, so it may not claim a provider whose work
+		// happens elsewhere. KindRemote is journaled remote and recomputed into the
+		// remote-call counters on resume, and KindMCP owns its own bucket in the per-kind
+		// accounting; either one declared by an injected tool reports work this process
+		// did as work a peer did. The check is on the kind rather than the presentation
+		// because the kind is what the accounting reads.
+		d, ok := t.(toolkit.Describer)
+		if ok {
+			switch d.Describe(json.RawMessage("{}")).Kind {
+			case toolkit.KindRemote:
+				return res, fmt.Errorf("custom tool %q declares the remote kind; injected tools run in-process and may not be accounted as another agent's", name)
+			case toolkit.KindMCP:
+				return res, fmt.Errorf("custom tool %q declares the mcp kind; injected tools run in-process and may not be accounted as an MCP server's", name)
+			}
 		}
 
 		customByName[name] = t
@@ -1169,12 +1273,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// The run needs at least one callable tool, counting every source the model can
 	// address: filtered application tools, the built-in HITL/memory/knowledge tools,
-	// imported remote tools, and caller-injected custom tools. Checking only the
-	// application tools would abort a run whose sole tools are native (e.g.
-	// knowledge_search), remote, or injected by the caller.
-	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(opts.CustomTools) == 0 {
+	// tools imported from remote agents and from MCP servers, and caller-injected custom
+	// tools. Checking only the application tools would abort a run whose sole tools are
+	// native (e.g. knowledge_search), imported, or injected by the caller.
+	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(mcpTools)+len(opts.CustomTools) == 0 {
 		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in or remote tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, or remote_tools in %q", opts.ConfigFile)
+			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_servers in %q", opts.ConfigFile)
 		}
 		return res, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
 	}
@@ -1285,7 +1389,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if opts.TraceFile != "" {
 			tracer, terr := util.NewTracer(opts.TraceFile, func(err error) {
 				events.Warn(Warning{Kind: WarnTraceWrite, Err: err})
-			})
+			}, nil)
 			if terr != nil {
 				return res, terr
 			}
@@ -1333,12 +1437,16 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	runSpan.SetProvider(caps.SemconvProviderName())
 
 	toolSearchAllowed := caps.SupportsToolSearch && cfg.ToolSearchEnabled()
-	deferrable := make([]toolkit.Tool, 0, len(tools)+len(remoteTools)+len(customByName))
+
+	// The deferrable tools are assembled in three parts rather than one list, because a
+	// server changing its tool list replaces the middle part and leaves the two either
+	// side of it alone.
+	beforeMCP := make([]toolkit.Tool, 0, len(tools)+len(remoteTools))
 	for _, t := range tools {
-		deferrable = append(deferrable, t)
+		beforeMCP = append(beforeMCP, t)
 	}
 	for _, rt := range remoteTools {
-		deferrable = append(deferrable, rt)
+		beforeMCP = append(beforeMCP, rt)
 	}
 	// Custom tools are appended in name order rather than the caller's slice order, so the
 	// tool set the run fingerprints is identical whether the caller built the slice in a
@@ -1350,37 +1458,91 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		customNames = append(customNames, name)
 	}
 	slices.Sort(customNames)
+	afterMCP := make([]toolkit.Tool, 0, len(customNames))
 	for _, name := range customNames {
-		deferrable = append(deferrable, customByName[name])
+		afterMCP = append(afterMCP, customByName[name])
 	}
-	toolDefs, toolSearch := util.BuildToolParams(deferrable, len(builtins)+len(memBuiltins)+len(ragBuiltins), toolSearchAllowed)
+
+	deferrable := make([]toolkit.Tool, 0, len(beforeMCP)+len(mcpTools)+len(afterMCP))
+	deferrable = append(deferrable, beforeMCP...)
+	for _, mt := range mcpTools {
+		deferrable = append(deferrable, mt)
+	}
+	deferrable = append(deferrable, afterMCP...)
+	// The built-in tools in the order their definitions follow the deferrable ones:
+	// human-in-the-loop, then memory, then knowledge. They are kept in their own slices
+	// above so that neither the HITL system note nor its no-terminal warning sees the
+	// others.
+	builtinTools := make([]toolkit.Tool, 0, len(builtins)+len(memBuiltins)+len(ragBuiltins))
 	for _, b := range builtins {
-		toolDefs = append(toolDefs, b.Definition(false))
+		builtinTools = append(builtinTools, b)
 	}
 	for _, b := range memBuiltins {
-		toolDefs = append(toolDefs, b.Definition(false))
+		builtinTools = append(builtinTools, b)
 	}
 	for _, b := range ragBuiltins {
-		toolDefs = append(toolDefs, b.Definition(false))
+		builtinTools = append(builtinTools, b)
+	}
+
+	// The definitions the model is offered and the registry the runner dispatches on
+	// are built together from one list, so neither can name a tool the other does not.
+	// The source is what the runner reads before each model call, and a configured MCP
+	// server reporting that its tool list changed is what publishes to it.
+	toolSet := NewToolSet(deferrable, builtinTools, toolSearchAllowed)
+	toolSrc := NewToolSource(toolSet)
+
+	// A server can tell its session that its tool list changed at any point in the run.
+	// The rebuild happens on that session's goroutine, so the advisory it raises is
+	// queued for the loop to report from the run goroutine, where every other one is
+	// reported from.
+	//
+	// The registration is dropped when the run returns. Sessions the caller injected
+	// back every run a process hosts and outlive this one, so a run that left its
+	// registration behind would go on rebuilding a tool set nobody reads.
+	mcpWarnings := &warnQueue{}
+	if mcpSessions != nil {
+		live := newLiveMCPTools(liveMCPSetup{
+			Source:            toolSrc,
+			Caller:            mcpSessions,
+			Warnings:          mcpWarnings,
+			Imports:           mcpImports,
+			Claimed:           taken,
+			Remote:            remoteByName,
+			Before:            beforeMCP,
+			After:             afterMCP,
+			Builtins:          builtinTools,
+			ToolSearchAllowed: toolSearchAllowed,
+		})
+
+		stopWatching := mcpSessions.OnToolListChanged(live.changed)
+		defer stopWatching()
 	}
 
 	// A tool set that crosses the tool-search threshold but cannot use tool search is
 	// sent to the model in full every request, spending context the search tool exists
-	// to save. That is a silent degradation worth surfacing.
-	totalTools := len(deferrable) + len(builtins) + len(memBuiltins) + len(ragBuiltins)
-	if w := toolSearchDegradation(totalTools, caps, cfg.ToolSearchEnabled()); w != nil {
+	// to save. That is a silent degradation worth surfacing. The runner asks again as
+	// the set moves, and reports it once for the run, so a set that already crossed
+	// here is not reported a second time.
+	toolSearchWarned := false
+	if w := toolSearchDegradation(len(toolSet.defs), caps, cfg.ToolSearchEnabled()); w != nil {
 		events.Warn(*w)
+		toolSearchWarned = true
 	}
 
 	// The first point where every tool source has resolved, which is why this is a
 	// setter on the span rather than an argument to it: the span had to start far
 	// earlier, before the work that can fail on the way here.
+	//
+	// These are the counts the run started with. A set that moves later does not
+	// rewrite them: this is the startup span, and what it reports is what startup
+	// resolved.
 	startupSpan.SetTools(telemetry.ToolCounts{
 		Application: len(tools),
 		Builtin:     len(builtins) + len(memBuiltins) + len(ragBuiltins),
 		Remote:      len(remoteTools),
+		MCP:         len(mcpTools),
 		Custom:      len(customByName),
-		Deferred:    toolSearch,
+		Deferred:    toolSet.search,
 	})
 
 	messages := []llm.Message{
@@ -1412,13 +1574,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	thinking := thinkingMode(cfg)
 	maxOutputTokens := resolveMaxOutputTokens(cfg, thinking == llm.ThinkingOn)
 
-	// The feature switches are constant for the run, so they belong here rather than
-	// repeated on every model call, where they would cost export bandwidth per span and
-	// carry no extra information. toolSearch is what was actually decided, not what the
-	// operator allowed: the provider has to support it and the tool count has to cross
-	// the threshold.
+	// The feature switches belong here rather than repeated on every model call, where
+	// they would cost export bandwidth per span and carry no extra information. The
+	// tool-search value is what was actually decided for the set the run starts with,
+	// not what the operator allowed: the provider has to support it and the tool count
+	// has to cross the threshold. A set that moves mid-run re-decides it per call
+	// without rewriting this.
 	runSpan.SetMaxTokens(maxOutputTokens)
-	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSearch)
+	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSet.search)
 
 	// checkpointing was resolved above the NATS dial (the session store it gates
 	// depends on that connection); interactive was resolved at the top, where the root
@@ -1522,6 +1685,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.LlmCalls = rs.Counters.LlmCalls
 			stats.ToolCalls = rs.Counters.ToolCalls
 			stats.RemoteToolCalls = rs.Counters.RemoteToolCalls
+			stats.MCPToolCalls = rs.Counters.MCPToolCalls
+			stats.ToolCallsByKind = maps.Clone(rs.Counters.ToolCallsByKind)
 			stats.InTokens = rs.Counters.InTokens
 			stats.OutTokens = rs.Counters.OutTokens
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
@@ -1592,7 +1757,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	}
 
 	if checkpointing {
-		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolDefs)
+		// The tool set as the run starts, which is what the fingerprint records: it
+		// captures the configuration the run began with, and ToolsDiff compares one
+		// run's start to another's. A set that moves during the run does not
+		// retroactively change what was written down.
+		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolSet.defs)
 		if err != nil {
 			return res, err
 		}
@@ -1708,6 +1877,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			stats.LlmCalls = rs.Counters.LlmCalls
 			stats.ToolCalls = rs.Counters.ToolCalls
 			stats.RemoteToolCalls = rs.Counters.RemoteToolCalls
+			stats.MCPToolCalls = rs.Counters.MCPToolCalls
+			// Cloned rather than shared: the loop counts into this map for the rest of
+			// the run, and the folded RunState is the caller's to read afterwards.
+			stats.ToolCallsByKind = maps.Clone(rs.Counters.ToolCallsByKind)
 			stats.InTokens = rs.Counters.InTokens
 			stats.OutTokens = rs.Counters.OutTokens
 			stats.CacheReadTokens = rs.Counters.CacheReadTokens
@@ -1727,6 +1900,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Reasoning:   rs.Counters.ThinkingTokens,
 			}
 			resumeSeedCalls = rs.Counters.ToolCalls
+			resumeSeedRemoteCalls = rs.Counters.RemoteToolCalls
+			resumeSeedMCPCalls = rs.Counters.MCPToolCalls
 
 			// Tell the model it resumed so it re-verifies external state before
 			// acting on possibly-stale results. Appended after the fingerprint was
@@ -1861,25 +2036,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
-	// The runner dispatches over a single registry keyed by the unique name the model
-	// addresses each tool by. Names were made unique across the kinds as each was
-	// added (the taken set), so merging local, built-in and remote tools cannot
-	// shadow one another. The per-kind maps above are kept only where a consumer still
-	// needs the concrete kind: byName feeds the resume transcript renderer.
-	allTools := make(map[string]toolkit.Tool, len(byName)+len(builtinByName)+len(remoteByName)+len(customByName))
-	for name, t := range byName {
-		allTools[name] = t
-	}
-	for name, b := range builtinByName {
-		allTools[name] = b
-	}
-	for name, rt := range remoteByName {
-		allTools[name] = rt
-	}
-	for name, t := range customByName {
-		allTools[name] = t
-	}
-
 	// The turn a follow-up delivers, empty for every other run. It carries whatever the
 	// caller put in Options.Prompt, including the supporting Context it appended, which
 	// is the same text a first prompt would have entered the conversation with.
@@ -1893,40 +2049,44 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		provider:        provider,
 		stats:           stats,
 		system:          system,
-		toolDefs:        toolDefs,
-		toolSearch:      toolSearch,
 		thinking:        thinking,
 		maxOutputTokens: maxOutputTokens,
 		maxIter:         maxIter,
 		maxTokens:       maxTokens,
 		toolTimeout:     cfg.ToolTimeout(),
-		tools:           allTools,
-		confirmTags:     confirmTags,
-		gate:            gate,
-		approvals:       approvals,
-		verbose:         opts.Verbose,
-		promptCache:     cfg.PromptCacheEnabled(),
-		interactive:     interactive,
-		humanPaced:      opts.HumanPaced,
-		events:          events,
-		hooks:           opts.Hooks,
-		prompter:        prompter,
-		toolWorkDir:     opts.ToolWorkDir,
-		messages:        messages,
-		journal:         journal,
-		seq:             seq,
-		startIter:       startIter,
-		pending:         pending,
-		nextPrompt:      opts.NextPrompt,
-		sessionID:       sessionID,
-		newSession:      newSession,
-		telemetry:       opts.Telemetry,
-		providerName:    caps.SemconvProviderName(),
-		sessionBackend:  cfg.SessionBackend(),
-		identity:        cfg.Identity,
-		memoryTools:     memoryToolNames(memBuiltins),
-		memory:          memoryInfo(memStore),
-		memScope:        memScope,
+		// The source the loop reads before each model call, and the set it starts on,
+		// which is what a restored in-flight batch dispatches against before the first
+		// call of this run.
+		toolSrc:          toolSrc,
+		set:              toolSet,
+		queuedWarnings:   mcpWarnings,
+		toolSearchWarned: toolSearchWarned,
+		confirmTags:      confirmTags,
+		gate:             gate,
+		approvals:        approvals,
+		verbose:          opts.Verbose,
+		promptCache:      cfg.PromptCacheEnabled(),
+		interactive:      interactive,
+		humanPaced:       opts.HumanPaced,
+		events:           events,
+		hooks:            opts.Hooks,
+		prompter:         prompter,
+		toolWorkDir:      opts.ToolWorkDir,
+		messages:         messages,
+		journal:          journal,
+		seq:              seq,
+		startIter:        startIter,
+		pending:          pending,
+		nextPrompt:       opts.NextPrompt,
+		sessionID:        sessionID,
+		newSession:       newSession,
+		telemetry:        opts.Telemetry,
+		providerName:     caps.SemconvProviderName(),
+		sessionBackend:   cfg.SessionBackend(),
+		identity:         cfg.Identity,
+		memoryTools:      memoryToolNames(memBuiltins),
+		memory:           memoryInfo(memStore),
+		memScope:         memScope,
 
 		resumeAtInputBoundary: resumeAtInputBoundary,
 		followUp:              followUp,

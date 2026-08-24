@@ -10,6 +10,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -65,7 +66,7 @@ func (e *eventRecorder) Starting(info agent.RunInfo) {
 	}
 }
 
-// The two optional halves of agent.Events are implemented here unconditionally and
+// The three optional halves of agent.Events are implemented here unconditionally and
 // forwarded only to a channel's sink that wants them, so the recorder is transparent:
 // a channel that renders for a person keeps hearing them, and one that does not is not
 // made to implement them by sitting behind this.
@@ -73,6 +74,13 @@ func (e *eventRecorder) RemoteHostNotes(notes []remotetools.HostImport) {
 	reporter, ok := e.inner.(agent.RemoteHostReporter)
 	if ok {
 		reporter.RemoteHostNotes(notes)
+	}
+}
+
+func (e *eventRecorder) MCPServerNotes(imports []mcpclient.ServerImport) {
+	reporter, ok := e.inner.(agent.MCPServerReporter)
+	if ok {
+		reporter.MCPServerNotes(imports)
 	}
 }
 

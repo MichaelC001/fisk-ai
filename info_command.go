@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	"github.com/choria-io/fisk-ai/internal/pii"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
@@ -22,6 +24,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
+	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/fisk-ai/internal/util"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
@@ -93,8 +97,32 @@ func infoAction(_ *fisk.ParseContext) error {
 		fmt.Fprintf(os.Stderr, "warning: cannot connect to NATS context %q to discover remote tools: %v\n", cfg.NatsContext, err)
 	}
 
+	// The names the a2a import settled on are never written into taken, so the MCP
+	// naming pass is given both lookups, as a run gives it both. Passing taken alone
+	// would let an MCP tool take a name an imported remote tool already answers to,
+	// and info would then show a name no run would use.
+	remoteByName := make(map[string]*functool.Tool)
+	for _, imp := range imports {
+		for _, rt := range imp.Tools {
+			remoteByName[rt.Name()] = rt
+		}
+	}
+
+	// Discover the configured MCP servers best-effort, for the same reason the remote
+	// hosts are: a server that will not answer is reported with its error and the rest
+	// of the configuration is still shown. Nothing is connected when none are declared.
+	mcpImports := mcpclient.DiscoverForInfo(ctx, mcpclient.Options{
+		Servers:            cfg.MCPServers,
+		Identity:           cfg.Identity,
+		Version:            util.Version(),
+		CredentialEnvNames: cfg.CredentialEnvNames(),
+	}, mcpclient.NewClaimedNames(taken, remoteByName))
+
 	totalTools := len(tools) + len(hitlTools) + len(memTools) + len(ragTools)
 	for _, imp := range imports {
+		totalTools += len(imp.Tools)
+	}
+	for _, imp := range mcpImports {
 		totalTools += len(imp.Tools)
 	}
 
@@ -163,6 +191,7 @@ func infoAction(_ *fisk.ParseContext) error {
 			tbl.AddRow(rt.Name(), alias, "", util.TruncateString(desc, maxInfoDescriptionLen), tags)
 		}
 	}
+	addMCPToolRows(tbl, mcpImports)
 
 	c.Section("Tools", func(c *columns.Document) {
 		c.Embed(tbl)
@@ -173,6 +202,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	}
 
 	printRemoteToolStatus(c, cfg, imports)
+	printMCPServerStatus(c, mcpImports)
 
 	// List the application's exposable global flags so an operator can see which
 	// exist and which they have allowlisted under global_flags, closing the loop
@@ -206,7 +236,7 @@ func infoAction(_ *fisk.ParseContext) error {
 
 	c.Section("Prompt", func(c *columns.Document) {
 		if len(cfg.SystemPrompt) > 0 {
-			c.Print(util.RenderAnswer(cfg.SystemPrompt, noColor))
+			c.Print(tui.RenderAnswer(cfg.SystemPrompt, noColor))
 		} else {
 			c.Print("No system_prompt defined")
 		}
@@ -450,6 +480,97 @@ func printTelemetryCaptureItems(c *columns.Document, resolved telemetry.Resolved
 	c.Item("Export batch", withOrigin(fmt.Sprintf("%d spans", resolved.ExportBatch.Value), resolved.ExportBatch.Origin))
 }
 
+// addMCPToolRows lists every imported MCP tool in the tool table, so one table answers
+// what the model can call whether a tool came from the application, a built-in, an a2a
+// peer or an MCP server. The source is the server's alias, the way a remote tool's is
+// its host's alias, and it is the prefix the tool's own name carries.
+//
+// An MCP tool carries no tags and is never confirm gated locally, so both of those
+// cells stay blank. Its description is the server's own text, which is not split the
+// way a remote agent's is: no tag block is appended to it.
+func addMCPToolRows(tbl *table.Table, imports []mcpclient.ServerImport) {
+	for _, imp := range imports {
+		alias := imp.Server.EffectiveAlias()
+		for _, mt := range imp.Tools {
+			desc := strings.ReplaceAll(mt.Description(), "\n", " ")
+			tbl.AddRow(mt.Name(), alias, "", util.TruncateString(desc, maxInfoDescriptionLen), "")
+		}
+	}
+}
+
+// printMCPServerStatus prints a per-server block after the tool table, the parallel of
+// the remote host block, so an operator can tell why an MCP tool is or is not present:
+// where the server is reached and over which transport, whether it answered and how
+// long it took, how many tools it advertised, how many its filters kept, what each
+// survivor is named, and any tool that was left out with the reason.
+//
+// A server that could not be started, reached or listed is printed with its error.
+// Discovery is best-effort here, and this is where an operator inspecting a
+// configuration finds out that one of its servers is down.
+func printMCPServerStatus(c *columns.Document, imports []mcpclient.ServerImport) {
+	if len(imports) == 0 {
+		return
+	}
+
+	c.Blank()
+	c.Heading("MCP servers")
+
+	for _, imp := range imports {
+		if imp.Err != nil {
+			c.Printf("  %s (%s): UNAVAILABLE: %v\n", imp.Server.Name, mcpServerTarget(imp.Server), imp.Err)
+			continue
+		}
+
+		c.Printf("  %s (%s): reachable in %s, advertised %d tool(s), kept %d after filtering, imported %d as %q\n",
+			imp.Server.Name, mcpServerTarget(imp.Server), imp.RTT.Round(time.Millisecond),
+			imp.Discovered, len(imp.Kept), len(imp.Tools), imp.Server.EffectiveAlias())
+
+		if len(imp.Tools) > 0 {
+			names := make([]string, 0, len(imp.Tools))
+			for _, mt := range imp.Tools {
+				names = append(names, mt.Name())
+			}
+			c.Printf("    tools: %s\n", strings.Join(names, ", "))
+		}
+
+		for _, skipped := range imp.Skipped {
+			c.Printf("warning: mcp server %q: tool %q was not imported: %s\n", imp.Server.Name, skipped.Name, skipped.Reason)
+		}
+	}
+}
+
+// mcpServerTarget names the transport a server is reached over and what it is reached
+// at: the command line for a stdio server, and for an HTTP one the endpoint as the
+// configuration wrote it, through config.MCPServer.SafeURL. The expanded url is never
+// printed. It holds whatever each "${VAR}" resolved to, and a service that
+// authenticates by query parameter keeps its credential right there.
+//
+// SafeURL replaces the userinfo, the value of every query parameter and the fragment,
+// and leaves the path, so a credential an operator wrote into a path segment as a
+// literal is printed as they wrote it: nothing can tell that segment from one naming a
+// route. A reference is left as written, so it names the variable.
+//
+// The command and each argument of a stdio entry go through config.RedactURL as well.
+// The bridge pattern an operator reaches for, "npx -y mcp-remote
+// https://host/sse?key=...", carries the endpoint in an argument, and without this the
+// key is printed in full while the same url written under url: is redacted. An argument
+// carrying no url comes back unchanged: RedactURL rewrites only the userinfo before a
+// host, the value of every query parameter and the fragment, so "-y", "--port=8080" and
+// "/usr/local/bin/server" are printed as they were configured.
+func mcpServerTarget(server config.MCPServer) string {
+	if server.URL != "" {
+		return "http " + server.SafeURL()
+	}
+
+	command := make([]string, 0, len(server.Args)+1)
+	command = append(command, config.RedactURL(server.Command))
+	for _, arg := range server.Args {
+		command = append(command, config.RedactURL(arg))
+	}
+
+	return strings.TrimSpace("stdio " + strings.Join(command, " "))
+}
+
 // withOrigin renders a resolved value with the config key or environment variable
 // that decided it.
 func withOrigin(value string, origin string) string {
@@ -507,8 +628,9 @@ func telemetryScrubStatus(cfg *config.Config) string {
 // A run does not warn about no_tool_search, since the operator chose it, so the cost
 // of that choice is reported here instead: with totalTools at or above the threshold
 // every one of them is sent on every request. totalTools comes from the caller's
-// resolved tool set, which counts the remote tools discovery reached; a discovery
-// that failed leaves it short of what a run would send.
+// resolved tool set, which counts the tools a2a and MCP discovery reached; an a2a
+// peer that could not be discovered and an MCP server that would not answer both
+// leave it short of what a run would send.
 func toolSearchStatus(cfg *config.Config, totalTools int) string {
 	if !cfg.ToolSearchEnabled() {
 		if totalTools >= util.ToolSearchThreshold {

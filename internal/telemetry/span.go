@@ -166,9 +166,12 @@ type RunOutcome struct {
 
 	// Turns is the interactive turn count, zero for a one-shot run.
 	Turns int64
-	// ToolCalls and RemoteToolCalls are this process's counts.
+	// ToolCalls, RemoteToolCalls and MCPToolCalls are this process's counts. On a
+	// resumed run all three have the restored counts subtracted, as Usage does, so the
+	// remote and MCP counts stay subsets of the total.
 	ToolCalls       int64
 	RemoteToolCalls int64
+	MCPToolCalls    int64
 }
 
 // RunSpan is the trace root: one span covering an entire agent run, which is what
@@ -292,6 +295,7 @@ func (s *RunSpan) Finish(o RunOutcome) {
 		AttrRunCrashed.Bool(o.Crashed),
 		AttrRunToolCalls.Int64(o.ToolCalls),
 		AttrRunRemoteToolCalls.Int64(o.RemoteToolCalls),
+		AttrRunMCPToolCalls.Int64(o.MCPToolCalls),
 		semconv.GenAIUsageInputTokens(int(o.Usage.Input)),
 		semconv.GenAIUsageOutputTokens(int(o.Usage.Output)),
 		semconv.GenAIUsageCacheReadInputTokens(int(o.Usage.CacheRead)),
@@ -620,6 +624,13 @@ type ToolOutcome struct {
 	// Remote and RemoteAgent describe a call dispatched to another agent.
 	Remote      bool
 	RemoteAgent string
+	// MCPServer names the configured MCP server that served the call, and is empty
+	// for every tool that is not one. It is kept apart from RemoteAgent, which means
+	// the a2a peer: an MCP tool presents like a remote call and is accounted under its
+	// own kind, so a backend filtering on the remote agent must not start returning
+	// MCP calls. It is the configured name and nothing else about the server; see
+	// MCPServerInfo.
+	MCPServer string
 	// ConfirmWait is how long the call waited on the operator, zero when it did not.
 	ConfirmWait time.Duration
 	// Failed reports an error result, which is not the same as a failing command: a
@@ -739,6 +750,13 @@ func (s *ToolSpan) Finish(ctx context.Context, o ToolOutcome) {
 	}
 	if o.RemoteAgent != "" {
 		span.SetAttributes(AttrToolRemoteAgent.String(o.RemoteAgent))
+	}
+	// Which server answered, so a slow or failing call is attributed to the server that
+	// served it rather than to the whole import. It is on the span alone: the tool
+	// duration histogram would carry an empty value on every tool that is not an MCP
+	// one, which is the reason the memory backend stays off it too.
+	if o.MCPServer != "" {
+		span.SetAttributes(AttrToolMCPServer.String(o.MCPServer))
 	}
 	if o.ConfirmWait > 0 {
 		span.SetAttributes(AttrToolConfirmWaitMS.Int64(o.ConfirmWait.Milliseconds()))
@@ -969,6 +987,134 @@ func (s *RemoteAgentSpan) Finish(o RemoteAgentOutcome) {
 	s.Span.span.End()
 }
 
+// MCPServerInfo identifies one configured MCP server on a span.
+//
+// It carries the configured name and a transport token, and there is deliberately
+// nowhere to put anything else. The url, the command and the command's arguments all
+// carry credentials in practice: a service authenticates by query parameter or by
+// path segment, and the bridge shape "npx -y mcp-remote https://host/sse?key=SECRET"
+// puts a token in an argument. A span goes to a collector and cannot be un-sent, so
+// this type takes the two safe values rather than a config.MCPServer, which would put
+// every one of those fields within reach of a caller building the info.
+type MCPServerInfo struct {
+	// Server is the configured server name, operator configuration validated to
+	// letters, digits, '-' and '_' before it reaches here, which is what makes it safe
+	// in a span name.
+	Server string
+	// Transport is how this process reaches the server, from the closed MCPTransport
+	// vocabulary.
+	Transport MCPTransport
+}
+
+// MCPToolCounts is what listing one server found: how many tools it advertised, how
+// many survived the entry's filters, and how many of those could not be built into a
+// tool the model is offered.
+type MCPToolCounts struct {
+	Discovered int
+	Kept       int
+	Skipped    int
+}
+
+// MCPServerOutcome is what the work against one server reports once it has finished.
+type MCPServerOutcome struct {
+	// Tools is what the listing found, and is nil for work that listed nothing: a
+	// connect, and any failure. A pointer because zero is a real answer, as it is for
+	// a tool's exit code: a server that advertises nothing and a server that was never
+	// asked are different facts.
+	Tools *MCPToolCounts
+	// Class is the error class, empty when the work succeeded.
+	Class ErrorClass
+	// Failed reports a failure.
+	Failed bool
+}
+
+// MCPServerSpan is one bounded piece of work against one configured MCP server.
+type MCPServerSpan struct {
+	*Span
+}
+
+// StartMCPConnect starts a span over starting or reaching one server and finishing
+// the initialize handshake, which is what the entry's startup timeout limits.
+//
+// It exists because that work happens before the run loop, so no tool call span is
+// open and a server that takes twenty seconds to start is invisible today. A run
+// handed already-connected sessions opens none of these at startup: that connect
+// happened in the process that opened them, before any run existed to hang a span
+// on. One of those sessions that ends mid-run is replaced where it is used, and that
+// replacement does open this span, under whichever span is open at the time, usually
+// the tool call that reached for the session.
+func (p *Provider) StartMCPConnect(ctx context.Context, i MCPServerInfo) (context.Context, *MCPServerSpan) {
+	return p.startMCPServer(ctx, "mcp_connect", i)
+}
+
+// StartMCPImport starts a span over listing one server's tools and building what
+// survives its filters, which the entry's startup timeout limits again.
+//
+// It is a second span rather than an extension of the connect one because the two are
+// not one stretch of time: a run connects every server before it lists any, and a run
+// on borrowed sessions lists without connecting at all. One span across both would
+// report each server as having taken as long as every server after it.
+//
+// A tool list rebuilt because a server said its tools changed opens no span. That
+// happens on a goroutine of the sessions' own with no run context, so there is no
+// trace for it to belong to.
+func (p *Provider) StartMCPImport(ctx context.Context, i MCPServerInfo) (context.Context, *MCPServerSpan) {
+	return p.startMCPServer(ctx, "mcp_import", i)
+}
+
+// startMCPServer opens one of the two spans above. They share their attributes and
+// their outcome, so they are built in one place and differ only in the operation they
+// name.
+func (p *Provider) startMCPServer(ctx context.Context, operation string, i MCPServerInfo) (context.Context, *MCPServerSpan) {
+	// The empty value with a nil inner Span, never a nil *MCPServerSpan: End and Fail
+	// are promoted from the embedded pointer, and a promoted method reached through a
+	// nil outer pointer must dereference it to find the field.
+	if p == nil || p.tracer == nil {
+		return ctx, &MCPServerSpan{}
+	}
+
+	attrs := []attribute.KeyValue{AttrMCPServer.String(i.Server)}
+	if i.Transport.Set() {
+		attrs = append(attrs, AttrMCPTransport.String(i.Transport.String()))
+	}
+
+	ctx, span := p.tracer.Start(ctx, operation+" "+i.Server,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attrs...),
+	)
+
+	return ctx, &MCPServerSpan{Span: &Span{span: span, started: time.Now(), provider: p}}
+}
+
+// Finish records the outcome and ends the span.
+//
+// The counts are recorded only for work that succeeded, and that rule lives here
+// rather than at the call site for the reason MemorySpan.Finish gives: a failed
+// listing returns no tools, so a call site reporting the lengths regardless would put
+// zero on the span, and zero already means the server advertises nothing.
+func (s *MCPServerSpan) Finish(o MCPServerOutcome) {
+	if s == nil || s.Span == nil || s.Span.span == nil {
+		return
+	}
+
+	span := s.Span.span
+
+	if !o.Failed && o.Tools != nil {
+		span.SetAttributes(
+			AttrMCPToolsDiscovered.Int(o.Tools.Discovered),
+			AttrMCPToolsKept.Int(o.Tools.Kept),
+			AttrMCPToolsSkipped.Int(o.Tools.Skipped),
+		)
+	}
+
+	if o.Failed {
+		span.SetAttributes(errorType(o.Class))
+		span.SetStatus(codes.Error, "")
+	}
+
+	span.End()
+}
+
 // StartupInfo is what is known about a run when setup begins.
 type StartupInfo struct {
 	// Identity is the agent identity. It is operator-configured and validated to a
@@ -983,10 +1129,16 @@ type StartupInfo struct {
 // ToolCounts is the tool inventory a run resolved during setup, partitioned by where
 // each tool came from. Deferred reports whether the set was put behind server-side
 // tool search rather than sent to the model directly.
+//
+// MCP is the tools imported from the configured MCP servers. It is a field of its own
+// because the accounting keeps an MCP call apart from an a2a one everywhere else, and
+// a startup span without it reports a smaller tool set than the run has the moment a
+// server contributes one.
 type ToolCounts struct {
 	Application int
 	Builtin     int
 	Remote      int
+	MCP         int
 	Custom      int
 	Deferred    bool
 }
@@ -1040,6 +1192,7 @@ func (s *StartupSpan) SetTools(c ToolCounts) {
 		AttrToolsApplication.Int(c.Application),
 		AttrToolsBuiltin.Int(c.Builtin),
 		AttrToolsRemote.Int(c.Remote),
+		AttrToolsMCP.Int(c.MCP),
 		AttrToolsCustom.Int(c.Custom),
 		AttrToolsDeferred.Bool(c.Deferred),
 	)

@@ -25,7 +25,7 @@ import (
 
 // describelessTool is a model-facing Tool that does not implement toolkit.Describer,
 // so traceCall must fall back to its safe default: run it, trace it by name alone,
-// with no dependencies and not as a remote call.
+// with no dependencies and under the unknown kind.
 type describelessTool struct{}
 
 func (describelessTool) Name() string                { return "mystery" }
@@ -55,11 +55,10 @@ func findBuiltin(tools []*functool.Tool, name string) *functool.Tool {
 
 // These tests pin the observable output of traceCall per tool kind: the Presentation
 // carried on the emitted call trace (which drives output suppression), the provider
-// ProviderKind (the accounting axis and slog token), the trace's
-// Display/DisplayShort/Agent, the per-run ExecDeps the kind receives, and the remote
-// flag (which drives the remote-call stat and the journaled Remote flag). They assert
-// today's behavior so a later refactor cannot silently change what the operator or the
-// journal sees.
+// ProviderKind (the accounting axis and slog token, and what the dispatch counters and
+// the journaled Remote flag are taken from), the trace's Display/DisplayShort/Agent, and
+// the per-run ExecDeps the kind receives. They assert today's behavior so a later
+// refactor cannot silently change what the operator or the journal sees.
 var _ = Describe("runner.traceCall parity", func() {
 	const workDir = "/run/work-42"
 
@@ -67,7 +66,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		return &runner{
 			stats:       &util.RunStats{},
 			events:      ev,
-			tools:       tools,
+			set:         toolSetOf(tools),
 			prompter:    toolkit.DefaultDenyPrompter(),
 			toolWorkDir: workDir,
 		}
@@ -79,9 +78,8 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"stream_info": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "stream_info", Input: json.RawMessage(`{}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
-		deps, remote := r.traceCall(use, info)
-		Expect(remote).To(BeFalse())
+		info := describeCall(r.set.tools[use.Name], use.Input)
+		deps := r.traceCall(use, info)
 		Expect(deps.WorkDir).To(Equal(workDir))
 		Expect(deps.Prompter).To(BeNil())
 
@@ -93,7 +91,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		Expect(ev.calls[0].Display).NotTo(BeEmpty())
 	})
 
-	It("Should present a remote tool as PresentRemote naming its agent, flag it remote, and pass no dependencies", func() {
+	It("Should present a remote tool as PresentRemote naming its agent, under the remote kind, and pass no dependencies", func() {
 		ev := &captureEvents{}
 		desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
 		rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
@@ -101,9 +99,8 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"nats_info": rt})
 		use := llm.ToolUseBlock{ID: "t1", Name: "nats_info"}
 
-		info := describeCall(r.tools[use.Name], use.Input)
-		deps, remote := r.traceCall(use, info)
-		Expect(remote).To(BeTrue())
+		info := describeCall(r.set.tools[use.Name], use.Input)
+		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).To(BeNil())
 		Expect(deps.WorkDir).To(Equal(""))
 
@@ -120,9 +117,8 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"memory_list": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "memory_list", Input: json.RawMessage(`{}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
-		deps, remote := r.traceCall(use, info)
-		Expect(remote).To(BeFalse())
+		info := describeCall(r.set.tools[use.Name], use.Input)
+		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).NotTo(BeNil())
 
 		Expect(ev.calls).To(HaveLen(1))
@@ -139,9 +135,8 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"ask_human_confirm": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "ask_human_confirm", Input: json.RawMessage(`{"question":"go?"}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
-		deps, remote := r.traceCall(use, info)
-		Expect(remote).To(BeFalse())
+		info := describeCall(r.set.tools[use.Name], use.Input)
+		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).NotTo(BeNil())
 
 		Expect(ev.calls).To(HaveLen(1))
@@ -156,9 +151,8 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"mystery": describelessTool{}})
 		use := llm.ToolUseBlock{ID: "t1", Name: "mystery", Input: json.RawMessage(`{}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
-		deps, remote := r.traceCall(use, info)
-		Expect(remote).To(BeFalse())
+		info := describeCall(r.set.tools[use.Name], use.Input)
+		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).To(BeNil())
 		Expect(deps.WorkDir).To(Equal(""))
 

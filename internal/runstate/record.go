@@ -194,11 +194,34 @@ type UserRecord struct {
 }
 
 // ToolResultRecord is the result of a single tool call, keyed by the tool_use id
-// it answers. Remote marks a call dispatched to another agent over A2A.
+// it answers. Kind and Dispatched are the two facts Fold recomputes the tool counters
+// from; Counters says what each of them counts.
 type ToolResultRecord struct {
 	ToolUseID string              `json:"tool_use_id"`
 	Result    llm.ToolResultBlock `json:"result"`
-	Remote    bool                `json:"remote,omitempty"`
+	// Remote marks a call dispatched to another agent over A2A. A writer derives it
+	// from Kind and Dispatched and still writes it, so a build that predates those two
+	// folds a journal this one wrote into the remote total it has always reported.
+	Remote bool `json:"remote,omitempty"`
+	// Kind is the toolkit.Kind token of the provider that served the call:
+	// application, builtin, remote, custom, mcp, or unknown. It is written for every
+	// result, a call answered without running included, so folding recomputes the
+	// per-kind buckets as the partition of tool_calls they are.
+	//
+	// Additive and omitempty. A record written before it existed carries none: Fold
+	// reads its Remote flag as the remote kind, dispatched, and everything else as the
+	// unknown kind, not dispatched, so an existing journal resumes reporting what it
+	// always reported.
+	Kind string `json:"kind,omitempty"`
+	// Dispatched marks a call that was handed to whoever serves it rather than answered
+	// inside the process that made it. Kind cannot say so on its own, because it is
+	// written for a call a policy hook denied or the operator refused as well, and the
+	// remote and MCP totals count only the calls that were made. Fold takes
+	// RemoteToolCalls from the remote kind with this set and MCPToolCalls from the MCP
+	// kind with this set.
+	//
+	// Additive and omitempty, on the same terms as Kind.
+	Dispatched bool `json:"dispatched,omitempty"`
 }
 
 // DeferredRecord marks a tool call whose answer arrives later, keyed by the

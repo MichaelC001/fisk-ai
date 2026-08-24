@@ -92,6 +92,11 @@ func warningMessage(w agent.Warning) string {
 		return fmt.Sprintf("remote agent %q: skipped %s", w.Name, strings.Join(w.Params, "; "))
 	case agent.WarnRemoteNoTools:
 		return fmt.Sprintf("remote agent %q contributed no tools after filtering; check the include/exclude for that host (run 'fisk info' to see what it advertises)", w.Name)
+	case agent.WarnMCPToolsChanged:
+		if w.Err != nil {
+			return fmt.Sprintf("mcp server %q reported that its tool list changed and could not be listed again: %v; this run continues with the tools it already had", w.Name, w.Err)
+		}
+		return fmt.Sprintf("mcp server %q changed its tool list: %s; the model is offered the new set from its next request", w.Name, strings.Join(w.Params, "; "))
 	case agent.WarnToolSetDrift:
 		return "this session was saved with a different tool set; it continues under the current one, and the approvals you gave it were dropped since a tool may have moved under them"
 	case agent.WarnBudgetDrift:

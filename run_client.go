@@ -98,7 +98,7 @@ func (c *lineClient) text(b a2a.TextBlock) {
 		return
 	}
 
-	fmt.Fprintln(os.Stdout, util.RenderAnswer(b.Text, c.noColor))
+	fmt.Fprintln(os.Stdout, tui.RenderAnswer(b.Text, c.noColor))
 	c.answered = true
 }
 
@@ -435,7 +435,7 @@ func (c *lineClient) report(out *a2a.TaskOutcome) error {
 		// The answer reached stdout as it was produced. It is printed here only when it
 		// did not, which is a worker that sent no final text block.
 		if !c.answered && out.Result.Text != "" {
-			fmt.Fprintln(os.Stdout, util.RenderAnswer(out.Result.Text, c.noColor))
+			fmt.Fprintln(os.Stdout, tui.RenderAnswer(out.Result.Text, c.noColor))
 		}
 
 		printUsage(out.Result.Usage, ackMaxTokens(out))

@@ -130,7 +130,9 @@ type RunStartInfo struct {
 	Interactive bool
 	// Model is the LLM model the run will use.
 	Model string
-	// ToolNames lists every tool the model can call, by name.
+	// ToolNames lists every tool the model can call as the run starts, by name. A tool
+	// set that moves later does not re-fire this hook: it reports what the run began
+	// with, which is when it fires.
 	ToolNames []string
 }
 

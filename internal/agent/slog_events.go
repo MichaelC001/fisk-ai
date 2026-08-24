@@ -9,6 +9,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -36,12 +37,13 @@ type SlogEvents struct {
 	verbose bool
 }
 
-// Both optional halves are implemented: a structured log is where an operator goes to
+// Every optional half is implemented: a structured log is where an operator goes to
 // find out what a run did, so the import notes and the resumed conversation belong in
 // it as much as anything else.
 var (
 	_ Events             = (*SlogEvents)(nil)
 	_ RemoteHostReporter = (*SlogEvents)(nil)
+	_ MCPServerReporter  = (*SlogEvents)(nil)
 	_ TranscriptReplayer = (*SlogEvents)(nil)
 )
 
@@ -105,6 +107,26 @@ func (s *SlogEvents) RemoteHostNotes(imports []remotetools.HostImport) {
 		}
 		if len(imp.Skipped) > 0 {
 			s.log.Warn("remote tools skipped during import", "host", imp.Host.Name, "skipped", imp.Skipped)
+		}
+	}
+}
+
+func (s *SlogEvents) MCPServerNotes(imports []mcpclient.ServerImport) {
+	for _, imp := range imports {
+		attrs := []any{
+			"server", imp.Server.Name,
+			"discovered", imp.Discovered,
+			"kept", len(imp.Tools),
+			"rtt", imp.RTT,
+		}
+		if imp.Err != nil {
+			attrs = append(attrs, "error", imp.Err.Error())
+		}
+
+		s.log.Info("mcp server imported", attrs...)
+
+		for _, skipped := range imp.Skipped {
+			s.log.Warn("mcp tool skipped during import", "server", imp.Server.Name, "tool", skipped.Name, "reason", skipped.Reason)
 		}
 	}
 }

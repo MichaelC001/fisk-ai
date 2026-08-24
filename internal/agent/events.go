@@ -10,6 +10,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -74,6 +75,22 @@ type RemoteHostReporter interface {
 	// RemoteHostNotes reports the per-host outcome of importing remote tools, for
 	// advisory rendering.
 	RemoteHostNotes([]remotetools.HostImport)
+}
+
+// MCPServerReporter is the optional half of Events that hears how importing the tools
+// of the configured MCP servers went, server by server. A sink that renders advisories
+// for an operator implements it; one narrating to a peer, a log or a queue has nothing
+// to do with it.
+//
+// It is separate from Events for the reason RemoteHostReporter is: the argument names
+// this package's own run-path helper, and a sink should not have to import that to
+// compile. It is separate from RemoteHostReporter because the two carry different
+// findings, and a sink that renders one is free to ignore the other.
+type MCPServerReporter interface {
+	// MCPServerNotes reports the per-server outcome of importing MCP tools, for
+	// advisory rendering: how long each server took to answer, which of its tools were
+	// skipped and why, and which server contributed nothing.
+	MCPServerNotes([]mcpclient.ServerImport)
 }
 
 // TranscriptReplayer is the optional half of Events that replays a resumed run's
@@ -242,6 +259,16 @@ const (
 	// performed is not redaction, so the text is withheld rather than passed through.
 	// Raised once per run, like WarnPIIRedacted.
 	WarnPIIWithheld
+	// WarnMCPToolsChanged: the MCP server in Name told this run that its tool list
+	// changed, and Params says what moved: the tools the model gains, the ones it
+	// loses, and the ones the server now offers that this run cannot take. With Err
+	// set the server said its list changed and could not be re-listed, so the run
+	// keeps the tools it had.
+	//
+	// The model is offered the new set from its next call, so without this an operator
+	// watching a run sees it start calling a tool that was not there when it started
+	// and has nothing that says why.
+	WarnMCPToolsChanged
 )
 
 // HostImportWarnings is what importing one peer's tools has to say about it.
@@ -307,6 +334,7 @@ var warningKindNames = map[WarningKind]string{
 	WarnBudgetDrift:            "budget_drift",
 	WarnPIIRedacted:            "pii_redacted",
 	WarnPIIWithheld:            "pii_withheld",
+	WarnMCPToolsChanged:        "mcp_tools_changed",
 }
 
 var warningKindsByName = func() map[string]WarningKind {
