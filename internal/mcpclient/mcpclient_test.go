@@ -296,7 +296,7 @@ var _ = Describe("Sessions", func() {
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
 			Expect(servers.served()).To(HaveLen(1))
-			Expect(servers.served()[0].Close()).To(Succeed())
+			servers.breakLink("docs")
 
 			// The client learns the session ended asynchronously, so wait for the
 			// replacement rather than for the first call to fail.
@@ -321,6 +321,38 @@ var _ = Describe("Sessions", func() {
 			})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(tools).To(Equal(1))
+		})
+
+		It("should close the session it replaces", func() {
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+
+			// The watcher of the live session's subscriptions/listen stream. Asserting it
+			// is running before anything is broken is what makes the count below evidence
+			// rather than a probe that matches nothing.
+			Eventually(listenGoroutines).Should(Equal(1))
+
+			for i := 0; i < 5; i++ {
+				servers.breakLink("docs")
+
+				// The client learns a session ended asynchronously, so the call is repeated
+				// until it reaches the replacement rather than racing it.
+				Eventually(func() error {
+					return sessions.Use(ctx, "docs", func(session *mcp.ClientSession) error {
+						_, err := session.ListTools(ctx, nil)
+						return err
+					})
+				}).Should(Succeed())
+			}
+
+			servers.mu.Lock()
+			dials := servers.dials["docs"]
+			servers.mu.Unlock()
+			Expect(dials).To(Equal(6))
+
+			// Every replaced session was closed, so the only watcher left is the live
+			// session's. Closing runs on its own goroutine, which is what Eventually waits
+			// for.
+			Eventually(listenGoroutines).Should(Equal(1))
 		})
 
 		It("should be safe for concurrent use", func() {

@@ -78,10 +78,30 @@ func (b *callBarrier) arrive() error {
 type mcpEchoServer struct {
 	barrier *callBarrier
 
-	mu      sync.Mutex
-	dials   int
-	fail    error
-	serving []*mcp.ServerSession
+	mu    sync.Mutex
+	dials int
+	fail  error
+	links []mcp.Connection
+}
+
+// mcpLinkedTransport keeps the connection it opened so the server can break the link
+// under a live session.
+type mcpLinkedTransport struct {
+	inner mcp.Transport
+	fake  *mcpEchoServer
+}
+
+func (t *mcpLinkedTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := t.inner.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	t.fake.mu.Lock()
+	t.fake.links = append(t.fake.links, conn)
+	t.fake.mu.Unlock()
+
+	return conn, nil
 }
 
 func newMCPEchoServer(barrier *callBarrier) *mcpEchoServer {
@@ -113,16 +133,12 @@ func (s *mcpEchoServer) dialer() mcpclient.Dialer {
 		// The server side is connected before the client, as in-memory transports
 		// require, and on a context of its own: the caller's carries the connect
 		// timeout, which has nothing to say about how long this server lives.
-		session, err := srv.Connect(context.Background(), serverSide, nil)
+		_, err := srv.Connect(context.Background(), serverSide, nil)
 		if err != nil {
 			return nil, err
 		}
 
-		s.mu.Lock()
-		s.serving = append(s.serving, session)
-		s.mu.Unlock()
-
-		return clientSide, nil
+		return &mcpLinkedTransport{inner: clientSide, fake: s}, nil
 	}
 }
 
@@ -157,15 +173,20 @@ func (s *mcpEchoServer) dialCount() int {
 
 // kill takes every server down and leaves the next dial failing, which is a stdio
 // child that died or an endpoint that stopped answering.
+//
+// The link is broken rather than the server session closed: a client watching a
+// server's tool list holds a subscriptions/listen request open, and the SDK's Close
+// waits for its in-flight requests to finish, so a server closing its own session
+// would wait for the client it is being closed away from.
 func (s *mcpEchoServer) kill(err error) {
 	s.mu.Lock()
 	s.fail = err
-	serving := s.serving
-	s.serving = nil
+	links := s.links
+	s.links = nil
 	s.mu.Unlock()
 
-	for _, session := range serving {
-		_ = session.Close()
+	for _, link := range links {
+		_ = link.Close()
 	}
 }
 

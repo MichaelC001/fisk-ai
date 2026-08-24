@@ -259,6 +259,16 @@ const (
 	// performed is not redaction, so the text is withheld rather than passed through.
 	// Raised once per run, like WarnPIIRedacted.
 	WarnPIIWithheld
+	// WarnMCPToolsChanged: the MCP server in Name told this run that its tool list
+	// changed, and Params says what moved: the tools the model gains, the ones it
+	// loses, and the ones the server now offers that this run cannot take. With Err
+	// set the server said its list changed and could not be re-listed, so the run
+	// keeps the tools it had.
+	//
+	// The model is offered the new set from its next call, so without this an operator
+	// watching a run sees it start calling a tool that was not there when it started
+	// and has nothing that says why.
+	WarnMCPToolsChanged
 )
 
 // HostImportWarnings is what importing one peer's tools has to say about it.
@@ -324,6 +334,7 @@ var warningKindNames = map[WarningKind]string{
 	WarnBudgetDrift:            "budget_drift",
 	WarnPIIRedacted:            "pii_redacted",
 	WarnPIIWithheld:            "pii_withheld",
+	WarnMCPToolsChanged:        "mcp_tools_changed",
 }
 
 var warningKindsByName = func() map[string]WarningKind {

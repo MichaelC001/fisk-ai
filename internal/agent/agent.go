@@ -1153,6 +1153,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// the server described badly does not abort it, since the server answered: that one
 	// is skipped and reported.
 	var mcpTools []*functool.Tool
+	var mcpSessions *mcpclient.Sessions
+	var mcpImports []mcpclient.ServerImport
 	mcpByName := map[string]*functool.Tool{}
 	if len(cfg.MCPServers) > 0 {
 		// Caller-injected sessions are borrowed: a server process connects once and hands
@@ -1185,11 +1187,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			return res, err
 		}
 
+		mcpSessions = sessions
+
 		// The names the remote import settled on are never written into taken, so the
 		// naming pass is given both lookups. The names this import settles on are added to
 		// taken below, which keeps it the whole set of claimed names.
-		var imports []mcpclient.ServerImport
-		mcpTools, mcpByName, imports, err = mcpclient.ImportForRun(ctx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+		mcpTools, mcpByName, mcpImports, err = mcpclient.ImportForRun(ctx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
 
 		// ImportForRun returns the per-server outcomes with its error as well as without
 		// one, so the notes are reported before the error is: an operator deciding whether
@@ -1197,7 +1200,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// back with the failure, not the failure alone.
 		reporter, ok := events.(MCPServerReporter)
 		if ok {
-			reporter.MCPServerNotes(imports)
+			reporter.MCPServerNotes(mcpImports)
 		}
 
 		if err != nil {
@@ -1431,15 +1434,16 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	runSpan.SetProvider(caps.SemconvProviderName())
 
 	toolSearchAllowed := caps.SupportsToolSearch && cfg.ToolSearchEnabled()
-	deferrable := make([]toolkit.Tool, 0, len(tools)+len(remoteTools)+len(mcpTools)+len(customByName))
+
+	// The deferrable tools are assembled in three parts rather than one list, because a
+	// server changing its tool list replaces the middle part and leaves the two either
+	// side of it alone.
+	beforeMCP := make([]toolkit.Tool, 0, len(tools)+len(remoteTools))
 	for _, t := range tools {
-		deferrable = append(deferrable, t)
+		beforeMCP = append(beforeMCP, t)
 	}
 	for _, rt := range remoteTools {
-		deferrable = append(deferrable, rt)
-	}
-	for _, mt := range mcpTools {
-		deferrable = append(deferrable, mt)
+		beforeMCP = append(beforeMCP, rt)
 	}
 	// Custom tools are appended in name order rather than the caller's slice order, so the
 	// tool set the run fingerprints is identical whether the caller built the slice in a
@@ -1451,9 +1455,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		customNames = append(customNames, name)
 	}
 	slices.Sort(customNames)
+	afterMCP := make([]toolkit.Tool, 0, len(customNames))
 	for _, name := range customNames {
-		deferrable = append(deferrable, customByName[name])
+		afterMCP = append(afterMCP, customByName[name])
 	}
+
+	deferrable := make([]toolkit.Tool, 0, len(beforeMCP)+len(mcpTools)+len(afterMCP))
+	deferrable = append(deferrable, beforeMCP...)
+	for _, mt := range mcpTools {
+		deferrable = append(deferrable, mt)
+	}
+	deferrable = append(deferrable, afterMCP...)
 	// The built-in tools in the order their definitions follow the deferrable ones:
 	// human-in-the-loop, then memory, then knowledge. They are kept in their own slices
 	// above so that neither the HITL system note nor its no-terminal warning sees the
@@ -1471,10 +1483,37 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// The definitions the model is offered and the registry the runner dispatches on
 	// are built together from one list, so neither can name a tool the other does not.
-	// The source is what the runner reads before each model call: nothing publishes to
-	// it yet, so this set is what every call of this run carries.
+	// The source is what the runner reads before each model call, and a configured MCP
+	// server reporting that its tool list changed is what publishes to it.
 	toolSet := NewToolSet(deferrable, builtinTools, toolSearchAllowed)
 	toolSrc := NewToolSource(toolSet)
+
+	// A server can tell its session that its tool list changed at any point in the run.
+	// The rebuild happens on that session's goroutine, so the advisory it raises is
+	// queued for the loop to report from the run goroutine, where every other one is
+	// reported from.
+	//
+	// The registration is dropped when the run returns. Sessions the caller injected
+	// back every run a process hosts and outlive this one, so a run that left its
+	// registration behind would go on rebuilding a tool set nobody reads.
+	mcpWarnings := &warnQueue{}
+	if mcpSessions != nil {
+		live := newLiveMCPTools(liveMCPSetup{
+			Source:            toolSrc,
+			Caller:            mcpSessions,
+			Warnings:          mcpWarnings,
+			Imports:           mcpImports,
+			Claimed:           taken,
+			Remote:            remoteByName,
+			Before:            beforeMCP,
+			After:             afterMCP,
+			Builtins:          builtinTools,
+			ToolSearchAllowed: toolSearchAllowed,
+		})
+
+		stopWatching := mcpSessions.OnToolListChanged(live.changed)
+		defer stopWatching()
+	}
 
 	// A tool set that crosses the tool-search threshold but cannot use tool search is
 	// sent to the model in full every request, spending context the search tool exists
@@ -2016,6 +2055,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// call of this run.
 		toolSrc:          toolSrc,
 		set:              toolSet,
+		queuedWarnings:   mcpWarnings,
 		toolSearchWarned: toolSearchWarned,
 		confirmTags:      confirmTags,
 		gate:             gate,

@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -69,6 +71,38 @@ type fakeServers struct {
 	pageSize map[string]int
 	listing  map[string]func(*mcp.ListToolsResult)
 	stall    map[string]chan struct{}
+	// running is the mcp.Server standing behind each name, so a spec can change a
+	// server's tool list for real and let it tell its client about it.
+	running map[string]*mcp.Server
+	// listed counts the tools/list requests each server answered, so a spec can prove
+	// which server a notification made re-list and which it left alone.
+	listed map[string]int
+	// listFail is the error a server answers tools/list with once a spec has asked it
+	// to stop being listable.
+	listFail map[string]error
+	// links are the client-side connections, so a spec can break one.
+	links map[string]mcp.Connection
+}
+
+// linkedTransport keeps the connection it opened, so a spec can break the link under a
+// live session.
+type linkedTransport struct {
+	inner mcp.Transport
+	name  string
+	fake  *fakeServers
+}
+
+func (t *linkedTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := t.inner.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	t.fake.mu.Lock()
+	t.fake.links[t.name] = conn
+	t.fake.mu.Unlock()
+
+	return conn, nil
 }
 
 // fakeTool is one tool a fake server offers: the descriptor it advertises and the
@@ -86,6 +120,63 @@ func newFakeServers() *fakeServers {
 		pageSize: map[string]int{},
 		listing:  map[string]func(*mcp.ListToolsResult){},
 		stall:    map[string]chan struct{}{},
+		running:  map[string]*mcp.Server{},
+		listed:   map[string]int{},
+		listFail: map[string]error{},
+		links:    map[string]mcp.Connection{},
+	}
+}
+
+// server is the mcp.Server standing behind one configured name.
+func (f *fakeServers) server(name string) *mcp.Server {
+	GinkgoHelper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	srv, ok := f.running[name]
+	Expect(ok).To(BeTrue(), "no server named %q has been dialed", name)
+
+	return srv
+}
+
+// failListing makes the named server answer every later tools/list with err, so a
+// spec can drive a server that answered once and then stopped being listable.
+func (f *fakeServers) failListing(name string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.listFail[name] = err
+}
+
+// lists is how many tools/list requests one server has answered.
+func (f *fakeServers) lists(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.listed[name]
+}
+
+// listCounter counts the tools/list requests a server answers and refuses them once
+// failListing has been called for it.
+func (f *fakeServers) listCounter(name string) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/list" {
+				return next(ctx, method, req)
+			}
+
+			f.mu.Lock()
+			f.listed[name]++
+			err := f.listFail[name]
+			f.mu.Unlock()
+
+			if err != nil {
+				return nil, err
+			}
+
+			return next(ctx, method, req)
+		}
 	}
 }
 
@@ -189,6 +280,7 @@ func (f *fakeServers) dialer() Dialer {
 		for _, t := range tools {
 			srv.AddTool(t.tool, t.handler)
 		}
+		srv.AddReceivingMiddleware(f.listCounter(server.Name))
 		if rewrite != nil {
 			srv.AddReceivingMiddleware(listRewriter(rewrite))
 		}
@@ -206,9 +298,51 @@ func (f *fakeServers) dialer() Dialer {
 
 		f.mu.Lock()
 		f.sessions = append(f.sessions, session)
+		f.running[server.Name] = srv
 		f.mu.Unlock()
 
-		return clientSide, nil
+		return &linkedTransport{inner: clientSide, name: server.Name, fake: f}, nil
+	}
+}
+
+// breakLink closes the connection under one server's client session, which is how a
+// spec ends a session from outside it: the client reads a broken link and the session
+// ends, as it does when a stdio child dies.
+//
+// A server that has a client subscribed to its tool list cannot close its own session
+// instead. The subscriptions/listen handler runs until the client cancels it, and the
+// SDK's Close waits for its in-flight requests to finish, so the two wait for each
+// other.
+func (f *fakeServers) breakLink(name string) {
+	GinkgoHelper()
+
+	f.mu.Lock()
+	conn, ok := f.links[name]
+	f.mu.Unlock()
+
+	Expect(ok).To(BeTrue(), "no server named %q has been dialed", name)
+	Expect(conn.Close()).To(Succeed())
+}
+
+// listenGoroutines counts the goroutines parked in the SDK's subscriptions/listen
+// watcher. One is opened per client session, since the tool-list handler is always
+// set, and it waits on a context derived from context.Background() that only
+// ClientSession.Close cancels, so a session replaced without being closed leaves one
+// running for the life of the process.
+//
+// The frame is matched rather than the "created by" line a dump also carries for it,
+// so one goroutine counts once. A probe that matched nothing would make every count
+// zero, which the spec catches by asserting the live session's watcher before it
+// breaks anything.
+func listenGoroutines() int {
+	buf := make([]byte, 64*1024)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "mcp.callSubscriptionsListen.func1(")
+		}
+
+		buf = make([]byte, 2*len(buf))
 	}
 }
 

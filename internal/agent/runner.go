@@ -80,6 +80,13 @@ type runner struct {
 	confirmTags []string
 	gate        *util.ConfirmGate
 
+	// queuedWarnings holds the advisories raised away from this goroutine, which today
+	// is a configured MCP server reporting that its tool list changed. The loop drains
+	// it where it takes the tools for a model call, so they reach the events sink from
+	// the run goroutine like every other advisory and arrive with the call that carries
+	// the set they are about.
+	queuedWarnings *warnQueue
+
 	// toolSearchWarned records that the tool-search degradation advisory has been
 	// raised. A set that crosses the threshold repeatedly reports it once: the answer
 	// is the same each time, and a server whose tool list flaps would otherwise repeat
@@ -939,7 +946,22 @@ func (r *runner) warnToolSearchDegraded() {
 	r.toolSearchWarned = true
 }
 
+// reportQueuedWarnings hands the advisories raised away from this goroutine to the
+// sink. The drain empties the queue, so an advisory reaches the operator once however
+// many times this is called.
+func (r *runner) reportQueuedWarnings() {
+	for _, w := range r.queuedWarnings.drain() {
+		r.events.Warn(w)
+	}
+}
+
 func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
+	// A change landing during the last tool batch, or after a set was published and
+	// before the next call takes it, has no model call left to be reported at, so every
+	// way out of the loop reports what is queued: the answer the run ends on, an error,
+	// a suspend, and the resume path below that returns before the loop begins.
+	defer r.reportQueuedWarnings()
+
 	// On resume, finish the in-flight tool batch before proceeding so the
 	// conversation reaches a coherent boundary. Its already-run tools are reused
 	// from the journal; only the unanswered ones execute.
@@ -974,6 +996,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		// answering it dispatches against are then the same set, so a set published
 		// while that batch runs applies from the next call.
 		r.set = r.toolSrc.Snapshot()
+		r.reportQueuedWarnings()
 		r.warnToolSearchDegraded()
 
 		req := llm.Request{

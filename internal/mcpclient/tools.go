@@ -173,6 +173,62 @@ func ImportForRun(ctx context.Context, sessions *Sessions, claimed ClaimedNames)
 	return tools, byName, imports, nil
 }
 
+// ToolListChange is one server's tool list as it stands after that server reported
+// it changed, with the entry's include and exclude filters already applied. It is
+// what Sessions.OnToolListChanged hands a caller, and ImportChanged names and builds
+// tools from it.
+//
+// A non-nil Err means the server could not be re-listed, in which case Kept is empty
+// and nothing about it is known; the caller keeps the tools it already had.
+type ToolListChange struct {
+	// Server is the configuration entry whose tools changed.
+	Server config.MCPServer
+	// Err is the failure that stopped the re-listing, if any.
+	Err error
+	// RTT is how long re-listing the server took.
+	RTT time.Duration
+	// Discovered is how many tools the server advertised, before filtering.
+	Discovered int
+	// Kept are the descriptors that survived the entry's include and exclude filters.
+	Kept []*mcp.Tool
+}
+
+// ImportChanged names and builds the tools of a server that reported its tool list
+// changed, for a caller replacing that one server's tools in a set it already holds.
+// Every other server's tools and the caller's own are its own business and are not
+// touched here.
+//
+// It differs from Import in what a name collision costs. Import returns one, because
+// at the start of a run nothing has happened yet and a run that cannot offer the
+// tools its prompt names is better refused. Here the conversation is under way, and
+// the collision is a third party's edit to its own tool list, so the colliding tool
+// is left out and recorded in Skipped rather than ending the run. Every other reason
+// a tool is skipped is recorded as it is at run start.
+//
+// claimed must hold every name in use except the ones this server's own tools hold
+// now, which are about to be replaced; a caller passing those too would report every
+// tool of this server as colliding with itself. Naming is always "<alias>_<tool>", so
+// a tool arriving mid-conversation cannot take the name another tool answers to and
+// nothing already offered to the model is renamed.
+func ImportChanged(change ToolListChange, claimed ClaimedNames, caller Caller) ServerImport {
+	if !claimed.built {
+		return ServerImport{Server: change.Server, Err: fmt.Errorf("the claimed tool names must be built with mcpclient.NewClaimedNames, which takes both of the lookups a run keeps them in")}
+	}
+	if change.Err != nil {
+		return ServerImport{Server: change.Server, Err: change.Err, RTT: change.RTT}
+	}
+
+	result := ServerImport{
+		Server:     change.Server,
+		RTT:        change.RTT,
+		Discovered: change.Discovered,
+		Kept:       change.Kept,
+	}
+	result.Tools, result.Skipped, _ = buildServerTools(change.Server, change.Kept, claimed, map[string]*functool.Tool{}, caller)
+
+	return result
+}
+
 // importServer discovers one server, filters it, and names and builds what
 // survives. byName holds the names the servers before it settled on, so a second
 // server cannot claim one of them, and it gains the names this one settles on. The
@@ -185,49 +241,72 @@ func ImportForRun(ctx context.Context, sessions *Sessions, claimed ClaimedNames)
 func importServer(ctx context.Context, caller Caller, server config.MCPServer, claimed ClaimedNames, byName map[string]*functool.Tool) (ServerImport, []string) {
 	result := ServerImport{Server: server}
 
+	result.Kept, result.Discovered, result.RTT, result.Err = listServer(ctx, caller, server)
+	if result.Err != nil {
+		return ServerImport{Server: server, Err: result.Err, RTT: result.RTT}, nil
+	}
+
+	var collisions []string
+	result.Tools, result.Skipped, collisions = buildServerTools(server, result.Kept, claimed, byName, caller)
+
+	return result, collisions
+}
+
+// listServer lists one server's tools and applies the entry's filters, reporting
+// what survived, how many the server advertised and how long it took to answer.
+//
+// The filters are compiled before the server is listed, so an operator's typo fails
+// without a round trip and with no round trip time to report.
+func listServer(ctx context.Context, caller Caller, server config.MCPServer) ([]*mcp.Tool, int, time.Duration, error) {
 	filters, err := compileFilters(server)
 	if err != nil {
-		result.Err = err
-		return result, nil
+		return nil, 0, 0, err
 	}
 
 	start := time.Now()
 	discovered, err := discover(ctx, caller, server)
-	result.RTT = time.Since(start)
+	rtt := time.Since(start)
 	if err != nil {
-		result.Err = err
-		return result, nil
+		return nil, 0, rtt, err
 	}
 
-	result.Discovered = len(discovered)
-	result.Kept = filterTools(discovered, filters)
+	return filterTools(discovered, filters), len(discovered), rtt, nil
+}
 
+// buildServerTools names and builds one server's kept descriptors, reporting the
+// tools, the descriptors it could not build with the reason for each, and the names
+// that collided. byName holds the names other servers settled on and gains the ones
+// settled on here.
+func buildServerTools(server config.MCPServer, kept []*mcp.Tool, claimed ClaimedNames, byName map[string]*functool.Tool, caller Caller) ([]*functool.Tool, []SkippedTool, []string) {
+	var tools []*functool.Tool
+	var skipped []SkippedTool
 	var collisions []string
-	for _, desc := range result.Kept {
+
+	for _, desc := range kept {
 		name := fmt.Sprintf("%s_%s", server.EffectiveAlias(), desc.Name)
 
 		if !toolNamePattern.MatchString(name) {
-			result.Skipped = append(result.Skipped, SkippedTool{Name: desc.Name, Reason: fmt.Sprintf("it would be named %q, which is not a usable tool name", name)})
+			skipped = append(skipped, SkippedTool{Name: desc.Name, Reason: fmt.Sprintf("it would be named %q, which is not a usable tool name", name)})
 			continue
 		}
 
 		if claimed.Claimed(name) || byName[name] != nil {
-			result.Skipped = append(result.Skipped, SkippedTool{Name: desc.Name, Reason: fmt.Sprintf("the name %q is already taken by another tool", name)})
+			skipped = append(skipped, SkippedTool{Name: desc.Name, Reason: fmt.Sprintf("the name %q is already taken by another tool", name)})
 			collisions = append(collisions, fmt.Sprintf("%q (mcp server %q)", name, server.Name))
 			continue
 		}
 
 		tool, err := NewTool(name, server.Name, desc, caller)
 		if err != nil {
-			result.Skipped = append(result.Skipped, SkippedTool{Name: desc.Name, Reason: err.Error()})
+			skipped = append(skipped, SkippedTool{Name: desc.Name, Reason: err.Error()})
 			continue
 		}
 
 		byName[name] = tool
-		result.Tools = append(result.Tools, tool)
+		tools = append(tools, tool)
 	}
 
-	return result, collisions
+	return tools, skipped, collisions
 }
 
 // discover lists every tool a server offers, within the time the entry allows for

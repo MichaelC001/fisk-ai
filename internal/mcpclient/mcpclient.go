@@ -83,8 +83,17 @@ type Sessions struct {
 	names   []string
 	entries map[string]*entry
 
-	mu     sync.Mutex
-	closed bool
+	mu        sync.Mutex
+	closed    bool
+	listeners []listener
+	nextID    uint64
+}
+
+// listener is one registered tool-list watcher and the id OnToolListChanged's
+// cancel removes it by.
+type listener struct {
+	id uint64
+	fn func(ToolListChange)
 }
 
 // entry is one configured server and the session currently connected to it. Its
@@ -101,6 +110,16 @@ type entry struct {
 	// done is closed when session ends, whether the server went away, the child
 	// died, or Close closed it.
 	done chan struct{}
+
+	// watchMu guards the two flags below, which keep one server's rebuilds to one
+	// at a time.
+	watchMu sync.Mutex
+	// rebuilding says a goroutine is re-listing this server now.
+	rebuilding bool
+	// again says a notification arrived while that goroutine was working, so it
+	// lists once more when it is done rather than answering with what it read
+	// before the change.
+	again bool
 }
 
 // Connect opens a session with every configured server, in the order they were
@@ -289,7 +308,9 @@ func (s *Sessions) Close() error {
 	return errors.Join(errs...)
 }
 
-// live returns the session for the named server, replacing one that has ended.
+// live returns the session for the named server, replacing one that has ended. The
+// ended session is closed as it is replaced, so nothing the SDK attached to it
+// outlives it.
 func (s *Sessions) live(ctx context.Context, name string) (*mcp.ClientSession, error) {
 	s.mu.Lock()
 	closed := s.closed
@@ -327,12 +348,43 @@ func (s *Sessions) live(ctx context.Context, name string) (*mcp.ClientSession, e
 		}
 	}
 
+	// The entry gives up the ended session before it is handed to the closer, so a
+	// failed replacement leaves the entry holding nothing rather than a session
+	// somebody else is closing.
+	ended := e.session
+	e.session = nil
+	closeEnded(ended)
+
 	err := s.open(ctx, e)
 	if err != nil {
 		return nil, err
 	}
 
 	return e.session, nil
+}
+
+// closeEnded closes a session that has ended and whose replacement is being opened.
+//
+// The session is closed rather than dropped because Close is what releases what the
+// SDK hung off it. Under the 2026-07-28 protocol every session opens a
+// subscriptions/listen stream whose watcher waits on a context derived from
+// context.Background(), and Close is the only thing that cancels it, so a dropped
+// session parks that goroutine for the life of the process, once per reconnect. A
+// stdio child is reaped in the same call: nothing else waits on the command.
+//
+// It runs on a goroutine of its own because the caller holds the entry lock and is
+// here to make a call. Closing a stdio child that ignores its stdin closing costs the
+// SDK's whole terminate window, three waits of five seconds, and a synchronous close
+// would hold every call to this server, the replacement included, for that long. The
+// close error is dropped for the same reason it is not the caller's: it describes
+// tearing down a session that had already ended, where the caller wants its answer or
+// the failure that brought it here.
+func closeEnded(session *mcp.ClientSession) {
+	if session == nil {
+		return
+	}
+
+	go func() { _ = session.Close() }()
 }
 
 // open connects a session for e and records it. The caller holds e's lock, except
@@ -351,7 +403,7 @@ func (s *Sessions) open(ctx context.Context, e *entry) error {
 		return redacted(err, e.secrets)
 	}
 
-	session, err := s.client().Connect(ctx, transport, nil)
+	session, err := s.client(e).Connect(ctx, transport, nil)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return redacted(fmt.Errorf("connecting to mcp server %q: it did not answer the initialize handshake within %v: %w", e.server.Name, e.server.StartupTimeout(), err), e.secrets)
@@ -392,8 +444,113 @@ func (s *Sessions) open(ctx context.Context, e *entry) error {
 // No sampling handler is set, so a foreign server cannot spend this agent's model
 // budget, and no elicitation handler, so nothing is advertised that no one here
 // answers yet.
-func (s *Sessions) client() *mcp.Client {
+//
+// The tool-list handler is set whether or not anything is watching, because under
+// the 2026-07-28 protocol Connect subscribes to tools/list_changed only when the
+// handler is there: it opens the subscriptions/listen stream with the notifications
+// the client's handlers ask for, and a session connected without one is never told.
+// A run that registers with OnToolListChanged after the sessions were built, which
+// is every run under fisk serve, would have nothing to hear.
+func (s *Sessions) client(e *entry) *mcp.Client {
 	return mcp.NewClient(&mcp.Implementation{Name: s.opts.Identity, Version: s.opts.Version}, &mcp.ClientOptions{
 		Capabilities: &mcp.ClientCapabilities{},
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+			s.toolListChanged(e)
+		},
 	})
+}
+
+// OnToolListChanged registers fn to hear that a server changed its tool list, with
+// that server's list as it stands after the change. It returns the function that
+// removes the registration, which a caller must call when it stops caring: sessions
+// injected into a run outlive it, so a run that left its registration behind would
+// keep rebuilding a tool set nobody reads.
+//
+// fn is called on a goroutine of these sessions', never on the run's, and the
+// registrations are called one after another in the order they were made. It is
+// called with the entry's include and exclude filters already applied, and with Err
+// set when the server could not be re-listed, which leaves the caller holding the
+// tools it already had.
+//
+// A notification that arrives while no one is registered is dropped without a round
+// trip: the list is read when a run starts, so nothing is lost by not reading it
+// while no run is watching.
+func (s *Sessions) OnToolListChanged(fn func(ToolListChange)) func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nextID++
+	id := s.nextID
+	s.listeners = append(s.listeners, listener{id: id, fn: fn})
+
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		s.listeners = slices.DeleteFunc(s.listeners, func(l listener) bool { return l.id == id })
+	}
+}
+
+// watchers are the registrations to call, in the order they were made.
+func (s *Sessions) watchers() []listener {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Clone(s.listeners)
+}
+
+// toolListChanged handles one server's tools/list_changed notification.
+//
+// The work happens on a goroutine of its own rather than on the SDK's: the handler
+// is called on the session's incoming-message path, which delivers notifications
+// one at a time, so re-listing the server from inside it would hold up everything
+// else the server has to say for a whole round trip.
+//
+// A server is re-listed one notification at a time. One arriving while a listing is
+// running neither starts a second listing nor is dropped: the running one lists again
+// when it is done, since what it read came from before that change.
+func (s *Sessions) toolListChanged(e *entry) {
+	e.watchMu.Lock()
+	if e.rebuilding {
+		e.again = true
+		e.watchMu.Unlock()
+		return
+	}
+	e.rebuilding = true
+	e.watchMu.Unlock()
+
+	go func() {
+		for {
+			s.notifyToolListChange(e)
+
+			e.watchMu.Lock()
+			if !e.again {
+				e.rebuilding = false
+				e.watchMu.Unlock()
+				return
+			}
+			e.again = false
+			e.watchMu.Unlock()
+		}
+	}()
+}
+
+// notifyToolListChange re-lists one server and hands the result to everyone
+// registered.
+//
+// The listing runs on a context of its own rather than the notification's, which
+// belongs to the session. The entry's startup timeout limits it, as it limits the
+// listing an import makes.
+func (s *Sessions) notifyToolListChange(e *entry) {
+	watchers := s.watchers()
+	if len(watchers) == 0 {
+		return
+	}
+
+	change := ToolListChange{Server: e.server}
+	change.Kept, change.Discovered, change.RTT, change.Err = listServer(context.Background(), s, e.server)
+
+	for _, w := range watchers {
+		w.fn(change)
+	}
 }

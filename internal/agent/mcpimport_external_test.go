@@ -47,6 +47,14 @@ func mcpDescriptor(name string, description string) *mcp.Tool {
 type mcpFakeServers struct {
 	tools    []*mcp.Tool
 	failList bool
+
+	mu sync.Mutex
+	// running is the mcp.Server behind each configured name, so a spec can change a
+	// server's tool list for real and let it tell the run about it.
+	running map[string]*mcp.Server
+	// listed counts the tools/list requests each server answered, so a spec can prove
+	// which server a notification made re-list and which it left alone.
+	listed map[string]int
 }
 
 // dialer builds the mcpclient.Dialer to connect these servers with.
@@ -58,6 +66,7 @@ func (f *mcpFakeServers) dialer() mcpclient.Dialer {
 		for _, tool := range f.tools {
 			srv.AddTool(tool, mcpEchoHandler)
 		}
+		srv.AddReceivingMiddleware(f.listCounter(server.Name))
 		if f.failList {
 			srv.AddReceivingMiddleware(mcpFailListing())
 		}
@@ -70,8 +79,56 @@ func (f *mcpFakeServers) dialer() mcpclient.Dialer {
 			return nil, err
 		}
 
+		f.mu.Lock()
+		if f.running == nil {
+			f.running = map[string]*mcp.Server{}
+		}
+		f.running[server.Name] = srv
+		f.mu.Unlock()
+
 		return clientSide, nil
 	}
+}
+
+// listCounter counts the tools/list requests one server answers.
+func (f *mcpFakeServers) listCounter(name string) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				f.mu.Lock()
+				if f.listed == nil {
+					f.listed = map[string]int{}
+				}
+				f.listed[name]++
+				f.mu.Unlock()
+			}
+
+			return next(ctx, method, req)
+		}
+	}
+}
+
+// server is the mcp.Server standing behind one configured name.
+func (f *mcpFakeServers) server(t *testing.T, name string) *mcp.Server {
+	t.Helper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	srv, ok := f.running[name]
+	if !ok {
+		t.Fatalf("no server named %q has been dialed", name)
+	}
+
+	return srv
+}
+
+// lists is how many tools/list requests one server has answered.
+func (f *mcpFakeServers) lists(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.listed[name]
 }
 
 // mcpEchoHandler answers a call by naming the tool the server ran, so a dispatched
