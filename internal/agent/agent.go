@@ -1389,7 +1389,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if opts.TraceFile != "" {
 			tracer, terr := util.NewTracer(opts.TraceFile, func(err error) {
 				events.Warn(Warning{Kind: WarnTraceWrite, Err: err})
-			})
+			}, nil)
 			if terr != nil {
 				return res, terr
 			}

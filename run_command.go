@@ -583,7 +583,7 @@ func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, toke
 		fmt.Fprintf(os.Stderr, "previous conversation saved; %s\n", hint)
 	}
 	if renderer.answer != "" {
-		fmt.Fprintln(os.Stdout, util.RenderAnswer(renderer.answer, noColor))
+		fmt.Fprintln(os.Stdout, tui.RenderAnswer(renderer.answer, noColor))
 	}
 	// Every conversation continues, so the handle prints however this one ended rather
 	// than only when it stopped somewhere it can be resumed from.

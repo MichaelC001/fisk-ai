@@ -5,8 +5,6 @@
 package util
 
 import (
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -98,69 +96,4 @@ func (s *RunStats) CountToolKind(kind toolkit.Kind) {
 	}
 
 	s.ToolCallsByKind[kind]++
-}
-
-// Print writes the run summary to stderr. It is deferred so every exit path,
-// including errors and a graceful suspend, reports what was spent. Verbose adds the
-// cache-write count, of interest mainly when diagnosing cache behavior.
-func (s *RunStats) Print(verbose bool) {
-	fmt.Fprintf(os.Stderr, "\n%s\n", s.summaryLine(verbose))
-}
-
-// summaryLine formats the run summary. The label distinguishes a suspended run
-// from a completed one; the session id and model are shown only when set, and the
-// remote and MCP tool call counts only when any were made, so an ephemeral run stays
-// uncluttered. The cache-read count appears only when the cache was hit (following
-// the remote_tool_calls pattern); the cache-write count is verbose-only.
-func (s *RunStats) summaryLine(verbose bool) string {
-	label := "Run summary"
-	if s.Suspended {
-		label = "Run suspended"
-	}
-
-	session := ""
-	if s.Session != "" {
-		session = fmt.Sprintf("session=%s ", s.Session)
-	}
-
-	model := ""
-	if s.Model != "" {
-		model = fmt.Sprintf("model=%s ", s.Model)
-	}
-
-	tools := fmt.Sprintf("tool_calls=%d", s.ToolCalls)
-	if s.RemoteToolCalls > 0 {
-		tools += fmt.Sprintf(" remote_tool_calls=%d", s.RemoteToolCalls)
-	}
-	if s.MCPToolCalls > 0 {
-		tools += fmt.Sprintf(" mcp_tool_calls=%d", s.MCPToolCalls)
-	}
-
-	cache := ""
-	if s.CacheReadTokens > 0 {
-		cache += fmt.Sprintf(" cached=%d", s.CacheReadTokens)
-	}
-	if verbose && s.CacheCreateTokens > 0 {
-		cache += fmt.Sprintf(" cache_write=%d", s.CacheCreateTokens)
-	}
-
-	// Unconditionally, unlike the cache tiers above. Reasoning is not rendered unless
-	// it is asked for, so this is the only place a run says whether any happened, and
-	// omitting it at zero would make "did not reason" and "reasoned invisibly" look the
-	// same. It is a share of the output half of tokens=, not an addition to it.
-	thinking := fmt.Sprintf(" thinking=%d", s.ThinkingTokens)
-
-	trace := ""
-	if s.TraceID != "" {
-		trace = fmt.Sprintf(" trace=%s", s.TraceID)
-	}
-	// Next to the trace id, since together they say what left the machine and where to
-	// find it. Present only when it happened: a marker on every run would be noise, and
-	// this one has to read as a fact about this run.
-	if s.ContentExported {
-		trace += " content=exported"
-	}
-
-	return fmt.Sprintf("%s: %s%sllm_calls=%d %s tokens=%d/%d%s%s latency=%s%s",
-		label, session, model, s.LlmCalls, tools, s.InTokens, s.OutTokens, thinking, cache, time.Since(s.Start).Round(time.Millisecond), trace)
 }

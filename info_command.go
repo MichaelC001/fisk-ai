@@ -25,6 +25,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
+	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/fisk-ai/internal/util"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
@@ -235,7 +236,7 @@ func infoAction(_ *fisk.ParseContext) error {
 
 	c.Section("Prompt", func(c *columns.Document) {
 		if len(cfg.SystemPrompt) > 0 {
-			c.Print(util.RenderAnswer(cfg.SystemPrompt, noColor))
+			c.Print(tui.RenderAnswer(cfg.SystemPrompt, noColor))
 		} else {
 			c.Print("No system_prompt defined")
 		}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -49,8 +50,12 @@ type Tracer struct {
 	warned bool
 	// warn reports the first trace write failure. It exists because the tracer cannot
 	// reach the run's event sink (util is a dependency of the agent, not the other way
-	// around), so the caller injects a func that routes to it; nil falls back to stderr.
+	// around), so the caller injects a func that routes to it; nil falls back to log.
 	warn func(error)
+	// log receives the first trace write failure when warn is nil. A nil log is
+	// replaced by a text logger on os.Stderr at the point it is used, so a Tracer
+	// built without one still reports.
+	log *slog.Logger
 }
 
 // traceEvent is one line in the trace file. Fields are omitted when empty so each
@@ -99,14 +104,15 @@ type traceEvent struct {
 // never clobbered. It is created 0600 because the trace holds full prompts and
 // responses. warn reports the first write failure to the caller (typically routed to
 // the run's event sink so it stays attributable when many runs share one process); a
-// nil warn falls back to stderr.
-func NewTracer(path string, warn func(error)) (*Tracer, error) {
+// nil warn reports the failure on log instead, and a nil log reports it on a text
+// logger writing to os.Stderr.
+func NewTracer(path string, warn func(error), log *slog.Logger) (*Tracer, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("creating trace file: %w", err)
 	}
 
-	return &Tracer{w: f, warn: warn}, nil
+	return &Tracer{w: f, warn: warn, log: log}, nil
 }
 
 // Middleware records the request and its response (or error) as trace lines. Its
@@ -279,8 +285,8 @@ func (t *Tracer) nextID() int {
 	return t.id
 }
 
-// emit serializes ev as one line. A write failure warns once to stderr and is
-// otherwise ignored so a broken trace never aborts the run.
+// emit serializes ev as one line. A write failure warns once and is otherwise
+// ignored so a broken trace never aborts the run.
 func (t *Tracer) emit(ev traceEvent) {
 	if t == nil {
 		return
@@ -316,7 +322,13 @@ func (t *Tracer) warnOnce(err error) {
 		t.warn(err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warning: trace write failed, trace will be incomplete: %v\n", err)
+
+	log := t.log
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
+	log.Warn("Trace write failed, the trace will be incomplete", "error", err)
 }
 
 // jsonBody returns raw as an embeddable JSON value: the bytes themselves when

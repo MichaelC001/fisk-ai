@@ -12,68 +12,6 @@ import (
 )
 
 var _ = Describe("RunStats", func() {
-	Describe("summaryLine", func() {
-		It("labels a completed run and omits the session when unset", func() {
-			s := &RunStats{Model: "claude-opus-4-8", LlmCalls: 2, ToolCalls: 1}
-			line := s.summaryLine(false)
-			Expect(line).To(HavePrefix("Run summary:"))
-			Expect(line).To(ContainSubstring("model=claude-opus-4-8"))
-			Expect(line).To(ContainSubstring("llm_calls=2"))
-			Expect(line).NotTo(ContainSubstring("session="))
-		})
-
-		It("labels a suspended run and includes the session id", func() {
-			s := &RunStats{Model: "m", Session: "sess1", Suspended: true}
-			line := s.summaryLine(false)
-			Expect(line).To(HavePrefix("Run suspended:"))
-			Expect(line).To(ContainSubstring("session=sess1"))
-		})
-
-		It("shows the remote tool count only when any were made", func() {
-			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("remote_tool_calls"))
-			Expect((&RunStats{RemoteToolCalls: 3}).summaryLine(false)).To(ContainSubstring("remote_tool_calls=3"))
-		})
-
-		It("shows the MCP tool count only when any were made", func() {
-			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("mcp_tool_calls"))
-			Expect((&RunStats{MCPToolCalls: 2}).summaryLine(false)).To(ContainSubstring("mcp_tool_calls=2"))
-		})
-
-		It("shows the cache read count only when the cache was hit", func() {
-			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("cached="))
-			Expect((&RunStats{CacheReadTokens: 4096}).summaryLine(false)).To(ContainSubstring("cached=4096"))
-		})
-
-		It("shows the cache write count only under verbose", func() {
-			s := &RunStats{CacheCreateTokens: 8192}
-			Expect(s.summaryLine(false)).NotTo(ContainSubstring("cache_write"))
-			Expect(s.summaryLine(true)).To(ContainSubstring("cache_write=8192"))
-		})
-
-		// The startup note that says this is printed before the full-screen UI takes the
-		// terminal and is covered for the rest of the run, and a pre-run note cannot tell
-		// anyone afterwards what a finished run did. This line survives in scrollback in
-		// both renderers and is what an operator pastes into a ticket.
-		It("marks a run that exported the conversation, and only such a run", func() {
-			Expect((&RunStats{}).summaryLine(false)).NotTo(ContainSubstring("content="))
-
-			line := (&RunStats{ContentExported: true, TraceID: "4bf92f3577b34da6"}).summaryLine(false)
-			Expect(line).To(ContainSubstring("content=exported"))
-			Expect(line).To(ContainSubstring("trace=4bf92f3577b34da6"))
-		})
-
-		It("keeps the line coarse, with no per-kind breakdown", func() {
-			s := &RunStats{ToolCalls: 2, RemoteToolCalls: 1}
-			s.CountToolKind(toolkit.KindApplication)
-			s.CountToolKind(toolkit.KindRemote)
-			line := s.summaryLine(false)
-			Expect(line).To(ContainSubstring("tool_calls=2"))
-			Expect(line).To(ContainSubstring("remote_tool_calls=1"))
-			Expect(line).NotTo(ContainSubstring("application"))
-			Expect(line).NotTo(ContainSubstring("builtin"))
-		})
-	})
-
 	Describe("CountToolKind", func() {
 		It("allocates on first use and accumulates per kind", func() {
 			s := &RunStats{}
