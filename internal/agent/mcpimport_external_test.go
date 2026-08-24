@@ -430,6 +430,52 @@ func TestMCPImport_InjectedSessionsAreBorrowed(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 }
 
+// TestMCPImport_MismatchedInjectedSessionsAbortRun pins what a run does when the
+// sessions it was handed were opened for other servers. The import walks the list the
+// sessions carry, so a run would otherwise import the injector's servers, under the
+// injector's aliases and filters, without either side noticing. The check sits in Run
+// rather than in a host, so it covers a caller setting Options.MCPSessions directly as
+// well as one that hosts runs behind a channel.
+func TestMCPImport_MismatchedInjectedSessionsAbortRun(t *testing.T) {
+	t.Run("a configured server that was not connected", func(t *testing.T) {
+		g := NewWithT(t)
+
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+
+		cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
+
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
+			MCPSessions: sessions,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+		g.Expect(err).To(MatchError(ContainSubstring("configured but not connected: wiki")))
+	})
+
+	t.Run("a connected server the run never configured", func(t *testing.T) {
+		g := NewWithT(t)
+
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
+
+		cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
+			MCPSessions: sessions,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+		g.Expect(err).To(MatchError(ContainSubstring("connected but not configured: wiki")))
+	})
+}
+
 // TestMCPImport_SelfOpenedSessionsAreClosed is the other half of the lifetime rule: a
 // run given no sessions connects its own at start and closes them at the end, so a
 // terminal run leaves nothing connected and no stdio child running.

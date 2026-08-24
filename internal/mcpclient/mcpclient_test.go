@@ -321,6 +321,55 @@ var _ = Describe("Sessions", func() {
 		})
 	})
 
+	Describe("CheckServers", func() {
+		It("should accept the same set in any order", func() {
+			sessions := connected(
+				config.MCPServer{Name: "docs", Command: "unused"},
+				config.MCPServer{Name: "issues", Command: "unused"},
+			)
+
+			Expect(sessions.CheckServers([]config.MCPServer{{Name: "issues"}, {Name: "docs"}})).To(Succeed())
+		})
+
+		// Only the names are compared: an alias and a filter belong to whoever opened
+		// the session, and a borrower has no standing to overrule them.
+		It("should ignore an alias and a filter that differ", func() {
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+
+			err := sessions.CheckServers([]config.MCPServer{{
+				Name:    "docs",
+				Alias:   "d",
+				Include: &config.ToolFilter{Tools: []string{"^search$"}},
+			}})
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should name a server that is configured and not connected", func() {
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+
+			err := sessions.CheckServers([]config.MCPServer{{Name: "docs"}, {Name: "wiki"}})
+			Expect(err).To(MatchError(ContainSubstring("configured but not connected: wiki")))
+		})
+
+		It("should name a server that is connected and not configured", func() {
+			sessions := connected(
+				config.MCPServer{Name: "docs", Command: "unused"},
+				config.MCPServer{Name: "issues", Command: "unused"},
+			)
+
+			err := sessions.CheckServers([]config.MCPServer{{Name: "docs"}})
+			Expect(err).To(MatchError(ContainSubstring("connected but not configured: issues")))
+		})
+
+		It("should name both directions when the sets differ both ways", func() {
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+
+			err := sessions.CheckServers([]config.MCPServer{{Name: "wiki"}})
+			Expect(err).To(MatchError(ContainSubstring("configured but not connected: wiki")))
+			Expect(err).To(MatchError(ContainSubstring("connected but not configured: docs")))
+		})
+	})
+
 	Describe("Close", func() {
 		It("should close every session", func() {
 			sessions, err := Connect(ctx, Options{

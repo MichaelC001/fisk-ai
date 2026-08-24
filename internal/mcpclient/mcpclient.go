@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -148,6 +149,55 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 // Names are the configured server names, in the order they were configured.
 func (s *Sessions) Names() []string {
 	return slices.Clone(s.names)
+}
+
+// CheckServers reports whether these sessions were opened for exactly the servers
+// in want, naming what differs when they were not.
+//
+// The import walks the list these sessions carry rather than the caller's
+// configuration, so a set opened from a different configuration would import its
+// own servers, under its own aliases and filters, in a run that never asked for
+// them. A caller that injects sessions calls this with the servers its
+// configuration declares and refuses the run on an error, rather than taking the
+// substitution.
+//
+// Only the names are compared. An alias, a filter and a transport belong to
+// whoever opened the session, and a borrower has no standing to overrule them.
+func (s *Sessions) CheckServers(want []config.MCPServer) error {
+	opened := make(map[string]bool, len(s.names))
+	for _, name := range s.names {
+		opened[name] = true
+	}
+
+	wanted := make(map[string]bool, len(want))
+	var unconnected []string
+	for _, server := range want {
+		wanted[server.Name] = true
+		if !opened[server.Name] {
+			unconnected = append(unconnected, server.Name)
+		}
+	}
+
+	var unconfigured []string
+	for _, name := range s.names {
+		if !wanted[name] {
+			unconfigured = append(unconfigured, name)
+		}
+	}
+
+	if len(unconnected) == 0 && len(unconfigured) == 0 {
+		return nil
+	}
+
+	var parts []string
+	if len(unconnected) > 0 {
+		parts = append(parts, fmt.Sprintf("configured but not connected: %s", strings.Join(unconnected, ", ")))
+	}
+	if len(unconfigured) > 0 {
+		parts = append(parts, fmt.Sprintf("connected but not configured: %s", strings.Join(unconfigured, ", ")))
+	}
+
+	return fmt.Errorf("the mcp sessions were opened for different servers than this configuration declares (%s)", strings.Join(parts, "; "))
 }
 
 // configured are the entries the sessions were opened for, in the order they were

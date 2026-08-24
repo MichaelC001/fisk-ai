@@ -1173,6 +1173,18 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			defer sessions.Close()
 		}
 
+		// The import walks the server list the sessions carry, not cfg.MCPServers, so a
+		// set opened from another configuration would import its servers under its
+		// aliases and filters in a run that never declared them. That is refused rather
+		// than substituted. The check is here rather than in the host that injects
+		// because this is the one path every injected set reaches the import through, so
+		// a second host, or an embedder passing Options.MCPSessions directly, gets it
+		// without arranging anything.
+		err = sessions.CheckServers(cfg.MCPServers)
+		if err != nil {
+			return res, err
+		}
+
 		// The names the remote import settled on are never written into taken, so the
 		// naming pass is given both lookups. The names this import settles on are added to
 		// taken below, which keeps it the whole set of claimed names.

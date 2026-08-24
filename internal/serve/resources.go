@@ -5,6 +5,7 @@
 package serve
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,10 +13,12 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // ResourceOptions are what building the shared resources needs that no configuration
@@ -99,6 +102,16 @@ type Resources struct {
 	// never reaches it. Building it here is what moves a missing JetStream stream from
 	// the first job to startup.
 	SessionStore runstate.Store
+
+	// MCPSessions are the live sessions with the configured MCP servers, or nil when
+	// the configuration declares none. One session per server backs every run: a
+	// process that opened a stdio child per run would pay that server's startup cost on
+	// every job, and give an HTTP server a new session per job for nothing.
+	//
+	// Every run shares the server's working directory, its authentication and its rate
+	// limits, so a server that is stateful per client is stateful across this worker's
+	// runs. That is a property of sharing one child rather than a defect in it.
+	MCPSessions *mcpclient.Sessions
 
 	// ownsConns records whether Conns was dialed here. A connection the caller supplied
 	// is theirs and outlives this set, and conns.Provider cannot answer the question
@@ -184,7 +197,50 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 	// from here. Wrapping it is what makes that cost visible in the run log.
 	r.SessionStore = withStoreLogging(sessions, opts.Logger)
 
+	// Last, because it is the only resource here that starts other people's programs. A
+	// store that cannot be built therefore fails before a child is running rather than
+	// after, and the defer above closes the children when something later fails.
+	err = r.connectMCP(cfg, opts.Logger)
+	if err != nil {
+		return nil, err
+	}
+
 	return r, nil
+}
+
+// connectMCP opens a session with every configured MCP server.
+//
+// A server that will not start or cannot be reached fails the whole build, which is
+// what puts it in front of the operator starting the worker instead of in front of
+// the first job to arrive. It is the same strictness a run applies, for the same
+// reason: the prompts this worker serves may depend on tools that are not there.
+//
+// It connects on a background context rather than one the caller passes, since
+// NewResources takes none and a worker's shared resources outlive any one request.
+// Each entry's timeout bounds its own connect, so a server that never answers fails
+// this naming it instead of holding startup open.
+func (r *Resources) connectMCP(cfg *config.Config, log *slog.Logger) error {
+	if len(cfg.MCPServers) == 0 {
+		return nil
+	}
+
+	sessions, err := mcpclient.Connect(context.Background(), mcpclient.Options{
+		Servers:            cfg.MCPServers,
+		Identity:           cfg.Identity,
+		Version:            util.Version(),
+		CredentialEnvNames: cfg.CredentialEnvNames(),
+	})
+	if err != nil {
+		return err
+	}
+
+	r.MCPSessions = sessions
+
+	if log != nil {
+		log.Info("Connected the configured MCP servers", "servers", sessions.Names())
+	}
+
+	return nil
 }
 
 // newProvider builds the model provider the runs share.
@@ -269,6 +325,7 @@ func (r *Resources) ApplyTo(o *Options) {
 	o.RAGStore = r.RAGStore
 	o.MemoryStore = r.MemoryStore
 	o.SessionStore = r.SessionStore
+	o.MCPSessions = r.MCPSessions
 }
 
 // Close releases what was built here and nothing else. A connection the caller supplied
@@ -277,14 +334,30 @@ func (r *Resources) ApplyTo(o *Options) {
 // It must not be called until Serve has returned: the runs it hosted use these, and
 // Serve does not return while one is in flight.
 //
-// The provider and the two stores have nothing to release. Only the knowledge index
-// holds a file handle and only the connection holds a socket.
+// The provider and the two stores have nothing to release. The knowledge index holds
+// a file handle, the connection holds a socket, and the MCP sessions hold a child
+// process each.
+//
+// Server.Drain releases the channels and the services and deliberately leaves these
+// alone, so a run that is still in flight still has the servers its tools call. The
+// MCP sessions are ended here and never by a run: a run that closed them would take
+// the next run's servers down with it.
 func (r *Resources) Close() error {
 	if r == nil {
 		return nil
 	}
 
 	var errs []error
+
+	// First, since a stdio child gets a terminate window to exit in and nothing else
+	// here is waiting on it.
+	if r.MCPSessions != nil {
+		err := r.MCPSessions.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("closing the mcp sessions: %w", err))
+		}
+		r.MCPSessions = nil
+	}
 
 	if r.RAGStore != nil {
 		err := r.RAGStore.Close()
