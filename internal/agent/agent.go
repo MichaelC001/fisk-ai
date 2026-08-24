@@ -1454,34 +1454,52 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	for _, name := range customNames {
 		deferrable = append(deferrable, customByName[name])
 	}
-	toolDefs, toolSearch := util.BuildToolParams(deferrable, len(builtins)+len(memBuiltins)+len(ragBuiltins), toolSearchAllowed)
+	// The built-in tools in the order their definitions follow the deferrable ones:
+	// human-in-the-loop, then memory, then knowledge. They are kept in their own slices
+	// above so that neither the HITL system note nor its no-terminal warning sees the
+	// others.
+	builtinTools := make([]toolkit.Tool, 0, len(builtins)+len(memBuiltins)+len(ragBuiltins))
 	for _, b := range builtins {
-		toolDefs = append(toolDefs, b.Definition(false))
+		builtinTools = append(builtinTools, b)
 	}
 	for _, b := range memBuiltins {
-		toolDefs = append(toolDefs, b.Definition(false))
+		builtinTools = append(builtinTools, b)
 	}
 	for _, b := range ragBuiltins {
-		toolDefs = append(toolDefs, b.Definition(false))
+		builtinTools = append(builtinTools, b)
 	}
+
+	// The definitions the model is offered and the registry the runner dispatches on
+	// are built together from one list, so neither can name a tool the other does not.
+	// The source is what the runner reads before each model call: nothing publishes to
+	// it yet, so this set is what every call of this run carries.
+	toolSet := NewToolSet(deferrable, builtinTools, toolSearchAllowed)
+	toolSrc := NewToolSource(toolSet)
 
 	// A tool set that crosses the tool-search threshold but cannot use tool search is
 	// sent to the model in full every request, spending context the search tool exists
-	// to save. That is a silent degradation worth surfacing.
-	totalTools := len(deferrable) + len(builtins) + len(memBuiltins) + len(ragBuiltins)
-	if w := toolSearchDegradation(totalTools, caps, cfg.ToolSearchEnabled()); w != nil {
+	// to save. That is a silent degradation worth surfacing. The runner asks again as
+	// the set moves, and reports it once for the run, so a set that already crossed
+	// here is not reported a second time.
+	toolSearchWarned := false
+	if w := toolSearchDegradation(len(toolSet.defs), caps, cfg.ToolSearchEnabled()); w != nil {
 		events.Warn(*w)
+		toolSearchWarned = true
 	}
 
 	// The first point where every tool source has resolved, which is why this is a
 	// setter on the span rather than an argument to it: the span had to start far
 	// earlier, before the work that can fail on the way here.
+	//
+	// These are the counts the run started with. A set that moves later does not
+	// rewrite them: this is the startup span, and what it reports is what startup
+	// resolved.
 	startupSpan.SetTools(telemetry.ToolCounts{
 		Application: len(tools),
 		Builtin:     len(builtins) + len(memBuiltins) + len(ragBuiltins),
 		Remote:      len(remoteTools),
 		Custom:      len(customByName),
-		Deferred:    toolSearch,
+		Deferred:    toolSet.search,
 	})
 
 	messages := []llm.Message{
@@ -1513,13 +1531,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	thinking := thinkingMode(cfg)
 	maxOutputTokens := resolveMaxOutputTokens(cfg, thinking == llm.ThinkingOn)
 
-	// The feature switches are constant for the run, so they belong here rather than
-	// repeated on every model call, where they would cost export bandwidth per span and
-	// carry no extra information. toolSearch is what was actually decided, not what the
-	// operator allowed: the provider has to support it and the tool count has to cross
-	// the threshold.
+	// The feature switches belong here rather than repeated on every model call, where
+	// they would cost export bandwidth per span and carry no extra information. The
+	// tool-search value is what was actually decided for the set the run starts with,
+	// not what the operator allowed: the provider has to support it and the tool count
+	// has to cross the threshold. A set that moves mid-run re-decides it per call
+	// without rewriting this.
 	runSpan.SetMaxTokens(maxOutputTokens)
-	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSearch)
+	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSet.search)
 
 	// checkpointing was resolved above the NATS dial (the session store it gates
 	// depends on that connection); interactive was resolved at the top, where the root
@@ -1695,7 +1714,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	}
 
 	if checkpointing {
-		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolDefs)
+		// The tool set as the run starts, which is what the fingerprint records: it
+		// captures the configuration the run began with, and ToolsDiff compares one
+		// run's start to another's. A set that moves during the run does not
+		// retroactively change what was written down.
+		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolSet.defs)
 		if err != nil {
 			return res, err
 		}
@@ -1970,28 +1993,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 	}
 
-	// The runner dispatches over a single registry keyed by the unique name the model
-	// addresses each tool by. Names were made unique across the kinds as each was
-	// added (the taken set), so merging local, built-in, remote and MCP tools cannot
-	// shadow one another. The per-kind maps above are kept only where a consumer still
-	// needs the concrete kind: byName feeds the resume transcript renderer.
-	allTools := make(map[string]toolkit.Tool, len(byName)+len(builtinByName)+len(remoteByName)+len(mcpByName)+len(customByName))
-	for name, t := range byName {
-		allTools[name] = t
-	}
-	for name, b := range builtinByName {
-		allTools[name] = b
-	}
-	for name, rt := range remoteByName {
-		allTools[name] = rt
-	}
-	for name, mt := range mcpByName {
-		allTools[name] = mt
-	}
-	for name, t := range customByName {
-		allTools[name] = t
-	}
-
 	// The turn a follow-up delivers, empty for every other run. It carries whatever the
 	// caller put in Options.Prompt, including the supporting Context it appended, which
 	// is the same text a first prompt would have entered the conversation with.
@@ -2005,40 +2006,43 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		provider:        provider,
 		stats:           stats,
 		system:          system,
-		toolDefs:        toolDefs,
-		toolSearch:      toolSearch,
 		thinking:        thinking,
 		maxOutputTokens: maxOutputTokens,
 		maxIter:         maxIter,
 		maxTokens:       maxTokens,
 		toolTimeout:     cfg.ToolTimeout(),
-		tools:           allTools,
-		confirmTags:     confirmTags,
-		gate:            gate,
-		approvals:       approvals,
-		verbose:         opts.Verbose,
-		promptCache:     cfg.PromptCacheEnabled(),
-		interactive:     interactive,
-		humanPaced:      opts.HumanPaced,
-		events:          events,
-		hooks:           opts.Hooks,
-		prompter:        prompter,
-		toolWorkDir:     opts.ToolWorkDir,
-		messages:        messages,
-		journal:         journal,
-		seq:             seq,
-		startIter:       startIter,
-		pending:         pending,
-		nextPrompt:      opts.NextPrompt,
-		sessionID:       sessionID,
-		newSession:      newSession,
-		telemetry:       opts.Telemetry,
-		providerName:    caps.SemconvProviderName(),
-		sessionBackend:  cfg.SessionBackend(),
-		identity:        cfg.Identity,
-		memoryTools:     memoryToolNames(memBuiltins),
-		memory:          memoryInfo(memStore),
-		memScope:        memScope,
+		// The source the loop reads before each model call, and the set it starts on,
+		// which is what a restored in-flight batch dispatches against before the first
+		// call of this run.
+		toolSrc:          toolSrc,
+		set:              toolSet,
+		toolSearchWarned: toolSearchWarned,
+		confirmTags:      confirmTags,
+		gate:             gate,
+		approvals:        approvals,
+		verbose:          opts.Verbose,
+		promptCache:      cfg.PromptCacheEnabled(),
+		interactive:      interactive,
+		humanPaced:       opts.HumanPaced,
+		events:           events,
+		hooks:            opts.Hooks,
+		prompter:         prompter,
+		toolWorkDir:      opts.ToolWorkDir,
+		messages:         messages,
+		journal:          journal,
+		seq:              seq,
+		startIter:        startIter,
+		pending:          pending,
+		nextPrompt:       opts.NextPrompt,
+		sessionID:        sessionID,
+		newSession:       newSession,
+		telemetry:        opts.Telemetry,
+		providerName:     caps.SemconvProviderName(),
+		sessionBackend:   cfg.SessionBackend(),
+		identity:         cfg.Identity,
+		memoryTools:      memoryToolNames(memBuiltins),
+		memory:           memoryInfo(memStore),
+		memScope:         memScope,
 
 		resumeAtInputBoundary: resumeAtInputBoundary,
 		followUp:              followUp,

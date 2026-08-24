@@ -66,7 +66,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		return &runner{
 			stats:       &util.RunStats{},
 			events:      ev,
-			tools:       tools,
+			set:         toolSetOf(tools),
 			prompter:    toolkit.DefaultDenyPrompter(),
 			toolWorkDir: workDir,
 		}
@@ -78,7 +78,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"stream_info": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "stream_info", Input: json.RawMessage(`{}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
+		info := describeCall(r.set.tools[use.Name], use.Input)
 		deps := r.traceCall(use, info)
 		Expect(deps.WorkDir).To(Equal(workDir))
 		Expect(deps.Prompter).To(BeNil())
@@ -99,7 +99,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"nats_info": rt})
 		use := llm.ToolUseBlock{ID: "t1", Name: "nats_info"}
 
-		info := describeCall(r.tools[use.Name], use.Input)
+		info := describeCall(r.set.tools[use.Name], use.Input)
 		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).To(BeNil())
 		Expect(deps.WorkDir).To(Equal(""))
@@ -117,7 +117,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"memory_list": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "memory_list", Input: json.RawMessage(`{}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
+		info := describeCall(r.set.tools[use.Name], use.Input)
 		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).NotTo(BeNil())
 
@@ -135,7 +135,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"ask_human_confirm": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "ask_human_confirm", Input: json.RawMessage(`{"question":"go?"}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
+		info := describeCall(r.set.tools[use.Name], use.Input)
 		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).NotTo(BeNil())
 
@@ -151,7 +151,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		r := newRunner(ev, map[string]toolkit.Tool{"mystery": describelessTool{}})
 		use := llm.ToolUseBlock{ID: "t1", Name: "mystery", Input: json.RawMessage(`{}`)}
 
-		info := describeCall(r.tools[use.Name], use.Input)
+		info := describeCall(r.set.tools[use.Name], use.Input)
 		deps := r.traceCall(use, info)
 		Expect(deps.Prompter).To(BeNil())
 		Expect(deps.WorkDir).To(Equal(""))

@@ -36,8 +36,6 @@ type runner struct {
 	stats    *util.RunStats
 
 	system          []string
-	toolDefs        []llm.ToolDef
-	toolSearch      bool
 	thinking        llm.ThinkingMode
 	maxOutputTokens int64
 	maxIter         int64
@@ -58,15 +56,35 @@ type runner struct {
 	// read through cfg per call, as the budgets above are.
 	toolTimeout time.Duration
 
-	// tools is the single dispatch registry: every model-facing tool, whatever its
-	// kind (local command, in-process built-in, remote), keyed by the unique name the
+	// toolSrc is where the tools this run offers the model come from. It is read
+	// before each model call rather than resolved once before the loop, so a set
+	// published during the run reaches the model from the next call. Under fisk serve
+	// one source backs every hosted run.
+	toolSrc *ToolSource
+
+	// set is the snapshot the current model call was made with: the definitions that
+	// call carried, and the single dispatch registry every tool call in the reply
+	// answering it is looked up in. Every model-facing tool is in it, whatever its kind
+	// (local command, in-process built-in, remote, MCP), keyed by the unique name the
 	// model addresses it by. executeTool looks a call up here once and runs it through
 	// the uniform Tool contract, consulting narrow capability interfaces for the
 	// kind-specific policy (argument validation, confirmation) and the Describer
 	// interface for the kind-specific call trace and execution dependencies.
-	tools       map[string]toolkit.Tool
+	//
+	// It is replaced only at the head of a model call, which is what keeps one reply's
+	// whole tool_use batch on one set: a tool removed while the batch runs cannot
+	// strand a call the model has already made. A resumed run's restored batch answers
+	// a call made before this process started, so it runs against the set the run
+	// began with.
+	set         *ToolSet
 	confirmTags []string
 	gate        *util.ConfirmGate
+
+	// toolSearchWarned records that the tool-search degradation advisory has been
+	// raised. A set that crosses the threshold repeatedly reports it once: the answer
+	// is the same each time, and a server whose tool list flaps would otherwise repeat
+	// it on every crossing. It starts true for a run that already warned at startup.
+	toolSearchWarned bool
 
 	verbose bool
 
@@ -898,6 +916,29 @@ func (r *runner) recordText(resp llm.Response) {
 	r.finalText = sb.String()
 }
 
+// warnToolSearchDegraded raises the tool-search degradation advisory for the set
+// this model call carries, at most once for the run.
+//
+// The question is asked again per call because the set can move: one that grows past
+// the threshold on a provider that cannot search starts spending context from the
+// call it crossed on rather than from the start of the run. The answer is reported
+// once because it is the same answer each time, and a server whose tool list flaps
+// across the threshold would otherwise repeat it on every crossing. A run whose set
+// already crossed it at startup reported it there.
+func (r *runner) warnToolSearchDegraded() {
+	if r.toolSearchWarned {
+		return
+	}
+
+	w := toolSearchDegradation(len(r.set.defs), r.provider.Capabilities(), r.cfg.ToolSearchEnabled())
+	if w == nil {
+		return
+	}
+
+	r.events.Warn(*w)
+	r.toolSearchWarned = true
+}
+
 func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 	// On resume, finish the in-flight tool batch before proceeding so the
 	// conversation reaches a coherent boundary. Its already-run tools are reused
@@ -929,12 +970,18 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		i := r.iter
 		r.iter++
 
+		// This call's tools, taken once. What the request offers and what the batch
+		// answering it dispatches against are then the same set, so a set published
+		// while that batch runs applies from the next call.
+		r.set = r.toolSrc.Snapshot()
+		r.warnToolSearchDegraded()
+
 		req := llm.Request{
 			Model:           r.cfg.LLM.Model,
 			SystemBlocks:    r.system,
 			Messages:        r.messages,
-			Tools:           r.toolDefs,
-			ToolSearch:      r.toolSearch,
+			Tools:           r.set.defs,
+			ToolSearch:      r.set.search,
 			Thinking:        r.thinking,
 			ReasoningEffort: r.cfg.ReasoningEffort(),
 			MaxOutputTokens: r.maxOutputTokens,
@@ -956,7 +1003,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			Iteration:    int(i),
 			Model:        req.Model,
 			MessageCount: len(r.messages),
-			ToolCount:    len(r.toolDefs),
+			ToolCount:    len(r.set.defs),
 		})
 		if preErr != nil {
 			return runstate.ReasonError, fmt.Errorf("PreModelCall hook: %w", preErr)
@@ -969,7 +1016,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			MaxTokens:      req.MaxOutputTokens,
 			Iteration:      i,
 			Messages:       len(r.messages),
-			Tools:          len(r.toolDefs),
+			Tools:          len(r.set.defs),
 			// Built unconditionally and serialized only if capture is on, which is what
 			// keeps this call site free of a branch on whether telemetry is configured.
 			// The builder closes over the live conversation and is invoked before this
@@ -1144,6 +1191,10 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 // The first return reports that a deferral is still outstanding. Nothing is committed
 // then: a turn cannot be handed to the model while a tool_use has no result, so the
 // caller ends the run at a resumable boundary instead.
+//
+// These calls dispatch against the set the run started with, since the model call
+// that asked for them was made before this process began and no call of this run's
+// has taken a set yet.
 func (r *runner) completePending(ctx context.Context) (bool, error) {
 	p := r.pending
 
@@ -1278,7 +1329,7 @@ func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) 
 // The returns are named so the deferred span finish can read what the model was
 // actually told, from one place rather than from each of the eight ways this ends.
 func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result llm.ToolResultBlock, dispatched bool, kind toolkit.Kind, herr error) {
-	tool, ok := r.tools[use.Name]
+	tool, ok := r.set.tool(use.Name)
 
 	// The span covers every way this can end, and there are eight of them, so it is
 	// ended from one defer rather than at each return. outcome is filled in as the call
@@ -1384,7 +1435,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	effName := use.Name
 	effInput := use.Input
 	if pre.RewriteTool != "" {
-		rt, ok := r.tools[pre.RewriteTool]
+		rt, ok := r.set.tool(pre.RewriteTool)
 		if !ok {
 			return llm.ToolResultBlock{}, false, origInfo.Kind, fmt.Errorf("PreToolUse hook redirected tool %q to unregistered tool %q", use.Name, pre.RewriteTool)
 		}

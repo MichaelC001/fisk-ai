@@ -51,7 +51,7 @@ var _ = Describe("runner tool accounting", func() {
 		return &runner{
 			stats:       &util.RunStats{},
 			events:      &captureEvents{},
-			tools:       tools,
+			set:         toolSetOf(tools),
 			prompter:    toolkit.DefaultDenyPrompter(),
 			gate:        util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 			toolWorkDir: "/run/work",
