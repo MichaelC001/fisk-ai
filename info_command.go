@@ -16,7 +16,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
-	"github.com/choria-io/fisk-ai/internal/pii"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
@@ -132,7 +131,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	printModelSection(c, cfg, totalTools)
 	printMemorySection(c, cfg)
 	printSessionsSection(c, cfg)
-	printPIISection(c, cfg)
+	printHarnessSection(c, cfg)
 	printTelemetrySection(c, cfg)
 
 	tbl := table.NewTableWriter("")
@@ -382,33 +381,48 @@ func printSessionsSection(c *columns.Document, cfg *config.Config) {
 	})
 }
 
-// printPIISection shows what a run would scan for personal data and what it would do
-// with what it found, the parallel of the Memory and Sessions sections and resolved the
-// same way, from config alone.
+// printHarnessSection shows the harness settings that govern the agent loop, the
+// parallel of the Memory and Sessions sections and resolved the same way, from config
+// alone. Each value is one an operator either configured or took a default for, and
+// several are invisible everywhere else: the tool timeout has a default no key states,
+// the confirm tags are otherwise only visible through the tools they happened to match,
+// and PII scanning is on without having been asked for.
 //
-// It prints in every mode, including off, where Memory prints in none. PII is the one
-// harness feature that acts without being asked for and the one that changes what the
-// model receives, so "is my data being scanned?" is a question this has to answer rather
-// than leave to a missing section, which is also what a misspelled key looks like.
-//
-// It says plainly what detection is worth. An operator who reads redaction as a guarantee
-// will send data somewhere on the strength of it.
-func printPIISection(c *columns.Document, cfg *config.Config) {
-	c.Section("PII scanning", func(c *columns.Document) {
-		mode := cfg.PIIMode()
-		c.Item("Mode", mode)
+// It is gated on a model being set, the same rule as the Model and Sessions sections:
+// every setting here acts in the agent loop, so an MCP-only config has none of them.
+func printHarnessSection(c *columns.Document, cfg *config.Config) {
+	if cfg.LLM.Model == "" {
+		return
+	}
 
-		if mode == config.PIIModeOff {
-			c.Item("Scanned", "nothing")
-
-			return
+	c.Section("Harness", func(c *columns.Document) {
+		timeout := "unlimited"
+		if d := cfg.ToolTimeout(); d > 0 {
+			timeout = d.String()
 		}
+		c.Item("Tool timeout", timeout)
 
-		c.Item("Scanned", "prompts and tool results, before the model, the session store or telemetry see them")
-		c.Item("Not scanned", "the system prompt, memory, the model's replies, tool arguments and resumed history")
-		c.Item("Checks", strings.Join(pii.DefaultChecks, ", "))
-		c.Item("Credentials", "API keys, bearer tokens and NATS credentials, by shape, wherever they appear")
-		c.Item("Detection", "best-effort pattern matching: it misses real values and flags text that is not personal data")
+		// The always-on tag is listed alongside the configured ones, since the gate an
+		// operator is checking is the union and ai:confirm is half of it on a config that
+		// sets no confirm_tags at all.
+		c.Item("Confirm tags", strings.Join(append([]string{toolkit.ConfirmTag}, cfg.ConfirmTags()...), ", "))
+
+		hitl := "disabled"
+		if cfg.HumanInTheLoopEnabled() {
+			hitl = "enabled"
+		}
+		c.Item("Human in the loop", hitl)
+
+		tui := "full-screen"
+		switch {
+		case cfg.TUIDisabled():
+			tui = "line UI (no_tui)"
+		case !cfg.BellEnabled():
+			tui = "full-screen, bell silenced (no_bell)"
+		}
+		c.Item("Terminal UI", tui)
+
+		c.Item("PII scanning", cfg.PIIMode())
 	})
 }
 
