@@ -1,5 +1,5 @@
 +++
-title = "MCP Servers"
+title = "MCP server"
 description = "Serve Fisk application tools over MCP"
 toc = true
 weight = 20

@@ -1,5 +1,5 @@
 +++
-title = "Docs Style Guide"
+title = "Docs style guide"
 description = "Define writing conventions for documentation"
 toc = true
 weight = 110
@@ -36,12 +36,14 @@ Use TOML delimiters (`+++`). Include at minimum:
 
 ```toml
 +++
-title = "Resource Name"
+title = "Tool selection"
 description = "Short verb-phrase summary"
 toc = true
 weight = 30
 +++
 ```
+
+The `title` field uses sentence case, the same as headings: "Tool selection," not "Tool Selection." An initialism keeps its capitals and the rest of the title does not: "MCP client," not "MCP Client."
 
 The `description` field should read as a phrase, not a sentence. No trailing period. Start with a verb: "Manage files content, ownership and more."
 
