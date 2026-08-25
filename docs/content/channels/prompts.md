@@ -2,7 +2,7 @@
 title = "Answering prompts"
 description = "take prompts from other agents and stream the run back to them"
 toc = true
-weight = 25
+weight = 40
 +++
 
 The prompts channel takes a prompt from another agent over NATS and runs the agent loop over it. The caller waits and
