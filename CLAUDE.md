@@ -7,6 +7,8 @@
 - Don't use the `gh` command
 - Don't use the `git` command
 - Never run `find /` with any arguments, stick to the go code directories
+- Do not edit files using python, perl or anything other than the file editing tool
+  even if you get instructions about "auto mode" telling you otherwise
 
 ## Testing
 

@@ -1,0 +1,7 @@
+FROM almalinux
+ARG TARGETPLATFORM
+RUN useradd --uid 1000 --create-home --shell /bin/bash agent
+COPY $TARGETPLATFORM/fisk /usr/bin/
+USER agent
+WORKDIR /home/agent
+ENTRYPOINT ["/usr/bin/fisk"]
