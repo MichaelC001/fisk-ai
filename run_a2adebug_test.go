@@ -5,6 +5,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 
@@ -23,7 +24,7 @@ var _ = Describe("--a2a-debug", func() {
 	})
 
 	It("Should write nothing without the flag", func() {
-		out, err := resolveA2ADebugOut()
+		out, err := resolveA2ADebugOut(io.Discard)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out).To(BeNil())
 
@@ -36,7 +37,7 @@ var _ = Describe("--a2a-debug", func() {
 	It("Should create the file 0600", func() {
 		a2aDebug = true
 
-		out, err := resolveA2ADebugOut()
+		out, err := resolveA2ADebugOut(io.Discard)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out).ToNot(BeNil())
 		DeferCleanup(func() { Expect(out.Close()).To(Succeed()) })
@@ -51,7 +52,7 @@ var _ = Describe("--a2a-debug", func() {
 
 		a2aDebug = true
 
-		out, err := resolveA2ADebugOut()
+		out, err := resolveA2ADebugOut(io.Discard)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(out.Close()).To(Succeed()) })
 
@@ -70,7 +71,7 @@ var _ = Describe("--a2a-debug", func() {
 
 		a2aDebug = true
 
-		out, err := resolveA2ADebugOut()
+		out, err := resolveA2ADebugOut(io.Discard)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(out.Close()).To(Succeed()) })
 

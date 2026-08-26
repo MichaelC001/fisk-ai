@@ -22,6 +22,7 @@ import (
 
 	"github.com/choria-io/fisk"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -109,16 +110,14 @@ func (f *mcpFakeServers) listCounter(name string) mcp.Middleware {
 }
 
 // server is the mcp.Server standing behind one configured name.
-func (f *mcpFakeServers) server(t *testing.T, name string) *mcp.Server {
+func (f *mcpFakeServers) server(t testing.TB, name string) *mcp.Server {
 	t.Helper()
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	srv, ok := f.running[name]
-	if !ok {
-		t.Fatalf("no server named %q has been dialed", name)
-	}
+	Expect(ok).To(BeTrue(), "no server named %q has been dialed", name)
 
 	return srv
 }
@@ -152,10 +151,9 @@ func mcpFailListing() mcp.Middleware {
 }
 
 // connectMCP opens the sessions a caller injects into a run and closes them when the
-// test ends, which is the caller's job and never Run's.
-func connectMCP(t *testing.T, fake *mcpFakeServers, servers ...config.MCPServer) *mcpclient.Sessions {
+// spec ends, which is the caller's job and never Run's.
+func connectMCP(t testing.TB, fake *mcpFakeServers, servers ...config.MCPServer) *mcpclient.Sessions {
 	t.Helper()
-	g := NewWithT(t)
 
 	sessions, err := mcpclient.Connect(context.Background(), mcpclient.Options{
 		Servers:  servers,
@@ -163,8 +161,8 @@ func connectMCP(t *testing.T, fake *mcpFakeServers, servers ...config.MCPServer)
 		Version:  "0.0.1",
 		Dialer:   fake.dialer(),
 	})
-	g.Expect(err).NotTo(HaveOccurred())
-	t.Cleanup(func() { g.Expect(sessions.Close()).To(Succeed()) })
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
 
 	return sessions
 }
@@ -207,399 +205,376 @@ func advertised(defs []llm.ToolDef, name string) bool {
 	return false
 }
 
-// TestMCPImport_ImportedToolDispatches proves the whole path: a configured server's
-// tool is named "<alias>_<tool>", advertised to the model, and dispatched to the
-// server it came from, with the server's answer returned as the tool result and the
-// call accounted as an MCP call rather than a peer's.
-func TestMCPImport_ImportedToolDispatches(t *testing.T) {
-	g := NewWithT(t)
+var _ = Describe("the MCP import", func() {
+	// This proves the whole path: a configured server's tool is named
+	// "<alias>_<tool>", advertised to the model, and dispatched to the server it came
+	// from, with the server's answer returned as the tool result and the call accounted
+	// as an MCP call rather than a peer's.
+	It("Should dispatch an imported tool to the server it came from", func() {
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		provider := agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`)),
+			agenttest.TextResponse("done"),
+		)
+		events := agenttest.NewRecordingEvents()
 
-	provider := agenttest.NewScriptedProvider(t,
-		agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`)),
-		agenttest.TextResponse("done"),
-	)
-	events := agenttest.NewRecordingEvents()
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"search the docs"},
+			Provider:    provider,
+			MCPSessions: sessions,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"search the docs"},
-		Provider:    provider,
-		MCPSessions: sessions,
-	}, events, agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
 
-	g.Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
+		results := events.ToolResults()
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].IsError).To(BeFalse())
+		Expect(results[0].Output).To(Equal("handled by search"))
+		Expect(results[0].ProviderKind).To(Equal(toolkit.KindMCP))
+	})
 
-	results := events.ToolResults()
-	g.Expect(results).To(HaveLen(1))
-	g.Expect(results[0].IsError).To(BeFalse())
-	g.Expect(results[0].Output).To(Equal("handled by search"))
-	g.Expect(results[0].ProviderKind).To(Equal(toolkit.KindMCP))
-}
+	// This pins the strict half: a server that answered the handshake and then cannot be
+	// listed aborts the run naming it, because the prompt may depend on the tools that
+	// are not there.
+	It("Should abort the run for a server that cannot be listed", func() {
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}, failList: true}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-// TestMCPImport_UnlistableServerAbortsRun pins the strict half: a server that answered
-// the handshake and then cannot be listed aborts the run naming it, because the prompt
-// may depend on the tools that are not there.
-func TestMCPImport_UnlistableServerAbortsRun(t *testing.T) {
-	g := NewWithT(t)
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
 
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}, failList: true}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			MCPSessions: sessions,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).To(MatchError(ContainSubstring(`importing tools from mcp server "docs"`)))
+	})
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+	// This pins the other side of that line: a tool the server described badly costs that
+	// tool and not the run, since the server answered. What was skipped, what the server
+	// offered and how long it took to answer reach the caller through the optional
+	// reporter half.
+	It("Should skip a badly described tool and run on", func() {
+		fake := &mcpFakeServers{tools: []*mcp.Tool{
+			mcpDescriptor("search", "Searches the documentation"),
+			mcpDescriptor("broken", ""),
+		}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MCPSessions: sessions,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).To(MatchError(ContainSubstring(`importing tools from mcp server "docs"`)))
-}
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
 
-// TestMCPImport_BadlyDescribedToolIsSkipped pins the other side of that line: a tool
-// the server described badly costs that tool and not the run, since the server
-// answered. What was skipped, what the server offered and how long it took to answer
-// reach the caller through the optional reporter half.
-func TestMCPImport_BadlyDescribedToolIsSkipped(t *testing.T) {
-	g := NewWithT(t)
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
+		events := newMCPNoteRecorder()
 
-	fake := &mcpFakeServers{tools: []*mcp.Tool{
-		mcpDescriptor("search", "Searches the documentation"),
-		mcpDescriptor("broken", ""),
-	}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    provider,
+			MCPSessions: sessions,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
+		Expect(advertised(provider.Requests()[0].Tools, "docs_broken")).To(BeFalse())
 
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("done"))
-	events := newMCPNoteRecorder()
+		notes := events.Notes()
+		Expect(notes).To(HaveLen(1))
+		Expect(notes[0].Server.Name).To(Equal("docs"))
+		Expect(notes[0].Discovered).To(Equal(2))
+		Expect(notes[0].Tools).To(HaveLen(1))
+		Expect(notes[0].RTT).To(BeNumerically(">", time.Duration(0)))
+		Expect(notes[0].Skipped).To(HaveLen(1))
+		Expect(notes[0].Skipped[0].Name).To(Equal("broken"))
+		Expect(notes[0].Skipped[0].Reason).To(ContainSubstring("advertises no description"))
+	})
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    provider,
-		MCPSessions: sessions,
-	}, events, agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+	// This pins the naming pass against both of the lookups a run keeps its claimed names
+	// in: the taken set the application tools write, and the name map the a2a import
+	// returns and never writes there. A clash with either aborts the run naming the tool
+	// and the server it came from.
+	Describe("a name collision", func() {
+		It("Should abort against an application tool", func() {
+			// The application's "docs search" command loads as the tool "docs_search", which
+			// is the name the server's "search" would take under the alias "docs".
+			application := fisk.New("app", "an app")
+			application.Command("docs", "documentation commands").Command("search", "search the documentation")
 
-	g.Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
-	g.Expect(advertised(provider.Requests()[0].Tools, "docs_broken")).To(BeFalse())
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-	notes := events.Notes()
-	g.Expect(notes).To(HaveLen(1))
-	g.Expect(notes[0].Server.Name).To(Equal("docs"))
-	g.Expect(notes[0].Discovered).To(Equal(2))
-	g.Expect(notes[0].Tools).To(HaveLen(1))
-	g.Expect(notes[0].RTT).To(BeNumerically(">", time.Duration(0)))
-	g.Expect(notes[0].Skipped).To(HaveLen(1))
-	g.Expect(notes[0].Skipped[0].Name).To(Equal("broken"))
-	g.Expect(notes[0].Skipped[0].Reason).To(ContainSubstring("advertises no description"))
-}
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), application))
+			cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
 
-// TestMCPImport_CollisionsAbortRun pins the naming pass against both of the lookups a
-// run keeps its claimed names in: the taken set the application tools write, and the
-// name map the a2a import returns and never writes there. A clash with either aborts
-// the run naming the tool and the server it came from.
-func TestMCPImport_CollisionsAbortRun(t *testing.T) {
-	t.Run("against an application tool", func(t *testing.T) {
-		g := NewWithT(t)
+			_, err := agent.Run(context.Background(), agent.Options{
+				Config:      cfg,
+				ConfigFile:  "agent.yaml",
+				Prompt:      []string{"go"},
+				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+				MCPSessions: sessions,
+			}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+			Expect(err).To(MatchError(ContainSubstring(`"docs_search" (mcp server "docs")`)))
+		})
 
-		// The application's "docs search" command loads as the tool "docs_search", which
-		// is the name the server's "search" would take under the alias "docs".
+		It("Should abort against a tool imported from a peer", func() {
+			// The peer's tool is imported under its own name, since nothing local claims it,
+			// so it takes the name the server's "search" would take under the alias "docs".
+			transport := agenttest.NewFakeTransport(GinkgoTB(), a2a.AgentCard{
+				Name:    "docs-svc",
+				Version: "1.0.0",
+				Tools: []a2a.ToolDescriptor{{
+					Name:        "docs_search",
+					Description: "search the documentation",
+					InputSchema: json.RawMessage(`{"type":"object"}`),
+				}},
+			})
+
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+			cfg.RemoteTools = []config.RemoteToolHost{{Name: "docs-svc"}}
+			cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+
+			_, err := agent.Run(context.Background(), agent.Options{
+				Config:       cfg,
+				ConfigFile:   "agent.yaml",
+				Prompt:       []string{"go"},
+				Provider:     agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+				A2ATransport: transport,
+				MCPSessions:  sessions,
+			}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+			Expect(err).To(MatchError(ContainSubstring(`"docs_search" (mcp server "docs")`)))
+		})
+	})
+
+	// This pins what an operator is left with when a collision aborts the run: the
+	// outcomes of every server reach the reporter before the error is returned, so the
+	// alias to set or the filter to drop is decided against the second server's tools and
+	// round trip rather than the collision alone.
+	It("Should report every server's notes when a collision aborts the run", func() {
+		// The application's "docs search" command loads as the tool "docs_search", the name
+		// the first server's "search" takes under the alias "docs". The second server's takes
+		// "wiki_search", which nothing claims.
 		application := fisk.New("app", "an app")
 		application.Command("docs", "documentation commands").Command("search", "search the documentation")
 
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
 
-		cfg := agenttest.Config(t, agenttest.NewFakeApp(t, application))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
-
-		_, err := agent.Run(context.Background(), agent.Options{
-			Config:      cfg,
-			ConfigFile:  "agent.yaml",
-			Prompt:      []string{"go"},
-			Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-			MCPSessions: sessions,
-		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-		g.Expect(err).To(MatchError(ContainSubstring(`"docs_search" (mcp server "docs")`)))
-	})
-
-	t.Run("against a tool imported from a peer", func(t *testing.T) {
-		g := NewWithT(t)
-
-		// The peer's tool is imported under its own name, since nothing local claims it,
-		// so it takes the name the server's "search" would take under the alias "docs".
-		transport := agenttest.NewFakeTransport(t, a2a.AgentCard{
-			Name:    "docs-svc",
-			Version: "1.0.0",
-			Tools: []a2a.ToolDescriptor{{
-				Name:        "docs_search",
-				Description: "search the documentation",
-				InputSchema: json.RawMessage(`{"type":"object"}`),
-			}},
-		})
-
-		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
-
-		cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
-		cfg.RemoteTools = []config.RemoteToolHost{{Name: "docs-svc"}}
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
-
-		_, err := agent.Run(context.Background(), agent.Options{
-			Config:       cfg,
-			ConfigFile:   "agent.yaml",
-			Prompt:       []string{"go"},
-			Provider:     agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-			A2ATransport: transport,
-			MCPSessions:  sessions,
-		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-		g.Expect(err).To(MatchError(ContainSubstring(`"docs_search" (mcp server "docs")`)))
-	})
-}
-
-// TestMCPImport_CollisionStillReportsNotes pins what an operator is left with when a
-// collision aborts the run: the outcomes of every server reach the reporter before the
-// error is returned, so the alias to set or the filter to drop is decided against the
-// second server's tools and round trip rather than the collision alone.
-func TestMCPImport_CollisionStillReportsNotes(t *testing.T) {
-	g := NewWithT(t)
-
-	// The application's "docs search" command loads as the tool "docs_search", the name
-	// the first server's "search" takes under the alias "docs". The second server's takes
-	// "wiki_search", which nothing claims.
-	application := fisk.New("app", "an app")
-	application.Command("docs", "documentation commands").Command("search", "search the documentation")
-
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
-
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, application))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
-
-	events := newMCPNoteRecorder()
-
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MCPSessions: sessions,
-	}, events, agenttest.NewScriptedPrompter(t))
-	g.Expect(err).To(MatchError(ContainSubstring(`"docs_search" (mcp server "docs")`)))
-
-	notes := events.Notes()
-	g.Expect(notes).To(HaveLen(2))
-
-	g.Expect(notes[0].Server.Name).To(Equal("docs"))
-	g.Expect(notes[0].Tools).To(BeEmpty())
-	g.Expect(notes[0].Skipped).To(HaveLen(1))
-	g.Expect(notes[0].Skipped[0].Name).To(Equal("search"))
-	g.Expect(notes[0].Skipped[0].Reason).To(ContainSubstring(`the name "docs_search" is already taken`))
-
-	g.Expect(notes[1].Server.Name).To(Equal("wiki"))
-	g.Expect(notes[1].Discovered).To(Equal(1))
-	g.Expect(notes[1].Tools).To(HaveLen(1))
-	g.Expect(notes[1].Skipped).To(BeEmpty())
-	g.Expect(notes[1].RTT).To(BeNumerically(">", time.Duration(0)))
-}
-
-// TestMCPImport_CustomToolCollisionAbortsRun covers the collision from the other
-// direction: the MCP import runs before the caller's custom tools, so a custom tool
-// taking a name an imported tool already holds aborts the run naming the mcp server it
-// came from rather than shadowing it.
-func TestMCPImport_CustomToolCollisionAbortsRun(t *testing.T) {
-	g := NewWithT(t)
-
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
-
-	// The imported tool is named "docs_search", which is the name this custom tool takes.
-	custom, err := functool.New(functool.Spec{
-		Name:        "docs_search",
-		Description: "a custom tool",
-		Schema:      map[string]any{"type": "object"},
-		Handler:     noopCustomHandler,
-	})
-	g.Expect(err).NotTo(HaveOccurred())
-
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
-
-	_, err = agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MCPSessions: sessions,
-		CustomTools: []toolkit.Tool{custom},
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).To(MatchError(ContainSubstring(`custom tool at index 0 ("docs_search") collides with a tool of the same name imported from an mcp server`)))
-}
-
-// TestMCPImport_InjectedSessionsAreBorrowed proves Run leaves injected sessions open:
-// the caller connected them once for every run it hosts, so a run that closed them
-// would take the next run's servers down with it.
-func TestMCPImport_InjectedSessionsAreBorrowed(t *testing.T) {
-	g := NewWithT(t)
-	ctx := context.Background()
-
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
-
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
-
-	res, err := agent.Run(ctx, agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MCPSessions: sessions,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
-
-	// The session the run borrowed still answers, which a closed Sessions refuses
-	// before it reaches the server.
-	err = sessions.Use(ctx, "docs", func(session *mcp.ClientSession) error {
-		_, err := session.ListTools(ctx, nil)
-		return err
-	})
-	g.Expect(err).NotTo(HaveOccurred())
-}
-
-// TestMCPImport_MismatchedInjectedSessionsAbortRun pins what a run does when the
-// sessions it was handed were opened for other servers. The import walks the list the
-// sessions carry, so a run would otherwise import the injector's servers, under the
-// injector's aliases and filters, without either side noticing. The check sits in Run
-// rather than in a host, so it covers a caller setting Options.MCPSessions directly as
-// well as one that hosts runs behind a channel.
-func TestMCPImport_MismatchedInjectedSessionsAbortRun(t *testing.T) {
-	t.Run("a configured server that was not connected", func(t *testing.T) {
-		g := NewWithT(t)
-
-		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
-
-		cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), application))
 		cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
 
+		events := newMCPNoteRecorder()
+
 		_, err := agent.Run(context.Background(), agent.Options{
 			Config:      cfg,
 			ConfigFile:  "agent.yaml",
 			Prompt:      []string{"go"},
-			Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
 			MCPSessions: sessions,
-		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-		g.Expect(err).To(MatchError(ContainSubstring("configured but not connected: wiki")))
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).To(MatchError(ContainSubstring(`"docs_search" (mcp server "docs")`)))
+
+		notes := events.Notes()
+		Expect(notes).To(HaveLen(2))
+
+		Expect(notes[0].Server.Name).To(Equal("docs"))
+		Expect(notes[0].Tools).To(BeEmpty())
+		Expect(notes[0].Skipped).To(HaveLen(1))
+		Expect(notes[0].Skipped[0].Name).To(Equal("search"))
+		Expect(notes[0].Skipped[0].Reason).To(ContainSubstring(`the name "docs_search" is already taken`))
+
+		Expect(notes[1].Server.Name).To(Equal("wiki"))
+		Expect(notes[1].Discovered).To(Equal(1))
+		Expect(notes[1].Tools).To(HaveLen(1))
+		Expect(notes[1].Skipped).To(BeEmpty())
+		Expect(notes[1].RTT).To(BeNumerically(">", time.Duration(0)))
 	})
 
-	t.Run("a connected server the run never configured", func(t *testing.T) {
-		g := NewWithT(t)
-
+	// This covers the collision from the other direction: the MCP import runs before the
+	// caller's custom tools, so a custom tool taking a name an imported tool already holds
+	// aborts the run naming the mcp server it came from rather than shadowing it.
+	It("Should abort when a custom tool takes an imported tool's name", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-		cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
+		// The imported tool is named "docs_search", which is the name this custom tool takes.
+		custom, err := functool.New(functool.Spec{
+			Name:        "docs_search",
+			Description: "a custom tool",
+			Schema:      map[string]any{"type": "object"},
+			Handler:     noopCustomHandler,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
 
-		_, err := agent.Run(context.Background(), agent.Options{
+		_, err = agent.Run(context.Background(), agent.Options{
 			Config:      cfg,
 			ConfigFile:  "agent.yaml",
 			Prompt:      []string{"go"},
-			Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
 			MCPSessions: sessions,
-		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-		g.Expect(err).To(MatchError(ContainSubstring("connected but not configured: wiki")))
+			CustomTools: []toolkit.Tool{custom},
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).To(MatchError(ContainSubstring(`custom tool at index 0 ("docs_search") collides with a tool of the same name imported from an mcp server`)))
 	})
-}
 
-// TestMCPImport_SelfOpenedSessionsAreClosed is the other half of the lifetime rule: a
-// run given no sessions connects its own at start and closes them at the end, so a
-// terminal run leaves nothing connected and no stdio child running.
-func TestMCPImport_SelfOpenedSessionsAreClosed(t *testing.T) {
-	g := NewWithT(t)
+	// This proves Run leaves injected sessions open: the caller connected them once for
+	// every run it hosts, so a run that closed them would take the next run's servers
+	// down with it.
+	It("Should leave injected sessions open", func() {
+		ctx := context.Background()
 
-	srv := mcp.NewServer(&mcp.Implementation{Name: "docs", Version: "1.0.0"}, nil)
-	srv.AddTool(mcpDescriptor("search", "Searches the documentation"), mcpEchoHandler)
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-	// Ending a streamable HTTP session is a DELETE to the endpoint, so the request the
-	// server receives is how the run's own Close is observed from outside it.
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
-	terminated := make(chan struct{}, 1)
-	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			select {
-			case terminated <- struct{}{}:
-			default:
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+
+		res, err := agent.Run(ctx, agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			MCPSessions: sessions,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+
+		// The session the run borrowed still answers, which a closed Sessions refuses
+		// before it reaches the server.
+		err = sessions.Use(ctx, "docs", func(session *mcp.ClientSession) error {
+			_, err := session.ListTools(ctx, nil)
+			return err
+		})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	// This pins what a run does when the sessions it was handed were opened for other
+	// servers. The import walks the list the sessions carry, so a run would otherwise
+	// import the injector's servers, under the injector's aliases and filters, without
+	// either side noticing. The check sits in Run rather than in a host, so it covers a
+	// caller setting Options.MCPSessions directly as well as one that hosts runs behind a
+	// channel.
+	Describe("mismatched injected sessions", func() {
+		It("Should abort on a configured server that was not connected", func() {
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+			cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
+
+			_, err := agent.Run(context.Background(), agent.Options{
+				Config:      cfg,
+				ConfigFile:  "agent.yaml",
+				Prompt:      []string{"go"},
+				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+				MCPSessions: sessions,
+			}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+			Expect(err).To(MatchError(ContainSubstring("configured but not connected: wiki")))
+		})
+
+		It("Should abort on a connected server the run never configured", func() {
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+			cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+
+			_, err := agent.Run(context.Background(), agent.Options{
+				Config:      cfg,
+				ConfigFile:  "agent.yaml",
+				Prompt:      []string{"go"},
+				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+				MCPSessions: sessions,
+			}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+			Expect(err).To(MatchError(ContainSubstring("connected but not configured: wiki")))
+		})
+	})
+
+	// This is the other half of the lifetime rule: a run given no sessions connects its
+	// own at start and closes them at the end, so a terminal run leaves nothing connected
+	// and no stdio child running.
+	It("Should close the sessions it opened itself", func() {
+		srv := mcp.NewServer(&mcp.Implementation{Name: "docs", Version: "1.0.0"}, nil)
+		srv.AddTool(mcpDescriptor("search", "Searches the documentation"), mcpEchoHandler)
+
+		// Ending a streamable HTTP session is a DELETE to the endpoint, so the request the
+		// server receives is how the run's own Close is observed from outside it.
+		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+		terminated := make(chan struct{}, 1)
+		endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				select {
+				case terminated <- struct{}{}:
+				default:
+				}
 			}
-		}
 
-		handler.ServeHTTP(w, r)
-	}))
-	t.Cleanup(endpoint.Close)
+			handler.ServeHTTP(w, r)
+		}))
+		DeferCleanup(endpoint.Close)
 
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs", URL: endpoint.URL}}
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs", URL: endpoint.URL}}
 
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("done"))
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:     cfg,
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{"go"},
-		Provider:   provider,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:     cfg,
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{"go"},
+			Provider:   provider,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	// The run reached this server, and ended the session it opened before it returned.
-	g.Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
-	g.Eventually(terminated, 10*time.Second).Should(Receive())
-}
+		// The run reached this server, and ended the session it opened before it returned.
+		Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
+		Eventually(terminated, 10*time.Second).Should(Receive())
+	})
 
-// TestMCPImport_OnlyMCPToolsStartsRun proves the no-tools gate counts imported MCP
-// tools: an agent wrapping an application with no commands, with no built-in, remote or
-// injected tools, starts and completes on a server's tools alone rather than reporting
-// that it has none.
-func TestMCPImport_OnlyMCPToolsStartsRun(t *testing.T) {
-	g := NewWithT(t)
+	// This proves the no-tools gate counts imported MCP tools: an agent wrapping an
+	// application with no commands, with no built-in, remote or injected tools, starts
+	// and completes on a server's tools alone rather than reporting that it has none.
+	It("Should start a run on a server's tools alone", func() {
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), emptyFiskApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
 
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, emptyFiskApp()))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
 
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("done"))
-
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    provider,
-		MCPSessions: sessions,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
-	g.Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
-}
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    provider,
+			MCPSessions: sessions,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(advertised(provider.Requests()[0].Tools, "docs_search")).To(BeTrue())
+	})
+})

@@ -53,6 +53,10 @@ func (c *testClock) after(d time.Duration) <-chan time.Time {
 	out := make(chan time.Time, 1)
 
 	if c.released {
+		// A released clock runs freely, so a caller asking to wait an hour has an hour
+		// credited to it: a limiter that woke to a clock standing still would find its
+		// bucket as empty as it left it and ask for the same wait again.
+		c.at = c.at.Add(d)
 		out <- c.at
 
 		return out
@@ -84,7 +88,7 @@ func (c *testClock) waiting() int {
 
 // release lets everything through, now and from now on.
 //
-// Time moves as well as the waiters firing, because a limiter that woke on a clock that
+// Time moves on here and keeps moving in after, because a limiter that woke on a clock that
 // stood still would find its bucket as empty as it left it and wait again. A drain writes
 // the ending of every turn that never ran, so there is something spending tokens at the end
 // of every spec that uses this.

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -31,8 +32,8 @@ import (
 
 // accountingTool is a custom tool that answers immediately, so a run can make a call
 // of the custom kind alongside the wrapped application's own.
-func accountingTool(t *testing.T, name string) toolkit.Tool {
-	t.Helper()
+func accountingTool(tb testing.TB, name string) toolkit.Tool {
+	tb.Helper()
 
 	tool, err := functool.New(functool.Spec{
 		Name:        name,
@@ -42,7 +43,7 @@ func accountingTool(t *testing.T, name string) toolkit.Tool {
 			return "ok", nil
 		},
 	})
-	NewWithT(t).Expect(err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred())
 
 	return tool
 }
@@ -57,252 +58,249 @@ func summedByKind(stats *util.RunStats) int64 {
 	return n
 }
 
-// TestToolAccounting_PerKindSurvivesASuspend is the case the partition invariant never
-// held for. A resumed run seeded only the coarse totals, so its buckets summed to the
-// calls made since the resume while tool_calls counted the conversation. The journal now
-// records each call's kind, so the fold recomputes every bucket and the resume seeds
-// them.
-func TestToolAccounting_PerKindSurvivesASuspend(t *testing.T) {
-	g := NewWithT(t)
-	ctx := context.Background()
+var _ = Describe("the per-kind tool accounting", func() {
+	// This is the case the partition invariant never held for. A resumed run seeded only
+	// the coarse totals, so its buckets summed to the calls made since the resume while
+	// tool_calls counted the conversation. The journal now records each call's kind, so the
+	// fold recomputes every bucket and the resume seeds them.
+	It("Should keep the per-kind buckets across a suspend", func() {
+		ctx := context.Background()
 
-	store, err := runstatefile.NewFileStore(t.TempDir())
-	g.Expect(err).NotTo(HaveOccurred())
+		store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	tools := []toolkit.Tool{accountingTool(t, "note_add")}
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		tools := []toolkit.Tool{accountingTool(GinkgoTB(), "note_add")}
 
-	opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint, suspend func() bool) agent.Options {
-		return agent.Options{
-			Config:           agenttest.Config(t, app),
-			ConfigFile:       "agent.yaml",
-			Prompt:           []string{"look it up"},
-			Provider:         provider,
-			SessionStore:     store,
-			Checkpoint:       cp,
-			CustomTools:      tools,
-			SuspendRequested: suspend,
+		opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint, suspend func() bool) agent.Options {
+			return agent.Options{
+				Config:           agenttest.Config(GinkgoTB(), app),
+				ConfigFile:       "agent.yaml",
+				Prompt:           []string{"look it up"},
+				Provider:         provider,
+				SessionStore:     store,
+				Checkpoint:       cp,
+				CustomTools:      tools,
+				SuspendRequested: suspend,
+			}
 		}
-	}
 
-	// Run 1: one application call, then a suspend at the next boundary.
-	polls := 0
-	res1, err := agent.Run(ctx, opts(
-		agenttest.NewScriptedProvider(t, agenttest.ToolUseResponse("c1", "do", json.RawMessage(`{"subject":"widgets"}`))),
-		agent.Checkpoint{Enabled: true},
-		func() bool { polls++; return polls > 1 },
-	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
-	g.Expect(res1.Stats.ToolCalls).To(BeEquivalentTo(1))
-	g.Expect(res1.Stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindApplication: 1}))
+		// Run 1: one application call, then a suspend at the next boundary.
+		polls := 0
+		res1, err := agent.Run(ctx, opts(
+			agenttest.NewScriptedProvider(GinkgoTB(), agenttest.ToolUseResponse("c1", "do", json.RawMessage(`{"subject":"widgets"}`))),
+			agent.Checkpoint{Enabled: true},
+			func() bool { polls++; return polls > 1 },
+		), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
+		Expect(res1.Stats.ToolCalls).To(BeEquivalentTo(1))
+		Expect(res1.Stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindApplication: 1}))
 
-	// The journal carries the kind, so folding it recovers the same buckets without the
-	// run that wrote them.
-	rs, err := store.Load(res1.SessionID)
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
-	g.Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindApplication: 1}))
+		// The journal carries the kind, so folding it recovers the same buckets without the
+		// run that wrote them.
+		rs, err := store.Load(res1.SessionID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
+		Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindApplication: 1}))
 
-	// Run 2: a resume in a fresh process makes one custom call and answers.
-	res2, err := agent.Run(ctx, opts(
-		agenttest.NewScriptedProvider(t,
-			agenttest.ToolUseResponse("c2", "note_add", json.RawMessage(`{}`)),
-			agenttest.TextResponse("found it"),
-		),
-		agent.Checkpoint{ResumeID: res1.SessionID},
-		nil,
-	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+		// Run 2: a resume in a fresh process makes one custom call and answers.
+		res2, err := agent.Run(ctx, opts(
+			agenttest.NewScriptedProvider(GinkgoTB(),
+				agenttest.ToolUseResponse("c2", "note_add", json.RawMessage(`{}`)),
+				agenttest.TextResponse("found it"),
+			),
+			agent.Checkpoint{ResumeID: res1.SessionID},
+			nil,
+		), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
 
-	// The counters a resume reports are cumulative from the first instruction, and the
-	// buckets say the same thing the total does.
-	g.Expect(res2.Stats.ToolCalls).To(BeEquivalentTo(2))
-	g.Expect(res2.Stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
-		toolkit.KindApplication: 1,
-		toolkit.KindCustom:      1,
-	}))
-	g.Expect(summedByKind(res2.Stats)).To(Equal(res2.Stats.ToolCalls), "per-kind buckets must partition tool_calls after a resume")
-}
-
-// TestToolAccounting_DeniedCallsAreBucketedButNotDispatched drives both axes through the
-// journal. A call a policy hook denies is one tool call of its provider's kind that never
-// reached that provider, so it belongs in the per-kind bucket and in neither the remote
-// nor the MCP total, live and again after the journal is folded back.
-func TestToolAccounting_DeniedCallsAreBucketedButNotDispatched(t *testing.T) {
-	g := NewWithT(t)
-	ctx := context.Background()
-
-	store, err := runstatefile.NewFileStore(t.TempDir())
-	g.Expect(err).NotTo(HaveOccurred())
-
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
-
-	transport := agenttest.NewFakeTransport(t, a2a.AgentCard{
-		Name:    "weather-svc",
-		Version: "1.0.0",
-		Tools: []a2a.ToolDescriptor{{
-			Name:        "forecast",
-			Description: "get the forecast",
-			InputSchema: json.RawMessage(`{"type":"object"}`),
-		}},
+		// The counters a resume reports are cumulative from the first instruction, and the
+		// buckets say the same thing the total does.
+		Expect(res2.Stats.ToolCalls).To(BeEquivalentTo(2))
+		Expect(res2.Stats.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{
+			toolkit.KindApplication: 1,
+			toolkit.KindCustom:      1,
+		}))
+		Expect(summedByKind(res2.Stats)).To(Equal(res2.Stats.ToolCalls), "per-kind buckets must partition tool_calls after a resume")
 	})
-	transport.SetToolReply(`{"forecast":"sunny"}`, false)
 
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
-	cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
+	// This drives both axes through the journal. A call a policy hook denies is one tool
+	// call of its provider's kind that never reached that provider, so it belongs in the
+	// per-kind bucket and in neither the remote nor the MCP total, live and again after the
+	// journal is folded back.
+	It("Should bucket denied calls without dispatching them", func() {
+		ctx := context.Background()
 
-	// The second call to each provider is denied, so each kind has one call that was
-	// dispatched and one that never left the process.
-	denied := map[string]bool{"c2": true, "c4": true}
+		store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
 
-	res, err := agent.Run(ctx, agent.Options{
-		Config:       cfg,
-		ConfigFile:   "agent.yaml",
-		Prompt:       []string{"check the docs and the weather"},
-		SessionStore: store,
-		Checkpoint:   agent.Checkpoint{Enabled: true},
-		MCPSessions:  sessions,
-		A2ATransport: transport,
-		Hooks: agent.Hooks{
-			PreToolUse: func(_ context.Context, in agent.PreToolUseInfo) (agent.PreToolUseResult, error) {
-				if !denied[in.ToolUseID] {
-					return agent.PreToolUseResult{}, nil
-				}
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-				return agent.PreToolUseResult{Deny: true, DenyReason: "blocked by policy"}, nil
+		transport := agenttest.NewFakeTransport(GinkgoTB(), a2a.AgentCard{
+			Name:    "weather-svc",
+			Version: "1.0.0",
+			Tools: []a2a.ToolDescriptor{{
+				Name:        "forecast",
+				Description: "get the forecast",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			}},
+		})
+		transport.SetToolReply(`{"forecast":"sunny"}`, false)
+
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
+
+		// The second call to each provider is denied, so each kind has one call that was
+		// dispatched and one that never left the process.
+		denied := map[string]bool{"c2": true, "c4": true}
+
+		res, err := agent.Run(ctx, agent.Options{
+			Config:       cfg,
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{"check the docs and the weather"},
+			SessionStore: store,
+			Checkpoint:   agent.Checkpoint{Enabled: true},
+			MCPSessions:  sessions,
+			A2ATransport: transport,
+			Hooks: agent.Hooks{
+				PreToolUse: func(_ context.Context, in agent.PreToolUseInfo) (agent.PreToolUseResult, error) {
+					if !denied[in.ToolUseID] {
+						return agent.PreToolUseResult{}, nil
+					}
+
+					return agent.PreToolUseResult{Deny: true, DenyReason: "blocked by policy"}, nil
+				},
 			},
-		},
-		Provider: agenttest.NewScriptedProvider(t,
-			agenttest.ToolUseResponse("c1", "docs_search", json.RawMessage(`{}`)),
-			agenttest.ToolUseResponse("c2", "docs_search", json.RawMessage(`{}`)),
-			agenttest.ToolUseResponse("c3", "forecast", json.RawMessage(`{}`)),
-			agenttest.ToolUseResponse("c4", "forecast", json.RawMessage(`{}`)),
-			agenttest.TextResponse("done"),
-		),
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+			Provider: agenttest.NewScriptedProvider(GinkgoTB(),
+				agenttest.ToolUseResponse("c1", "docs_search", json.RawMessage(`{}`)),
+				agenttest.ToolUseResponse("c2", "docs_search", json.RawMessage(`{}`)),
+				agenttest.ToolUseResponse("c3", "forecast", json.RawMessage(`{}`)),
+				agenttest.ToolUseResponse("c4", "forecast", json.RawMessage(`{}`)),
+				agenttest.TextResponse("done"),
+			),
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	want := map[toolkit.Kind]int64{toolkit.KindMCP: 2, toolkit.KindRemote: 2}
-	g.Expect(res.Stats.ToolCalls).To(BeEquivalentTo(4))
-	g.Expect(res.Stats.MCPToolCalls).To(BeEquivalentTo(1), "the denied MCP call never reached the server")
-	g.Expect(res.Stats.RemoteToolCalls).To(BeEquivalentTo(1), "the denied remote call never reached the peer")
-	g.Expect(res.Stats.ToolCallsByKind).To(Equal(want))
-	g.Expect(summedByKind(res.Stats)).To(Equal(res.Stats.ToolCalls), "per-kind buckets must partition tool_calls")
+		want := map[toolkit.Kind]int64{toolkit.KindMCP: 2, toolkit.KindRemote: 2}
+		Expect(res.Stats.ToolCalls).To(BeEquivalentTo(4))
+		Expect(res.Stats.MCPToolCalls).To(BeEquivalentTo(1), "the denied MCP call never reached the server")
+		Expect(res.Stats.RemoteToolCalls).To(BeEquivalentTo(1), "the denied remote call never reached the peer")
+		Expect(res.Stats.ToolCallsByKind).To(Equal(want))
+		Expect(summedByKind(res.Stats)).To(Equal(res.Stats.ToolCalls), "per-kind buckets must partition tool_calls")
 
-	// The journal records each call's kind and whether it was dispatched, so folding it
-	// recovers both axes rather than reading the buckets as the totals.
-	rs, err := store.Load(res.SessionID)
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(rs.Counters.ToolCalls).To(Equal(int64(4)))
-	g.Expect(rs.Counters.MCPToolCalls).To(Equal(int64(1)))
-	g.Expect(rs.Counters.RemoteToolCalls).To(Equal(int64(1)))
-	g.Expect(rs.Counters.ToolCallsByKind).To(Equal(want))
-}
-
-// TestToolAccounting_ResumedRunSpanReportsThisProcessOnly pins what the root span says
-// about a resumed run's tool calls.
-//
-// The span subtracted the resume seed from tool_calls alone, while the remote and MCP
-// counts came straight from the stats a resume seeds cumulatively. A resumed run then
-// reported subsets larger than their total, and summing either subset across a session's
-// traces counted every restored call once per resume where the total counted it once.
-//
-// Both runs call the same two providers, so the session's counts and this process's are
-// different numbers, and the cumulative stats are asserted alongside the span to prove
-// the seed was subtracted rather than never restored.
-func TestToolAccounting_ResumedRunSpanReportsThisProcessOnly(t *testing.T) {
-	g := NewWithT(t)
-	ctx := context.Background()
-
-	store, err := runstatefile.NewFileStore(t.TempDir())
-	g.Expect(err).NotTo(HaveOccurred())
-
-	fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-	sessions := connectMCP(t, fake, config.MCPServer{Name: "docs"})
-
-	transport := agenttest.NewFakeTransport(t, a2a.AgentCard{
-		Name:    "weather-svc",
-		Version: "1.0.0",
-		Tools: []a2a.ToolDescriptor{{
-			Name:        "forecast",
-			Description: "get the forecast",
-			InputSchema: json.RawMessage(`{"type":"object"}`),
-		}},
+		// The journal records each call's kind and whether it was dispatched, so folding it
+		// recovers both axes rather than reading the buckets as the totals.
+		rs, err := store.Load(res.SessionID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rs.Counters.ToolCalls).To(Equal(int64(4)))
+		Expect(rs.Counters.MCPToolCalls).To(Equal(int64(1)))
+		Expect(rs.Counters.RemoteToolCalls).To(Equal(int64(1)))
+		Expect(rs.Counters.ToolCallsByKind).To(Equal(want))
 	})
-	transport.SetToolReply(`{"forecast":"sunny"}`, false)
 
-	cfg := agenttest.Config(t, agenttest.NewFakeApp(t, exampleApp()))
-	cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
-	cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
+	// This pins what the root span says about a resumed run's tool calls.
+	//
+	// The span subtracted the resume seed from tool_calls alone, while the remote and MCP
+	// counts came straight from the stats a resume seeds cumulatively. A resumed run then
+	// reported subsets larger than their total, and summing either subset across a session's
+	// traces counted every restored call once per resume where the total counted it once.
+	//
+	// Both runs call the same two providers, so the session's counts and this process's are
+	// different numbers, and the cumulative stats are asserted alongside the span to prove
+	// the seed was subtracted rather than never restored.
+	It("Should report only this process's tool calls on a resumed run span", func() {
+		ctx := context.Background()
 
-	opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint, suspend func() bool, tel *telemetry.Provider) agent.Options {
-		return agent.Options{
-			Config:           cfg,
-			ConfigFile:       "agent.yaml",
-			Prompt:           []string{"check the docs and the weather"},
-			Provider:         provider,
-			SessionStore:     store,
-			Checkpoint:       cp,
-			MCPSessions:      sessions,
-			A2ATransport:     transport,
-			SuspendRequested: suspend,
-			Telemetry:        tel,
+		store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+
+		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+
+		transport := agenttest.NewFakeTransport(GinkgoTB(), a2a.AgentCard{
+			Name:    "weather-svc",
+			Version: "1.0.0",
+			Tools: []a2a.ToolDescriptor{{
+				Name:        "forecast",
+				Description: "get the forecast",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			}},
+		})
+		transport.SetToolReply(`{"forecast":"sunny"}`, false)
+
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
+
+		opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint, suspend func() bool, tel *telemetry.Provider) agent.Options {
+			return agent.Options{
+				Config:           cfg,
+				ConfigFile:       "agent.yaml",
+				Prompt:           []string{"check the docs and the weather"},
+				Provider:         provider,
+				SessionStore:     store,
+				Checkpoint:       cp,
+				MCPSessions:      sessions,
+				A2ATransport:     transport,
+				SuspendRequested: suspend,
+				Telemetry:        tel,
+			}
 		}
-	}
 
-	// Run 1: one MCP call and one call to the peer, then a suspend at the next boundary.
-	polls := 0
-	res1, err := agent.Run(ctx, opts(
-		agenttest.NewScriptedProvider(t,
-			agenttest.ToolUseResponse("c1", "docs_search", json.RawMessage(`{}`)),
-			agenttest.ToolUseResponse("c2", "forecast", json.RawMessage(`{}`)),
-		),
-		agent.Checkpoint{Enabled: true},
-		func() bool { polls++; return polls > 2 },
-		nil,
-	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
-	g.Expect(res1.Stats.ToolCalls).To(BeEquivalentTo(2))
-	g.Expect(res1.Stats.RemoteToolCalls).To(BeEquivalentTo(1))
-	g.Expect(res1.Stats.MCPToolCalls).To(BeEquivalentTo(1))
+		// Run 1: one MCP call and one call to the peer, then a suspend at the next boundary.
+		polls := 0
+		res1, err := agent.Run(ctx, opts(
+			agenttest.NewScriptedProvider(GinkgoTB(),
+				agenttest.ToolUseResponse("c1", "docs_search", json.RawMessage(`{}`)),
+				agenttest.ToolUseResponse("c2", "forecast", json.RawMessage(`{}`)),
+			),
+			agent.Checkpoint{Enabled: true},
+			func() bool { polls++; return polls > 2 },
+			nil,
+		), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
+		Expect(res1.Stats.ToolCalls).To(BeEquivalentTo(2))
+		Expect(res1.Stats.RemoteToolCalls).To(BeEquivalentTo(1))
+		Expect(res1.Stats.MCPToolCalls).To(BeEquivalentTo(1))
 
-	// Run 2: a resume that makes one call to each provider again and answers.
-	tel, exp := recordingTelemetry()
-	res2, err := agent.Run(ctx, opts(
-		agenttest.NewScriptedProvider(t,
-			agenttest.ToolUseResponse("c3", "docs_search", json.RawMessage(`{}`)),
-			agenttest.ToolUseResponse("c4", "forecast", json.RawMessage(`{}`)),
-			agenttest.TextResponse("done"),
-		),
-		agent.Checkpoint{ResumeID: res1.SessionID},
-		nil,
-		tel,
-	), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
+		// Run 2: a resume that makes one call to each provider again and answers.
+		tel, exp := recordingTelemetry()
+		res2, err := agent.Run(ctx, opts(
+			agenttest.NewScriptedProvider(GinkgoTB(),
+				agenttest.ToolUseResponse("c3", "docs_search", json.RawMessage(`{}`)),
+				agenttest.ToolUseResponse("c4", "forecast", json.RawMessage(`{}`)),
+				agenttest.TextResponse("done"),
+			),
+			agent.Checkpoint{ResumeID: res1.SessionID},
+			nil,
+			tel,
+		), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res2.Reason).To(Equal(runstate.ReasonCompleted))
 
-	// The stats stay cumulative from the first instruction, which is where the span's
-	// numbers come from and what makes the subtraction observable.
-	g.Expect(res2.Stats.ToolCalls).To(BeEquivalentTo(4))
-	g.Expect(res2.Stats.RemoteToolCalls).To(BeEquivalentTo(2))
-	g.Expect(res2.Stats.MCPToolCalls).To(BeEquivalentTo(2))
+		// The stats stay cumulative from the first instruction, which is where the span's
+		// numbers come from and what makes the subtraction observable.
+		Expect(res2.Stats.ToolCalls).To(BeEquivalentTo(4))
+		Expect(res2.Stats.RemoteToolCalls).To(BeEquivalentTo(2))
+		Expect(res2.Stats.MCPToolCalls).To(BeEquivalentTo(2))
 
-	// Named rather than taken by prefix: a call to the peer opens an invoke_agent span
-	// of its own, named for the peer.
-	root := spanNamed(g, exp, "invoke_agent "+cfg.Identity)
-	for key, want := range map[attribute.Key]int64{
-		telemetry.AttrRunToolCalls:       2,
-		telemetry.AttrRunRemoteToolCalls: 1,
-		telemetry.AttrRunMCPToolCalls:    1,
-	} {
-		v, ok := spanAttr(root, key)
-		g.Expect(ok).To(BeTrue(), "expected %s on the run span", key)
-		g.Expect(v.AsInt64()).To(Equal(want), "%s must count this process's calls, not the session's", key)
-	}
-}
+		// Named rather than taken by prefix: a call to the peer opens an invoke_agent span
+		// of its own, named for the peer.
+		root := spanNamed(exp, "invoke_agent "+cfg.Identity)
+		for key, want := range map[attribute.Key]int64{
+			telemetry.AttrRunToolCalls:       2,
+			telemetry.AttrRunRemoteToolCalls: 1,
+			telemetry.AttrRunMCPToolCalls:    1,
+		} {
+			v, ok := spanAttr(root, key)
+			Expect(ok).To(BeTrue(), "expected %s on the run span", key)
+			Expect(v.AsInt64()).To(Equal(want), "%s must count this process's calls, not the session's", key)
+		}
+	})
+})

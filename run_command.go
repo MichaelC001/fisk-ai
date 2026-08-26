@@ -173,7 +173,7 @@ func runAction(_ *fisk.ParseContext) error {
 		reporter = multiplex.Detect(os.Getenv, cfg.Identity)
 	}
 
-	wire, err := resolveA2ADebugOut()
+	wire, err := resolveA2ADebugOut(os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -325,7 +325,7 @@ func modelFromCard(card *a2a.AgentCard) string {
 // Nothing is hosted here: no broker, no server, no model provider, no journal and no
 // telemetry pipeline. What this process is, is a terminal.
 func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.Config) error {
-	wire, err := resolveA2ADebugOut()
+	wire, err := resolveA2ADebugOut(os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -429,13 +429,15 @@ const httpDebugFilename = "http-debug.log"
 const a2aDebugFilename = "a2a-debug.log"
 
 // resolveA2ADebugOut opens the a2a dump when --a2a-debug is set, and returns nil when it
-// is not. The caller owns closing it.
+// is not. The caller owns closing it. The notice naming the file is written to notice,
+// which the run passes os.Stderr and a spec passes io.Discard, so driving this from a
+// test does not print into the test output.
 //
 // The file holds the conversation token, the prompts and every tool result, so it gets
 // what the http dump gets: created 0600, and removed before being created exclusively,
 // which drops a symlink somebody may have planted at the fixed name rather than
 // following it.
-func resolveA2ADebugOut() (io.WriteCloser, error) {
+func resolveA2ADebugOut(notice io.Writer) (io.WriteCloser, error) {
 	if !a2aDebug {
 		return nil, nil
 	}
@@ -450,7 +452,7 @@ func resolveA2ADebugOut() (io.WriteCloser, error) {
 		return nil, fmt.Errorf("opening a2a-debug file %q: %w", a2aDebugFilename, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "%s\n", a2aDebugNotice)
+	fmt.Fprintf(notice, "%s\n", a2aDebugNotice)
 
 	return f, nil
 }

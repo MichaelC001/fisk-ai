@@ -514,6 +514,13 @@ func (p *Provider) Shutdown(ctx context.Context) (Delivery, error) {
 // instead, on the reasoning that a logger writing nowhere is always safe while one
 // writing to a dead buffer is the failure this exists to prevent. Calling restore is
 // optional; a command that owns the process to its end has nothing to restore to.
+//
+// restore runs once and later calls do nothing. That is not defensive tidiness either.
+// When nothing had been installed before, previous is OpenTelemetry's own delegating
+// handler, and handing that back a second time asks the SDK to make the delegator its
+// own delegate. It refuses, and says so through the standard log package rather than
+// through the logger set above, which puts a line on os.Stderr that no caller can
+// redirect: the one channel this whole function exists to close.
 func SetErrorHandler(w io.Writer) (restore func()) {
 	previous := otel.GetErrorHandler()
 
@@ -525,9 +532,13 @@ func SetErrorHandler(w io.Writer) (restore func()) {
 	// next to the run's own output, and the line is already prefixed as a warning.
 	otel.SetLogger(stdr.New(log.New(w, "warning: telemetry: ", 0)))
 
+	var once sync.Once
+
 	return func() {
-		otel.SetErrorHandler(previous)
-		otel.SetLogger(stdr.New(log.New(io.Discard, "", 0)))
+		once.Do(func() {
+			otel.SetErrorHandler(previous)
+			otel.SetLogger(stdr.New(log.New(io.Discard, "", 0)))
+		})
 	}
 }
 

@@ -6,6 +6,8 @@ package agenttest
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -104,6 +106,7 @@ type Queue struct {
 	mu       sync.Mutex
 	pending  []*serve.Work
 	outcomes []serve.Outcome
+	faults   []ScriptingFault
 	closed   bool
 	closes   int
 	wake     chan struct{}
@@ -122,23 +125,48 @@ func (q *Queue) Name() string { return q.name }
 // Submit offers work to whoever is serving the queue. It never blocks, and work
 // submitted while nothing is serving waits until something is.
 //
+// Nil work is not queued: it records a ScriptingFault and is reported in an error
+// wrapping ErrNotScripted, while the rest of the batch is submitted. A spec submitting
+// from a goroutine of its own reads the faults back through ScriptingFaults.
+//
 // Submitting to a closed queue is allowed and the work is never delivered, which is
 // what a queue a worker has drained away from looks like. Pending reports what is left.
-func (q *Queue) Submit(work ...*serve.Work) {
+func (q *Queue) Submit(work ...*serve.Work) error {
 	q.tb.Helper()
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	var faulted error
+
 	for i, w := range work {
 		if w == nil {
-			q.tb.Fatalf("agenttest: Queue.Submit work %d is nil", i)
+			fault := ScriptingFault{Call: "Submit", Subject: q.name, Missing: fmt.Sprintf("work %d is nil", i)}
+			q.faults = append(q.faults, fault)
+			faulted = errors.Join(faulted, fmt.Errorf("%w: %w", ErrNotScripted, fault))
+
+			continue
 		}
 
 		q.pending = append(q.pending, w)
 	}
 
 	q.broadcastLocked()
+
+	return faulted
+}
+
+// ScriptingFaults returns every submission the queue could not accept, in the order it
+// received them. A spec submitting only real work gets an empty slice. The copy is safe
+// to read from the spec goroutine while a server is running.
+//
+// This is not serve.FaultingEndpoint's Faults, which reports a channel's own error
+// stream. The Queue does not implement that interface.
+func (q *Queue) ScriptingFaults() []ScriptingFault {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return append([]ScriptingFault(nil), q.faults...)
 }
 
 // Next blocks until work is submitted, the queue is closed, or ctx ends. Every piece of

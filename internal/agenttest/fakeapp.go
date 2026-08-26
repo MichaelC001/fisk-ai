@@ -15,10 +15,13 @@
 package agenttest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/choria-io/fisk"
@@ -34,19 +37,76 @@ type FakeApp struct {
 }
 
 // NewFakeApp introspects app in-process to capture its genuine command model, then
-// writes an executable that replays that model on --fisk-introspect and echoes its
+// returns an executable that replays that model on --fisk-introspect and echoes its
 // arguments otherwise. It sets a no-op Terminate on app, since --fisk-introspect
 // would otherwise call os.Exit through fisk's default terminate.
+//
+// The executable is written once per process for each distinct command model and shared
+// by every later call that produces the same one, so a suite standing up the same
+// application in many tests writes one file rather than one per test. Nothing in the file
+// is per-test: it is read-only once written, and the working directory it reports is the
+// calling run's own.
 func NewFakeApp(tb testing.TB, app *fisk.Application) *FakeApp {
 	tb.Helper()
 
 	model := introspectJSON(tb, app)
 
-	dir := tb.TempDir()
-	jsonPath := filepath.Join(dir, "introspect.json")
-	err := os.WriteFile(jsonPath, model, 0o600)
+	appPath, err := fakeAppExecutable(model)
 	if err != nil {
-		tb.Fatalf("agenttest: writing introspect model: %v", err)
+		tb.Fatalf("agenttest: %v", err)
+	}
+
+	return &FakeApp{Path: appPath}
+}
+
+var (
+	fakeAppRootOnce sync.Once
+	fakeAppRoot     string
+	fakeAppRootErr  error
+
+	fakeAppMu    sync.Mutex
+	fakeAppPaths = map[string]string{}
+)
+
+// fakeAppExecutable returns the path of the executable that replays model, writing it and
+// the model beside it on the first call for that model. Entries are keyed on the model's
+// content hash and each gets its own subdirectory, so two applications never overwrite one
+// another and two calls carrying the same model produce byte-identical files. Callers
+// reach it from whatever goroutine they run on, so a mutex covers both the map and the
+// writes.
+//
+// The root directory is created once per process and is not registered with a testing.TB,
+// since it outlives every individual test. The operating system reclaims it as it does any
+// temporary directory a test process leaves behind.
+func fakeAppExecutable(model []byte) (string, error) {
+	sum := sha256.Sum256(model)
+	key := hex.EncodeToString(sum[:])
+
+	fakeAppMu.Lock()
+	defer fakeAppMu.Unlock()
+
+	appPath, ok := fakeAppPaths[key]
+	if ok {
+		return appPath, nil
+	}
+
+	fakeAppRootOnce.Do(func() {
+		fakeAppRoot, fakeAppRootErr = os.MkdirTemp("", "agenttest-fakeapp")
+	})
+	if fakeAppRootErr != nil {
+		return "", fmt.Errorf("creating fake application directory: %w", fakeAppRootErr)
+	}
+
+	dir := filepath.Join(fakeAppRoot, key)
+	err := os.MkdirAll(dir, 0o700)
+	if err != nil {
+		return "", fmt.Errorf("creating fake application directory: %w", err)
+	}
+
+	jsonPath := filepath.Join(dir, "introspect.json")
+	err = os.WriteFile(jsonPath, model, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("writing introspect model: %w", err)
 	}
 
 	// On --fisk-introspect the binary replays the captured model; otherwise it reports
@@ -55,13 +115,15 @@ func NewFakeApp(tb testing.TB, app *fisk.Application) *FakeApp {
 	// a tool call's output is predictable.
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\nprintf 'PWD=%%s\\n' \"$PWD\"\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; done\n", jsonPath)
 
-	appPath := filepath.Join(dir, "app")
+	appPath = filepath.Join(dir, "app")
 	err = os.WriteFile(appPath, []byte(script), 0o700)
 	if err != nil {
-		tb.Fatalf("agenttest: writing fake application: %v", err)
+		return "", fmt.Errorf("writing fake application: %w", err)
 	}
 
-	return &FakeApp{Path: appPath}
+	fakeAppPaths[key] = appPath
+
+	return appPath, nil
 }
 
 // introspectJSON drives app's real --fisk-introspect handler in-process and returns

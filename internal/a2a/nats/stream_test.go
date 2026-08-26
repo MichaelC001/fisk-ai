@@ -72,7 +72,7 @@ func drain(ctx context.Context, reader a2a.Reader) [][]byte {
 	}
 }
 
-var _ = Describe("Integration: a2a NATS reply set", func() {
+var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func() {
 	var ctx context.Context
 
 	BeforeEach(func() {
@@ -243,7 +243,7 @@ var _ = Describe("Integration: a2a NATS reply set", func() {
 	})
 })
 
-var _ = Describe("Integration: a2a NATS cancel", func() {
+var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 	var ctx context.Context
 
 	BeforeEach(func() {
@@ -365,7 +365,7 @@ func cancelAck(body []byte) *a2a.Ack {
 	return ack
 }
 
-var _ = Describe("Integration: a2a NATS elicit replies", func() {
+var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), func() {
 	var ctx context.Context
 
 	BeforeEach(func() {

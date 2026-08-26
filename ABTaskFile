@@ -141,7 +141,7 @@ commands:
                   go install github.com/onsi/ginkgo/v2/ginkgo
             {{ end }}
 
-            ginkgo -r --skip Integration {{ .Arguments.dir | escape }}
+            ginkgo -r --label-filter='!integration' {{ .Arguments.dir | escape }}
 
         - name: lint
           type: exec
