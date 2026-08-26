@@ -46,8 +46,28 @@ homebrew_casks:
     repository:
       owner: choria-io
       name: homebrew-tap
-    homepage: "https://github.com/choria-io/fisk-ai"
+    homepage: "https://choria.io/fisk-ai"
     description: Fisk Agent and MCP Creation Toolkit
+
+dockers_v2:
+  - dockerfile: Dockerfile.goreleaser
+    images:
+      - registry.choria.io/choria/fisk-ai
+    tags:
+      - "v{{ .Version }}"
+      - "{{ if .IsNightly }}nightly{{ end }}"
+      - "{{ if not .IsNightly }}latest{{ end }}"
+    labels:
+      "org.opencontainers.image.description": "Fisk Agent and MCP Creation Toolkit"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
+
+    platforms:
+      - linux/amd64
+      - linux/arm64
 
 checksum:
   name_template: "SHA256SUMS"
@@ -55,7 +75,7 @@ checksum:
 
 nfpms:
   - file_name_template: 'fisk-ai-{{.Version}}-{{ if eq .Arch "amd64" }}x86_64{{ else}}{{.Arch}}{{end}}{{if .Arm}}{{.Arm}}{{end}}'
-    homepage:  https://github.com/choria-io/fisk-ai
+    homepage:  https://choria.io/fisk-ai
     description: Fisk Agent and MCP Creation Toolkit
     maintainer: R.I. Pienaar <rip@devco.net>
     license: Apache 2.0
