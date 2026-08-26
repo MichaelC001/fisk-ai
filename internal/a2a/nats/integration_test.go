@@ -25,8 +25,9 @@ import (
 )
 
 // runNATS starts an embedded NATS server on a random port and returns a client
-// connection. Both are torn down when the spec ends. The Describe is labeled
-// Integration so the unit suite (ginkgo --skip Integration) does not run it.
+// connection. Both are torn down when the spec ends. The Describe carries
+// Label("integration") so the unit suite (ginkgo --label-filter='!integration')
+// does not run it.
 func runNATS() *nats.Conn {
 	GinkgoHelper()
 
@@ -92,7 +93,7 @@ func servingApp(name, body string) []toolkit.Tool {
 	return toolkit.Tools(tools)
 }
 
-var _ = Describe("Integration: a2a NATS round-trip", func() {
+var _ = Describe("Integration: a2a NATS round-trip", Label("integration"), func() {
 	var ctx context.Context
 
 	BeforeEach(func() {

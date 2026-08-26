@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-// These tests exercise harness.pii through the exported agent.Run API: what the model
+// These specs exercise harness.pii through the exported agent.Run API: what the model
 // receives, what a caller's own hook sees, and what the operator is told. The scanner
 // itself is covered in internal/pii; what is proved here is the wiring, the ordering
 // against a caller's hooks, and the two modes.
@@ -12,8 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"testing"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -57,7 +57,9 @@ func requestText(reqs []llm.Request) string {
 
 // leakyTool returns a custom tool whose output carries the address, standing in for the
 // grep over a mailbox or the log file that is where personal data actually arrives.
-func leakyTool(g *WithT) *functool.Tool {
+func leakyTool() *functool.Tool {
+	GinkgoHelper()
+
 	tool, err := functool.New(functool.Spec{
 		Name:        "read_record",
 		Description: "read a customer record",
@@ -66,248 +68,232 @@ func leakyTool(g *WithT) *functool.Tool {
 			return "customer: acme ltd, contact " + piiAddress + ", plan: enterprise", nil
 		},
 	})
-	g.Expect(err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred())
 
 	return tool
 }
 
-// TestPII_RedactsInitialPromptBeforeTheModelAndTheJournal proves the initial prompt is
-// scanned, that the redaction reaches the conversation the provider is sent (not only the
-// prompt slice the journal records), and that the operator is told.
-func TestPII_RedactsInitialPromptBeforeTheModelAndTheJournal(t *testing.T) {
-	g := NewWithT(t)
+var _ = Describe("harness.pii", func() {
+	// The initial prompt is scanned, the redaction reaches the conversation the provider
+	// is sent (not only the prompt slice the journal records), and the operator is told.
+	It("Should redact the initial prompt before the model and the journal", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("sent"))
+		events := agenttest.NewRecordingEvents()
+		store := agenttest.NewFakeSessionStore(GinkgoTB())
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("sent"))
-	events := agenttest.NewRecordingEvents()
-	store := agenttest.NewFakeSessionStore(t)
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:       agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeRedact)),
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{promptText},
+			Provider:     provider,
+			Checkpoint:   agent.Checkpoint{Enabled: true},
+			SessionStore: store,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:       agenttest.Config(t, app, agenttest.WithPII(config.PIIModeRedact)),
-		ConfigFile:   "agent.yaml",
-		Prompt:       []string{promptText},
-		Provider:     provider,
-		Checkpoint:   agent.Checkpoint{Enabled: true},
-		SessionStore: store,
-	}, events, agenttest.NewScriptedPrompter(t))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		// The model never saw the address, and did see the rest of the prompt.
+		sent := requestText(provider.Requests())
+		Expect(sent).NotTo(ContainSubstring(piiAddress))
+		Expect(sent).To(ContainSubstring("mail the report to"))
 
-	// The model never saw the address, and did see the rest of the prompt.
-	sent := requestText(provider.Requests())
-	g.Expect(sent).NotTo(ContainSubstring(piiAddress))
-	g.Expect(sent).To(ContainSubstring("mail the report to"))
+		// Neither did the journal, which is also what a resume would replay.
+		rs, lerr := store.Load(res.SessionID)
+		Expect(lerr).NotTo(HaveOccurred())
+		Expect(rs.Prompt).NotTo(ContainSubstring(piiAddress))
+		Expect(rs.Prompt).To(ContainSubstring("mail the report to"))
 
-	// Neither did the journal, which is also what a resume would replay.
-	rs, lerr := store.Load(res.SessionID)
-	g.Expect(lerr).NotTo(HaveOccurred())
-	g.Expect(rs.Prompt).NotTo(ContainSubstring(piiAddress))
-	g.Expect(rs.Prompt).To(ContainSubstring("mail the report to"))
+		Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeTrue())
+		for _, w := range events.Warnings() {
+			Expect(w.Name).NotTo(ContainSubstring(piiAddress))
+			Expect(strings.Join(w.Params, " ")).NotTo(ContainSubstring(piiAddress))
+		}
+	})
 
-	g.Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeTrue())
-	for _, w := range events.Warnings() {
-		g.Expect(w.Name).NotTo(ContainSubstring(piiAddress))
-		g.Expect(strings.Join(w.Params, " ")).NotTo(ContainSubstring(piiAddress))
-	}
-}
+	// Reject mode stops the run before a model call and says why without repeating the
+	// value.
+	It("Should reject the initial prompt", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		// No scripted responses: a model call would error, proving none is made.
+		provider := agenttest.NewScriptedProvider(GinkgoTB())
+		events := agenttest.NewRecordingEvents()
 
-// TestPII_RejectsInitialPrompt proves reject mode stops the run before a model call and
-// says why without repeating the value.
-func TestPII_RejectsInitialPrompt(t *testing.T) {
-	g := NewWithT(t)
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeReject)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{promptText},
+			Provider:   provider,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	// No scripted responses: a model call would error, proving none is made.
-	provider := agenttest.NewScriptedProvider(t)
-	events := agenttest.NewRecordingEvents()
+		Expect(err).To(MatchError(ContainSubstring("initial prompt was rejected")))
+		Expect(err).To(MatchError(ContainSubstring("harness.pii.mode is reject")))
+		Expect(err.Error()).NotTo(ContainSubstring(piiAddress))
+		Expect(provider.Requests()).To(BeEmpty())
+		Expect(events.HasWarning(agent.WarnPIIWithheld)).To(BeTrue())
+	})
 
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithPII(config.PIIModeReject)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{promptText},
-		Provider:   provider,
-	}, events, agenttest.NewScriptedPrompter(t))
+	// A run whose text has nothing personal in it is untouched and says nothing, so the
+	// feature is invisible until it acts.
+	It("Should leave clean text alone", func() {
+		const clean = "restart the payments service and summarize the logs"
 
-	g.Expect(err).To(MatchError(ContainSubstring("initial prompt was rejected")))
-	g.Expect(err).To(MatchError(ContainSubstring("harness.pii.mode is reject")))
-	g.Expect(err.Error()).NotTo(ContainSubstring(piiAddress))
-	g.Expect(provider.Requests()).To(BeEmpty())
-	g.Expect(events.HasWarning(agent.WarnPIIWithheld)).To(BeTrue())
-}
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
+		events := agenttest.NewRecordingEvents()
 
-// TestPII_LeavesCleanTextAlone proves a run whose text has nothing personal in it is
-// untouched and says nothing, so the feature is invisible until it acts.
-func TestPII_LeavesCleanTextAlone(t *testing.T) {
-	g := NewWithT(t)
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeRedact)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{clean},
+			Provider:   provider,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	const clean = "restart the payments service and summarize the logs"
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(requestText(provider.Requests())).To(ContainSubstring(clean))
+		Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeFalse())
+		Expect(events.HasWarning(agent.WarnPIIWithheld)).To(BeFalse())
+	})
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("done"))
-	events := agenttest.NewRecordingEvents()
+	// A tool result is scanned before the model, the journal or the trace sees it.
+	It("Should redact tool output", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), emptyFiskApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("call-1", "read_record", json.RawMessage(`{}`)),
+			agenttest.TextResponse("read it"),
+		)
+		events := agenttest.NewRecordingEvents()
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithPII(config.PIIModeRedact)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{clean},
-		Provider:   provider,
-	}, events, agenttest.NewScriptedPrompter(t))
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeRedact)),
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"read the record"},
+			Provider:    provider,
+			CustomTools: []toolkit.Tool{leakyTool()},
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
-	g.Expect(requestText(provider.Requests())).To(ContainSubstring(clean))
-	g.Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeFalse())
-	g.Expect(events.HasWarning(agent.WarnPIIWithheld)).To(BeFalse())
-}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-// TestPII_RedactsToolOutput proves a tool result is scanned before the model, the journal
-// or the trace sees it.
-func TestPII_RedactsToolOutput(t *testing.T) {
-	g := NewWithT(t)
+		sent := requestText(provider.Requests())
+		Expect(sent).NotTo(ContainSubstring(piiAddress))
+		Expect(sent).To(ContainSubstring("customer: acme ltd"))
 
-	app := agenttest.NewFakeApp(t, emptyFiskApp())
-	provider := agenttest.NewScriptedProvider(t,
-		agenttest.ToolUseResponse("call-1", "read_record", json.RawMessage(`{}`)),
-		agenttest.TextResponse("read it"),
-	)
-	events := agenttest.NewRecordingEvents()
+		// The operator's own screen shows what the model was given, not the raw output: the
+		// same trace crosses a2a to a caller who is not on this machine.
+		for _, tr := range events.ToolResults() {
+			Expect(tr.Output).NotTo(ContainSubstring(piiAddress))
+		}
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:      agenttest.Config(t, app, agenttest.WithPII(config.PIIModeRedact)),
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"read the record"},
-		Provider:    provider,
-		CustomTools: []toolkit.Tool{leakyTool(g)},
-	}, events, agenttest.NewScriptedPrompter(t))
+		Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeTrue())
+	})
 
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+	// Reject mode replaces a tool result with an error the model can act on rather than
+	// leaving a silent hole, and repeats no value in it.
+	It("Should withhold tool output", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), emptyFiskApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("call-1", "read_record", json.RawMessage(`{}`)),
+			agenttest.TextResponse("could not read it"),
+		)
+		events := agenttest.NewRecordingEvents()
 
-	sent := requestText(provider.Requests())
-	g.Expect(sent).NotTo(ContainSubstring(piiAddress))
-	g.Expect(sent).To(ContainSubstring("customer: acme ltd"))
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeReject)),
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"read the record"},
+			Provider:    provider,
+			CustomTools: []toolkit.Tool{leakyTool()},
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	// The operator's own screen shows what the model was given, not the raw output: the
-	// same trace crosses a2a to a caller who is not on this machine.
-	for _, tr := range events.ToolResults() {
-		g.Expect(tr.Output).NotTo(ContainSubstring(piiAddress))
-	}
+		Expect(err).NotTo(HaveOccurred())
 
-	g.Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeTrue())
-}
+		sent := requestText(provider.Requests())
+		Expect(sent).NotTo(ContainSubstring(piiAddress))
+		Expect(sent).NotTo(ContainSubstring("acme ltd"))
+		Expect(sent).To(ContainSubstring("withheld"))
+		Expect(sent).To(ContainSubstring("harness.pii.mode is reject"))
 
-// TestPII_WithholdsToolOutput proves reject mode replaces a tool result with an error the
-// model can act on rather than leaving a silent hole, and repeats no value in it.
-func TestPII_WithholdsToolOutput(t *testing.T) {
-	g := NewWithT(t)
+		Expect(events.HasWarning(agent.WarnPIIWithheld)).To(BeTrue())
+	})
 
-	app := agenttest.NewFakeApp(t, emptyFiskApp())
-	provider := agenttest.NewScriptedProvider(t,
-		agenttest.ToolUseResponse("call-1", "read_record", json.RawMessage(`{}`)),
-		agenttest.TextResponse("could not read it"),
-	)
-	events := agenttest.NewRecordingEvents()
+	// This is the ordering the feature exists for: a caller's own UserPromptSubmit runs
+	// first, and whatever it produced is scanned. A hook that introduces personal data
+	// does not thereby get it past the scan.
+	It("Should scan what a caller's hook left behind", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
+		events := agenttest.NewRecordingEvents()
 
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:      agenttest.Config(t, app, agenttest.WithPII(config.PIIModeReject)),
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"read the record"},
-		Provider:    provider,
-		CustomTools: []toolkit.Tool{leakyTool(g)},
-	}, events, agenttest.NewScriptedPrompter(t))
+		var saw agent.UserPromptSubmitInfo
 
-	g.Expect(err).NotTo(HaveOccurred())
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeRedact)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{"look up the contact"},
+			Provider:   provider,
+			Hooks: agent.Hooks{
+				UserPromptSubmit: func(_ context.Context, in agent.UserPromptSubmitInfo) (agent.UserPromptSubmitResult, error) {
+					saw = in
 
-	sent := requestText(provider.Requests())
-	g.Expect(sent).NotTo(ContainSubstring(piiAddress))
-	g.Expect(sent).NotTo(ContainSubstring("acme ltd"))
-	g.Expect(sent).To(ContainSubstring("withheld"))
-	g.Expect(sent).To(ContainSubstring("harness.pii.mode is reject"))
-
-	g.Expect(events.HasWarning(agent.WarnPIIWithheld)).To(BeTrue())
-}
-
-// TestPII_ScansWhatACallersHookLeftBehind is the ordering the feature exists for: a
-// caller's own UserPromptSubmit runs first, and whatever it produced is scanned. A hook
-// that introduces personal data does not thereby get it past the scan.
-func TestPII_ScansWhatACallersHookLeftBehind(t *testing.T) {
-	g := NewWithT(t)
-
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("done"))
-	events := agenttest.NewRecordingEvents()
-
-	var saw agent.UserPromptSubmitInfo
-
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithPII(config.PIIModeRedact)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{"look up the contact"},
-		Provider:   provider,
-		Hooks: agent.Hooks{
-			UserPromptSubmit: func(_ context.Context, in agent.UserPromptSubmitInfo) (agent.UserPromptSubmitResult, error) {
-				saw = in
-
-				return agent.UserPromptSubmitResult{Rewrite: "mail it to " + piiAddress}, nil
+					return agent.UserPromptSubmitResult{Rewrite: "mail it to " + piiAddress}, nil
+				},
 			},
-		},
-	}, events, agenttest.NewScriptedPrompter(t))
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 
-	// The caller's hook saw the operator's text, unscanned, since nothing has acted yet.
-	g.Expect(saw.Text).To(Equal("look up the contact"))
-	g.Expect(saw.Initial).To(BeTrue())
+		// The caller's hook saw the operator's text, unscanned, since nothing has acted yet.
+		Expect(saw.Text).To(Equal("look up the contact"))
+		Expect(saw.Initial).To(BeTrue())
 
-	// The address the hook introduced did not reach the model.
-	sent := requestText(provider.Requests())
-	g.Expect(sent).NotTo(ContainSubstring(piiAddress))
-	g.Expect(sent).To(ContainSubstring("mail it to"))
-}
+		// The address the hook introduced did not reach the model.
+		sent := requestText(provider.Requests())
+		Expect(sent).NotTo(ContainSubstring(piiAddress))
+		Expect(sent).To(ContainSubstring("mail it to"))
+	})
 
-// TestPII_KeepsACallersDeny proves a caller's deny is answered as-is: nothing is
-// entering, so nothing is scanned and the caller's own reason is what the run reports.
-func TestPII_KeepsACallersDeny(t *testing.T) {
-	g := NewWithT(t)
+	// A caller's deny is answered as-is: nothing is entering, so nothing is scanned and
+	// the caller's own reason is what the run reports.
+	It("Should keep a caller's deny", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB())
+		events := agenttest.NewRecordingEvents()
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t)
-	events := agenttest.NewRecordingEvents()
-
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithPII(config.PIIModeRedact)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{promptText},
-		Provider:   provider,
-		Hooks: agent.Hooks{
-			UserPromptSubmit: func(context.Context, agent.UserPromptSubmitInfo) (agent.UserPromptSubmitResult, error) {
-				return agent.UserPromptSubmitResult{Deny: true, DenyReason: "blocked by policy"}, nil
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeRedact)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{promptText},
+			Provider:   provider,
+			Hooks: agent.Hooks{
+				UserPromptSubmit: func(context.Context, agent.UserPromptSubmitInfo) (agent.UserPromptSubmitResult, error) {
+					return agent.UserPromptSubmitResult{Deny: true, DenyReason: "blocked by policy"}, nil
+				},
 			},
-		},
-	}, events, agenttest.NewScriptedPrompter(t))
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	g.Expect(err).To(MatchError(ContainSubstring("blocked by policy")))
-	g.Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeFalse())
-}
+		Expect(err).To(MatchError(ContainSubstring("blocked by policy")))
+		Expect(events.HasWarning(agent.WarnPIIRedacted)).To(BeFalse())
+	})
 
-// TestPII_OffScansNothing proves the off mode leaves the text as the operator wrote it.
-func TestPII_OffScansNothing(t *testing.T) {
-	g := NewWithT(t)
+	// The off mode leaves the text as the operator wrote it.
+	It("Should scan nothing when off", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("sent"))
+		events := agenttest.NewRecordingEvents()
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t, agenttest.TextResponse("sent"))
-	events := agenttest.NewRecordingEvents()
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithPII(config.PIIModeOff)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{promptText},
+			Provider:   provider,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithPII(config.PIIModeOff)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{promptText},
-		Provider:   provider,
-	}, events, agenttest.NewScriptedPrompter(t))
-
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(requestText(provider.Requests())).To(ContainSubstring(piiAddress))
-	g.Expect(events.Warnings()).To(BeEmpty())
-}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requestText(provider.Requests())).To(ContainSubstring(piiAddress))
+		Expect(events.Warnings()).To(BeEmpty())
+	})
+})

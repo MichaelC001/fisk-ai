@@ -16,7 +16,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/conns"
 )
 
-var _ = Describe("Integration: caller context", func() {
+var _ = Describe("Integration: caller context", Label("integration"), func() {
 	// serveCaller stands a transport up and captures the caller it hands its handler for
 	// one request carrying body.
 	serveCaller := func(body []byte) a2a.Caller {

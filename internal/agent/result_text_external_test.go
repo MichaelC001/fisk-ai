@@ -9,8 +9,8 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
-	"testing"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
@@ -19,77 +19,71 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
-// TestResultText_ReportsTheFinalAnswer covers the ordinary case: the run completes and
-// Text is the terminal turn's prose, concatenated across its text blocks.
-func TestResultText_ReportsTheFinalAnswer(t *testing.T) {
-	g := NewWithT(t)
+var _ = Describe("Result.Text", func() {
+	// The ordinary case: the run completes and Text is the terminal turn's prose,
+	// concatenated across its text blocks.
+	It("Should report the final answer", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), &llm.Response{
+			StopReason: llm.StopEndTurn,
+			Content: []llm.ContentBlock{
+				{Text: &llm.TextBlock{Text: "the answer is "}},
+				{Text: &llm.TextBlock{Text: "42"}},
+			},
+		})
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t, &llm.Response{
-		StopReason: llm.StopEndTurn,
-		Content: []llm.ContentBlock{
-			{Text: &llm.TextBlock{Text: "the answer is "}},
-			{Text: &llm.TextBlock{Text: "42"}},
-		},
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{"go"},
+			Provider:   provider,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(res.Text).To(Equal("the answer is 42"))
 	})
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{"go"},
-		Provider:   provider,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	// This is why the field exists. A run stopped by the iteration cap never produces a
+	// turn marked terminal, so a caller watching only for one would record nothing, but
+	// the text the model had reached is still the best account of where it got to.
+	It("Should survive a non-terminal ending", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), &llm.Response{
+			StopReason: llm.StopToolUse,
+			Content: []llm.ContentBlock{
+				{Text: &llm.TextBlock{Text: "checking the subject first"}},
+				{ToolUse: &llm.ToolUseBlock{ID: "call-1", Name: "do", Input: json.RawMessage(`{"subject":"x"}`)}},
+			},
+		})
 
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
-	g.Expect(res.Text).To(Equal("the answer is 42"))
-}
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithMaxIterations(1)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{"keep working"},
+			Provider:   provider,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-// TestResultText_SurvivesANonTerminalEnding is why the field exists. A run stopped by
-// the iteration cap never produces a turn marked terminal, so a caller watching only
-// for one would record nothing, but the text the model had reached is still the best
-// account of where it got to.
-func TestResultText_SurvivesANonTerminalEnding(t *testing.T) {
-	g := NewWithT(t)
-
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t, &llm.Response{
-		StopReason: llm.StopToolUse,
-		Content: []llm.ContentBlock{
-			{Text: &llm.TextBlock{Text: "checking the subject first"}},
-			{ToolUse: &llm.ToolUseBlock{ID: "call-1", Name: "do", Input: json.RawMessage(`{"subject":"x"}`)}},
-		},
+		Expect(err).To(MatchError(ContainSubstring("max iterations")))
+		Expect(res.Reason).To(Equal(runstate.ReasonMaxIterations))
+		Expect(res.Text).To(Equal("checking the subject first"))
 	})
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithMaxIterations(1)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{"keep working"},
-		Provider:   provider,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	// A run that only ever called tools reports no answer rather than inventing one.
+	It("Should be empty when nothing was said", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		provider := agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("call-1", "do", json.RawMessage(`{"subject":"x"}`)),
+		)
 
-	g.Expect(err).To(MatchError(ContainSubstring("max iterations")))
-	g.Expect(res.Reason).To(Equal(runstate.ReasonMaxIterations))
-	g.Expect(res.Text).To(Equal("checking the subject first"))
-}
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:     agenttest.Config(GinkgoTB(), app, agenttest.WithMaxIterations(1)),
+			ConfigFile: "agent.yaml",
+			Prompt:     []string{"keep working"},
+			Provider:   provider,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-// TestResultText_IsEmptyWhenNothingWasSaid proves a run that only ever called tools
-// reports no answer rather than inventing one.
-func TestResultText_IsEmptyWhenNothingWasSaid(t *testing.T) {
-	g := NewWithT(t)
-
-	app := agenttest.NewFakeApp(t, exampleApp())
-	provider := agenttest.NewScriptedProvider(t,
-		agenttest.ToolUseResponse("call-1", "do", json.RawMessage(`{"subject":"x"}`)),
-	)
-
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:     agenttest.Config(t, app, agenttest.WithMaxIterations(1)),
-		ConfigFile: "agent.yaml",
-		Prompt:     []string{"keep working"},
-		Provider:   provider,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-
-	g.Expect(err).To(MatchError(ContainSubstring("max iterations")))
-	g.Expect(res.Text).To(BeEmpty())
-}
+		Expect(err).To(MatchError(ContainSubstring("max iterations")))
+		Expect(res.Text).To(BeEmpty())
+	})
+})

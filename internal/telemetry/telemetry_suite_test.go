@@ -5,6 +5,7 @@
 package telemetry
 
 import (
+	"io"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,6 +19,17 @@ func TestTelemetry(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Internal/Telemetry")
 }
+
+// The specs that drive a refused export would otherwise print through OpenTelemetry's
+// default handler, which writes to the log package's own os.Stderr and so lands in the
+// suite's output rather than anywhere a spec can see. A per-spec handler cannot close
+// that: containers are shuffled on every run, so any spec can be ordered into a
+// position where nothing is installed, which is why the leak came and went with the
+// seed. The sibling Bootstrap suite installs the same one for the same reason. Specs
+// asserting what a handler receives install their own over this and restore to it.
+var _ = BeforeSuite(func() {
+	SetErrorHandler(io.Discard)
+})
 
 // envFrom returns an environment reader over a fixed map, the injection point every
 // spec here uses instead of setting process environment variables. Nothing in this

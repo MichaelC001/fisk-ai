@@ -10,9 +10,9 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"testing"
 
-	"github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -20,7 +20,7 @@ import (
 )
 
 // newSlogCapture returns a SlogEvents writing JSON to buf and the buf to read back.
-// A JSON handler makes each record a parseable object so a test asserts on the
+// A JSON handler makes each record a parseable object so a spec asserts on the
 // structured attributes rather than on prose.
 func newSlogCapture(verbose bool) (*agent.SlogEvents, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
@@ -30,8 +30,8 @@ func newSlogCapture(verbose bool) (*agent.SlogEvents, *bytes.Buffer) {
 }
 
 // records parses the captured buffer into one map per JSON log line.
-func records(t *testing.T, buf *bytes.Buffer) []map[string]any {
-	t.Helper()
+func records(buf *bytes.Buffer) []map[string]any {
+	GinkgoHelper()
 
 	var out []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
@@ -39,115 +39,107 @@ func records(t *testing.T, buf *bytes.Buffer) []map[string]any {
 			continue
 		}
 		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("bad log line %q: %v", line, err)
-		}
+		Expect(json.Unmarshal([]byte(line), &rec)).To(Succeed(), "bad log line %q", line)
 		out = append(out, rec)
 	}
 
 	return out
 }
 
-func TestSlogEvents_Starting(t *testing.T) {
-	g := gomega.NewWithT(t)
-	ev, buf := newSlogCapture(false)
+var _ = Describe("SlogEvents", func() {
+	It("Should log the run's tool count, session and resumed flag on Starting", func() {
+		ev, buf := newSlogCapture(false)
 
-	ev.Starting(agent.RunInfo{Tools: 3, SessionID: "sess-1", Resumed: true})
+		ev.Starting(agent.RunInfo{Tools: 3, SessionID: "sess-1", Resumed: true})
 
-	recs := records(t, buf)
-	g.Expect(recs).To(gomega.HaveLen(1))
-	g.Expect(recs[0]["msg"]).To(gomega.Equal("agent run starting"))
-	g.Expect(recs[0]["tools"]).To(gomega.BeEquivalentTo(3))
-	g.Expect(recs[0]["session_id"]).To(gomega.Equal("sess-1"))
-	g.Expect(recs[0]["resumed"]).To(gomega.Equal(true))
-}
+		recs := records(buf)
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0]["msg"]).To(Equal("agent run starting"))
+		Expect(recs[0]["tools"]).To(BeEquivalentTo(3))
+		Expect(recs[0]["session_id"]).To(Equal("sess-1"))
+		Expect(recs[0]["resumed"]).To(Equal(true))
+	})
 
-func TestSlogEvents_WarnCarriesKindAndFields(t *testing.T) {
-	g := gomega.NewWithT(t)
-	ev, buf := newSlogCapture(false)
+	It("Should carry the kind and fields of a warning", func() {
+		ev, buf := newSlogCapture(false)
 
-	ev.Warn(agent.Warning{Kind: agent.WarnConfirmNoTerminal, Count: 2})
+		ev.Warn(agent.Warning{Kind: agent.WarnConfirmNoTerminal, Count: 2})
 
-	recs := records(t, buf)
-	g.Expect(recs).To(gomega.HaveLen(1))
-	g.Expect(recs[0]["level"]).To(gomega.Equal("WARN"))
-	g.Expect(recs[0]["kind"]).To(gomega.Equal("confirm_no_terminal"))
-	g.Expect(recs[0]["count"]).To(gomega.BeEquivalentTo(2))
-}
+		recs := records(buf)
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0]["level"]).To(Equal("WARN"))
+		Expect(recs[0]["kind"]).To(Equal("confirm_no_terminal"))
+		Expect(recs[0]["count"]).To(BeEquivalentTo(2))
+	})
 
-func TestSlogEvents_LLMRequestVerboseOnly(t *testing.T) {
-	g := gomega.NewWithT(t)
+	It("Should log an LLM request only when verbose", func() {
+		quiet, quietBuf := newSlogCapture(false)
+		quiet.LLMRequest("one request")
+		Expect(quietBuf.Len()).To(BeZero(), "non-verbose must drop LLMRequest")
 
-	quiet, quietBuf := newSlogCapture(false)
-	quiet.LLMRequest("one request")
-	g.Expect(quietBuf.Len()).To(gomega.BeZero(), "non-verbose must drop LLMRequest")
+		loud, loudBuf := newSlogCapture(true)
+		loud.LLMRequest("one request")
+		recs := records(loudBuf)
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0]["level"]).To(Equal("DEBUG"))
+		Expect(recs[0]["summary"]).To(Equal("one request"))
+	})
 
-	loud, loudBuf := newSlogCapture(true)
-	loud.LLMRequest("one request")
-	recs := records(t, loudBuf)
-	g.Expect(recs).To(gomega.HaveLen(1))
-	g.Expect(recs[0]["level"]).To(gomega.Equal("DEBUG"))
-	g.Expect(recs[0]["summary"]).To(gomega.Equal("one request"))
-}
+	It("Should truncate a large tool result and say so", func() {
+		ev, buf := newSlogCapture(false)
 
-func TestSlogEvents_ToolResultTruncates(t *testing.T) {
-	g := gomega.NewWithT(t)
-	ev, buf := newSlogCapture(false)
+		big := strings.Repeat("x", 5000)
+		ev.ToolResult(agent.ToolResultTrace{ProviderKind: toolkit.KindApplication, Output: big, IsError: true})
 
-	big := strings.Repeat("x", 5000)
-	ev.ToolResult(agent.ToolResultTrace{ProviderKind: toolkit.KindApplication, Output: big, IsError: true})
+		recs := records(buf)
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0]["kind"]).To(Equal("application"))
+		Expect(recs[0]["is_error"]).To(Equal(true))
+		Expect(recs[0]["truncated"]).To(Equal(true))
+		Expect(recs[0]["output"]).To(HaveLen(2048))
+	})
 
-	recs := records(t, buf)
-	g.Expect(recs).To(gomega.HaveLen(1))
-	g.Expect(recs[0]["kind"]).To(gomega.Equal("application"))
-	g.Expect(recs[0]["is_error"]).To(gomega.Equal(true))
-	g.Expect(recs[0]["truncated"]).To(gomega.Equal(true))
-	g.Expect(recs[0]["output"]).To(gomega.HaveLen(2048))
-}
+	It("Should log a panic value and its stack at error level", func() {
+		ev, buf := newSlogCapture(false)
 
-func TestSlogEvents_Panicked(t *testing.T) {
-	g := gomega.NewWithT(t)
-	ev, buf := newSlogCapture(false)
+		ev.Panicked("boom", []byte("goroutine 1 [running]:\nmain.main()"))
 
-	ev.Panicked("boom", []byte("goroutine 1 [running]:\nmain.main()"))
+		recs := records(buf)
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0]["level"]).To(Equal("ERROR"))
+		Expect(recs[0]["value"]).To(Equal("boom"))
+		Expect(recs[0]["stack"]).To(ContainSubstring("goroutine 1"))
+	})
 
-	recs := records(t, buf)
-	g.Expect(recs).To(gomega.HaveLen(1))
-	g.Expect(recs[0]["level"]).To(gomega.Equal("ERROR"))
-	g.Expect(recs[0]["value"]).To(gomega.Equal("boom"))
-	g.Expect(recs[0]["stack"]).To(gomega.ContainSubstring("goroutine 1"))
-}
+	It("Should log a message's stop reason, token usage and terminal flag", func() {
+		ev, buf := newSlogCapture(false)
 
-func TestSlogEvents_Message(t *testing.T) {
-	g := gomega.NewWithT(t)
-	ev, buf := newSlogCapture(false)
+		ev.Message(llm.Response{StopReason: llm.StopReason("end_turn"), Usage: llm.Usage{In: 10, Out: 20}}, true)
 
-	ev.Message(llm.Response{StopReason: llm.StopReason("end_turn"), Usage: llm.Usage{In: 10, Out: 20}}, true)
+		recs := records(buf)
+		Expect(recs).To(HaveLen(1))
+		Expect(recs[0]["terminal"]).To(Equal(true))
+		Expect(recs[0]["stop_reason"]).To(Equal("end_turn"))
+		Expect(recs[0]["tokens_in"]).To(BeEquivalentTo(10))
+		Expect(recs[0]["tokens_out"]).To(BeEquivalentTo(20))
+	})
 
-	recs := records(t, buf)
-	g.Expect(recs).To(gomega.HaveLen(1))
-	g.Expect(recs[0]["terminal"]).To(gomega.Equal(true))
-	g.Expect(recs[0]["stop_reason"]).To(gomega.Equal("end_turn"))
-	g.Expect(recs[0]["tokens_in"]).To(gomega.BeEquivalentTo(10))
-	g.Expect(recs[0]["tokens_out"]).To(gomega.BeEquivalentTo(20))
-}
+	// Several goroutines point at one SlogEvents, as a server aggregating many runs
+	// would, and every record still lands intact.
+	It("Should land every record under concurrent use", func() {
+		ev, buf := newSlogCapture(false)
 
-// TestSlogEvents_ConcurrentUse points several goroutines at one SlogEvents, as a
-// server aggregating many runs would, and asserts every record still lands intact.
-func TestSlogEvents_ConcurrentUse(t *testing.T) {
-	g := gomega.NewWithT(t)
-	ev, buf := newSlogCapture(false)
+		const runs = 20
+		var wg sync.WaitGroup
+		wg.Add(runs)
+		for i := 0; i < runs; i++ {
+			go func() {
+				defer wg.Done()
+				ev.ToolCall(agent.ToolTrace{Name: "t"})
+			}()
+		}
+		wg.Wait()
 
-	const runs = 20
-	var wg sync.WaitGroup
-	wg.Add(runs)
-	for i := 0; i < runs; i++ {
-		go func() {
-			defer wg.Done()
-			ev.ToolCall(agent.ToolTrace{Name: "t"})
-		}()
-	}
-	wg.Wait()
-
-	g.Expect(records(t, buf)).To(gomega.HaveLen(runs))
-}
+		Expect(records(buf)).To(HaveLen(runs))
+	})
+})

@@ -20,8 +20,8 @@ import (
 
 // runJetStream starts an embedded JetStream-enabled NATS server on a random port
 // and returns a client connection. Both are torn down when the spec ends. The
-// Describe is labeled Integration so the unit suite (ginkgo --skip Integration)
-// does not run it.
+// Describe carries Label("integration") so the unit suite
+// (ginkgo --label-filter='!integration') does not run it.
 func runJetStream() *nats.Conn {
 	GinkgoHelper()
 
@@ -39,7 +39,7 @@ func runJetStream() *nats.Conn {
 	return nc
 }
 
-var _ = Describe("Integration: jetstream memory", func() {
+var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 	var (
 		ctx context.Context
 		nc  *nats.Conn

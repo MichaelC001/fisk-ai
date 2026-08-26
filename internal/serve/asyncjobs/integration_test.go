@@ -255,7 +255,7 @@ func (w *worker) stop() {
 	Expect(w.ch.Close()).To(Succeed())
 }
 
-var _ = Describe("Integration: asyncjobs channel", func() {
+var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() {
 	var nc *nats.Conn
 
 	BeforeEach(func() {

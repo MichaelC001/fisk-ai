@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -114,27 +115,27 @@ func (f *fakeEmbeddings) Break() { f.broken.Store(true) }
 
 // knowledgeFixture writes a small corpus, builds a hybrid index over it against emb, and
 // returns the directory the index lives in.
-func knowledgeFixture(t *testing.T, g *WithT, emb *fakeEmbeddings) string {
-	t.Helper()
+func knowledgeFixture(emb *fakeEmbeddings) string {
+	GinkgoHelper()
 
-	tmp := t.TempDir()
+	tmp := GinkgoT().TempDir()
 	storeDir := filepath.Join(tmp, "knowledge")
 	docsDir := filepath.Join(tmp, "docs")
 
-	g.Expect(os.MkdirAll(docsDir, 0o755)).To(Succeed())
-	g.Expect(os.WriteFile(filepath.Join(docsDir, "backpressure.md"),
+	Expect(os.MkdirAll(docsDir, 0o755)).To(Succeed())
+	Expect(os.WriteFile(filepath.Join(docsDir, "backpressure.md"),
 		[]byte("# Design\n\n## Backpressure\n\nThe queue applies backpressure when the buffer is full so producers slow down.\n"),
 		0o644)).To(Succeed())
-	g.Expect(os.WriteFile(filepath.Join(docsDir, "auth.md"),
+	Expect(os.WriteFile(filepath.Join(docsDir, "auth.md"),
 		[]byte("# Authentication\n\nTokens are validated against the issuer before any request proceeds.\n"),
 		0o644)).To(Succeed())
 
 	w, err := rag.OpenWriter(knowledgeConfig(storeDir, emb.URL()), "")
-	g.Expect(err).ToNot(HaveOccurred())
+	Expect(err).ToNot(HaveOccurred())
 	defer w.Close()
 
 	_, err = w.Index(context.Background(), []string{docsDir}, rag.IndexOptions{Reconcile: true})
-	g.Expect(err).ToNot(HaveOccurred())
+	Expect(err).ToNot(HaveOccurred())
 
 	return storeDir
 }
@@ -160,11 +161,11 @@ func knowledgeConfig(dir string, baseURL string) *config.Config {
 
 // exportKnowledgeRun drives a run whose model searches the knowledge index, through the
 // real export path into rx.
-func exportKnowledgeRun(t *testing.T, g *WithT, rx *agenttest.OTLPReceiver, storeDir string, baseURL string) {
-	t.Helper()
+func exportKnowledgeRun(rx *agenttest.OTLPReceiver, storeDir string, baseURL string) {
+	GinkgoHelper()
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app, func(c *config.Config) {
+	app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+	cfg := agenttest.Config(GinkgoTB(), app, func(c *config.Config) {
 		c.Harness.RAG = knowledgeConfig(storeDir, baseURL).Harness.RAG
 		c.Telemetry.Enabled = true
 		c.Telemetry.Endpoint = rx.Endpoint()
@@ -174,7 +175,7 @@ func exportKnowledgeRun(t *testing.T, g *WithT, rx *agenttest.OTLPReceiver, stor
 		Config:  cfg,
 		Version: util.Version(),
 	})
-	g.Expect(err).ToNot(HaveOccurred())
+	Expect(err).ToNot(HaveOccurred())
 
 	responses := []*llm.Response{
 		exportUsage(agenttest.ToolUseResponse("call_1", "knowledge_search", []byte(`{"query":"backpressure buffer"}`))),
@@ -185,119 +186,115 @@ func exportKnowledgeRun(t *testing.T, g *WithT, rx *agenttest.OTLPReceiver, stor
 		Config:     cfg,
 		ConfigFile: "agent.yaml",
 		Prompt:     []string{"how does backpressure work"},
-		Provider:   agenttest.NewScriptedProvider(t, responses...),
+		Provider:   agenttest.NewScriptedProvider(GinkgoTB(), responses...),
 		Telemetry:  tel.Provider,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-	g.Expect(err).ToNot(HaveOccurred())
+	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+	Expect(err).ToNot(HaveOccurred())
 
 	delivery, err := tel.Close()
-	g.Expect(err).ToNot(HaveOccurred())
-	g.Expect(delivery.Complete()).To(BeTrue(),
+	Expect(err).ToNot(HaveOccurred())
+	Expect(delivery.Complete()).To(BeTrue(),
 		"the receiver did not accept everything: %d of %d spans, err=%v",
 		delivery.SpansDelivered, delivery.SpansAttempted, delivery.Err)
 }
 
-// TestExport_EmbeddingsNestUnderRetrieval is the assertion the StartSearch doc comment
-// calls for: the two spans have every name and attribute right whether they nest or not,
-// and only a comparison of parent ids tells them apart.
-func TestExport_EmbeddingsNestUnderRetrieval(t *testing.T) {
-	g := NewWithT(t)
+var _ = Describe("OTLP knowledge export", func() {
+	// This is the assertion the StartSearch doc comment calls for: the two spans have every
+	// name and attribute right whether they nest or not, and only a comparison of parent
+	// ids tells them apart.
+	It("Should nest embeddings under retrieval", func() {
+		emb := newFakeEmbeddings(GinkgoTB())
+		storeDir := knowledgeFixture(emb)
 
-	emb := newFakeEmbeddings(t)
-	storeDir := knowledgeFixture(t, g, emb)
+		rx := agenttest.NewOTLPReceiver(GinkgoTB())
+		exportKnowledgeRun(rx, storeDir, emb.URL())
 
-	rx := agenttest.NewOTLPReceiver(t)
-	exportKnowledgeRun(t, g, rx, storeDir, emb.URL())
+		retrieval := rx.Span(GinkgoTB(), "retrieval")
 
-	retrieval := rx.Span(t, "retrieval")
+		// One hybrid search makes two embeddings requests, so two spans: the dimension probe
+		// that checks the live model against the index's pinned manifest, and the query
+		// embedding itself. Every one of them has to nest, which is a stronger assertion than
+		// picking one: a threading mistake that reparented only the second would pass any
+		// spec that looked at a single span.
+		embeddings := rx.SpansNamed("embeddings ")
+		Expect(embeddings).To(HaveLen(2))
 
-	// One hybrid search makes two embeddings requests, so two spans: the dimension probe
-	// that checks the live model against the index's pinned manifest, and the query
-	// embedding itself. Every one of them has to nest, which is a stronger assertion than
-	// picking one: a threading mistake that reparented only the second would pass any
-	// spec that looked at a single span.
-	embeddings := rx.SpansNamed("embeddings ")
-	g.Expect(embeddings).To(HaveLen(2))
+		for _, s := range embeddings {
+			Expect(s.ParentSpanID).To(Equal(retrieval.SpanID),
+				"embeddings arrived parented to %q rather than to the retrieval span %q, so a backend renders it as an unrelated trace",
+				s.ParentSpanID, retrieval.SpanID)
+			Expect(s.TraceID).To(Equal(retrieval.TraceID))
+		}
 
-	for _, s := range embeddings {
-		g.Expect(s.ParentSpanID).To(Equal(retrieval.SpanID),
-			"embeddings arrived parented to %q rather than to the retrieval span %q, so a backend renders it as an unrelated trace",
-			s.ParentSpanID, retrieval.SpanID)
-		g.Expect(s.TraceID).To(Equal(retrieval.TraceID))
-	}
+		Expect(rx.ChildrenOf(retrieval)).To(HaveLen(len(embeddings)))
 
-	g.Expect(rx.ChildrenOf(retrieval)).To(HaveLen(len(embeddings)))
+		// The retrieval span is itself a child rather than a root, which is what puts the
+		// whole knowledge subtree under the tool call that asked for it.
+		Expect(retrieval.ParentSpanID).ToNot(BeEmpty())
+		tool := rx.Span(GinkgoTB(), "execute_tool knowledge_search")
+		Expect(retrieval.ParentSpanID).To(Equal(tool.SpanID))
+	})
 
-	// The retrieval span is itself a child rather than a root, which is what puts the
-	// whole knowledge subtree under the tool call that asked for it.
-	g.Expect(retrieval.ParentSpanID).ToNot(BeEmpty())
-	tool := rx.Span(t, "execute_tool knowledge_search")
-	g.Expect(retrieval.ParentSpanID).To(Equal(tool.SpanID))
-}
+	// This is the first counter in this work to be exported, so the first Sum rather than
+	// Histogram. A counter arriving shaped as something else is correct in memory and
+	// answers nothing in a backend.
+	It("Should cross the wire with the degraded search counter", func() {
+		emb := newFakeEmbeddings(GinkgoTB())
+		storeDir := knowledgeFixture(emb)
 
-// TestExport_DegradedSearchCounterCrossesTheWire is the first counter in this work to be
-// exported, so the first Sum rather than Histogram. A counter arriving shaped as
-// something else is correct in memory and answers nothing in a backend.
-func TestExport_DegradedSearchCounterCrossesTheWire(t *testing.T) {
-	g := NewWithT(t)
+		// The index is built; from here every embeddings request fails, so the search
+		// degrades from hybrid to lexical rather than failing.
+		emb.Break()
 
-	emb := newFakeEmbeddings(t)
-	storeDir := knowledgeFixture(t, g, emb)
+		rx := agenttest.NewOTLPReceiver(GinkgoTB())
+		exportKnowledgeRun(rx, storeDir, emb.URL())
 
-	// The index is built; from here every embeddings request fails, so the search
-	// degrades from hybrid to lexical rather than failing.
-	emb.Break()
+		m := rx.Metric(GinkgoTB(), telemetry.MetricKnowledgeDegradedSearches)
+		Expect(m.Histogram).To(BeFalse(),
+			"%s is a counter and must arrive as a Sum, not a Histogram", telemetry.MetricKnowledgeDegradedSearches)
+		Expect(m.IntValue).To(BeNumerically(">", 0))
 
-	rx := agenttest.NewOTLPReceiver(t)
-	exportKnowledgeRun(t, g, rx, storeDir, emb.URL())
+		// The reason is what makes the counter actionable: an unreachable embeddings server
+		// and an unreadable index manifest both degrade a search and have different fixes.
+		reason, ok := m.Attributes[string(telemetry.AttrKnowledgeDegradedReason)]
+		Expect(ok).To(BeTrue(), "the counter arrived with no degrade reason: %v", m.Attributes)
+		Expect(reason).To(Equal(telemetry.DegradeEmbeddings.String()))
+	})
 
-	m := rx.Metric(t, telemetry.MetricKnowledgeDegradedSearches)
-	g.Expect(m.Histogram).To(BeFalse(),
-		"%s is a counter and must arrive as a Sum, not a Histogram", telemetry.MetricKnowledgeDegradedSearches)
-	g.Expect(m.IntValue).To(BeNumerically(">", 0))
+	// The embeddings span still arrives, and still nests, when the request it covers
+	// failed. A degraded search that exported no embeddings span would leave the counter
+	// with nothing explaining it.
+	It("Should record the failed embeddings of a degraded search", func() {
+		emb := newFakeEmbeddings(GinkgoTB())
+		storeDir := knowledgeFixture(emb)
+		emb.Break()
 
-	// The reason is what makes the counter actionable: an unreachable embeddings server
-	// and an unreadable index manifest both degrade a search and have different fixes.
-	reason, ok := m.Attributes[string(telemetry.AttrKnowledgeDegradedReason)]
-	g.Expect(ok).To(BeTrue(), "the counter arrived with no degrade reason: %v", m.Attributes)
-	g.Expect(reason).To(Equal(telemetry.DegradeEmbeddings.String()))
-}
+		rx := agenttest.NewOTLPReceiver(GinkgoTB())
+		exportKnowledgeRun(rx, storeDir, emb.URL())
 
-// TestExport_DegradedSearchRecordsTheFailedEmbeddings asserts the embeddings span still
-// arrives, and still nests, when the request it covers failed. A degraded search that
-// exported no embeddings span would leave the counter with nothing explaining it.
-func TestExport_DegradedSearchRecordsTheFailedEmbeddings(t *testing.T) {
-	g := NewWithT(t)
+		retrieval := rx.Span(GinkgoTB(), "retrieval")
 
-	emb := newFakeEmbeddings(t)
-	storeDir := knowledgeFixture(t, g, emb)
-	emb.Break()
+		// The dimension probe is the request that fails here, so it is the only embeddings
+		// span: the query is never embedded once the probe has failed.
+		embeddings := rx.SpansNamed("embeddings ")
+		Expect(embeddings).ToNot(BeEmpty())
 
-	rx := agenttest.NewOTLPReceiver(t)
-	exportKnowledgeRun(t, g, rx, storeDir, emb.URL())
+		for _, s := range embeddings {
+			Expect(s.ParentSpanID).To(Equal(retrieval.SpanID))
 
-	retrieval := rx.Span(t, "retrieval")
+			status, ok := s.Int("http.response.status_code")
+			Expect(ok).To(BeTrue(), "the failed embeddings span carried no status code: %v", s.Attributes)
+			Expect(status).To(Equal(int64(http.StatusInternalServerError)))
 
-	// The dimension probe is the request that fails here, so it is the only embeddings
-	// span: the query is never embedded once the probe has failed.
-	embeddings := rx.SpansNamed("embeddings ")
-	g.Expect(embeddings).ToNot(BeEmpty())
+			// No error text ever reaches a span: this tree's errors embed absolute paths and
+			// config values, and a status description cannot be un-sent.
+			Expect(s.StatusMessage).To(BeEmpty())
+		}
 
-	for _, s := range embeddings {
-		g.Expect(s.ParentSpanID).To(Equal(retrieval.SpanID))
-
-		status, ok := s.Int("http.response.status_code")
-		g.Expect(ok).To(BeTrue(), "the failed embeddings span carried no status code: %v", s.Attributes)
-		g.Expect(status).To(Equal(int64(http.StatusInternalServerError)))
-
-		// No error text ever reaches a span: this tree's errors embed absolute paths and
-		// config values, and a status description cannot be un-sent.
-		g.Expect(s.StatusMessage).To(BeEmpty())
-	}
-
-	// The retrieval span reports the degrade rather than an error, since the search
-	// answered from the lexical tier and the caller got results.
-	reason, ok := retrieval.String(string(telemetry.AttrKnowledgeDegradedReason))
-	g.Expect(ok).To(BeTrue(), "the retrieval span did not say why it degraded: %v", retrieval.Attributes)
-	g.Expect(reason).To(Equal(telemetry.DegradeEmbeddings.String()))
-}
+		// The retrieval span reports the degrade rather than an error, since the search
+		// answered from the lexical tier and the caller got results.
+		reason, ok := retrieval.String(string(telemetry.AttrKnowledgeDegradedReason))
+		Expect(ok).To(BeTrue(), "the retrieval span did not say why it degraded: %v", retrieval.Attributes)
+		Expect(reason).To(Equal(telemetry.DegradeEmbeddings.String()))
+	})
+})

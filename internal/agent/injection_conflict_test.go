@@ -16,8 +16,8 @@ package agent_test
 
 import (
 	"context"
-	"testing"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -27,125 +27,113 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
-// TestInjection_MemoryStoreConflict asserts injecting a memory store that runs on a
-// different backend from the one the config names fails at run start, naming both.
-func TestInjection_MemoryStoreConflict(t *testing.T) {
-	g := NewWithT(t)
+var _ = Describe("injected store precedence", func() {
+	// The refusal names both backends, the injected one and the configured one.
+	It("Should refuse a memory store that runs on a different backend from the one the config names", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true, Backend: "jetstream"}
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.Harness.Memory = &config.MemoryConfig{Enabled: true, Backend: "jetstream"}
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			MemoryStore: agenttest.NewFakeMemoryStore(GinkgoTB()),
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MemoryStore: agenttest.NewFakeMemoryStore(t),
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring(`Options.MemoryStore runs on the "fake" backend`)))
+		Expect(err).To(MatchError(ContainSubstring(`harness.memory.backend in "agent.yaml" selects "jetstream"`)))
+		Expect(err.Error()).NotTo(ContainSubstring("connecting to NATS"))
+	})
 
-	g.Expect(err).To(HaveOccurred())
-	g.Expect(err).To(MatchError(ContainSubstring(`Options.MemoryStore runs on the "fake" backend`)))
-	g.Expect(err).To(MatchError(ContainSubstring(`harness.memory.backend in "agent.yaml" selects "jetstream"`)))
-	g.Expect(err.Error()).NotTo(ContainSubstring("connecting to NATS"))
-}
+	// The store the configuration asked for is accepted rather than refused for having
+	// been injected at all. It is the case a host sharing one store across many runs is
+	// in, and the reason the rule compares backends instead of refusing on presence.
+	It("Should accept a memory store the configuration asked for", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true, Backend: "jetstream"}
 
-// TestInjection_MemoryStoreAgreeing asserts the store the configuration asked for is
-// accepted rather than refused for having been injected at all. It is the case a host
-// sharing one store across many runs is in, and the reason the rule compares backends
-// instead of refusing on presence.
-func TestInjection_MemoryStoreAgreeing(t *testing.T) {
-	g := NewWithT(t)
+		store := agenttest.NewFakeMemoryStore(GinkgoTB())
+		store.SetInfo(memory.Info{Backend: "jetstream", Location: "MEMORY"})
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.Harness.Memory = &config.MemoryConfig{Enabled: true, Backend: "jetstream"}
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			MemoryStore: store,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	store := agenttest.NewFakeMemoryStore(t)
-	store.SetInfo(memory.Info{Backend: "jetstream", Location: "MEMORY"})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.Text).To(Equal("done"))
+	})
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MemoryStore: store,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+	It("Should refuse a session store that runs on a different backend from the one the config names", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.Harness.Sessions = &config.SessionConfig{Backend: "jetstream"}
 
-	g.Expect(err).ToNot(HaveOccurred())
-	g.Expect(res.Text).To(Equal("done"))
-}
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:       cfg,
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{"go"},
+			Provider:     agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			Checkpoint:   agent.Checkpoint{Enabled: true},
+			SessionStore: agenttest.NewFakeSessionStore(GinkgoTB()),
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-// TestInjection_SessionStoreConflict asserts the same refusal for the session seam.
-func TestInjection_SessionStoreConflict(t *testing.T) {
-	g := NewWithT(t)
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring(`Options.SessionStore runs on the "fake" backend`)))
+		Expect(err).To(MatchError(ContainSubstring(`harness.sessions.backend in "agent.yaml" selects "jetstream"`)))
+		Expect(err.Error()).NotTo(ContainSubstring("connecting to NATS"))
+	})
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.Harness.Sessions = &config.SessionConfig{Backend: "jetstream"}
+	// The accepting case for the session seam, which is what lets a worker share one
+	// store across every job it runs.
+	It("Should accept a session store the configuration asked for", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.Harness.Sessions = &config.SessionConfig{Backend: "jetstream"}
 
-	_, err := agent.Run(context.Background(), agent.Options{
-		Config:       cfg,
-		ConfigFile:   "agent.yaml",
-		Prompt:       []string{"go"},
-		Provider:     agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		Checkpoint:   agent.Checkpoint{Enabled: true},
-		SessionStore: agenttest.NewFakeSessionStore(t),
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+		store := agenttest.NewFakeSessionStore(GinkgoTB())
+		store.SetInfo(runstate.Info{Backend: "jetstream", Location: "SESSIONS"})
 
-	g.Expect(err).To(HaveOccurred())
-	g.Expect(err).To(MatchError(ContainSubstring(`Options.SessionStore runs on the "fake" backend`)))
-	g.Expect(err).To(MatchError(ContainSubstring(`harness.sessions.backend in "agent.yaml" selects "jetstream"`)))
-	g.Expect(err.Error()).NotTo(ContainSubstring("connecting to NATS"))
-}
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:       cfg,
+			ConfigFile:   "agent.yaml",
+			Prompt:       []string{"go"},
+			Provider:     agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			Checkpoint:   agent.Checkpoint{Enabled: true},
+			SessionStore: store,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-// TestInjection_SessionStoreAgreeing asserts the accepting case for the session seam,
-// which is what lets a worker share one store across every job it runs.
-func TestInjection_SessionStoreAgreeing(t *testing.T) {
-	g := NewWithT(t)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.Text).To(Equal("done"))
+	})
 
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.Harness.Sessions = &config.SessionConfig{Backend: "jetstream"}
+	// The default is not a declaration: nothing was asked for, so nothing conflicts,
+	// which is what keeps an embedder free to supply a store of its own without editing
+	// the operator's file.
+	It("Should take any store when the configuration names no backend", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
 
-	store := agenttest.NewFakeSessionStore(t)
-	store.SetInfo(runstate.Info{Backend: "jetstream", Location: "SESSIONS"})
+		store := agenttest.NewFakeMemoryStore(GinkgoTB())
+		store.SetInfo(memory.Info{Backend: "jetstream", Location: "MEMORY"})
 
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:       cfg,
-		ConfigFile:   "agent.yaml",
-		Prompt:       []string{"go"},
-		Provider:     agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		Checkpoint:   agent.Checkpoint{Enabled: true},
-		SessionStore: store,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			MemoryStore: store,
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 
-	g.Expect(err).ToNot(HaveOccurred())
-	g.Expect(res.Text).To(Equal("done"))
-}
-
-// TestInjection_UndeclaredBackendTakesAnyStore asserts a configuration that names no
-// backend accepts whatever it is given. The default is not a declaration: nothing was
-// asked for, so nothing conflicts, which is what keeps an embedder free to supply a
-// store of its own without editing the operator's file.
-func TestInjection_UndeclaredBackendTakesAnyStore(t *testing.T) {
-	g := NewWithT(t)
-
-	app := agenttest.NewFakeApp(t, exampleApp())
-	cfg := agenttest.Config(t, app)
-	cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
-
-	store := agenttest.NewFakeMemoryStore(t)
-	store.SetInfo(memory.Info{Backend: "jetstream", Location: "MEMORY"})
-
-	res, err := agent.Run(context.Background(), agent.Options{
-		Config:      cfg,
-		ConfigFile:  "agent.yaml",
-		Prompt:      []string{"go"},
-		Provider:    agenttest.NewScriptedProvider(t, agenttest.TextResponse("done")),
-		MemoryStore: store,
-	}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(t))
-
-	g.Expect(err).ToNot(HaveOccurred())
-	g.Expect(res.Text).To(Equal("done"))
-}
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.Text).To(Equal("done"))
+	})
+})

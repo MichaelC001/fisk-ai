@@ -185,7 +185,7 @@ func servingApp(name, body string) []toolkit.Tool {
 	return toolkit.Tools(tools)
 }
 
-var _ = Describe("Integration: a2a tool keepalives", func() {
+var _ = Describe("Integration: a2a tool keepalives", Label("integration"), func() {
 	It("Should say it is still working while a tool runs, and close the set with the reply", func() {
 		dir := GinkgoT().TempDir()
 		gate := filepath.Join(dir, "gate")
@@ -225,7 +225,7 @@ var _ = Describe("Integration: a2a tool keepalives", func() {
 	})
 })
 
-var _ = Describe("Integration: a2a capacity refusal", func() {
+var _ = Describe("Integration: a2a capacity refusal", Label("integration"), func() {
 	It("Should refuse a second tool request while the first holds the only slot, and serve again once it frees", func() {
 		dir := GinkgoT().TempDir()
 		runs := filepath.Join(dir, "runs")

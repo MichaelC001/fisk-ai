@@ -13,10 +13,16 @@ import (
 )
 
 var _ = Describe("RenderMarkdownTo", func() {
-	// The test process writes to a pipe or a file rather than a terminal, so this is
-	// also the path a piped or redirected run takes.
+	// The destination is a pipe of the spec's own rather than os.Stdout, which is a
+	// terminal or not depending on how the suite was invoked: ginkgo intercepts stdout
+	// unless it is run with -v. This is the path a piped or redirected run takes.
 	It("Should return the markdown unchanged when the destination is not a terminal", func() {
-		Expect(RenderMarkdownTo("# Title\n\nhello", os.Stdout, false)).To(Equal("# Title\n\nhello"))
+		r, w, err := os.Pipe()
+		Expect(err).NotTo(HaveOccurred())
+		defer r.Close()
+		defer w.Close()
+
+		Expect(RenderMarkdownTo("# Title\n\nhello", w, false)).To(Equal("# Title\n\nhello"))
 	})
 
 	It("Should return the markdown unchanged when color is off", func() {
