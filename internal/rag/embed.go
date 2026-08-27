@@ -77,8 +77,8 @@ type Document struct {
 // buildEmbedder constructs the embedder for cfg, or returns nil when the vector
 // tier is off (lexical-only). It validates the embeddings block here so a
 // misconfiguration fails at Open, before the agent loop, without contacting the
-// server: base_url and model must be set, and a non-loopback base_url must use
-// https so a query is never sent in cleartext to a remote host.
+// server: base_url and model must be set, and base_url must be a well-formed http
+// or https URL naming a host.
 func buildEmbedder(cfg *config.Config) (Embedder, error) {
 	if !cfg.RAGVectorEnabled() {
 		return nil, nil

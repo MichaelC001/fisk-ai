@@ -64,13 +64,14 @@ var _ = Describe("Embedding client", func() {
 			Expect(emb).To(BeNil())
 		})
 
-		It("rejects a non-loopback http base_url via config", func() {
+		It("accepts a non-loopback http base_url via config", func() {
 			cfg := &config.Config{Identity: "t", Harness: config.HarnessConfig{RAG: &config.RAGConfig{
 				Enabled:    true,
 				Embeddings: &config.RAGEmbeddingsConfig{BaseURL: "http://example.com/v1", Model: "m", TimeoutParsed: time.Second},
 			}}}
-			_, err := buildEmbedder(cfg)
-			Expect(err).To(HaveOccurred())
+			emb, err := buildEmbedder(cfg)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(emb).ToNot(BeNil())
 		})
 	})
 

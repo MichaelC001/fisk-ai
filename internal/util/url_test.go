@@ -20,14 +20,9 @@ var _ = Describe("ValidateBaseURL", func() {
 		Expect(ValidateBaseURL("base", "http://[::1]:1234/v1")).To(Succeed())
 	})
 
-	It("rejects http to a non-loopback host", func() {
-		err := ValidateBaseURL("--base-url / ANTHROPIC_BASE_URL", "http://10.0.0.5:8080")
-		Expect(err).To(MatchError(ContainSubstring("uses http to a non-loopback host")))
-		Expect(err).To(MatchError(ContainSubstring("--base-url / ANTHROPIC_BASE_URL")))
-	})
-
-	It("does not treat a non-loopback name that merely looks local as loopback", func() {
-		Expect(ValidateBaseURL("base", "http://localhost.evil.com/v1")).ToNot(Succeed())
+	It("accepts http to a non-loopback host", func() {
+		Expect(ValidateBaseURL("base", "http://10.0.0.5:8080")).To(Succeed())
+		Expect(ValidateBaseURL("base", "http://host.docker.internal:1234/v1")).To(Succeed())
 	})
 
 	It("rejects a non-http scheme", func() {
@@ -43,6 +38,6 @@ var _ = Describe("ValidateBaseURL", func() {
 	})
 
 	It("rejects http with an empty host", func() {
-		Expect(ValidateBaseURL("base", "http://")).ToNot(Succeed())
+		Expect(ValidateBaseURL("base", "http://")).To(MatchError(ContainSubstring("must name a host")))
 	})
 })
