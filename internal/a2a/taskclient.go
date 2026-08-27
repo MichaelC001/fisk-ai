@@ -39,7 +39,7 @@ type TaskOutcome struct {
 	Result *Result
 	// Error is the ending that was not an answer, set when it was not. Exactly one of
 	// Result and Error is set for a task that ended; both are nil for one whose set
-	// could not be read, which is the error return.
+	// could not be read, which comes back beside the error return.
 	Error *ErrorMessage
 	// Gaps is how many event messages the sequence numbers say never arrived. The
 	// stream is advisory and the answer is in the terminal message, so a gap is
@@ -113,7 +113,9 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 // anything while a question is on screen, since the silence there is this caller's.
 //
 // The error return is for a set that could not be read. A run that failed is not an
-// error here: it ended, and how it ended is in TaskOutcome.Error.
+// error here: it ended, and how it ended is in TaskOutcome.Error. The outcome comes
+// back beside such an error rather than nil, since a person answering when the set died
+// leaves an answer in Unsent that a caller can still deliver.
 func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h TaskHandler) (*TaskOutcome, error) {
 	// The one hook that can stop a task, fired before anything is sent so a denial costs
 	// nothing and a rewrite is what the agent receives, journals and answers. A request
@@ -144,9 +146,10 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 
 	out := &TaskOutcome{}
 
-	// Questions outlive the messages that carried them: a person is still deciding
-	// while the rest of the set arrives. They are given a context of their own so the
-	// end of the set takes them down with it, and waited for so nothing writes to the
+	// Questions outlive the set that carried them: a person is still deciding while the
+	// rest of it arrives, and still deciding when it ends. They are given a context of
+	// their own, which ends with the caller's rather than with the set, so the set ending
+	// stops the reading and not the asking. They are waited for so nothing writes to the
 	// outcome after it is returned.
 	asking, stopAsking := context.WithCancel(ctx)
 	defer stopAsking()
@@ -164,12 +167,12 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 	// Every path out of the loop passes through here, which is what makes TurnEnd a
 	// point a caller can rely on: a turn that was accepted closes exactly once,
 	// whether it answered, failed, was canceled or lost its transport. The questions
-	// this task opened are ended and waited for first, so nothing about a question
-	// lands after the turn that asked it.
+	// this task opened are waited for first, so nothing about a question lands after the
+	// turn that asked it, and a person mid-answer when the set ended holds the turn open
+	// until they are done or the caller's context ends.
 	//
 	// A task whose ack never arrived opened no turn, so it closes none.
 	defer func() {
-		stopAsking()
 		wg.Wait()
 
 		mu.Lock()
@@ -196,7 +199,12 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 		if err != nil {
 			endErr = err
 
-			return nil, err
+			// The outcome travels with the error rather than being dropped for it. A set
+			// that died under a question leaves somebody still answering, and what they
+			// decide is in Unsent by the time this returns; discarding it would spend a
+			// person's whole answer and throw it away, which is the ending this path is
+			// most likely to be.
+			return out, err
 		}
 
 		switch m := msg.(type) {
@@ -355,10 +363,10 @@ func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask 
 	}
 
 	// Only a decision is worth keeping. A no-operator reply is what a handler produces
-	// when it has nobody to ask, which includes the case where the set ended and the
-	// question was taken off the screen under somebody: delivering that later would
-	// decline a gated command on their behalf, having never shown them the question, and
-	// delivering it to a question that is already gone changes nothing either way.
+	// when it has nobody to ask, and what one with somebody produces when they dismissed
+	// the question or the caller's context ended under them: delivering that later would
+	// decline a gated command on behalf of a person who decided nothing, and delivering
+	// it to a question that is already gone changes nothing either way.
 	if reply.Answer == AnswerNoOperator {
 		return questionOutcome{}
 	}
@@ -415,11 +423,20 @@ func (c *Client) waitForAnswer(ctx context.Context, agent, request string, ask *
 			// A refusal here means the question is gone. Nothing is sent about it: the
 			// person is left with what they were typing, and the answer travels on a
 			// request of its own if they finish it.
+			//
+			// Every ack after the set ends is refused, so this is the ordinary path for a
+			// question that outlived one, and the wait it hands over to keeps the caller's
+			// context: a prompter that cannot be canceled through ctx would otherwise be
+			// the only thing that could end the turn.
 			ack, err := c.Answer(ctx, agent, request, NewWaitingAck(ask, c.sender))
 			if err != nil || (ack != nil && !ack.Accepted) {
-				got := <-done
+				select {
+				case got := <-done:
+					return got.reply, got.err
 
-				return got.reply, got.err
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
 			}
 		}
 	}

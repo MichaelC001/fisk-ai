@@ -322,14 +322,18 @@ func (l *Live) Run(parent context.Context, run func(context.Context) error) (run
 	// continued; a second press, or a run already ended, gives up on it instead. Runs on
 	// the tview loop, so it mutates view state directly.
 	//
-	// A run blocked on a question is included: asking it to stop closes the question, so
-	// it reaches a boundary rather than sitting on one nobody will answer. At the input
-	// row there is nothing running to ask, so the key leaves directly rather than
-	// starting an exchange that could never complete.
+	// A run blocked on a question is included, and the question is closed here rather
+	// than by the run stopping: a question outlives the reply set that carried it, so the
+	// run may already be gone and a cancel would reach nothing, leaving the overlay up
+	// with no way past it. Somebody leaving decided nothing, so the closed prompt reports
+	// that nobody answered rather than a decision to deliver. At the input row there is
+	// nothing running to ask, so the key leaves directly rather than starting an exchange
+	// that could never complete.
 	var suspendAsked bool
 	l.v.onQuit = func() {
 		if l.suspend != nil && !suspendAsked && !l.ended && l.state != stateAwaitingInput {
 			suspendAsked = true
+			l.prompter.leave()
 			l.suspend()
 			l.state = stateSuspending
 			l.refreshStatus()

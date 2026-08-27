@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/gdamore/tcell/v2"
@@ -31,6 +32,12 @@ func aborted(ctx context.Context) error {
 	return fmt.Errorf("%w: %w", toolkit.ErrPromptAborted, ctx.Err())
 }
 
+// errPromptLeft ends a prompt because the operator pressed a leave key while it was on
+// screen. It reports as toolkit.ErrPromptAborted rather than as a dismissal: somebody
+// leaving decided nothing, and a reply built from this would decline a gated command on
+// their behalf and be delivered to the run later.
+var errPromptLeft = fmt.Errorf("%w: the operator left with the prompt on screen", toolkit.ErrPromptAborted)
+
 // tcellPrompter implements util.Prompter with native tview widgets, driven from the
 // run goroutine. Each method marshals its widget onto the tview loop and blocks
 // until the operator answers or ctx is canceled; the caller (the confirm gate and
@@ -38,12 +45,53 @@ func aborted(ctx context.Context) error {
 // toolkit.ErrPromptAborted, as an authoritative denial. A torn-down loop or a
 // canceled run reports the abort instead, since nobody answered. It never owns the
 // deny default itself.
+// A prompt no longer has a run behind it once the reply set has ended under it, which
+// is why the leave key ends it here rather than by asking the run to stop: the run may
+// be gone, and nothing else would take the overlay off the screen.
 type tcellPrompter struct {
 	live *Live
+
+	// left is closed by the leave key while a prompt is on screen, and replaced for the
+	// next one. It is nil when nothing is being asked.
+	mu   sync.Mutex
+	left chan struct{}
 }
 
 func newTcellPrompter(live *Live) *tcellPrompter {
 	return &tcellPrompter{live: live}
+}
+
+// asking opens the channel the leave key closes and returns it, along with the func
+// that closes the prompt out again once it has been answered.
+func (p *tcellPrompter) asking() (<-chan struct{}, func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.left = make(chan struct{})
+	left := p.left
+
+	return left, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		if p.left == left {
+			p.left = nil
+		}
+	}
+}
+
+// leave ends the prompt on screen, as the leave key does when the operator is going
+// rather than answering. It does nothing when nothing is being asked.
+func (p *tcellPrompter) leave() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.left == nil {
+		return
+	}
+
+	close(p.left)
+	p.left = nil
 }
 
 var _ toolkit.Prompter = (*tcellPrompter)(nil)
@@ -76,10 +124,16 @@ func (p *tcellPrompter) ApproveCommand(ctx context.Context, req toolkit.GateRequ
 		}
 	})
 
+	left, answered := p.asking()
+	defer answered()
+
 	select {
 	case <-ctx.Done():
 		p.dismiss()
 		return toolkit.ConfirmNo, aborted(ctx)
+	case <-left:
+		p.dismiss()
+		return toolkit.ConfirmNo, errPromptLeft
 	case r := <-result:
 		return r, nil
 	}
@@ -96,10 +150,16 @@ func (p *tcellPrompter) Confirm(ctx context.Context, question string) (bool, err
 		result <- idx == 1
 	})
 
+	left, answered := p.asking()
+	defer answered()
+
 	select {
 	case <-ctx.Done():
 		p.dismiss()
 		return false, aborted(ctx)
+	case <-left:
+		p.dismiss()
+		return false, errPromptLeft
 	case r := <-result:
 		return r, nil
 	}
@@ -134,10 +194,16 @@ func (p *tcellPrompter) Select(ctx context.Context, question string, options []s
 		return overlay(list, 60, clamp(len(options)+2, 3, 20)), list
 	})
 
+	left, answered := p.asking()
+	defer answered()
+
 	select {
 	case <-ctx.Done():
 		p.dismiss()
 		return -1, aborted(ctx)
+	case <-left:
+		p.dismiss()
+		return -1, errPromptLeft
 	case r := <-result:
 		return r.idx, r.err
 	}
@@ -169,10 +235,16 @@ func (p *tcellPrompter) Input(ctx context.Context, question, def string) (string
 		return overlay(input, 60, 3), input
 	})
 
+	left, answered := p.asking()
+	defer answered()
+
 	select {
 	case <-ctx.Done():
 		p.dismiss()
 		return "", aborted(ctx)
+	case <-left:
+		p.dismiss()
+		return "", errPromptLeft
 	case r := <-result:
 		return r.text, r.err
 	}

@@ -32,6 +32,10 @@ type heldTransport struct {
 	// which is what a worker that died mid-turn leaves behind.
 	endEarly bool
 
+	// failAfter ends the set with a transport error instead of a terminal message, which
+	// is the reply set becoming unreadable under whoever is answering.
+	failAfter error
+
 	mu      sync.Mutex
 	answers []*ElicitReply
 	// requests is every request the client actually sent, so a spec can tell a prompt
@@ -86,10 +90,11 @@ func (t *heldTransport) Stream(_ context.Context, _ string, _ RouteHint, body []
 	t.mu.Unlock()
 
 	return &heldReader{
-		messages: t.prefix(&hdr),
-		terminal: t.terminal(&hdr),
-		release:  t.release,
-		endEarly: t.endEarly,
+		messages:  t.prefix(&hdr),
+		terminal:  t.terminal(&hdr),
+		release:   t.release,
+		endEarly:  t.endEarly,
+		failAfter: t.failAfter,
 	}, nil
 }
 
@@ -129,12 +134,13 @@ func (t *heldTransport) sentAnswers() []*ElicitReply {
 // heldReader yields its prefix, then waits for the release before the terminal message,
 // so the set stays open exactly as long as the test wants it to.
 type heldReader struct {
-	messages [][]byte
-	terminal []byte
-	release  chan struct{}
-	endEarly bool
-	at       int
-	done     bool
+	messages  [][]byte
+	terminal  []byte
+	release   chan struct{}
+	endEarly  bool
+	failAfter error
+	at        int
+	done      bool
 }
 
 func (r *heldReader) Next(ctx context.Context) ([]byte, error) {
@@ -157,6 +163,10 @@ func (r *heldReader) Next(ctx context.Context) ([]byte, error) {
 
 	r.done = true
 
+	if r.failAfter != nil {
+		return nil, r.failAfter
+	}
+
 	if r.endEarly {
 		return nil, io.EOF
 	}
@@ -175,6 +185,10 @@ type scriptedHandler struct {
 	answer func(*ElicitRequest) *ElicitReply
 	pause  time.Duration
 	asked  chan struct{}
+
+	// ignoreCtx takes the pause without watching the context, which is what a prompter
+	// owning a terminal in raw mode does: nothing but a keystroke ends it.
+	ignoreCtx bool
 }
 
 func (h *scriptedHandler) Block(b Block) {
@@ -189,7 +203,11 @@ func (h *scriptedHandler) Question(ctx context.Context, ask *ElicitRequest) (*El
 		close(h.asked)
 	}
 
-	if h.pause > 0 {
+	if h.pause > 0 && h.ignoreCtx {
+		time.Sleep(h.pause)
+	}
+
+	if h.pause > 0 && !h.ignoreCtx {
 		select {
 		case <-time.After(h.pause):
 		case <-ctx.Done():
@@ -471,6 +489,89 @@ var _ = Describe("RunTask", func() {
 
 		_, err := run(context.Background())
 		Expect(err).To(MatchError(ErrAgentUnavailable))
+	})
+
+	// The second half of the report the idle bound came from: the client should stay open
+	// and, if the other end went away, still take the answer. A question is not torn off
+	// the screen because the set under it ended, so what somebody was typing survives.
+	It("Should leave a question on screen when the set ends under it", func() {
+		transport.refuse = true
+		handler.pause = 200 * time.Millisecond
+		handler.answer = func(ask *ElicitRequest) *ElicitReply {
+			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		}
+
+		// The terminal message is already there, so the set ends while somebody is still
+		// deciding rather than waiting for them.
+		close(transport.release)
+
+		out, err := run(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(out.Result.Text).To(Equal("removed"))
+
+		Expect(out.Unsent).To(HaveLen(1))
+		Expect(out.Unsent[0].ToolUseID).To(Equal("toolu_1"))
+		Expect(out.Unsent[0].Choice).To(Equal(ChoiceOnce))
+	})
+
+	// The ending this item is for. A set that cannot be read is the error return, and the
+	// outcome travels with it: discarding it would spend somebody's whole answer and then
+	// throw the answer away, which is worse than never having asked them to finish.
+	It("Should carry a held answer out of a set that could not be read", func() {
+		transport.refuse = true
+		transport.failAfter = fmt.Errorf("the subscription is gone")
+		handler.pause = 200 * time.Millisecond
+		handler.answer = func(ask *ElicitRequest) *ElicitReply {
+			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		}
+
+		close(transport.release)
+
+		out, err := run(context.Background())
+		Expect(err).To(MatchError("the subscription is gone"))
+		Expect(out).ToNot(BeNil(), "the outcome comes back beside the error")
+		Expect(out.Unsent).To(HaveLen(1))
+		Expect(out.Unsent[0].ToolUseID).To(Equal("toolu_1"))
+	})
+
+	// Every waiting ack is refused once the set has ended, and the wait that follows one
+	// is where a turn would otherwise become unendable: a prompter owning a terminal in
+	// raw mode does not watch a context, so the caller's own ending has to be watched
+	// here.
+	It("Should end the wait when the context ends after a waiting ack was refused", func() {
+		transport.refuse = true
+		handler.pause = 3 * time.Second
+		handler.ignoreCtx = true
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-handler.asked
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+		}()
+		defer cancel()
+
+		started := time.Now()
+		_, err := run(ctx)
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(time.Since(started)).To(BeNumerically("<", time.Second), "it waits for the caller, not for the prompt")
+	})
+
+	// A surface with nobody to ask answers at once, so nothing holds the turn open for it
+	// and it keeps the ending it has always had.
+	It("Should not hold the turn open for a handler with nobody to ask", func() {
+		transport.refuse = true
+		handler.answer = func(ask *ElicitRequest) *ElicitReply {
+			return NewNoOperatorReply(ask, "caller1")
+		}
+
+		close(transport.release)
+
+		started := time.Now()
+		out, err := run(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(out.Unsent).To(BeEmpty())
+		Expect(time.Since(started)).To(BeNumerically("<", time.Second))
 	})
 
 	// A terminal error is how a run ended, not a failure to read the set.

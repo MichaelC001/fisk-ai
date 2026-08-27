@@ -105,9 +105,13 @@ type ClientHooks struct {
 	QuestionAnswered QuestionAnsweredHook
 
 	// TurnEnd fires when a turn the agent acked is over, with what it cost and how it
-	// ended. It is the point at which the agent stops working, and it fires for an
-	// ending that is not an answer as well as for one that is, including an ending no
-	// terminal message described.
+	// ended. It fires for an ending that is not an answer as well as for one that is,
+	// including an ending no terminal message described.
+	//
+	// It is the point at which the turn is finished with rather than the moment the
+	// agent stopped: a question outstanding when the set ended holds the turn open until
+	// the person answers it, which keeps QuestionAnswered before this and can put hours
+	// between the agent's last message and this one.
 	TurnEnd ClientTurnEndHook
 
 	// CancelRequested fires when a cancel is sent, before it goes. The turn does not end

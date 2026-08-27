@@ -88,6 +88,39 @@ var _ = Describe("tcellPrompter", func() {
 			Eventually(front, time.Second).Should(Equal("main"))
 		})
 
+		// A question outlives the reply set that carried it, so the leave key closes the
+		// prompt here rather than by asking a run that may already be gone to stop. Nobody
+		// answered, so it reports the abort rather than a decline that would be delivered
+		// to the run later.
+		It("Should end the prompt when the operator leaves with it on screen", func() {
+			type res struct {
+				choice toolkit.ConfirmChoice
+				err    error
+			}
+
+			out := make(chan res, 1)
+			go func() {
+				c, err := l.prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS", Tag: "ai:confirm"})
+				out <- res{choice: c, err: err}
+			}()
+			awaitPrompt()
+
+			l.prompter.leave()
+
+			var got res
+			Eventually(out, time.Second).Should(Receive(&got))
+			Expect(got.choice).To(Equal(toolkit.ConfirmNo))
+			Expect(got.err).To(MatchError(toolkit.ErrPromptAborted))
+			Eventually(front, time.Second).Should(Equal("main"))
+		})
+
+		It("Should do nothing when nobody is being asked", func() {
+			before := front()
+
+			l.prompter.leave()
+			Expect(front()).To(Equal(before))
+		})
+
 		It("Should show an injected color tag in the command literally", func() {
 			go l.prompter.ApproveCommand(context.Background(), toolkit.GateRequest{Command: "run", Display: "run [red]x", Tag: "ai:confirm"})
 			awaitPrompt()

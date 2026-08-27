@@ -274,12 +274,19 @@ func runAsClient(ctx context.Context, stop context.CancelFunc, host *hostedAgent
 	defer restore()
 
 	out, err := host.client.RunTask(ctx, host.identity, req, client)
-	if err != nil {
-		return err
+
+	if out != nil && out.Ack != nil && out.Ack.ConversationToken != "" {
+		conversation = out.Ack.ConversationToken
 	}
 
-	if out.Ack != nil && out.Ack.ConversationToken != "" {
-		conversation = out.Ack.ConversationToken
+	// A set that could not be read still comes back with what somebody answered under it,
+	// and that ending is the likeliest one to leave a question on screen: the run is gone,
+	// so the answer had nowhere to go. It is delivered before the error is reported, since
+	// reporting it returns.
+	if err != nil {
+		deliverHeldAnswers(ctx, host, conversation, out, client)
+
+		return err
 	}
 
 	// An answer somebody gave after the run had given the question up. There is no input
