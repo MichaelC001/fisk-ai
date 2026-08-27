@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,18 @@ type TaskStream struct {
 	// Zero waits forever, which is what a caller that set no bound asked for.
 	idle time.Duration
 
+	// holding counts the questions this caller has been asked and not yet answered,
+	// and resumed is closed when the last of them is answered. While one is
+	// outstanding the idle bound does not apply: the agent is waiting for an answer
+	// this caller owes it, so its silence says nothing about whether it is there.
+	//
+	// The count is taken on the goroutine reading the set and released on the
+	// goroutine that answers, which is why both are guarded. resumed is nil whenever
+	// the count is zero, which is how a read tells the two states apart.
+	mu      sync.Mutex
+	holding int
+	resumed chan struct{}
+
 	// agent and wire are who the set is with and where to record it, for a caller that
 	// asked to see what crossed. A body is recorded as it arrives, before the size cap
 	// and the schema have had an opinion, since a message that fails either is the one
@@ -42,23 +55,133 @@ type TaskStream struct {
 	wire  *wireLog
 }
 
+// suspend stops the idle bound applying while a question this caller has been asked and
+// not yet answered is outstanding, and returns the release that starts it applying
+// again.
+//
+// It is taken on the goroutine reading the set, before the read that follows the
+// question, so a read never begins under a bound the question should have lifted. The
+// release is safe to call more than once.
+func (t *TaskStream) suspend() func() {
+	t.mu.Lock()
+	if t.holding == 0 {
+		t.resumed = make(chan struct{})
+	}
+	t.holding++
+	resumed := t.resumed
+	t.mu.Unlock()
+
+	var once sync.Once
+
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+
+			t.holding--
+			if t.holding > 0 {
+				return
+			}
+
+			close(resumed)
+			t.resumed = nil
+		})
+	}
+}
+
+// suspended returns the channel closed when the last outstanding question is answered,
+// and nil when the bound applies.
+func (t *TaskStream) suspended() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.resumed
+}
+
 // read takes one message, bounded by the idle wait when there is one. The bound is
 // reported as its own error rather than as a canceled context, since a caller that gave
 // up and an agent that went quiet are different things to tell somebody about.
+//
+// The reader runs on a goroutine of its own so that the window can be started over
+// without starting the read over: Next is called once per message, where canceling it
+// and calling it again would drop whatever the first call had already taken.
 func (t *TaskStream) read(ctx context.Context) ([]byte, error) {
 	if t.idle <= 0 {
 		return t.reader.Next(ctx)
 	}
 
-	waited, cancel := context.WithTimeout(ctx, t.idle)
-	defer cancel()
-
-	body, err := t.reader.Next(waited)
-	if err != nil && waited.Err() != nil && ctx.Err() == nil {
-		return nil, fmt.Errorf("%w: nothing heard from the agent for %s", ErrAgentUnavailable, t.idle)
+	type message struct {
+		body []byte
+		err  error
 	}
 
-	return body, err
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan message, 1)
+
+	go func() {
+		body, err := t.reader.Next(readCtx)
+		done <- message{body: body, err: err}
+	}()
+
+	timer := time.NewTimer(t.idle)
+	defer timer.Stop()
+
+	for {
+		// Nil for a read with no question outstanding, which blocks its case forever and
+		// leaves the bound applying as it always did.
+		resumed := t.suspended()
+
+		select {
+		case got := <-done:
+			return got.body, got.err
+
+		// The caller's own ending, which the reader is seeing too, so what the reader
+		// answers is what this read reports.
+		case <-ctx.Done():
+			got := <-done
+
+			return got.body, got.err
+
+		// The answer has gone, so the agent owes this caller a message again and it gets
+		// a whole window to send one. The time somebody spent deciding is not charged
+		// against it: a question answered a minute into a two minute window would
+		// otherwise leave the agent a minute to speak, which is the fault this suspension
+		// exists to remove.
+		case <-resumed:
+			timer.Reset(t.idle)
+
+		case <-timer.C:
+			if resumed == nil {
+				// A message that arrived as the window closed is a message rather than
+				// silence, and the select above had no way to prefer it.
+				select {
+				case got := <-done:
+					return got.body, got.err
+				default:
+				}
+
+				return nil, fmt.Errorf("%w: nothing heard from the agent for %s", ErrAgentUnavailable, t.idle)
+			}
+
+			// The window ran out under the question. The answer is waited for here rather
+			// than by going round the loop, since the release may have landed as the
+			// window closed and the next pass would then find nothing left to wait on.
+			select {
+			case got := <-done:
+				return got.body, got.err
+
+			case <-ctx.Done():
+				got := <-done
+
+				return got.body, got.err
+
+			case <-resumed:
+				timer.Reset(t.idle)
+			}
+		}
+	}
 }
 
 // Next returns the next message of the set, one of *Ack, *Event, *Result or

@@ -109,7 +109,8 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 // obeys are the ones a client gets wrong: say the question is still on screen every
 // AckInterval so the agent keeps holding it, stop saying so before answering, and treat
 // a question the agent has given up on as a question to answer on a later request
-// rather than as an answer to throw away.
+// rather than as an answer to throw away. It also stops expecting the agent to say
+// anything while a question is on screen, since the silence there is this caller's.
 //
 // The error return is for a set that could not be read. A run that failed is not an
 // error here: it ended, and how it ended is in TaskOutcome.Error.
@@ -219,11 +220,18 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 				Display:    m.Display,
 			})
 
+			// The set goes quiet from here until somebody decides, and this caller is the
+			// reason for it, so the idle bound is lifted until the answer has gone. Every
+			// other read stays bounded, where silence does mean the agent has stopped
+			// saying anything.
+			release := stream.suspend()
+
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 
 				outcome := c.answerQuestion(asking, agent, stream.Request(), m, h)
+				release()
 
 				// Fired from this goroutine rather than the reader, so it lands when the
 				// question is actually done with rather than when the set moves on. The
