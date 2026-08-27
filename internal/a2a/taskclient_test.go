@@ -378,6 +378,101 @@ var _ = Describe("RunTask", func() {
 		Expect(out.Unsent).To(BeEmpty())
 	})
 
+	// The reported fault: a question left on screen for longer than the idle bound ended
+	// the turn with "remote agent unavailable", having asked somebody a question and then
+	// given up on them for taking too long to answer it.
+	It("Should not end the turn while a question nobody has answered is on screen", func() {
+		client.idle = 200 * time.Millisecond
+		handler.pause = 500 * time.Millisecond
+		handler.answer = func(ask *ElicitRequest) *ElicitReply {
+			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		}
+
+		// The waiting acks are answers on the wire too, so the set is held open until the
+		// decision itself arrives, which is what a real worker does.
+		go func() {
+			Eventually(func() bool {
+				for _, a := range transport.sentAnswers() {
+					if a.Answer == AnswerChoice {
+						return true
+					}
+				}
+
+				return false
+			}, 2*time.Second).Should(BeTrue())
+			close(transport.release)
+		}()
+
+		out, err := run(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(out.Result.Text).To(Equal("removed"))
+	})
+
+	// Somebody who decides inside the window is the ordinary case, and the time they took
+	// is not charged against the agent: at the shipped default an answer at a minute and
+	// fifty would otherwise leave it ten seconds to say anything.
+	It("Should give the agent a whole window from the answer, not what was left of one", func() {
+		client.idle = 400 * time.Millisecond
+		handler.pause = 300 * time.Millisecond
+		handler.answer = func(ask *ElicitRequest) *ElicitReply {
+			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		}
+
+		// The agent speaks again 250ms after the answer, which is past the window the
+		// question opened under and inside the one the answer starts.
+		go func() {
+			Eventually(func() bool {
+				for _, a := range transport.sentAnswers() {
+					if a.Answer == AnswerChoice {
+						return true
+					}
+				}
+
+				return false
+			}, 2*time.Second).Should(BeTrue())
+
+			time.Sleep(250 * time.Millisecond)
+			close(transport.release)
+		}()
+
+		out, err := run(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(out.Result.Text).To(Equal("removed"))
+	})
+
+	// The other half of the same rule: the bound is lifted for the question rather than
+	// for the rest of the set, so an agent that goes quiet after the answer reached it is
+	// still given up on.
+	It("Should bound the read again once the answer has gone", func() {
+		client.idle = 150 * time.Millisecond
+		handler.pause = 250 * time.Millisecond
+		handler.answer = func(ask *ElicitRequest) *ElicitReply {
+			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		}
+
+		// The set is never released, so nothing follows the answer.
+		_, err := run(context.Background())
+		Expect(err).To(MatchError(ErrAgentUnavailable))
+
+		answers := transport.sentAnswers()
+		Expect(answers[len(answers)-1].Answer).To(Equal(AnswerChoice))
+	})
+
+	It("Should end the turn when the agent goes quiet with no question outstanding", func() {
+		client.idle = 150 * time.Millisecond
+
+		transport.prefix = func(req *Header) [][]byte {
+			ack := NewAck(true)
+			StampReply(&ack.Header, req, "svc")
+			ack.Sequence = 1
+
+			return [][]byte{encodeMessage(ack)}
+		}
+
+		_, err := run(context.Background())
+		Expect(err).To(MatchError(ErrAgentUnavailable))
+	})
+
 	// A terminal error is how a run ended, not a failure to read the set.
 	It("Should return an ending that was not an answer", func() {
 		transport.terminal = func(req *Header) []byte {
