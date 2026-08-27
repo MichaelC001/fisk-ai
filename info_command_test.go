@@ -156,7 +156,7 @@ var _ = Describe("MCP servers", func() {
 		Expect(imports[0].Err).ToNot(HaveOccurred())
 
 		out := render(imports)
-		Expect(out).To(ContainSubstring("MCP servers"))
+		Expect(out).To(ContainSubstring("MCP clients"))
 		Expect(out).To(ContainSubstring("docs (stdio npx -y docs-server): reachable in"))
 		Expect(out).To(ContainSubstring(`advertised 2 tool(s), kept 1 after filtering, imported 1 as "dx"`))
 		Expect(out).To(ContainSubstring("tools: dx_search"))
@@ -247,7 +247,7 @@ var _ = Describe("MCP servers", func() {
 		imports := discover(mcpclient.NewClaimedNames(nil, nil))
 		Expect(imports).To(BeNil())
 		Expect(servers.dialed()).To(Equal(0))
-		Expect(render(imports)).ToNot(ContainSubstring("MCP servers"))
+		Expect(render(imports)).ToNot(ContainSubstring("MCP clients"))
 	})
 })
 

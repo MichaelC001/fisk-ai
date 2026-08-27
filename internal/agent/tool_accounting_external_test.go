@@ -151,7 +151,7 @@ var _ = Describe("the per-kind tool accounting", func() {
 		transport.SetToolReply(`{"forecast":"sunny"}`, false)
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 		cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
 
 		// The second call to each provider is denied, so each kind has one call that was
@@ -234,7 +234,7 @@ var _ = Describe("the per-kind tool accounting", func() {
 		transport.SetToolReply(`{"forecast":"sunny"}`, false)
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 		cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
 
 		opts := func(provider *agenttest.ScriptedProvider, cp agent.Checkpoint, suspend func() bool, tel *telemetry.Provider) agent.Options {

@@ -275,7 +275,7 @@ var _ = Describe("Shared MCP sessions", func() {
 
 		cfg := servedConfig()
 		for _, name := range names {
-			cfg.MCPServers = append(cfg.MCPServers, config.MCPServer{Name: name})
+			cfg.MCPClients = append(cfg.MCPClients, config.MCPServer{Name: name})
 		}
 
 		return cfg
@@ -432,7 +432,7 @@ var _ = Describe("Resources and MCP servers", func() {
 	// discovering on the first job that a server it needs will not run.
 	It("Should stop the build when a configured server will not start", func() {
 		cfg := servedConfig()
-		cfg.MCPServers = []config.MCPServer{{Name: "docs", Command: "fisk-mcp-server-that-does-not-exist"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs", Command: "fisk-mcp-server-that-does-not-exist"}}
 
 		res, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).To(MatchError(ContainSubstring(`connecting to mcp server "docs"`)))
@@ -453,7 +453,7 @@ var _ = Describe("Resources and MCP servers", func() {
 		endpoint := mcpEndpoint()
 
 		cfg := servedConfig()
-		cfg.MCPServers = []config.MCPServer{{Name: "docs", URL: endpoint}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs", URL: endpoint}}
 
 		res, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).ToNot(HaveOccurred())

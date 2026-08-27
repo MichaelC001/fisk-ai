@@ -220,12 +220,12 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 // Each entry's timeout bounds its own connect, so a server that never answers fails
 // this naming it instead of holding startup open.
 func (r *Resources) connectMCP(cfg *config.Config, log *slog.Logger) error {
-	if len(cfg.MCPServers) == 0 {
+	if len(cfg.MCPClients) == 0 {
 		return nil
 	}
 
 	sessions, err := mcpclient.Connect(context.Background(), mcpclient.Options{
-		Servers:            cfg.MCPServers,
+		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
 		Version:            util.Version(),
 		CredentialEnvNames: cfg.CredentialEnvNames(),

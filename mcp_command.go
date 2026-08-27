@@ -89,12 +89,12 @@ func mcpAction(_ *fisk.ParseContext) error {
 	// note about where those tools are reachable. A client here cannot tell which of
 	// the tools it is offered belong to the wrapped application and which came from a
 	// third party the operator wired in, which is why they are not offered at all.
-	if len(cfg.MCPServers) > 0 {
-		servers := make([]string, 0, len(cfg.MCPServers))
-		for _, server := range cfg.MCPServers {
+	if len(cfg.MCPClients) > 0 {
+		servers := make([]string, 0, len(cfg.MCPClients))
+		for _, server := range cfg.MCPClients {
 			servers = append(servers, server.Name)
 		}
-		fmt.Fprintf(os.Stderr, "note: %d configured MCP server(s) are not served over MCP: %s. Their tools are imported into an agent run, so they are reachable only there\n", len(servers), strings.Join(servers, ", "))
+		fmt.Fprintf(os.Stderr, "note: the %d server(s) in mcp_clients are not served over MCP: %s. Their tools are imported into an agent run, so they are reachable only there\n", len(servers), strings.Join(servers, ", "))
 	}
 
 	tools, err := fisktool.ServedTools(ctx, cfg)

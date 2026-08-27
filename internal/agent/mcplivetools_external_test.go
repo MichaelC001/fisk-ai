@@ -171,7 +171,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{
@@ -230,7 +230,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{
@@ -288,7 +288,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{
@@ -333,7 +333,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), application))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{
@@ -380,7 +380,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{response: agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`))},
@@ -413,7 +413,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{
@@ -460,7 +460,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := newMCPStepProvider(GinkgoTB(),
 			mcpStep{response: agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`))},

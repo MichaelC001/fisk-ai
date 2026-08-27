@@ -1889,7 +1889,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
 		cfg := agenttest.Config(GinkgoTB(), app)
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 		tel, exp := recordingTelemetry()
 
 		_, err := agent.Run(context.Background(), agent.Options{

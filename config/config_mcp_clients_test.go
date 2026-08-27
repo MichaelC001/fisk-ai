@@ -12,13 +12,13 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("MCP servers", func() {
+var _ = Describe("MCP clients", func() {
 	base := func(servers ...MCPServer) *Config {
 		cfg := &Config{
 			ApplicationPath: "/bin/true",
 			Identity:        "agent",
 			SystemPrompt:    "do things",
-			MCPServers:      servers,
+			MCPClients:      servers,
 		}
 		cfg.LLM.Model = ModelClaudeSonnet46
 
@@ -45,18 +45,18 @@ var _ = Describe("MCP servers", func() {
 	Describe("MCPServer.StartupTimeout", func() {
 		It("Should default to 30 seconds when no timeout is set", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx"})
-			Expect(cfg.MCPServers[0].StartupTimeout()).To(Equal(30 * time.Second))
+			Expect(cfg.MCPClients[0].StartupTimeout()).To(Equal(30 * time.Second))
 		})
 
 		It("Should use an explicit timeout parsed by prepare", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "5s"})
-			Expect(cfg.MCPServers[0].TimeoutParsed).To(Equal(5 * time.Second))
-			Expect(cfg.MCPServers[0].StartupTimeout()).To(Equal(5 * time.Second))
+			Expect(cfg.MCPClients[0].TimeoutParsed).To(Equal(5 * time.Second))
+			Expect(cfg.MCPClients[0].StartupTimeout()).To(Equal(5 * time.Second))
 		})
 
 		It("Should reject an unparseable timeout", func() {
 			cfg := base(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "soon"})
-			Expect(cfg.prepare()).To(MatchError(ContainSubstring("invalid mcp_servers timeout \"soon\" on server \"filesystem\"")))
+			Expect(cfg.prepare()).To(MatchError(ContainSubstring("invalid mcp_clients timeout \"soon\" on server \"filesystem\"")))
 		})
 
 		It("Should reject a zero timeout, which would leave the startup unlimited", func() {
@@ -104,12 +104,12 @@ var _ = Describe("MCP servers", func() {
 
 		It("Should require a name", func() {
 			cfg := prepared(MCPServer{Command: "npx"})
-			Expect(ValidateForMode(cfg, ModeAgent)).To(MatchError(ContainSubstring("mcp_servers server is missing a name")))
+			Expect(ValidateForMode(cfg, ModeAgent)).To(MatchError(ContainSubstring("mcp_clients server is missing a name")))
 		})
 
 		It("Should reject a name that is not a legal tool-name token", func() {
 			cfg := prepared(MCPServer{Name: "bad.name", Command: "npx"})
-			Expect(ValidateForMode(cfg, ModeAgent)).To(MatchError(ContainSubstring("mcp_servers server name \"bad.name\" is invalid")))
+			Expect(ValidateForMode(cfg, ModeAgent)).To(MatchError(ContainSubstring("mcp_clients server name \"bad.name\" is invalid")))
 		})
 
 		It("Should reject an invalid alias", func() {
@@ -137,7 +137,7 @@ var _ = Describe("MCP servers", func() {
 
 		It("Should reject an entry setting neither command nor url", func() {
 			cfg := prepared(MCPServer{Name: "filesystem"})
-			Expect(ValidateForMode(cfg, ModeAgent)).To(MatchError(ContainSubstring("mcp_servers server \"filesystem\" sets neither command nor url")))
+			Expect(ValidateForMode(cfg, ModeAgent)).To(MatchError(ContainSubstring("mcp_clients server \"filesystem\" sets neither command nor url")))
 		})
 
 		It("Should reject an entry setting both command and url", func() {
@@ -173,7 +173,7 @@ var _ = Describe("MCP servers", func() {
 		It("Should reject a url with no scheme", func() {
 			cfg := prepared(MCPServer{Name: "docs", URL: "localhost:9000"})
 			err := ValidateForMode(cfg, ModeAgent)
-			Expect(err).To(MatchError(ContainSubstring("mcp_servers server \"docs\" has an invalid url \"localhost:9000\"")))
+			Expect(err).To(MatchError(ContainSubstring("mcp_clients server \"docs\" has an invalid url \"localhost:9000\"")))
 			Expect(err).To(MatchError(ContainSubstring("http:// or https:// endpoint")))
 		})
 
@@ -200,7 +200,7 @@ var _ = Describe("MCP servers", func() {
 		It("Should accept a url whose query holds a reference", func() {
 			cfg := prepared(MCPServer{Name: "tavily", URL: "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}"})
 			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
-			Expect(cfg.MCPServers[0].URL).To(Equal("https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}"))
+			Expect(cfg.MCPClients[0].URL).To(Equal("https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TOKEN}"))
 		})
 
 		It("Should accept a url mixing a reference with literal text", func() {
@@ -219,7 +219,7 @@ var _ = Describe("MCP servers", func() {
 		It("Should reject a reference in a url whose syntax is wrong", func() {
 			cfg := prepared(MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp/?apiKey=${DOCS-TOKEN}"})
 			err := ValidateForMode(cfg, ModeAgent)
-			Expect(err).To(MatchError(ContainSubstring("mcp_servers server \"docs\" has an invalid url")))
+			Expect(err).To(MatchError(ContainSubstring("mcp_clients server \"docs\" has an invalid url")))
 			Expect(err).To(MatchError(ContainSubstring("\"DOCS-TOKEN\" is not a variable name")))
 		})
 
@@ -437,7 +437,7 @@ identity: agent
 system_prompt: do things
 llm:
   model: `+ModelClaudeSonnet46+`
-mcp_servers:
+mcp_clients:
   - name: filesystem
     command: npx
     args:
@@ -448,10 +448,10 @@ mcp_servers:
     timeout: 10s
 `), ModeAgent)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(cfg.MCPServers).To(HaveLen(1))
-			Expect(cfg.MCPServers[0].Env).To(Equal(map[string]string{"FS_TOKEN": "${FISK_AI_MCP_TEST_ABSENT}"}))
-			Expect(cfg.MCPServers[0].Args).To(Equal([]string{"-y", "@modelcontextprotocol/server-filesystem"}))
-			Expect(cfg.MCPServers[0].StartupTimeout()).To(Equal(10 * time.Second))
+			Expect(cfg.MCPClients).To(HaveLen(1))
+			Expect(cfg.MCPClients[0].Env).To(Equal(map[string]string{"FS_TOKEN": "${FISK_AI_MCP_TEST_ABSENT}"}))
+			Expect(cfg.MCPClients[0].Args).To(Equal([]string{"-y", "@modelcontextprotocol/server-filesystem"}))
+			Expect(cfg.MCPClients[0].StartupTimeout()).To(Equal(10 * time.Second))
 		})
 	})
 })
