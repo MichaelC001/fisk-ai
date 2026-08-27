@@ -85,11 +85,15 @@ func (s *chatSession) run(ctx context.Context) error {
 		}
 
 		done, err := s.turn(ctx, prompt)
+
+		// Delivered whether or not the set could be read. A set that died under a question
+		// is the ending most likely to leave one on screen, and what the person answered
+		// after it went is the whole reason the question stayed.
+		s.deliverHeld(ctx, s.outcome)
+
 		if err != nil {
 			return err
 		}
-
-		s.deliverHeld(ctx, s.outcome)
 
 		if done {
 			return nil
@@ -137,16 +141,19 @@ func (s *chatSession) turn(ctx context.Context, prompt string) (bool, error) {
 	defer s.holdRequest("")
 
 	out, err := s.host.client.RunTask(ctx, s.host.identity, req, s.client)
-	if err != nil {
-		return false, err
-	}
 
+	// The outcome and the token the worker minted for a conversation this turn opened are
+	// recorded before the error rather than after it: a set that could not be read still
+	// carries what somebody answered under it, and an answer needs the token to travel on.
+	// Nothing reads an outcome that carries neither ending.
 	s.outcome = out
 
-	// The token the worker minted for a conversation this turn opened, so the next turn
-	// continues it.
-	if out.Ack != nil && out.Ack.ConversationToken != "" {
+	if out != nil && out.Ack != nil && out.Ack.ConversationToken != "" {
 		s.conversation = out.Ack.ConversationToken
+	}
+
+	if err != nil {
+		return false, err
 	}
 
 	// What this conversation may process in total, which only the agent knows: it is the
@@ -223,7 +230,7 @@ func (s *chatSession) sendAnswer(ctx context.Context, held *a2a.Answer) error {
 		if out.Error == nil {
 			return nil
 		}
-		if endsSession(out.Error.Code) {
+		if !answerNotTaken(out.Error.Code) {
 			return fmt.Errorf("%s", endingMessage(out.Error))
 		}
 	}
@@ -372,6 +379,22 @@ func (s *chatSession) contentExported() bool {
 		return s.outcome.Result.ContentExported
 	case s.outcome.Error != nil:
 		return s.outcome.Error.ContentExported
+	}
+
+	return false
+}
+
+// answerNotTaken reports whether an ending means the answer never reached a turn, which
+// is the only kind worth sending again.
+//
+// A turn that ran and failed has spent it: an approve reply is consumed where it lands
+// and the gated command runs, so sending it again on a fresh resume would run that
+// command a second time. The three here are refusals taken before any of that: no slot,
+// a conversation already working, and a turn the worker did not accept.
+func answerNotTaken(code string) bool {
+	switch code {
+	case a2a.CodeCapacity, a2a.CodeConversationBusy, a2a.CodeTurnNotTaken:
+		return true
 	}
 
 	return false
