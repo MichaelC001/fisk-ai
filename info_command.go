@@ -111,7 +111,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	// hosts are: a server that will not answer is reported with its error and the rest
 	// of the configuration is still shown. Nothing is connected when none are declared.
 	mcpImports := mcpclient.DiscoverForInfo(ctx, mcpclient.Options{
-		Servers:            cfg.MCPServers,
+		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
 		Version:            util.Version(),
 		CredentialEnvNames: cfg.CredentialEnvNames(),
@@ -527,7 +527,7 @@ func printMCPServerStatus(c *columns.Document, imports []mcpclient.ServerImport)
 	}
 
 	c.Blank()
-	c.Heading("MCP servers")
+	c.Heading("MCP clients")
 
 	for _, imp := range imports {
 		if imp.Err != nil {

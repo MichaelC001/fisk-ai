@@ -141,7 +141,7 @@ func Import(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]Se
 	}
 
 	if len(collisions) > 0 {
-		return out, fmt.Errorf("imported mcp tool name collision: %s; set a distinct alias on the mcp_servers entry, or exclude the tool", strings.Join(collisions, ", "))
+		return out, fmt.Errorf("imported mcp tool name collision: %s; set a distinct alias on the mcp_clients entry, or exclude the tool", strings.Join(collisions, ", "))
 	}
 
 	return out, nil

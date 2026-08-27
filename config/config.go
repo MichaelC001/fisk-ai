@@ -64,7 +64,7 @@ const defaultToolTimeout = 5 * time.Minute
 // than giving up first.
 const defaultA2ARequestTimeout = 120 * time.Second
 
-// defaultMCPStartupTimeout is how long an mcp_servers entry with no timeout of its own
+// defaultMCPStartupTimeout is how long an mcp_clients entry with no timeout of its own
 // gets to start or be reached, to finish the initialize handshake and to list its
 // tools. It is a limit on a server that never answers rather than on a slow one: a
 // stdio command that does not speak the protocol, an HTTP endpoint that accepts the
@@ -122,13 +122,13 @@ type Config struct {
 	RemoteAgents []RemoteAgent `json:"remote_agents,omitempty" yaml:"remote_agents,omitempty"`
 	// RemoteTools are remote agents we pull in all the tools of.
 	RemoteTools []RemoteToolHost `json:"remote_tools,omitempty" yaml:"remote_tools,omitempty"`
-	// MCPServers are third-party MCP servers whose tools are pulled into an agent run,
+	// MCPClients are third-party MCP servers whose tools are pulled into an agent run,
 	// each reached over stdio or streamable HTTP. Their tools are named
 	// "<alias>_<tool>" and are only ever available to the agent loop: fisk mcp and the
 	// a2a tool server never pass an imported tool on to their own clients. A "${VAR}"
 	// reference is recognized in an entry's env, headers and url values, and one
 	// written in command or args is taken literally.
-	MCPServers []MCPServer `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
+	MCPClients []MCPServer `json:"mcp_clients,omitempty" yaml:"mcp_clients,omitempty"`
 	// Expose makes this agent discoverable to other agents and/or over MCP.
 	Expose *ExposeConfig `json:"expose,omitempty" yaml:"expose,omitempty"`
 	// Harness groups the settings that govern how the agent harness itself behaves
@@ -1617,10 +1617,10 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 		return err
 	}
 
-	// One file drives fisk run, fisk serve and fisk mcp, so a bad mcp_servers entry
+	// One file drives fisk run, fisk serve and fisk mcp, so a bad mcp_clients entry
 	// fails the same way whichever command reads it, even though only the agent loop
 	// imports the servers.
-	if err := validateMCPServers(cfg.MCPServers); err != nil {
+	if err := validateMCPClients(cfg.MCPClients); err != nil {
 		return err
 	}
 
@@ -1790,7 +1790,7 @@ func validateRemoteToolHosts(hosts []RemoteToolHost) error {
 	return nil
 }
 
-// validateMCPServers checks each configured MCP server's identity, transport,
+// validateMCPClients checks each configured MCP server's identity, transport,
 // credentials and filters. The name is required and must be a legal tool-name token,
 // as must the alias when set, since one of the two prefixes every tool imported from
 // the server. A duplicate name is an error, and so is a duplicate effective alias:
@@ -1806,39 +1806,39 @@ func validateRemoteToolHosts(hosts []RemoteToolHost) error {
 // A value in env, headers or url is checked for the syntax of its "${VAR}" references
 // and nothing more; see EnvReferences for why the variables themselves are read
 // elsewhere.
-func validateMCPServers(servers []MCPServer) error {
+func validateMCPClients(servers []MCPServer) error {
 	names := make(map[string]struct{}, len(servers))
 	aliases := make(map[string]string, len(servers))
 
 	for _, server := range servers {
 		if server.Name == "" {
-			return fmt.Errorf("mcp_servers server is missing a name")
+			return fmt.Errorf("mcp_clients server is missing a name")
 		}
 		if !identityPattern.MatchString(server.Name) {
-			return fmt.Errorf("mcp_servers server name %q is invalid: it must contain only letters, digits, '-' or '_' (it prefixes imported tool names)", server.Name)
+			return fmt.Errorf("mcp_clients server name %q is invalid: it must contain only letters, digits, '-' or '_' (it prefixes imported tool names)", server.Name)
 		}
 		if server.Alias != "" && !identityPattern.MatchString(server.Alias) {
-			return fmt.Errorf("mcp_servers server %q has an invalid alias %q: it must contain only letters, digits, '-' or '_' (it prefixes imported tool names)", server.Name, server.Alias)
+			return fmt.Errorf("mcp_clients server %q has an invalid alias %q: it must contain only letters, digits, '-' or '_' (it prefixes imported tool names)", server.Name, server.Alias)
 		}
 
 		_, dupName := names[server.Name]
 		if dupName {
-			return fmt.Errorf("mcp_servers has more than one server named %q: give each entry its own name", server.Name)
+			return fmt.Errorf("mcp_clients has more than one server named %q: give each entry its own name", server.Name)
 		}
 		names[server.Name] = struct{}{}
 
 		alias := server.EffectiveAlias()
 		first, dupAlias := aliases[alias]
 		if dupAlias {
-			return fmt.Errorf("mcp_servers servers %q and %q both use the alias %q: every imported tool is named \"<alias>_<tool>\", so two servers sharing an alias name the same tool twice; set a different alias on one of them", first, server.Name, alias)
+			return fmt.Errorf("mcp_clients servers %q and %q both use the alias %q: every imported tool is named \"<alias>_<tool>\", so two servers sharing an alias name the same tool twice; set a different alias on one of them", first, server.Name, alias)
 		}
 		aliases[alias] = server.Name
 
 		if server.Command == "" && server.URL == "" {
-			return fmt.Errorf("mcp_servers server %q sets neither command nor url: set command to start the server and speak stdio to it, or url to reach a running server over streamable HTTP", server.Name)
+			return fmt.Errorf("mcp_clients server %q sets neither command nor url: set command to start the server and speak stdio to it, or url to reach a running server over streamable HTTP", server.Name)
 		}
 		if server.Command != "" && server.URL != "" {
-			return fmt.Errorf("mcp_servers server %q sets both command and url: a server is reached one way, so remove whichever of the two is not the transport you want", server.Name)
+			return fmt.Errorf("mcp_clients server %q sets both command and url: a server is reached one way, so remove whichever of the two is not the transport you want", server.Name)
 		}
 
 		if server.URL != "" {
@@ -1849,20 +1849,20 @@ func validateMCPServers(servers []MCPServer) error {
 		}
 
 		if len(server.Env) > 0 && server.Command == "" {
-			return fmt.Errorf("mcp_servers server %q sets env alongside url: env is the environment of a stdio child process, so pass values to a server reached over HTTP in headers instead", server.Name)
+			return fmt.Errorf("mcp_clients server %q sets env alongside url: env is the environment of a stdio child process, so pass values to a server reached over HTTP in headers instead", server.Name)
 		}
 		if len(server.Args) > 0 && server.Command == "" {
-			return fmt.Errorf("mcp_servers server %q sets args alongside url: args are the arguments of a stdio child process, so remove them from a server reached over HTTP", server.Name)
+			return fmt.Errorf("mcp_clients server %q sets args alongside url: args are the arguments of a stdio child process, so remove them from a server reached over HTTP", server.Name)
 		}
 		if len(server.Headers) > 0 && server.URL == "" {
-			return fmt.Errorf("mcp_servers server %q sets headers alongside command: headers are sent on HTTP requests, so pass values to a server spoken to over stdio in env instead", server.Name)
+			return fmt.Errorf("mcp_clients server %q sets headers alongside command: headers are sent on HTTP requests, so pass values to a server spoken to over stdio in env instead", server.Name)
 		}
 
 		if server.Include != nil && len(server.Include.Tags) > 0 {
-			return fmt.Errorf("mcp_servers server %q has an include.tags filter, which cannot be honored: MCP has no tags, so a tool would never match one; include by tool name instead", server.Name)
+			return fmt.Errorf("mcp_clients server %q has an include.tags filter, which cannot be honored: MCP has no tags, so a tool would never match one; include by tool name instead", server.Name)
 		}
 		if server.Exclude != nil && len(server.Exclude.Tags) > 0 {
-			return fmt.Errorf("mcp_servers server %q has an exclude.tags filter, which cannot be honored: MCP has no tags, so a tool excluded by tag would be imported anyway; exclude by tool name instead", server.Name)
+			return fmt.Errorf("mcp_clients server %q has an exclude.tags filter, which cannot be honored: MCP has no tags, so a tool excluded by tag would be imported anyway; exclude by tool name instead", server.Name)
 		}
 
 		if err := validateMCPServerValues(server.Name, "env", server.Env); err != nil {
@@ -1889,7 +1889,7 @@ func validateMCPServerValues(server string, key string, values map[string]string
 	for _, name := range names {
 		_, err := EnvReferences(values[name])
 		if err != nil {
-			return fmt.Errorf("mcp_servers server %q has an invalid %s value for %q: %w", server, key, name, err)
+			return fmt.Errorf("mcp_clients server %q has an invalid %s value for %q: %w", server, key, name, err)
 		}
 	}
 
@@ -1915,7 +1915,7 @@ func validateMCPServerValues(server string, key string, values map[string]string
 func validateMCPServerURL(server string, value string) error {
 	refs, err := EnvReferences(value)
 	if err != nil {
-		return fmt.Errorf("mcp_servers server %q has an invalid url: %w", server, err)
+		return fmt.Errorf("mcp_clients server %q has an invalid url: %w", server, err)
 	}
 	if len(refs) > 0 {
 		return nil
@@ -1923,7 +1923,7 @@ func validateMCPServerURL(server string, value string) error {
 
 	_, err = ParseMCPServerURL(value)
 	if err != nil {
-		return fmt.Errorf("mcp_servers server %q has an invalid url %q: %w", server, RedactURL(value), err)
+		return fmt.Errorf("mcp_clients server %q has an invalid url %q: %w", server, RedactURL(value), err)
 	}
 
 	return nil
@@ -2657,23 +2657,23 @@ func (c *Config) prepare() error {
 		c.Harness.ToolTimeoutParsed = d
 	}
 
-	// An mcp_servers timeout covers a server's startup only, so an unset key leaves
+	// An mcp_clients timeout covers a server's startup only, so an unset key leaves
 	// zero, which MCPServer.StartupTimeout reads as the default. Zero is refused along
 	// with a negative, unlike harness.tool_timeout where it means unlimited: a startup
 	// with no limit holds up the start of a run against a server that never answers.
-	for i, server := range c.MCPServers {
+	for i, server := range c.MCPClients {
 		if server.TimeoutString == "" {
 			continue
 		}
 
 		d, err := fisk.ParseDuration(server.TimeoutString)
 		if err != nil {
-			return fmt.Errorf("invalid mcp_servers timeout %q on server %q: %w", server.TimeoutString, server.Name, err)
+			return fmt.Errorf("invalid mcp_clients timeout %q on server %q: %w", server.TimeoutString, server.Name, err)
 		}
 		if d <= 0 {
-			return fmt.Errorf("invalid mcp_servers timeout %q on server %q: must be greater than zero", server.TimeoutString, server.Name)
+			return fmt.Errorf("invalid mcp_clients timeout %q on server %q: must be greater than zero", server.TimeoutString, server.Name)
 		}
-		c.MCPServers[i].TimeoutParsed = d
+		c.MCPClients[i].TimeoutParsed = d
 	}
 
 	if err := c.LLM.Budget.prepare(); err != nil {

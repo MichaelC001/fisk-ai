@@ -4,7 +4,7 @@
 
 // Package mcpclient imports the tools of a third-party MCP server into an agent
 // run. It is the policy and transport layer over the client half of the Model
-// Context Protocol SDK: it builds a transport from an mcp_servers entry,
+// Context Protocol SDK: it builds a transport from an mcp_clients entry,
 // resolves that entry's "${VAR}" references against the process environment,
 // connects one session per server and holds those sessions for the caller to
 // reach by name and close when the run ends. Over those sessions it lists each

@@ -392,7 +392,7 @@ type Options struct {
 	// use, which mcpclient.Sessions is: the runs sharing them call tools over them
 	// concurrently. When nil, Run connects to the configured servers at run start and
 	// closes those sessions at run end, so the CLI path is unchanged. They are consulted
-	// only when the config declares mcp_servers; with none they are ignored, so injecting
+	// only when the config declares mcp_clients; with none they are ignored, so injecting
 	// them into a run with no MCP servers is a no-op.
 	MCPSessions *mcpclient.Sessions
 
@@ -1156,7 +1156,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	var mcpSessions *mcpclient.Sessions
 	var mcpImports []mcpclient.ServerImport
 	mcpByName := map[string]*functool.Tool{}
-	if len(cfg.MCPServers) > 0 {
+	if len(cfg.MCPClients) > 0 {
 		// Caller-injected sessions are borrowed: a server process connects once and hands
 		// the same sessions to every run it hosts rather than starting a stdio child around
 		// each one. They are used verbatim and never closed (the caller owns them).
@@ -1167,7 +1167,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		sessions := opts.MCPSessions
 		if sessions == nil {
 			sessions, err = mcpclient.Connect(setupCtx, mcpclient.Options{
-				Servers:            cfg.MCPServers,
+				Servers:            cfg.MCPClients,
 				Identity:           cfg.Identity,
 				Version:            util.Version(),
 				CredentialEnvNames: cfg.CredentialEnvNames(),
@@ -1178,14 +1178,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			defer sessions.Close()
 		}
 
-		// The import walks the server list the sessions carry, not cfg.MCPServers, so a
+		// The import walks the server list the sessions carry, not cfg.MCPClients, so a
 		// set opened from another configuration would import its servers under its
 		// aliases and filters in a run that never declared them. That is refused rather
 		// than substituted. The check is here rather than in the host that injects
 		// because this is the one path every injected set reaches the import through, so
 		// a second host, or an embedder passing Options.MCPSessions directly, gets it
 		// without arranging anything.
-		err = sessions.CheckServers(cfg.MCPServers)
+		err = sessions.CheckServers(cfg.MCPClients)
 		if err != nil {
 			return res, err
 		}
@@ -1278,7 +1278,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// native (e.g. knowledge_search), imported, or injected by the caller.
 	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(mcpTools)+len(opts.CustomTools) == 0 {
 		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_servers in %q", opts.ConfigFile)
+			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients in %q", opts.ConfigFile)
 		}
 		return res, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
 	}

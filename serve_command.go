@@ -348,7 +348,7 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	if runs {
 		doc.Item("Sessions", c.sessionsDescription(res))
 		doc.Item("Knowledge", c.knowledgeDescription(cfg, res))
-		doc.Item("MCP Servers", c.mcpServersDescription(cfg))
+		doc.Item("MCP Clients", c.mcpClientsDescription(cfg))
 	}
 
 	doc.Item("Telemetry", c.telemetryDescription(tel))
@@ -465,20 +465,20 @@ func (c *fiskServeCommand) knowledgeDescription(cfg *config.Config, res *serve.R
 	return fmt.Sprintf("enabled (%s)", res.RAGStore.Path())
 }
 
-// mcpServersDescription names the MCP servers whose tools every hosted run imports.
+// mcpClientsDescription names the MCP servers whose tools every hosted run imports.
 // They are connected once at startup and shared, so a server named here has already
 // answered: the worker refuses to start when one cannot be reached, and the banner
 // prints after everything that can fail has.
 //
 // The names come from the configuration rather than from the connected set, so the
 // line reads the same whether or not this process built the sessions itself.
-func (c *fiskServeCommand) mcpServersDescription(cfg *config.Config) string {
-	if len(cfg.MCPServers) == 0 {
+func (c *fiskServeCommand) mcpClientsDescription(cfg *config.Config) string {
+	if len(cfg.MCPClients) == 0 {
 		return "none configured"
 	}
 
-	names := make([]string, 0, len(cfg.MCPServers))
-	for _, server := range cfg.MCPServers {
+	names := make([]string, 0, len(cfg.MCPClients))
+	for _, server := range cfg.MCPClients {
 		names = append(names, server.Name)
 	}
 

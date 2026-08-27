@@ -216,7 +216,7 @@ var _ = Describe("the MCP import", func() {
 
 		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
 		cfg := agenttest.Config(GinkgoTB(), app)
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`)),
@@ -252,7 +252,7 @@ var _ = Describe("the MCP import", func() {
 
 		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
 		cfg := agenttest.Config(GinkgoTB(), app)
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		_, err := agent.Run(context.Background(), agent.Options{
 			Config:      cfg,
@@ -277,7 +277,7 @@ var _ = Describe("the MCP import", func() {
 
 		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
 		cfg := agenttest.Config(GinkgoTB(), app)
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
 		events := newMCPNoteRecorder()
@@ -321,7 +321,7 @@ var _ = Describe("the MCP import", func() {
 			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), application))
-			cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 			_, err := agent.Run(context.Background(), agent.Options{
 				Config:      cfg,
@@ -351,7 +351,7 @@ var _ = Describe("the MCP import", func() {
 
 			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 			cfg.RemoteTools = []config.RemoteToolHost{{Name: "docs-svc"}}
-			cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 			_, err := agent.Run(context.Background(), agent.Options{
 				Config:       cfg,
@@ -380,7 +380,7 @@ var _ = Describe("the MCP import", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), application))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
 
 		events := newMCPNoteRecorder()
 
@@ -426,7 +426,7 @@ var _ = Describe("the MCP import", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		_, err = agent.Run(context.Background(), agent.Options{
 			Config:      cfg,
@@ -449,7 +449,7 @@ var _ = Describe("the MCP import", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		res, err := agent.Run(ctx, agent.Options{
 			Config:      cfg,
@@ -482,7 +482,7 @@ var _ = Describe("the MCP import", func() {
 			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-			cfg.MCPServers = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
+			cfg.MCPClients = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
 
 			_, err := agent.Run(context.Background(), agent.Options{
 				Config:      cfg,
@@ -499,7 +499,7 @@ var _ = Describe("the MCP import", func() {
 			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
 
 			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-			cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 			_, err := agent.Run(context.Background(), agent.Options{
 				Config:      cfg,
@@ -536,7 +536,7 @@ var _ = Describe("the MCP import", func() {
 		DeferCleanup(endpoint.Close)
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs", URL: endpoint.URL}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs", URL: endpoint.URL}}
 
 		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
 
@@ -562,7 +562,7 @@ var _ = Describe("the MCP import", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), emptyFiskApp()))
-		cfg.MCPServers = []config.MCPServer{{Name: "docs"}}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
 		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done"))
 
