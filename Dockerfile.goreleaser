@@ -1,7 +1,8 @@
 FROM almalinux
 ARG TARGETPLATFORM
 RUN useradd --uid 1000 --create-home --shell /bin/bash agent
+RUN ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt
 COPY $TARGETPLATFORM/fisk /usr/bin/
 USER agent
 WORKDIR /home/agent
-ENTRYPOINT ["/usr/bin/fisk"]
+CMD ["/usr/bin/fisk"]

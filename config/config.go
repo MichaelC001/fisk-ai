@@ -452,7 +452,7 @@ type RAGConfig struct {
 // needs and pin whatever it emits in the index manifest.
 type RAGEmbeddingsConfig struct {
 	// BaseURL is the OpenAI-compatible base; embeddings are POSTed to
-	// <base_url>/embeddings. A non-loopback base_url must use https.
+	// <base_url>/embeddings. Either http or https may be used.
 	BaseURL string `json:"base_url" yaml:"base_url"`
 	// Model is the embedding model name passed to the server.
 	Model string `json:"model" yaml:"model"`
