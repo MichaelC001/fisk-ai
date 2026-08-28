@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -67,6 +68,15 @@ var _ = Describe("knowledge_search tool", func() {
 		}
 
 		Expect(names).To(ConsistOf(knowledgeSearchName, knowledgeEnumerateName))
+	})
+
+	// A citation rule that renders a URL puts something an agent with a web tool can
+	// fetch in front of it, which a relative path never was, so the note has to say
+	// what the URL is for.
+	It("tells the model a citation that reads as a URL is still a citation", func() {
+		note := RAGSystemNote(enabled(""))
+		Expect(note).To(ContainSubstring("citation rules render a citation as a URL"))
+		Expect(note).To(ContainSubstring("rather than fetching it"))
 	})
 
 	It("returns an error when invoked with a nil store", func() {
@@ -166,18 +176,35 @@ var _ = Describe("knowledge_search tool", func() {
 	Describe("capHits", func() {
 		It("always includes the first hit and stops once the budget is exceeded", func() {
 			hits := []rag.Hit{
-				{Citation: "a#0", Content: "aaaaaaaaaa"},
-				{Citation: "b#0", Content: "bbbbbbbbbb"},
+				{Citation: "a#0", MappedCitation: "a#0", Content: "aaaaaaaaaa"},
+				{Citation: "b#0", MappedCitation: "b#0", Content: "bbbbbbbbbb"},
 			}
 			// Budget of 1 token ~ 4 chars, far below the first hit's size.
 			out := capHits(hits, 1)
 			Expect(out).To(HaveLen(1))
-			Expect(out[0].Citation).To(Equal("a#0"))
+			Expect(out[0].IndexRef).To(Equal("a#0"))
 		})
 
 		It("includes all hits when the budget is ample", func() {
 			hits := []rag.Hit{{Citation: "a#0", Content: "x"}, {Citation: "b#0", Content: "y"}}
 			Expect(capHits(hits, 1000)).To(HaveLen(2))
+		})
+
+		// The model is told to cite one field and to keep the other off the page, so
+		// the mapped citation has to land in the field the description names.
+		It("cites the mapped citation and keeps the index key beside it", func() {
+			hits := []rag.Hit{{
+				Citation:       "docs/note.md#3",
+				MappedCitation: "https://docs.example.net/note#backpressure",
+				Mapped:         true,
+				HeadingPath:    "Guide > Backpressure",
+				Content:        "text",
+			}}
+
+			out := capHits(hits, 1000)
+			Expect(out).To(HaveLen(1))
+			Expect(out[0].Citation).To(Equal("https://docs.example.net/note#backpressure"))
+			Expect(out[0].IndexRef).To(Equal("docs/note.md#3"))
 		})
 	})
 
@@ -236,6 +263,46 @@ var _ = Describe("knowledge_search tool", func() {
 			Expect(res.Results).ToNot(BeEmpty())
 			Expect(res.Results[0].Citation).To(ContainSubstring("note.md#"))
 			Expect(res.Results[0].Content).To(ContainSubstring("shards"))
+		})
+
+		search := func() knowledgeHitJSON {
+			GinkgoHelper()
+
+			out, err := callTool(ragToolNamed(tools, knowledgeSearchName), ctx, json.RawMessage(`{"query":"sharding horizontal scale"}`), nil)
+			Expect(err).ToNot(HaveOccurred())
+
+			var res knowledgeSearchOutcome
+			Expect(json.Unmarshal([]byte(out), &res)).To(Succeed())
+			Expect(res.Results).ToNot(BeEmpty())
+
+			return res.Results[0]
+		}
+
+		It("cites a mapped document by the operator's rule and keeps the index key in index_ref", func() {
+			// Unanchored because the indexer stores the absolute path it walked.
+			cfg.Harness.RAG.Citations = []config.RAGCitationRule{{
+				Pattern:         `docs/(.*)\.md$`,
+				Replace:         "https://docs.example.net/$1#${anchor}",
+				PatternCompiled: regexp.MustCompile(`docs/(.*)\.md$`),
+			}}
+			buildIndex()
+			open()
+
+			hit := search()
+			Expect(hit.Citation).To(Equal("https://docs.example.net/note#sharding"))
+			Expect(hit.IndexRef).To(ContainSubstring("note.md#"))
+		})
+
+		// A corpus that is published nowhere is the default, and the model is told to
+		// cite the citation field whatever the operator configured, so that field has to
+		// hold something citable even then.
+		It("puts the index key in both fields for a document no rule matches", func() {
+			buildIndex()
+			open()
+
+			hit := search()
+			Expect(hit.Citation).To(ContainSubstring("note.md#"))
+			Expect(hit.Citation).To(Equal(hit.IndexRef))
 		})
 	})
 })
