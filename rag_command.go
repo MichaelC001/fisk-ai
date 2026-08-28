@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/ui/columns"
@@ -270,18 +271,44 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	for _, h := range res.Hits {
-		c.Section(h.Citation, func(c *columns.Document) {
+	renderSearchHits(c, res.Hits, knowledgeFull)
+
+	return nil
+}
+
+// renderSearchHits adds one section per hit.
+//
+// The raw citation stays the section heading so it can be pasted straight into
+// knowledge show, which accepts only that token: a citation rule is a regular
+// expression and is not reversible, so a published URL resolves back to no chunk.
+// The mapped citation is a field under it, and only when a rule matched, because a
+// line repeating the path is noise on a corpus that is mostly unpublished.
+//
+// A citation carries a corpus path and a mapped citation can carry the document's
+// own heading, so both are sanitized on the way out.
+func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
+	for _, h := range hits {
+		c.Section(terminalToken(h.Citation), func(c *columns.Document) {
+			if h.Mapped {
+				c.Item("Mapped", terminalToken(h.MappedCitation))
+			}
 			c.ItemUnlessZero("Section", h.HeadingPath)
-			if knowledgeFull {
+			if full {
 				c.Item("Chunk", h.Content)
 			} else {
 				c.Item("Chunk", util.TruncateLine(h.Content, 100))
 			}
 		})
 	}
+}
 
-	return nil
+// terminalToken sanitizes a raw or a mapped citation for a terminal without
+// cutting it short. The operator pastes a raw citation into knowledge show and a
+// mapped one into a browser or wherever the rules publish to, and neither accepts
+// a token that lost its tail. terminalText truncates, since a table cell has a
+// width.
+func terminalToken(s string) string {
+	return util.SanitizeForTerminal(s, utf8.RuneCountInString(s))
 }
 
 func knowledgeShowAction(_ *fisk.ParseContext) error {
@@ -518,15 +545,67 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	tbl := table.NewTableWriter("")
-	defer tbl.WriteTo(os.Stdout)
+	// Without rules there is nothing to map and no rule that can fail to match, so
+	// the column and the count are left off entirely rather than filling a listing
+	// with blanks for the operators who never published their corpus.
+	var mapper *rag.CitationMapper
+	if len(cfg.RAGCitationRules()) > 0 {
+		mapper = store.CitationMapper()
+	}
 
-	tbl.AddHeaders("Path", "Chunks", "Last Indexed")
-	for _, s := range sources {
-		tbl.AddRow(s.Path, s.Chunks, s.MTime)
+	tbl, unmapped := sourcesTable(sources, mapper)
+	if _, err := tbl.WriteTo(os.Stdout); err != nil {
+		return err
+	}
+
+	if mapper != nil {
+		fmt.Printf("\n%d of %d %s matched no citation rule and %s cited by path\n",
+			unmapped, len(sources), plural(len(sources), "document", "documents"), plural(unmapped, "is", "are"))
 	}
 
 	return nil
+}
+
+// sourcesTable lists the indexed documents and reports how many of them no
+// citation rule matched.
+//
+// A nil mapper means no citation rules are configured, which leaves the mapped
+// column off and the count at zero. Where rules are configured the column is blank
+// for a document none of them matched, and the count says how many: a rule
+// matching nothing sends raw paths to the model and reports no error anywhere.
+//
+// The mapped citation is the document-level one; see
+// rag.CitationMapper.RenderDocument for how it differs from knowledge match.
+func sourcesTable(sources []rag.Source, mapper *rag.CitationMapper) (*table.Table, int) {
+	tbl := table.NewTableWriter("")
+
+	if mapper == nil {
+		tbl.AddHeaders("Path", "Chunks", "Last Indexed")
+		for _, s := range sources {
+			tbl.AddRow(s.Path, s.Chunks, s.MTime)
+		}
+
+		return tbl, 0
+	}
+
+	var unmapped int
+
+	tbl.AddHeaders("Path", "Chunks", "Last Indexed", "Mapped")
+	for _, s := range sources {
+		mappedCitation, mapped := mapper.RenderDocument(s.Path)
+		// A rule whose replacement is nothing but reserved names matches and then
+		// renders empty at document level, and a document with an empty mapped
+		// citation is unmapped whichever way it got there. Counting it as mapped
+		// would report the corpus clean while every cell in the column was blank.
+		if !mapped || mappedCitation == "" {
+			unmapped++
+			mappedCitation = ""
+		}
+
+		tbl.AddRow(s.Path, s.Chunks, s.MTime, terminalText(mappedCitation))
+	}
+
+	return tbl, unmapped
 }
 
 func knowledgeDoctorAction(_ *fisk.ParseContext) error {

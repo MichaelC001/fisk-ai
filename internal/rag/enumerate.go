@@ -88,6 +88,21 @@ type MatchedDoc struct {
 	BodyMatches    int
 	HeadingMatches int
 	TotalChunks    int
+
+	// MappedCitation is how this document is cited outside the corpus, rendered from
+	// the configured citation rules: a URL where the rules publish one, and whatever
+	// else a rule renders otherwise. It is the Citation token itself when no rule
+	// matched the path. It cites the document at its first matching chunk:
+	// ${ordinal} is filled, and ${heading} and ${anchor} render empty because
+	// enumeration answers which documents hold a term and never loads a section.
+	//
+	// A listing built on Sources renders the same document with
+	// CitationMapper.RenderDocument; see there for how the two differ.
+	MappedCitation string
+
+	// Mapped reports whether a rule produced MappedCitation, which MappedCitation
+	// alone does not say: a rule may render a path unchanged.
+	Mapped bool
 }
 
 // TermReport is one query term and what the index holds for it. Literal is the
@@ -372,12 +387,16 @@ func (s *Store) describeMatches(ctx context.Context, ids map[int64]bool, q *enum
 			continue
 		}
 
+		mappedCitation, mapped := s.citations.Render(path, firstOrdinals[id], "")
+
 		out = append(out, MatchedDoc{
 			Path:           path,
 			Citation:       Citation(path, firstOrdinals[id]),
 			BodyMatches:    bodyCounts[id],
 			HeadingMatches: headingCounts[id],
 			TotalChunks:    total,
+			MappedCitation: mappedCitation,
+			Mapped:         mapped,
 		})
 	}
 

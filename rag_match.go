@@ -134,7 +134,7 @@ func runKnowledgeMatch(pc *fisk.ParseContext) (int, error) {
 	c := columns.New()
 	defer c.WriteTo(os.Stdout)
 
-	return res.Matched, renderMatch(c, res)
+	return res.Matched, renderMatch(c, res, len(cfg.RAGCitationRules()) > 0)
 }
 
 // flagWasSet reports whether the user gave a flag, as opposed to it holding its
@@ -149,12 +149,14 @@ func flagWasSet(pc *fisk.ParseContext, name string) bool {
 	return false
 }
 
-// renderMatch adds the whole result to c.
+// renderMatch adds the whole result to c. citations says whether the operator
+// configured any citation rules, which decides whether the table carries a mapped
+// citation column.
 //
 // The two machine-readable modes bypass it and write bare lines, as knowledge show
 // does for a chunk: a document renderer decorates, and decoration is exactly what a
 // pipe cannot have.
-func renderMatch(c *columns.Document, res *rag.EnumerateResult) error {
+func renderMatch(c *columns.Document, res *rag.EnumerateResult, citations bool) error {
 	machine := knowledgeMatchCount || knowledgeMatchPathsOnly
 
 	switch res.Status {
@@ -209,27 +211,52 @@ func renderMatch(c *columns.Document, res *rag.EnumerateResult) error {
 		return nil
 	}
 
-	c.Embed(matchTable(res.Docs))
+	c.Embed(matchTable(res.Docs, citations))
 	renderMatchNotes(c, res)
 
 	return nil
 }
 
+// terminalText prepares one corpus-derived value for a table cell: sanitized, and
+// cut to the width a knowledge table renders a path at.
+func terminalText(s string) string {
+	return util.TruncateLine(util.SanitizeForTerminal(s, matchMaxPathRunes), matchMaxPathRunes)
+}
+
 // matchTable renders the matched documents. The citation carries the path as its
 // own prefix, so listing both doubles the width of the widest column to say the
 // same thing twice; the citation wins because it is the token knowledge show
-// accepts. Citations come from the corpus, so they are sanitized and truncated
-// like any other text on its way to a terminal.
-func matchTable(docs []rag.MatchedDoc) *table.Table {
+// accepts. Raw and mapped citations both come from the corpus, so they are
+// sanitized and truncated like any other text on its way to a terminal.
+//
+// citations says whether the operator configured any citation rules. Without them
+// no document has a mapped citation, and a column of blanks in every listing is
+// worse than no column. With them the column is blank for a document no rule
+// matched, which is the ordinary state of a partly published corpus.
+//
+// The column shows MatchedDoc.MappedCitation, which cites the document at the
+// first chunk that matched, the same chunk knowledge_enumerate reports it at. See
+// rag.CitationMapper.RenderDocument for how that differs from knowledge sources.
+func matchTable(docs []rag.MatchedDoc, citations bool) *table.Table {
 	tbl := table.NewTableWriter("")
-	tbl.AddHeaders("Citation", "Body", "Heading")
 
+	if !citations {
+		tbl.AddHeaders("Citation", "Body", "Heading")
+		for _, d := range docs {
+			tbl.AddRow(terminalText(d.Citation), d.BodyMatches, d.HeadingMatches)
+		}
+
+		return tbl
+	}
+
+	tbl.AddHeaders("Citation", "Body", "Heading", "Mapped")
 	for _, d := range docs {
-		tbl.AddRow(
-			util.TruncateLine(util.SanitizeForTerminal(d.Citation, matchMaxPathRunes), matchMaxPathRunes),
-			d.BodyMatches,
-			d.HeadingMatches,
-		)
+		mappedCitation := ""
+		if d.Mapped {
+			mappedCitation = terminalText(d.MappedCitation)
+		}
+
+		tbl.AddRow(terminalText(d.Citation), d.BodyMatches, d.HeadingMatches, mappedCitation)
 	}
 
 	return tbl

@@ -132,6 +132,11 @@ type Store struct {
 
 	topK              int
 	maxInjectedTokens int
+
+	// citations renders the mapped citation of every result this store returns. It
+	// is built in newStore, since a store keeps no *config.Config to build one from
+	// later and a writer answers searches too.
+	citations *CitationMapper
 }
 
 // resolveDir returns the store directory for cfg: the configured directory when
@@ -236,6 +241,36 @@ func resolvedMaxInjectedTokens(cfg *config.RAGConfig) int {
 	return cfg.MaxInjectedTokens
 }
 
+// newStore builds every part of a Store that comes from the config alone: the
+// embedder, the resolved directory, the index file path, the retrieval limits and
+// the citation renderer. Open and OpenWriter both build their store through it, so
+// a value derived from the config cannot reach one path and be missing from the
+// other, and a reader and a writer opened from one config always agree on it.
+//
+// The returned store has no db and no lock. Those belong to the constructors: Open
+// attaches a read-only handle once it has seen the file exists, and OpenWriter
+// attaches the write handle along with the advisory lock it took. buildEmbedder is
+// the only call here that can fail, and it holds no directory, lock or file, so a
+// caller that gets an error has nothing to release.
+func newStore(cfg *config.Config, storeDir string, readOnly bool) (*Store, error) {
+	emb, err := buildEmbedder(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	dir := resolveDir(cfg, storeDir)
+
+	return &Store{
+		emb:               emb,
+		dbPath:            filepath.Join(dir, dbFileName),
+		dir:               dir,
+		readOnly:          readOnly,
+		topK:              resolvedTopK(cfg.Harness.RAG),
+		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
+		citations:         NewCitationMapper(cfg.RAGCitationRules()),
+	}, nil
+}
+
 // Open opens the index for reading, the path the agent and the inspection CLI
 // commands use. It validates the config (a malformed embeddings block fails here,
 // before the agent loop) and builds the embedder when the vector tier is on, but a
@@ -244,34 +279,22 @@ func resolvedMaxInjectedTokens(cfg *config.RAGConfig) int {
 // validates the pinned embedding identity against the configured embedder and
 // refuses a stale or too-new index rather than returning garbage rankings.
 func Open(cfg *config.Config, storeDir string) (*Store, error) {
-	emb, err := buildEmbedder(cfg)
+	s, err := newStore(cfg, storeDir, true)
 	if err != nil {
 		return nil, err
-	}
-
-	dir := resolveDir(cfg, storeDir)
-	dbPath := filepath.Join(dir, dbFileName)
-
-	s := &Store{
-		emb:               emb,
-		dbPath:            dbPath,
-		dir:               dir,
-		readOnly:          true,
-		topK:              resolvedTopK(cfg.Harness.RAG),
-		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
 	}
 
 	// A read-only connection against a nonexistent file errors (mode=ro does not
 	// create), so stat first: a missing file is the soft not-built state, returned
 	// without opening. WAL is set by the writer before any reader attaches; the
 	// reader never runs that pragma.
-	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(s.dbPath); errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	} else if err != nil {
-		return nil, fmt.Errorf("stat knowledge index %q: %w", dbPath, err)
+		return nil, fmt.Errorf("stat knowledge index %q: %w", s.dbPath, err)
 	}
 
-	db, err := openDB(dbPath, true)
+	db, err := openDB(s.dbPath, true)
 	if err != nil {
 		return nil, err
 	}
@@ -307,47 +330,35 @@ func Open(cfg *config.Config, storeDir string) (*Store, error) {
 // the embeddings server. Close releases the lock. An index from another format
 // generation is refused here, before the schema statements run.
 func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
-	emb, err := buildEmbedder(cfg)
+	s, err := newStore(cfg, storeDir, false)
 	if err != nil {
 		return nil, err
 	}
 
-	dir := resolveDir(cfg, storeDir)
-	if err := os.MkdirAll(dir, dirFileMode); err != nil {
-		return nil, fmt.Errorf("creating knowledge directory %q: %w", dir, err)
+	if err := os.MkdirAll(s.dir, dirFileMode); err != nil {
+		return nil, fmt.Errorf("creating knowledge directory %q: %w", s.dir, err)
 	}
 
-	lock, err := acquireWriteLock(filepath.Join(dir, lockFileName))
+	lock, err := acquireWriteLock(filepath.Join(s.dir, lockFileName))
 	if err != nil {
 		return nil, err
 	}
-
-	dbPath := filepath.Join(dir, dbFileName)
+	s.lock = lock
 
 	// Create the file 0600 up front so SQLite does not create it under the umask,
 	// which could leave it world-readable and defeat the intended private mode.
-	if err := ensureFileMode(dbPath); err != nil {
+	if err := ensureFileMode(s.dbPath); err != nil {
 		lock.release()
 		return nil, err
 	}
 
-	db, err := openDB(dbPath, false)
+	db, err := openDB(s.dbPath, false)
 	if err != nil {
 		lock.release()
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-
-	s := &Store{
-		db:                db,
-		emb:               emb,
-		dbPath:            dbPath,
-		dir:               dir,
-		readOnly:          false,
-		lock:              lock,
-		topK:              resolvedTopK(cfg.Harness.RAG),
-		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
-	}
+	s.db = db
 
 	ctx := context.Background()
 	if err := s.verifyFTS5(ctx); err != nil {
@@ -371,7 +382,7 @@ func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
 	}
 	// WAL creates -wal/-shm honoring the umask; re-assert private modes on the file
 	// and its sidecars, refusing a symlink planted at any of the three paths.
-	if err := enforcePerms(dbPath); err != nil {
+	if err := enforcePerms(s.dbPath); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -785,6 +796,12 @@ func (s *Store) MaxInjectedTokens() int { return s.maxInjectedTokens }
 
 // Dir returns the store directory, excluded from its own index walk.
 func (s *Store) Dir() string { return s.dir }
+
+// CitationMapper returns the renderer this store built from the configured
+// citation rules. Every Hit and MatchedDoc already carries its mapped citation, so
+// this is for a surface that cites a document without running a search, such as a
+// listing of the indexed documents.
+func (s *Store) CitationMapper() *CitationMapper { return s.citations }
 
 // Meta is the pinned vector identity read from rag_meta. FormatVersion is always
 // present; the remaining fields are set only for an index built with the vector

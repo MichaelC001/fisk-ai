@@ -8,9 +8,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -25,6 +28,21 @@ var _ = Describe("knowledge_enumerate tool", func() {
 
 	enabled := func(dir string) *config.Config {
 		return &config.Config{Identity: "test", Harness: config.HarnessConfig{RAG: &config.RAGConfig{Enabled: true, Directory: dir}}}
+	}
+
+	rows := func(n int, citation string) []knowledgeEnumDocJSON {
+		out := make([]knowledgeEnumDocJSON, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, knowledgeEnumDocJSON{
+				Citation:       citation,
+				IndexRef:       "docs/some/typical/path.md#12",
+				BodyMatches:    3,
+				HeadingMatches: 1,
+				TotalChunks:    9,
+			})
+		}
+
+		return out
 	}
 
 	Describe("exposure", func() {
@@ -60,7 +78,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 
 		// A tool that declares MCP exposure but that config will not accept in the
 		// allowlist is selectable by no operator and served to nobody. Adding one has
-		// to move both halves, and this is what fails if only the spec moves.
+		// to move both halves, and this spec fails when only one of them does.
 		It("keeps every MCP-exposable knowledge tool nameable in config", func() {
 			nameable := []string{config.KnowledgeSearchToolName, config.KnowledgeEnumerateToolName}
 			for _, t := range RAGTools(cfg, nil) {
@@ -143,15 +161,72 @@ var _ = Describe("knowledge_enumerate tool", func() {
 	})
 
 	Describe("enumerateDocBudget", func() {
+		const maxTokens = 8000
+
 		It("scales with the operator's injection budget", func() {
 			Expect(enumerateDocBudget(8000)).To(BeNumerically(">", enumerateDocBudget(2000)))
 		})
 
-		// Rounding a real match down to an empty list would read as absence, which is
-		// the one answer this tool exists to make trustworthy.
-		It("never returns a budget of zero", func() {
-			Expect(enumerateDocBudget(0)).To(Equal(1))
-			Expect(enumerateDocBudget(1)).To(Equal(1))
+		// The count limits the query and trimEnumerateDocs holds the share, so the count
+		// only has to be generous: the trim must never want more rows than the count
+		// asked for. A row with nothing in either of its strings is the smallest the tool
+		// emits, so if even those run out before the count does, the count decided the
+		// list and the trim was never consulted.
+		It("asks for at least as many rows as the share can hold", func() {
+			kept, err := trimEnumerateDocs(make([]knowledgeEnumDocJSON, enumerateDocBudget(maxTokens)+20), enumerateShareBytes(maxTokens))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(kept)).To(BeNumerically("<=", enumerateDocBudget(maxTokens)))
+		})
+
+		// The other side of generous: a URL-shaped citation is the short end of what a
+		// rule renders, and the count has to leave the choice of how many of those fit
+		// to the trim rather than making it here.
+		It("asks for more rows than a URL-shaped row can fit", func() {
+			kept, err := trimEnumerateDocs(rows(enumerateDocBudget(maxTokens), "https://docs.example.net/some/typical/path/#section-12"), enumerateShareBytes(maxTokens))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(kept)).To(BeNumerically("<", enumerateDocBudget(maxTokens)))
+		})
+
+	})
+
+	Describe("trimEnumerateDocs", func() {
+		const maxTokens = 8000
+
+		// A citation is whatever the operator's rule renders and has no length limit,
+		// while the count that used to decide this divided the share by a row sized
+		// around a 54 byte URL. An ordinary deep path rendered to a URL is already half
+		// as long again as that, and a longer one runs to several times the share.
+		DescribeTable("keeps the marshaled list inside the share", func(citationLen int, atMost int) {
+			kept, err := trimEnumerateDocs(rows(400, strings.Repeat("a", citationLen)), enumerateShareBytes(maxTokens))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kept).ToNot(BeEmpty())
+			Expect(len(kept)).To(BeNumerically("<=", atMost))
+
+			listed, err := json.Marshal(kept)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(listed)).To(BeNumerically("<=", enumerateShareBytes(maxTokens)))
+		},
+			Entry("a deep path rendered to a URL", 103, 40),
+			Entry("a citation twice that length", 200, 26),
+			Entry("a citation long enough that a handful of rows fill the share", 1500, 5),
+		)
+
+		It("leaves a list that already fits alone", func() {
+			kept, err := trimEnumerateDocs(rows(5, "docs/some/typical/path.md#12"), enumerateShareBytes(maxTokens))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kept).To(HaveLen(5))
+		})
+
+		// A document that matched and is not listed reads as absence, so the first row
+		// is kept whatever it costs.
+		It("returns the single matching row even when it alone exceeds the share", func() {
+			kept, err := trimEnumerateDocs(rows(1, strings.Repeat("a", 4000)), enumerateShareBytes(1000))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(kept).To(HaveLen(1))
+
+			listed, err := json.Marshal(kept)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(listed)).To(BeNumerically(">", enumerateShareBytes(1000)))
 		})
 	})
 
@@ -240,6 +315,23 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			w.Close()
 		}
 
+		buildManyIndex := func(n int) {
+			GinkgoHelper()
+
+			docs := filepath.Join(tmp, "docs")
+			Expect(os.MkdirAll(docs, 0o755)).To(Succeed())
+			for i := 0; i < n; i++ {
+				body := fmt.Sprintf("# Retention %d\n\nThe retention policy for shard %d is written down here.\n", i, i)
+				Expect(os.WriteFile(filepath.Join(docs, fmt.Sprintf("policy-%02d.md", i)), []byte(body), 0o644)).To(Succeed())
+			}
+
+			w, err := rag.OpenWriter(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			_, err = w.Index(ctx, []string{docs}, rag.IndexOptions{Reconcile: true})
+			Expect(err).ToNot(HaveOccurred())
+			w.Close()
+		}
+
 		call := func(query string) knowledgeEnumerateOutcome {
 			GinkgoHelper()
 
@@ -284,6 +376,33 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(out.Note).To(ContainSubstring("complete set"))
 		})
 
+		It("cites a mapped document by the operator's rule and keeps the index key in index_ref", func() {
+			// Unanchored because the indexer stores the absolute path it walked.
+			cfg.Harness.RAG.Citations = []config.RAGCitationRule{{
+				Pattern:         `docs/(.*)\.md$`,
+				Replace:         "https://docs.example.net/$1",
+				PatternCompiled: regexp.MustCompile(`docs/(.*)\.md$`),
+			}}
+			buildIndex()
+
+			out := call("shards")
+			Expect(out.Documents).To(HaveLen(1))
+			Expect(out.Documents[0].Citation).To(Equal("https://docs.example.net/shard"))
+			Expect(out.Documents[0].IndexRef).To(ContainSubstring("shard.md#"))
+		})
+
+		// A corpus that is published nowhere is the default, and the model is told to
+		// cite the citation field whatever the operator configured, so that field has to
+		// hold something citable even then.
+		It("puts the index key in both fields for a document no rule matches", func() {
+			buildIndex()
+
+			out := call("shards")
+			Expect(out.Documents).To(HaveLen(1))
+			Expect(out.Documents[0].Citation).To(ContainSubstring("shard.md#"))
+			Expect(out.Documents[0].Citation).To(Equal(out.Documents[0].IndexRef))
+		})
+
 		// The empty answer is the reason the tool exists, so it has to arrive with the
 		// note that makes it safe to act on rather than as a bare empty list.
 		It("returns an empty set that says it is complete", func() {
@@ -316,6 +435,68 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			// "deprecate" is not written anywhere; only "deprecated" is.
 			Expect(out.Terms[0].AsWritten).To(Equal(0))
 			Expect(out.Note).To(ContainSubstring("related form"))
+		})
+
+		// The share is spent on rows whose citations the operator's rule renders, and a
+		// rule can render anything, so this measures the list the tool marshals rather
+		// than a count derived from a sample citation.
+		Describe("a corpus with long mapped citations", func() {
+			const maxTokens = 1000
+
+			mappedCall := func(pad int) knowledgeEnumerateOutcome {
+				GinkgoHelper()
+
+				cfg.Harness.RAG.MaxInjectedTokens = maxTokens
+				cfg.Harness.RAG.Citations = []config.RAGCitationRule{{
+					Pattern:         `docs/(.*)\.md$`,
+					Replace:         "https://docs.example.net/" + strings.Repeat("x", pad) + "/$1",
+					PatternCompiled: regexp.MustCompile(`docs/(.*)\.md$`),
+				}}
+				buildManyIndex(8)
+
+				return call("retention")
+			}
+
+			// The description tells the model to always read the note, so a list the
+			// trim shortened and the note still calls complete is the one error it has no
+			// way to catch.
+			It("announces a shortened list as truncated and counts the rows it returned", func() {
+				out := mappedCall(68)
+
+				Expect(out.Matched).To(Equal(8))
+				Expect(out.Documents).ToNot(BeEmpty())
+				Expect(out.Truncated).To(BeTrue())
+				Expect(out.Returned).To(Equal(len(out.Documents)))
+				Expect(out.Returned).To(BeNumerically("<", out.Matched))
+				Expect(out.Note).To(ContainSubstring("8 documents match"))
+				Expect(out.Note).To(ContainSubstring(fmt.Sprintf("the %d listed here", out.Returned)))
+				Expect(out.Note).To(ContainSubstring("not the whole set"))
+				Expect(out.Note).ToNot(ContainSubstring("complete set"))
+
+				listed, err := json.Marshal(out.Documents)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(listed)).To(BeNumerically("<=", enumerateShareBytes(maxTokens)))
+			})
+		})
+
+		// A corpus no rule matches repeats the index reference in both fields, and a
+		// list of those that fits is returned whole and said to be complete.
+		It("leaves an unmapped corpus that fits its share alone", func() {
+			buildManyIndex(8)
+
+			out := call("retention")
+			Expect(out.Matched).To(Equal(8))
+			Expect(out.Returned).To(Equal(8))
+			Expect(out.Documents).To(HaveLen(8))
+			Expect(out.Truncated).To(BeFalse())
+			Expect(out.Note).To(ContainSubstring("complete set"))
+			for _, d := range out.Documents {
+				Expect(d.Citation).To(Equal(d.IndexRef))
+			}
+
+			listed, err := json.Marshal(out.Documents)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(listed)).To(BeNumerically("<=", enumerateShareBytes(6000)))
 		})
 
 		It("refuses a boolean query with a fix the model can act on", func() {
