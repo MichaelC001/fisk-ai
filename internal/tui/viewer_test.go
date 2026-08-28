@@ -326,12 +326,6 @@ var _ = Describe("transcript viewer", func() {
 			Expect(h).NotTo(ContainSubstring("delete the orders stream"))
 		})
 
-		It("Should truncate on rune boundaries, never splitting a character", func() {
-			Expect(truncateRunes("hello", 10)).To(Equal("hello"))
-			Expect(truncateRunes("hello world", 5)).To(Equal("hello..."))
-			Expect(truncateRunes("héllo", 2)).To(Equal("hé..."))
-		})
-
 		It("Should draw the header band without the query", func() {
 			text := drawViewer(Meta{Version: "v9", Query: "see this"}, []Line{{Kind: LineNarration, Text: "hi"}})
 			Expect(text).To(ContainSubstring("fisk-ai v9"))

@@ -281,10 +281,19 @@ type viewer struct {
 	// splashCard is the live view's startup card, a single opaque TextView kept so the
 	// spinner can repaint it; nil for the static viewer, which shows no card. splashBody
 	// is its right-column content (version/model/dir), kept so a spinner repaint recomposes
-	// the card without rebuilding it. splashDismissed latches once the card is removed so it
-	// never re-shows. All are touched only on the tview loop.
+	// the card without rebuilding it, and splashSpinner is the glyph that content was
+	// composed with. splashFrame and splashColumn are the centering boxes around the card,
+	// kept so resizeSplash can give it a new width; splashMeta is what the body is built
+	// from and splashValue the value budget the current width leaves. splashDismissed
+	// latches once the card is removed so it never re-shows. All are touched only on the
+	// tview loop.
 	splashCard      *tview.TextView
 	splashBody      []string
+	splashSpinner   string
+	splashFrame     *tview.Flex
+	splashColumn    *tview.Flex
+	splashMeta      Meta
+	splashValue     int
 	splashDismissed bool
 
 	// history is the in-memory list of submitted follow-ups, recalled with Up/Down like a
@@ -386,6 +395,9 @@ func newViewer(meta Meta, lines []Line, noColor, follow bool) *viewer {
 			first := v.width == 0
 			v.renderAll(w)
 			v.updateDividers(w)
+			// The startup card is built before the screen is initialized, so this is where
+			// it first learns the terminal width, and where it follows a resize after that.
+			v.resizeSplash(w)
 			if first && v.follow {
 				// Turn on tview's own tail-tracking once; a manual scroll up will
 				// switch it off, and scrolling back to the bottom will restore it.
@@ -1627,17 +1639,6 @@ func multiplexerLabel(meta Meta) string {
 	return "[" + meta.Multiplexer + " detected] "
 }
 
-// truncateRunes shortens s to at most n runes, appending an ellipsis when it cut. It
-// counts runes, not bytes, so it never splits a multibyte character.
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-
-	return string(r[:n]) + "..."
-}
-
 // statusText is the single-line statusbar: what is being viewed on the left and
 // the always-visible key hint so an operator is never stranded without a way out.
 func statusText(meta Meta) string {
@@ -1755,11 +1756,23 @@ func helpOverlay(canSuspend, interactive bool) tview.Primitive {
 
 // overlay centers a primitive in a box of the given size over the main view.
 func overlay(p tview.Primitive, width, height int) tview.Primitive {
-	return tview.NewFlex().
+	frame, _ := resizableOverlay(p, width, height)
+
+	return frame
+}
+
+// resizableOverlay is overlay with the two handles a caller needs to change the box later:
+// the frame, whose ResizeItem sets the column's width, and the column, whose ResizeItem
+// sets the primitive's height.
+func resizableOverlay(p tview.Primitive, width, height int) (frame, column *tview.Flex) {
+	column = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(nil, 0, 1, false).
-			AddItem(p, height, 0, true).
-			AddItem(nil, 0, 1, false), width, 0, true).
+		AddItem(p, height, 0, true).
 		AddItem(nil, 0, 1, false)
+	frame = tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(column, width, 0, true).
+		AddItem(nil, 0, 1, false)
+
+	return frame, column
 }
