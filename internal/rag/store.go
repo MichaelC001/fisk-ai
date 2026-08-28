@@ -133,7 +133,7 @@ type Store struct {
 	topK              int
 	maxInjectedTokens int
 
-	// citations renders the published address of every result this store returns. It
+	// citations renders the mapped citation of every result this store returns. It
 	// is built in newStore, since a store keeps no *config.Config to build one from
 	// later and a writer answers searches too.
 	citations *CitationMapper
@@ -798,9 +798,9 @@ func (s *Store) MaxInjectedTokens() int { return s.maxInjectedTokens }
 func (s *Store) Dir() string { return s.dir }
 
 // CitationMapper returns the renderer this store built from the configured
-// citation rules. Every Hit and MatchedDoc already carries its rendered address, so
-// this is for a surface that addresses a document without running a search, such as
-// a listing of the indexed documents.
+// citation rules. Every Hit and MatchedDoc already carries its mapped citation, so
+// this is for a surface that cites a document without running a search, such as a
+// listing of the indexed documents.
 func (s *Store) CitationMapper() *CitationMapper { return s.citations }
 
 // Meta is the pinned vector identity read from rag_meta. FormatVersion is always

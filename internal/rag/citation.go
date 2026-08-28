@@ -15,12 +15,15 @@ import (
 )
 
 // CitationMapper rewrites the document path in a knowledge citation into the
-// address a reader can reach, using the ordered rules an operator writes under
-// harness.knowledge.citations.
+// citation the operator's rules produce, using the ordered rules written under
+// harness.knowledge.citations. A rule is a regular expression substitution over
+// the stored path: most often it renders a URL a reader can open, but nothing
+// stops it rendering a ticket key, an internal document id or a page title.
 //
-// A mapper holding no rules renders every citation as the raw
-// <relpath>#<ordinal> token, so a caller never needs to know whether an operator
-// configured any. That is the default: most corpora are not published.
+// A mapper holding no rules passes every citation through unrewritten, the raw
+// <relpath>#<ordinal> token from Render and the document path from
+// RenderDocument, so a caller never needs to know whether an operator configured
+// any. That is the default: most corpora are not published.
 type CitationMapper struct {
 	rules []config.RAGCitationRule
 }
@@ -36,7 +39,10 @@ func NewCitationMapper(rules []config.RAGCitationRule) *CitationMapper {
 	return &CitationMapper{rules: rules}
 }
 
-// Render returns the address for one cited chunk and whether a rule matched.
+// Render returns the mapped citation for one cited chunk and whether a rule
+// matched. A rule that renders a URL gives a reader something to open; one that
+// renders a ticket key or a document id gives them the corpus's own name for the
+// chunk.
 //
 // docPath is the document path as the indexer stored it, ordinal is the chunk's
 // ordinal within that document, and headingPath is the chunk's breadcrumb in the
@@ -48,44 +54,44 @@ func NewCitationMapper(rules []config.RAGCitationRule) *CitationMapper {
 // Callers need the second value rather than a comparison against
 // Citation(docPath, ordinal): a rule may legitimately render a path unchanged.
 //
-// An address left ending in a bare "#", which is what ${heading} or ${anchor}
-// does for a chunk with no heading, has that "#" trimmed. ${ordinal} always has
-// a value and never reaches the trim. A replacement writing a
+// A mapped citation left ending in a bare "#", which is what ${heading} or
+// ${anchor} does for a chunk with no heading, has that "#" trimmed. ${ordinal}
+// always has a value and never reaches the trim. A replacement writing a
 // literal between the "#" and an empty value, such as "#section-${ordinal}",
 // renders "#section-" and is the operator's to get right.
 func (m *CitationMapper) Render(docPath string, ordinal int, headingPath string) (string, bool) {
-	address, ok := m.render(docPath, citationReserved{ordinal: strconv.Itoa(ordinal), headingPath: headingPath})
+	citation, ok := m.render(docPath, citationReserved{ordinal: strconv.Itoa(ordinal), headingPath: headingPath})
 	if !ok {
 		return Citation(docPath, ordinal), false
 	}
 
-	return address, true
+	return citation, true
 }
 
-// RenderDocument returns the address for a whole document and whether a rule
-// matched, for a surface that lists documents rather than chunks: knowledge
+// RenderDocument returns the mapped citation for a whole document and whether a
+// rule matched, for a surface that lists documents rather than chunks: knowledge
 // sources, or anything else built on Sources, which carries neither an ordinal nor
 // a heading.
 //
 // Only the rule's own capture groups fill. ${ordinal}, ${heading} and ${anchor}
-// each render empty, and an address left ending in a bare "#" has that "#"
+// each render empty, and a mapped citation left ending in a bare "#" has that "#"
 // trimmed, so a rule written for chunks yields its document-level form here. A
-// path no rule matches is returned as docPath itself, with false: there is no
-// chunk being addressed, so there is no citation token to fall back to.
+// path no rule matches is returned as docPath itself, with false: no chunk is
+// cited, so there is no citation token to fall back to.
 //
-// This differs from Render, which addresses one chunk and fills all three reserved
-// names. A rule using ${ordinal} therefore renders a different address on the two:
-// knowledge match shows MatchedDoc.Address, which carries the first matching
-// chunk's ordinal, where knowledge sources shows this. They agree on every rule
-// that does not use ${ordinal}, and a rule that does is a poor one, since ordinals
-// shift on every reindex.
+// This differs from Render, which cites one chunk and fills all three reserved
+// names. A rule using ${ordinal} therefore renders differently on the two:
+// knowledge match shows MatchedDoc.MappedCitation, which carries the first
+// matching chunk's ordinal, where knowledge sources shows this. They agree on
+// every rule that does not use ${ordinal}, and a rule that does is a poor one,
+// since ordinals shift on every reindex.
 func (m *CitationMapper) RenderDocument(docPath string) (string, bool) {
-	address, ok := m.render(docPath, citationReserved{})
+	citation, ok := m.render(docPath, citationReserved{})
 	if !ok {
 		return docPath, false
 	}
 
-	return address, true
+	return citation, true
 }
 
 // citationReserved carries what the reserved names render from for one expansion.
@@ -97,7 +103,7 @@ type citationReserved struct {
 }
 
 // render expands the first rule whose pattern matches docPath and reports whether
-// one did. It leaves the unmatched address to the caller, because the two public
+// one did. It leaves the unmatched case to the caller, because the two public
 // renderers answer it differently: a chunk citation for Render, the bare path for
 // RenderDocument.
 func (m *CitationMapper) render(docPath string, reserved citationReserved) (string, bool) {
@@ -111,9 +117,9 @@ func (m *CitationMapper) render(docPath string, reserved citationReserved) (stri
 			continue
 		}
 
-		address := expandCitation(rule.PatternCompiled, rule.Replace, docPath, match, reserved)
+		citation := expandCitation(rule.PatternCompiled, rule.Replace, docPath, match, reserved)
 
-		return strings.TrimSuffix(address, "#"), true
+		return strings.TrimSuffix(citation, "#"), true
 	}
 
 	return "", false

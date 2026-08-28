@@ -35,10 +35,10 @@ func docsRule(replace string) []config.RAGCitationRule {
 
 var _ = Describe("CitationMapper", func() {
 	DescribeTable("rendering a citation",
-		func(rules []config.RAGCitationRule, path string, ordinal int, headingPath string, address string, matched bool) {
+		func(rules []config.RAGCitationRule, path string, ordinal int, headingPath string, citation string, matched bool) {
 			got, ok := NewCitationMapper(rules).Render(path, ordinal, headingPath)
 
-			Expect(got).To(Equal(address))
+			Expect(got).To(Equal(citation))
 			Expect(ok).To(Equal(matched))
 		},
 
@@ -180,16 +180,16 @@ var _ = Describe("CitationMapper", func() {
 			"https://catchall.example.net/notes/todo.txt", true),
 	)
 
-	DescribeTable("rendering a document-level address",
-		func(rules []config.RAGCitationRule, path string, address string, matched bool) {
+	DescribeTable("rendering a document-level citation",
+		func(rules []config.RAGCitationRule, path string, citation string, matched bool) {
 			got, ok := NewCitationMapper(rules).RenderDocument(path)
 
-			Expect(got).To(Equal(address))
+			Expect(got).To(Equal(citation))
 			Expect(ok).To(Equal(matched))
 		},
 
-		// The bare path, not Citation(path, 0): no chunk is being addressed, so there
-		// is no ordinal to invent.
+		// The bare path, not Citation(path, 0): no chunk is cited, so there is no
+		// ordinal to invent.
 		Entry("keeps the bare path when no rule is configured",
 			nil, "docs/guide.md", "docs/guide.md", false),
 
@@ -290,7 +290,7 @@ var _ = Describe("Store citation rendering", func() {
 		storeD = filepath.Join(tmp, "knowledge")
 
 		// The one rule fills both the ordinal and the anchor, so a single corpus pins
-		// what a chunk-level address carries and what a document-level one leaves
+		// what a chunk-level citation carries and what a document-level one leaves
 		// empty. It is unanchored because the indexer stores the absolute path it
 		// walked, which here is under a temporary directory.
 		cfg = citationConfig(storeD, citationRule(`published/(.*)\.md$`, "https://docs.example.net/$1?c=${ordinal}#${anchor}"))
@@ -351,30 +351,30 @@ var _ = Describe("Store citation rendering", func() {
 		return out
 	}
 
-	It("renders a mapped address for a search hit, anchored at the chunk's heading", func() {
+	It("renders a mapped citation for a search hit, anchored at the chunk's heading", func() {
 		hits := hitsByDoc(reader(cfg))
 		Expect(hits).To(HaveKey("guide.md"))
 
 		hit := hits["guide.md"]
 		Expect(hit.Ordinal).To(Equal(1))
 		Expect(hit.HeadingPath).To(Equal("Guide > Backpressure"))
-		Expect(hit.Address).To(Equal("https://docs.example.net/guide?c=1#backpressure"))
-		Expect(hit.AddressMapped).To(BeTrue())
+		Expect(hit.MappedCitation).To(Equal("https://docs.example.net/guide?c=1#backpressure"))
+		Expect(hit.Mapped).To(BeTrue())
 
 		// The raw token is kept alongside it rather than replaced.
 		Expect(hit.Citation).To(Equal(Citation(hit.DocPath, 1)))
 	})
 
-	// Enumeration never loads a heading, so the anchor renders empty and the address
-	// is the document at its first matching chunk.
-	It("renders a document-level address for an enumerate row", func() {
+	// Enumeration never loads a heading, so the anchor renders empty and the mapped
+	// citation names the document at its first matching chunk.
+	It("renders a document-level citation for an enumerate row", func() {
 		docs := docsByDoc(reader(cfg))
 		Expect(docs).To(HaveKey("guide.md"))
 
 		doc := docs["guide.md"]
 		Expect(doc.Citation).To(Equal(Citation(doc.Path, 1)))
-		Expect(doc.Address).To(Equal("https://docs.example.net/guide?c=1"))
-		Expect(doc.AddressMapped).To(BeTrue())
+		Expect(doc.MappedCitation).To(Equal("https://docs.example.net/guide?c=1"))
+		Expect(doc.Mapped).To(BeTrue())
 	})
 
 	It("keeps the raw token for a document in the same corpus that no rule matches", func() {
@@ -382,53 +382,53 @@ var _ = Describe("Store citation rendering", func() {
 
 		hits := hitsByDoc(r)
 		Expect(hits).To(HaveKey("notes.md"))
-		Expect(hits["notes.md"].Address).To(Equal(hits["notes.md"].Citation))
-		Expect(hits["notes.md"].AddressMapped).To(BeFalse())
+		Expect(hits["notes.md"].MappedCitation).To(Equal(hits["notes.md"].Citation))
+		Expect(hits["notes.md"].Mapped).To(BeFalse())
 
 		docs := docsByDoc(r)
 		Expect(docs).To(HaveKey("notes.md"))
-		Expect(docs["notes.md"].Address).To(Equal(docs["notes.md"].Citation))
-		Expect(docs["notes.md"].AddressMapped).To(BeFalse())
+		Expect(docs["notes.md"].MappedCitation).To(Equal(docs["notes.md"].Citation))
+		Expect(docs["notes.md"].Mapped).To(BeFalse())
 	})
 
-	It("leaves every address at the raw citation when no rules are configured", func() {
+	It("leaves every mapped citation at the raw citation when no rules are configured", func() {
 		r := reader(lexicalConfig(storeD))
 
 		hits := hitsByDoc(r)
 		Expect(hits).To(HaveLen(2))
 		for _, h := range hits {
-			Expect(h.Address).To(Equal(h.Citation))
-			Expect(h.AddressMapped).To(BeFalse())
+			Expect(h.MappedCitation).To(Equal(h.Citation))
+			Expect(h.Mapped).To(BeFalse())
 		}
 
 		docs := docsByDoc(r)
 		Expect(docs).To(HaveLen(2))
 		for _, d := range docs {
-			Expect(d.Address).To(Equal(d.Citation))
-			Expect(d.AddressMapped).To(BeFalse())
+			Expect(d.MappedCitation).To(Equal(d.Citation))
+			Expect(d.Mapped).To(BeFalse())
 		}
 	})
 
-	It("exposes the mapper for a surface that addresses a document without searching", func() {
-		address, mapped := reader(cfg).CitationMapper().Render(filepath.Join(docsD, "published/guide.md"), 0, "")
+	It("exposes the mapper for a surface that cites a document without searching", func() {
+		citation, mapped := reader(cfg).CitationMapper().Render(filepath.Join(docsD, "published/guide.md"), 0, "")
 
-		Expect(address).To(Equal("https://docs.example.net/guide?c=0"))
+		Expect(citation).To(Equal("https://docs.example.net/guide?c=0"))
 		Expect(mapped).To(BeTrue())
 	})
 
-	// A listing has no ordinal to address a document at, so the same rule renders its
+	// A listing has no ordinal to cite a document at, so the same rule renders its
 	// document-level form: knowledge sources differs from knowledge match here, and
 	// only because this rule uses ${ordinal}.
 	It("renders the document-level form of the same rule for a listing", func() {
 		m := reader(cfg).CitationMapper()
 
-		address, mapped := m.RenderDocument(filepath.Join(docsD, "published/guide.md"))
-		Expect(address).To(Equal("https://docs.example.net/guide?c="))
+		citation, mapped := m.RenderDocument(filepath.Join(docsD, "published/guide.md"))
+		Expect(citation).To(Equal("https://docs.example.net/guide?c="))
 		Expect(mapped).To(BeTrue())
 
 		unpublished := filepath.Join(docsD, "private/notes.md")
-		address, mapped = m.RenderDocument(unpublished)
-		Expect(address).To(Equal(unpublished))
+		citation, mapped = m.RenderDocument(unpublished)
+		Expect(citation).To(Equal(unpublished))
 		Expect(mapped).To(BeFalse())
 	})
 })

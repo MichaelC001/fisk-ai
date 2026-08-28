@@ -150,8 +150,8 @@ func flagWasSet(pc *fisk.ParseContext, name string) bool {
 }
 
 // renderMatch adds the whole result to c. citations says whether the operator
-// configured any citation rules, which decides whether the table carries an address
-// column.
+// configured any citation rules, which decides whether the table carries a mapped
+// citation column.
 //
 // The two machine-readable modes bypass it and write bare lines, as knowledge show
 // does for a chunk: a document renderer decorates, and decoration is exactly what a
@@ -226,18 +226,18 @@ func terminalText(s string) string {
 // matchTable renders the matched documents. The citation carries the path as its
 // own prefix, so listing both doubles the width of the widest column to say the
 // same thing twice; the citation wins because it is the token knowledge show
-// accepts. Citations and addresses come from the corpus, so they are sanitized and
-// truncated like any other text on its way to a terminal.
+// accepts. Raw and mapped citations both come from the corpus, so they are
+// sanitized and truncated like any other text on its way to a terminal.
 //
 // citations says whether the operator configured any citation rules. Without them
-// there is no address any document could have, and a column of blanks in every
-// listing is worse than no column. With them the column is blank for a document no
-// rule matched, which is the ordinary state of a partly published corpus.
+// no document has a mapped citation, and a column of blanks in every listing is
+// worse than no column. With them the column is blank for a document no rule
+// matched, which is the ordinary state of a partly published corpus.
 //
-// The address is MatchedDoc.Address, which addresses the document at its first
-// matching chunk, and is what knowledge_enumerate hands the model. A rule using
-// ${ordinal} therefore renders here with the ordinal and in knowledge sources
-// without it; see rag.CitationMapper.RenderDocument.
+// The column shows MatchedDoc.MappedCitation, which cites the document at the
+// first chunk that matched, the same chunk knowledge_enumerate reports it at. A
+// rule using ${ordinal} therefore renders here with the ordinal and in knowledge
+// sources without it; see rag.CitationMapper.RenderDocument.
 func matchTable(docs []rag.MatchedDoc, citations bool) *table.Table {
 	tbl := table.NewTableWriter("")
 
@@ -250,14 +250,14 @@ func matchTable(docs []rag.MatchedDoc, citations bool) *table.Table {
 		return tbl
 	}
 
-	tbl.AddHeaders("Citation", "Body", "Heading", "Address")
+	tbl.AddHeaders("Citation", "Body", "Heading", "Mapped")
 	for _, d := range docs {
-		address := ""
-		if d.AddressMapped {
-			address = terminalText(d.Address)
+		mappedCitation := ""
+		if d.Mapped {
+			mappedCitation = terminalText(d.MappedCitation)
 		}
 
-		tbl.AddRow(terminalText(d.Citation), d.BodyMatches, d.HeadingMatches, address)
+		tbl.AddRow(terminalText(d.Citation), d.BodyMatches, d.HeadingMatches, mappedCitation)
 	}
 
 	return tbl

@@ -80,16 +80,17 @@ type Hit struct {
 	HeadingPath string
 	Content     string
 
-	// Address is where a reader reaches this chunk, rendered from the configured
-	// citation rules. It is the Citation token itself when no rule matched the
-	// document path, so a surface can print it without asking whether any rule is
-	// configured.
-	Address string
+	// MappedCitation is how this chunk is cited outside the corpus, rendered from
+	// the configured citation rules: a URL where the rules publish one, and whatever
+	// else a rule renders otherwise. It is the Citation token itself when no rule
+	// matched the document path, so a surface can print it without asking whether
+	// any rule is configured.
+	MappedCitation string
 
-	// AddressMapped reports whether a rule produced Address. It cannot be derived
-	// from Address, since a rule may render a path unchanged, and a surface needs it
-	// to leave a column blank or to count the documents no rule reaches.
-	AddressMapped bool
+	// Mapped reports whether a rule produced MappedCitation. It cannot be derived
+	// from MappedCitation, since a rule may render a path unchanged, and a surface
+	// needs it to leave a column blank or to count the documents no rule reaches.
+	Mapped bool
 }
 
 // DegradeKind classifies why a hybrid query fell back to the lexical tier. It exists
@@ -426,7 +427,7 @@ func (s *Store) hydrate(ctx context.Context, ranked []result) ([]Hit, error) {
 			return nil, fmt.Errorf("hydrating results: %w", err)
 		}
 		h.Citation = Citation(h.DocPath, h.Ordinal)
-		h.Address, h.AddressMapped = s.citations.Render(h.DocPath, h.Ordinal, h.HeadingPath)
+		h.MappedCitation, h.Mapped = s.citations.Render(h.DocPath, h.Ordinal, h.HeadingPath)
 		byID[h.ChunkID] = h
 	}
 	if err := rows.Err(); err != nil {

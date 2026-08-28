@@ -446,10 +446,11 @@ type RAGConfig struct {
 	// Embeddings, when present, turns on the hybrid vector tier. Its absence leaves
 	// the feature lexical-only, needing no model and no external service.
 	Embeddings *RAGEmbeddingsConfig `json:"embeddings,omitempty" yaml:"embeddings,omitempty"`
-	// Citations are ordered rules rewriting the document path in a citation into the
-	// address a reader can reach. The first rule whose pattern matches wins. A path no
-	// rule matches is cited as the raw path, since a corpus that is only partly
-	// published is the normal case.
+	// Citations are ordered rules rewriting the document path in a citation into how
+	// the corpus is cited outside itself, most often a URL a reader can open but as
+	// readily a ticket key, an internal document id or a page title. The first rule
+	// whose pattern matches wins. A path no rule matches is cited as the raw path,
+	// since a corpus that is only partly published is the normal case.
 	//
 	// Patterns match the stored document path verbatim, which is the path the indexer
 	// walked and nothing normalizes: indexing ./docs stores docs/foo/bar.md and
@@ -457,14 +458,14 @@ type RAGConfig struct {
 	Citations []RAGCitationRule `json:"citations,omitempty" yaml:"citations,omitempty"`
 }
 
-// RAGCitationRule rewrites the document path in a knowledge citation into a
-// published address. An operator writes one as an entry under
+// RAGCitationRule rewrites the document path in a knowledge citation into the
+// citation the operator publishes it as. An operator writes one as an entry under
 // harness.knowledge.citations.
 type RAGCitationRule struct {
 	// Pattern is the regular expression matched against the document path, in Go's
 	// regexp syntax. An expression that does not compile fails config load.
 	Pattern string `json:"pattern" yaml:"pattern"`
-	// Replace is the address produced when Pattern matches. It is a template in the
+	// Replace is the citation produced when Pattern matches. It is a template in the
 	// syntax of regexp.Regexp.Expand: $1 and ${name} expand to a capture group of
 	// Pattern, and $$ is a literal dollar. Three further names are filled by the
 	// renderer rather than by the pattern, those in RAGCitationReservedNames.

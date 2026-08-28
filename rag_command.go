@@ -281,16 +281,16 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 // The raw citation stays the section heading so it can be pasted straight into
 // knowledge show, which accepts only that token: a citation rule is a regular
 // expression and is not reversible, so a published URL resolves back to no chunk.
-// The mapped address is a field under it, and only when a rule matched, because a
+// The mapped citation is a field under it, and only when a rule matched, because a
 // line repeating the path is noise on a corpus that is mostly unpublished.
 //
-// A citation carries a corpus path and an address can carry the document's own
-// heading, so both are sanitized on the way out.
+// A citation carries a corpus path and a mapped citation can carry the document's
+// own heading, so both are sanitized on the way out.
 func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 	for _, h := range hits {
 		c.Section(terminalToken(h.Citation), func(c *columns.Document) {
-			if h.AddressMapped {
-				c.Item("Address", terminalToken(h.Address))
+			if h.Mapped {
+				c.Item("Mapped", terminalToken(h.MappedCitation))
 			}
 			c.ItemUnlessZero("Section", h.HeadingPath)
 			if full {
@@ -302,10 +302,11 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 	}
 }
 
-// terminalToken sanitizes a citation or an address for a terminal without cutting
-// it short. Both are tokens the operator copies whole, one into knowledge show and
-// one into a browser, and a truncated one works in neither. The table columns
-// truncate instead, because a column has to fit.
+// terminalToken sanitizes a raw or a mapped citation for a terminal without
+// cutting it short. Both are tokens the operator copies whole, one into knowledge
+// show and one into a browser or wherever the rules publish to, and a truncated one
+// works in neither. The table columns truncate instead, because a column has to
+// fit.
 func terminalToken(s string) string {
 	return util.SanitizeForTerminal(s, utf8.RuneCountInString(s))
 }
@@ -544,9 +545,9 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	// Without rules there is no address to render and no rule that can fail to
-	// match, so the column and the count are left off entirely rather than filling a
-	// listing with blanks for the operators who never published their corpus.
+	// Without rules there is nothing to map and no rule that can fail to match, so
+	// the column and the count are left off entirely rather than filling a listing
+	// with blanks for the operators who never published their corpus.
 	var mapper *rag.CitationMapper
 	if len(cfg.RAGCitationRules()) > 0 {
 		mapper = store.CitationMapper()
@@ -568,14 +569,14 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 // sourcesTable lists the indexed documents and reports how many of them no
 // citation rule matched.
 //
-// A nil mapper means no citation rules are configured, which leaves the address
+// A nil mapper means no citation rules are configured, which leaves the mapped
 // column off and the count at zero. Where rules are configured the column is blank
 // for a document none of them matched, and that count is the diagnostic this
 // listing owes the operator: a rule matching nothing sends raw paths to the model
 // and reports no error anywhere.
 //
-// The address is the document-level one, so only capture groups fill it and a rule
-// written with ${ordinal} renders here without the ordinal. See
+// The mapped citation is the document-level one, so only capture groups fill it
+// and a rule written with ${ordinal} renders here without the ordinal. See
 // rag.CitationMapper.RenderDocument for why that differs from knowledge match.
 func sourcesTable(sources []rag.Source, mapper *rag.CitationMapper) (*table.Table, int) {
 	tbl := table.NewTableWriter("")
@@ -591,19 +592,19 @@ func sourcesTable(sources []rag.Source, mapper *rag.CitationMapper) (*table.Tabl
 
 	var unmapped int
 
-	tbl.AddHeaders("Path", "Chunks", "Last Indexed", "Address")
+	tbl.AddHeaders("Path", "Chunks", "Last Indexed", "Mapped")
 	for _, s := range sources {
-		address, mapped := mapper.RenderDocument(s.Path)
+		mappedCitation, mapped := mapper.RenderDocument(s.Path)
 		// A rule whose replacement is nothing but reserved names matches and then
-		// renders empty at document level, and a document with no address is
-		// unmapped whichever way it got there. Counting it as mapped would report
-		// the corpus clean while every cell in the column was blank.
-		if !mapped || address == "" {
+		// renders empty at document level, and a document with an empty mapped
+		// citation is unmapped whichever way it got there. Counting it as mapped
+		// would report the corpus clean while every cell in the column was blank.
+		if !mapped || mappedCitation == "" {
 			unmapped++
-			address = ""
+			mappedCitation = ""
 		}
 
-		tbl.AddRow(s.Path, s.Chunks, s.MTime, terminalText(address))
+		tbl.AddRow(s.Path, s.Chunks, s.MTime, terminalText(mappedCitation))
 	}
 
 	return tbl, unmapped

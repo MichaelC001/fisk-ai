@@ -91,7 +91,7 @@ var _ = Describe("knowledge citation rendering", func() {
 			return c.String()
 		}
 
-		It("keeps the raw citation as the heading and prints the address under it", func() {
+		It("keeps the raw citation as the heading and prints the mapped citation under it", func() {
 			out := render(hits())
 
 			// The heading is the token knowledge show accepts, for both documents.
@@ -99,10 +99,10 @@ var _ = Describe("knowledge citation rendering", func() {
 			Expect(out).To(ContainSubstring("notes.md#0"))
 
 			Expect(out).To(ContainSubstring("https://docs.example.net/guide#backpressure"))
-			Expect(strings.Count(out, "Address:")).To(Equal(1), "the unmapped document gets no address line")
+			Expect(strings.Count(out, "Mapped:")).To(Equal(1), "the unmapped document gets no mapped line")
 		})
 
-		It("prints no address at all when no rule is configured", func() {
+		It("prints no mapped citation at all when no rule is configured", func() {
 			plain, err := rag.Open(&config.Config{
 				Identity: "test",
 				Harness:  config.HarnessConfig{RAG: &config.RAGConfig{Enabled: true, Directory: cfg.Harness.RAG.Directory}},
@@ -113,32 +113,32 @@ var _ = Describe("knowledge citation rendering", func() {
 			res, err := plain.Search(ctx, "backpressure", 5)
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(render(res.Hits)).ToNot(ContainSubstring("Address:"))
+			Expect(render(res.Hits)).ToNot(ContainSubstring("Mapped:"))
 		})
 
 		// knowledge show accepts the whole token and nothing else, so a heading cut
 		// short would be a heading nobody can paste anywhere.
-		It("leaves a long citation and a long address whole", func() {
+		It("leaves a long citation and a long mapped citation whole", func() {
 			citation := "docs/" + strings.Repeat("a", 300) + ".md#7"
-			address := "https://docs.example.net/" + strings.Repeat("b", 300)
+			mapped := "https://docs.example.net/" + strings.Repeat("b", 300)
 
-			out := render([]rag.Hit{{Citation: citation, Address: address, AddressMapped: true, Content: "body"}})
+			out := render([]rag.Hit{{Citation: citation, MappedCitation: mapped, Mapped: true, Content: "body"}})
 
 			Expect(out).To(ContainSubstring(citation))
-			Expect(out).To(ContainSubstring(address))
+			Expect(out).To(ContainSubstring(mapped))
 		})
 
-		// A citation carries a corpus path and an address can carry a heading, so both
-		// are document content on their way to a terminal. The newline is what makes
-		// this spec load-bearing: the table library already drops raw escapes, and
+		// A raw citation carries a corpus path and a mapped one can carry a heading, so
+		// both are document content on their way to a terminal. The newline is what
+		// makes this spec load-bearing: the table library already drops raw escapes, and
 		// collapsing whitespace is what SanitizeForTerminal adds over it, so a value
 		// reaching the terminal unsanitized breaks the line rather than colors it.
-		It("strips a control sequence and a newline from the citation and the address", func() {
+		It("strips a control sequence and a newline from both citations", func() {
 			out := render([]rag.Hit{{
-				Citation:      "docs/gui\x1b[31mde\nnotes.md#1",
-				Address:       "https://docs.example.net/gui\x1b[31mde#head\ning",
-				AddressMapped: true,
-				Content:       "body",
+				Citation:       "docs/gui\x1b[31mde\nnotes.md#1",
+				MappedCitation: "https://docs.example.net/gui\x1b[31mde#head\ning",
+				Mapped:         true,
+				Content:        "body",
 			}})
 
 			Expect(out).ToNot(ContainSubstring("\x1b"))
@@ -158,10 +158,10 @@ var _ = Describe("knowledge citation rendering", func() {
 			return res.Docs
 		}
 
-		It("adds an address column that is blank for the document no rule matched", func() {
+		It("adds a mapped column that is blank for the document no rule matched", func() {
 			out := matchTable(docs(), true).Render()
 
-			Expect(out).To(ContainSubstring("Address"))
+			Expect(out).To(ContainSubstring("Mapped"))
 			Expect(out).To(ContainSubstring("https://docs.example.net/guide"))
 			Expect(strings.Count(out, "https://")).To(Equal(1), "the unmapped document has a blank cell")
 		})
@@ -169,16 +169,16 @@ var _ = Describe("knowledge citation rendering", func() {
 		It("leaves the column off when no rule is configured", func() {
 			out := matchTable(docs(), false).Render()
 
-			Expect(out).ToNot(ContainSubstring("Address"))
+			Expect(out).ToNot(ContainSubstring("Mapped"))
 			Expect(out).ToNot(ContainSubstring("https://"))
 		})
 
-		It("strips a control sequence and a newline from the address", func() {
+		It("strips a control sequence and a newline from the mapped citation", func() {
 			out := matchTable([]rag.MatchedDoc{{
-				Path:          "docs/guide.md",
-				Citation:      "docs/guide.md#1",
-				Address:       "https://docs.example.net/gui\x1b[31mde#head\ning",
-				AddressMapped: true,
+				Path:           "docs/guide.md",
+				Citation:       "docs/guide.md#1",
+				MappedCitation: "https://docs.example.net/gui\x1b[31mde#head\ning",
+				Mapped:         true,
 			}}, true).Render()
 
 			Expect(out).ToNot(ContainSubstring("\x1b"))
@@ -199,15 +199,15 @@ var _ = Describe("knowledge citation rendering", func() {
 
 		// The count is the diagnostic: a rule that matches nothing sends raw paths to
 		// the model and reports no error anywhere.
-		It("renders the document-level address and counts what no rule reached", func() {
+		It("renders the document-level citation and counts what no rule reached", func() {
 			tbl, unmapped := sourcesTable(sources(), store.CitationMapper())
 
 			Expect(unmapped).To(Equal(1))
 
 			out := tbl.Render()
-			Expect(out).To(ContainSubstring("Address"))
+			Expect(out).To(ContainSubstring("Mapped"))
 			Expect(out).To(ContainSubstring("https://docs.example.net/guide"))
-			Expect(out).ToNot(ContainSubstring("#"), "no chunk is being addressed, so the anchor renders empty")
+			Expect(out).ToNot(ContainSubstring("#"), "no chunk is cited, so the anchor renders empty")
 			Expect(strings.Count(out, "https://")).To(Equal(1))
 		})
 
@@ -215,12 +215,12 @@ var _ = Describe("knowledge citation rendering", func() {
 			tbl, unmapped := sourcesTable(sources(), nil)
 
 			Expect(unmapped).To(Equal(0))
-			Expect(tbl.Render()).ToNot(ContainSubstring("Address"))
+			Expect(tbl.Render()).ToNot(ContainSubstring("Mapped"))
 		})
 
 		// The mapper percent-encodes what it substitutes, so a control sequence in a
 		// path reaches the column as text rather than as an escape.
-		It("keeps a control sequence in a path out of the address it renders", func() {
+		It("keeps a control sequence in a path out of the citation it renders", func() {
 			mapper := rag.NewCitationMapper([]config.RAGCitationRule{{
 				Pattern:         `^(.*)$`,
 				Replace:         "https://docs.example.net/$1",
@@ -251,7 +251,7 @@ var _ = Describe("knowledge citation rendering", func() {
 
 		// A rule that matches and renders nothing leaves the same blank cell as one
 		// that never matched, so the count has to agree with the column.
-		It("counts a document whose rule renders an empty address as unmapped", func() {
+		It("counts a document whose rule renders an empty citation as unmapped", func() {
 			mapper := rag.NewCitationMapper([]config.RAGCitationRule{{
 				Pattern:         `^(.*)\.md$`,
 				Replace:         "#${anchor}",

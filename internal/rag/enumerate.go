@@ -89,20 +89,21 @@ type MatchedDoc struct {
 	HeadingMatches int
 	TotalChunks    int
 
-	// Address is where a reader reaches this document, rendered from the configured
-	// citation rules, and is the Citation token itself when no rule matched the path.
-	// It addresses the document at its first matching chunk: ${ordinal} is filled,
-	// and ${heading} and ${anchor} render empty because enumeration answers which
-	// documents hold a term and never loads a section.
+	// MappedCitation is how this document is cited outside the corpus, rendered from
+	// the configured citation rules: a URL where the rules publish one, and whatever
+	// else a rule renders otherwise. It is the Citation token itself when no rule
+	// matched the path. It cites the document at its first matching chunk:
+	// ${ordinal} is filled, and ${heading} and ${anchor} render empty because
+	// enumeration answers which documents hold a term and never loads a section.
 	//
 	// A listing built on Sources renders the same document with
 	// CitationMapper.RenderDocument, which leaves ${ordinal} empty too, so the two
 	// differ on a rule that uses ${ordinal} and agree on every rule that does not.
-	Address string
+	MappedCitation string
 
-	// AddressMapped reports whether a rule produced Address, which Address alone does
-	// not say: a rule may render a path unchanged.
-	AddressMapped bool
+	// Mapped reports whether a rule produced MappedCitation, which MappedCitation
+	// alone does not say: a rule may render a path unchanged.
+	Mapped bool
 }
 
 // TermReport is one query term and what the index holds for it. Literal is the
@@ -387,7 +388,7 @@ func (s *Store) describeMatches(ctx context.Context, ids map[int64]bool, q *enum
 			continue
 		}
 
-		address, mapped := s.citations.Render(path, firstOrdinals[id], "")
+		mappedCitation, mapped := s.citations.Render(path, firstOrdinals[id], "")
 
 		out = append(out, MatchedDoc{
 			Path:           path,
@@ -395,8 +396,8 @@ func (s *Store) describeMatches(ctx context.Context, ids map[int64]bool, q *enum
 			BodyMatches:    bodyCounts[id],
 			HeadingMatches: headingCounts[id],
 			TotalChunks:    total,
-			Address:        address,
-			AddressMapped:  mapped,
+			MappedCitation: mappedCitation,
+			Mapped:         mapped,
 		})
 	}
 
