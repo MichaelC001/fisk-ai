@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/choria-io/fisk"
 	"github.com/goccy/go-yaml"
@@ -444,6 +446,53 @@ type RAGConfig struct {
 	// Embeddings, when present, turns on the hybrid vector tier. Its absence leaves
 	// the feature lexical-only, needing no model and no external service.
 	Embeddings *RAGEmbeddingsConfig `json:"embeddings,omitempty" yaml:"embeddings,omitempty"`
+	// Citations are ordered rules rewriting the document path in a citation into the
+	// address a reader can reach. The first rule whose pattern matches wins. A path no
+	// rule matches is cited as the raw path, since a corpus that is only partly
+	// published is the normal case.
+	//
+	// Patterns match the stored document path verbatim, which is the path the indexer
+	// walked and nothing normalizes: indexing ./docs stores docs/foo/bar.md and
+	// indexing /srv/docs stores /srv/docs/foo/bar.md.
+	Citations []RAGCitationRule `json:"citations,omitempty" yaml:"citations,omitempty"`
+}
+
+// RAGCitationRule rewrites the document path in a knowledge citation into a
+// published address. An operator writes one as an entry under
+// harness.knowledge.citations.
+type RAGCitationRule struct {
+	// Pattern is the regular expression matched against the document path, in Go's
+	// regexp syntax. An expression that does not compile fails config load.
+	Pattern string `json:"pattern" yaml:"pattern"`
+	// Replace is the address produced when Pattern matches. It is a template in the
+	// syntax of regexp.Regexp.Expand: $1 and ${name} expand to a capture group of
+	// Pattern, and $$ is a literal dollar. Three further names are filled by the
+	// renderer rather than by the pattern, those in RAGCitationReservedNames.
+	//
+	// A name that is neither a group of this rule's own pattern nor one of the
+	// reserved names fails config load, as does a numbered group beyond what the
+	// pattern captures. That is what catches $1x on a rule with one group: Go reads it
+	// as a reference to a group named "1x" and expands it to nothing, with no error.
+	Replace string `json:"replace" yaml:"replace"`
+	// PatternCompiled is the compiled form of Pattern, filled by prepare(). It is nil
+	// on a Config built as a struct literal rather than parsed, and
+	// Config.RAGCitationRules then reports no rules, so citations pass through as raw
+	// paths.
+	PatternCompiled *regexp.Regexp `json:"-" yaml:"-"`
+}
+
+// ragCitationReservedNames are the names a citation replacement may use besides
+// the capture groups of its own pattern. The renderer fills them from the cited
+// chunk: its ordinal within the document, its heading, and the anchor derived from
+// that heading.
+var ragCitationReservedNames = []string{"ordinal", "heading", "anchor"}
+
+// RAGCitationReservedNames returns the names a citation replacement may reference
+// in addition to the capture groups of its own pattern. Config validates
+// harness.knowledge.citations against this list and the renderer supplies a value
+// for each name in it, so the two cannot drift. The returned slice is a copy.
+func RAGCitationReservedNames() []string {
+	return slices.Clone(ragCitationReservedNames)
 }
 
 // RAGEmbeddingsConfig configures the optional vector tier: a local
@@ -2030,6 +2079,28 @@ func (c *Config) RAGVectorEnabled() bool {
 	return c.RAGEnabled() && c.Harness.RAG.Embeddings != nil
 }
 
+// RAGCitationRules returns the ordered citation rewrite rules set in
+// harness.knowledge.citations, compiled and validated by prepare. It is nil when
+// none are set.
+//
+// It is also nil for a Config assembled as a struct literal rather than parsed,
+// since prepare never ran over such a config and its rules carry no compiled
+// pattern. A citation then keeps the raw document path, which is what an unmatched
+// path does anyway.
+func (c *Config) RAGCitationRules() []RAGCitationRule {
+	if c.Harness.RAG == nil {
+		return nil
+	}
+
+	for _, rule := range c.Harness.RAG.Citations {
+		if rule.PatternCompiled == nil {
+			return nil
+		}
+	}
+
+	return c.Harness.RAG.Citations
+}
+
 // otlpCredentialEnvNames are the OpenTelemetry export variables that carry a
 // credential. They are stripped from every tool subprocess unconditionally, whether
 // or not this agent enables telemetry, because they are ambient operator variables
@@ -2680,6 +2751,12 @@ func (c *Config) prepare() error {
 		return err
 	}
 
+	if c.Harness.RAG != nil {
+		if err := prepareRAGCitations(c.Harness.RAG.Citations); err != nil {
+			return err
+		}
+	}
+
 	if c.Harness.RAG != nil && c.Harness.RAG.Embeddings != nil {
 		if err := c.Harness.RAG.Embeddings.prepare(); err != nil {
 			return err
@@ -2687,6 +2764,155 @@ func (c *Config) prepare() error {
 	}
 
 	return nil
+}
+
+// prepareRAGCitations compiles each citation rule's pattern and checks its
+// replacement against that pattern's groups, filling PatternCompiled in place. It
+// runs from prepare, whose error ParseConfigForMode surfaces, so a bad rule fails
+// the config load rather than the first citation rendered.
+//
+// Every reference the replacement makes must resolve, because Expand renders an
+// unresolved one as empty text with no error: an operator who wrote $1x on a rule
+// with one group would get a URL missing a path element and nothing saying why.
+//
+// A rule with no pattern is rejected for the same reason. An empty pattern
+// compiles and matches every path, so it takes the whole corpus on first match
+// wins and leaves every rule after it dead, and a rule with no replacement
+// rewrites the paths it matches to nothing.
+func prepareRAGCitations(rules []RAGCitationRule) error {
+	for i := range rules {
+		if rules[i].Pattern == "" {
+			return fmt.Errorf("invalid harness.knowledge.citations[%d]: pattern is required, an empty pattern matches every document path", i)
+		}
+		if rules[i].Replace == "" {
+			return fmt.Errorf("invalid harness.knowledge.citations[%d]: replace is required, an empty replacement maps the pattern %q to nothing", i, rules[i].Pattern)
+		}
+
+		re, err := regexp.Compile(rules[i].Pattern)
+		if err != nil {
+			return fmt.Errorf("invalid harness.knowledge.citations[%d] pattern %q: %w", i, rules[i].Pattern, err)
+		}
+
+		names := re.SubexpNames()
+
+		for _, ref := range ragCitationReplaceRefs(rules[i].Replace) {
+			if ref.num >= 0 {
+				if ref.num > re.NumSubexp() {
+					return fmt.Errorf("invalid harness.knowledge.citations[%d] replace %q: $%d refers to capture group %d but the pattern %q has %d", i, rules[i].Replace, ref.num, ref.num, rules[i].Pattern, re.NumSubexp())
+				}
+
+				continue
+			}
+
+			if slices.Contains(names, ref.name) {
+				continue
+			}
+			if slices.Contains(ragCitationReservedNames, ref.name) {
+				continue
+			}
+
+			return fmt.Errorf("invalid harness.knowledge.citations[%d] replace %q: $%s is neither a named capture group in the pattern %q nor one of %s", i, rules[i].Replace, ref.name, rules[i].Pattern, strings.Join(ragCitationReservedNames, ", "))
+		}
+
+		rules[i].PatternCompiled = re
+	}
+
+	return nil
+}
+
+// ragCitationRef is one group reference found in a citation replacement. Num is
+// the group number for a numbered reference and -1 for a named one, matching what
+// regexp resolves the same text to.
+type ragCitationRef struct {
+	name string
+	num  int
+}
+
+// ragCitationReplaceRefs returns the group references in a replacement template,
+// in the order they appear. It reads the template with the grammar of
+// regexp.Regexp.Expand, which is what renders it: $$ is a literal dollar and
+// yields no reference; $name and ${name} take a name of Unicode letters, digits
+// and underscores; an all-digit name without a leading zero is a numbered group
+// and anything else, $1x included, is a named one; and text that is not a
+// reference at all, such as a $ at the end or one before a punctuation character,
+// stays literal and yields nothing.
+func ragCitationReplaceRefs(template string) []ragCitationRef {
+	var refs []ragCitationRef
+
+	for len(template) > 0 {
+		_, after, ok := strings.Cut(template, "$")
+		if !ok {
+			break
+		}
+		template = after
+
+		if template != "" && template[0] == '$' {
+			template = template[1:]
+			continue
+		}
+
+		name, num, rest, ok := ragCitationExtract(template)
+		if !ok {
+			continue
+		}
+		template = rest
+
+		refs = append(refs, ragCitationRef{name: name, num: num})
+	}
+
+	return refs
+}
+
+// ragCitationExtract reads a leading "name" or "{name}" from str, which the caller
+// has already stripped the $ from. It mirrors the unexported extract in the regexp
+// package, so what config accepts and what Expand resolves stay the same set.
+func ragCitationExtract(str string) (name string, num int, rest string, ok bool) {
+	if str == "" {
+		return
+	}
+
+	brace := false
+	if str[0] == '{' {
+		brace = true
+		str = str[1:]
+	}
+
+	i := 0
+	for i < len(str) {
+		r, size := utf8.DecodeRuneInString(str[i:])
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			break
+		}
+		i += size
+	}
+	if i == 0 {
+		return
+	}
+
+	name = str[:i]
+	if brace {
+		if i >= len(str) || str[i] != '}' {
+			return
+		}
+		i++
+	}
+
+	num = 0
+	for j := 0; j < len(name); j++ {
+		if name[j] < '0' || '9' < name[j] || num >= 1e8 {
+			num = -1
+			break
+		}
+		num = num*10 + int(name[j]) - '0'
+	}
+	if name[0] == '0' && len(name) > 1 {
+		num = -1
+	}
+
+	rest = str[i:]
+	ok = true
+
+	return
 }
 
 // defaultRAGEmbedTimeout is the per-request embeddings timeout applied when
