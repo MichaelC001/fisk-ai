@@ -249,9 +249,9 @@ func resolvedMaxInjectedTokens(cfg *config.RAGConfig) int {
 //
 // The returned store has no db and no lock. Those belong to the constructors: Open
 // attaches a read-only handle once it has seen the file exists, and OpenWriter
-// attaches the write handle along with the advisory lock it took. Nothing here
-// creates a directory, takes a lock or opens a file, and buildEmbedder is the only
-// call that can fail, so a caller that gets an error holds no resource to release.
+// attaches the write handle along with the advisory lock it took. buildEmbedder is
+// the only call here that can fail, and it holds no directory, lock or file, so a
+// caller that gets an error has nothing to release.
 func newStore(cfg *config.Config, storeDir string, readOnly bool) (*Store, error) {
 	emb, err := buildEmbedder(cfg)
 	if err != nil {

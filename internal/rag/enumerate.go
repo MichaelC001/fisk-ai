@@ -97,8 +97,7 @@ type MatchedDoc struct {
 	// enumeration answers which documents hold a term and never loads a section.
 	//
 	// A listing built on Sources renders the same document with
-	// CitationMapper.RenderDocument, which leaves ${ordinal} empty too, so the two
-	// differ on a rule that uses ${ordinal} and agree on every rule that does not.
+	// CitationMapper.RenderDocument; see there for how the two differ.
 	MappedCitation string
 
 	// Mapped reports whether a rule produced MappedCitation, which MappedCitation

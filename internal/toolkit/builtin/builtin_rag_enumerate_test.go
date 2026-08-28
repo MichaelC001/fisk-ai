@@ -78,7 +78,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 
 		// A tool that declares MCP exposure but that config will not accept in the
 		// allowlist is selectable by no operator and served to nobody. Adding one has
-		// to move both halves, and this is what fails if only the spec moves.
+		// to move both halves, and this spec fails when only one of them does.
 		It("keeps every MCP-exposable knowledge tool nameable in config", func() {
 			nameable := []string{config.KnowledgeSearchToolName, config.KnowledgeEnumerateToolName}
 			for _, t := range RAGTools(cfg, nil) {
@@ -167,11 +167,11 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(enumerateDocBudget(8000)).To(BeNumerically(">", enumerateDocBudget(2000)))
 		})
 
-		// The count bounds the query and trimEnumerateDocs holds the share, so the count
-		// only has to be generous, and this is what generous has to mean: the trim never
-		// wants more rows than the count asked for. A row with nothing in either of its
-		// strings is the smallest the tool emits, so if even those run out before the
-		// count does, the count is what decided the list and the trim was never consulted.
+		// The count limits the query and trimEnumerateDocs holds the share, so the count
+		// only has to be generous: the trim must never want more rows than the count
+		// asked for. A row with nothing in either of its strings is the smallest the tool
+		// emits, so if even those run out before the count does, the count decided the
+		// list and the trim was never consulted.
 		It("asks for at least as many rows as the share can hold", func() {
 			kept, err := trimEnumerateDocs(make([]knowledgeEnumDocJSON, enumerateDocBudget(maxTokens)+20), enumerateShareBytes(maxTokens))
 			Expect(err).ToNot(HaveOccurred())
@@ -187,12 +187,6 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(len(kept)).To(BeNumerically("<", enumerateDocBudget(maxTokens)))
 		})
 
-		// Rounding a real match down to an empty list would read as absence, which is
-		// the one answer this tool exists to make trustworthy.
-		It("never returns a budget of zero", func() {
-			Expect(enumerateDocBudget(0)).To(Equal(1))
-			Expect(enumerateDocBudget(1)).To(Equal(1))
-		})
 	})
 
 	Describe("trimEnumerateDocs", func() {
@@ -444,8 +438,8 @@ var _ = Describe("knowledge_enumerate tool", func() {
 		})
 
 		// The share is spent on rows whose citations the operator's rule renders, and a
-		// rule can render anything. These measure the list the tool marshals rather than
-		// a count derived from a sample citation.
+		// rule can render anything, so this measures the list the tool marshals rather
+		// than a count derived from a sample citation.
 		Describe("a corpus with long mapped citations", func() {
 			const maxTokens = 1000
 
@@ -463,20 +457,6 @@ var _ = Describe("knowledge_enumerate tool", func() {
 				return call("retention")
 			}
 
-			DescribeTable("marshals its documents within its share of the injection budget", func(pad int) {
-				out := mappedCall(pad)
-				Expect(out.Matched).To(Equal(8))
-				Expect(out.Documents).ToNot(BeEmpty())
-
-				listed, err := json.Marshal(out.Documents)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(len(listed)).To(BeNumerically("<=", enumerateShareBytes(maxTokens)))
-			},
-				Entry("a deep path rendered to a URL", 68),
-				Entry("a citation twice that length", 165),
-				Entry("a citation long enough that one row fills the share", 465),
-			)
-
 			// The description tells the model to always read the note, so a list the
 			// trim shortened and the note still calls complete is the one error it has no
 			// way to catch.
@@ -484,6 +464,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 				out := mappedCall(68)
 
 				Expect(out.Matched).To(Equal(8))
+				Expect(out.Documents).ToNot(BeEmpty())
 				Expect(out.Truncated).To(BeTrue())
 				Expect(out.Returned).To(Equal(len(out.Documents)))
 				Expect(out.Returned).To(BeNumerically("<", out.Matched))

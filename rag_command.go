@@ -303,10 +303,10 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 }
 
 // terminalToken sanitizes a raw or a mapped citation for a terminal without
-// cutting it short. Both are tokens the operator copies whole, one into knowledge
-// show and one into a browser or wherever the rules publish to, and a truncated one
-// works in neither. The table columns truncate instead, because a column has to
-// fit.
+// cutting it short. The operator pastes a raw citation into knowledge show and a
+// mapped one into a browser or wherever the rules publish to, and neither accepts
+// a token that lost its tail. terminalText truncates, since a table cell has a
+// width.
 func terminalToken(s string) string {
 	return util.SanitizeForTerminal(s, utf8.RuneCountInString(s))
 }
@@ -571,13 +571,11 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 //
 // A nil mapper means no citation rules are configured, which leaves the mapped
 // column off and the count at zero. Where rules are configured the column is blank
-// for a document none of them matched, and that count is the diagnostic this
-// listing owes the operator: a rule matching nothing sends raw paths to the model
-// and reports no error anywhere.
+// for a document none of them matched, and the count says how many: a rule
+// matching nothing sends raw paths to the model and reports no error anywhere.
 //
-// The mapped citation is the document-level one, so only capture groups fill it
-// and a rule written with ${ordinal} renders here without the ordinal. See
-// rag.CitationMapper.RenderDocument for why that differs from knowledge match.
+// The mapped citation is the document-level one; see
+// rag.CitationMapper.RenderDocument for how it differs from knowledge match.
 func sourcesTable(sources []rag.Source, mapper *rag.CitationMapper) (*table.Table, int) {
 	tbl := table.NewTableWriter("")
 

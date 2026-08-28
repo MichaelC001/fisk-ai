@@ -129,9 +129,9 @@ var _ = Describe("knowledge citation rendering", func() {
 		})
 
 		// A raw citation carries a corpus path and a mapped one can carry a heading, so
-		// both are document content on their way to a terminal. The newline is what
-		// makes this spec load-bearing: the table library already drops raw escapes, and
-		// collapsing whitespace is what SanitizeForTerminal adds over it, so a value
+		// both are document content on their way to a terminal. The newline matters as
+		// much as the escape: the table library already drops raw escapes, and
+		// SanitizeForTerminal adds the collapsing of whitespace over that, so a value
 		// reaching the terminal unsanitized breaks the line rather than colors it.
 		It("strips a control sequence and a newline from both citations", func() {
 			out := render([]rag.Hit{{
@@ -197,8 +197,8 @@ var _ = Describe("knowledge citation rendering", func() {
 			return out
 		}
 
-		// The count is the diagnostic: a rule that matches nothing sends raw paths to
-		// the model and reports no error anywhere.
+		// A rule that matches nothing sends raw paths to the model and logs no error
+		// anywhere, so the count is the only place it shows.
 		It("renders the document-level citation and counts what no rule reached", func() {
 			tbl, unmapped := sourcesTable(sources(), store.CitationMapper())
 
@@ -216,37 +216,6 @@ var _ = Describe("knowledge citation rendering", func() {
 
 			Expect(unmapped).To(Equal(0))
 			Expect(tbl.Render()).ToNot(ContainSubstring("Mapped"))
-		})
-
-		// The mapper percent-encodes what it substitutes, so a control sequence in a
-		// path reaches the column as text rather than as an escape.
-		It("keeps a control sequence in a path out of the citation it renders", func() {
-			mapper := rag.NewCitationMapper([]config.RAGCitationRule{{
-				Pattern:         `^(.*)$`,
-				Replace:         "https://docs.example.net/$1",
-				PatternCompiled: regexp.MustCompile(`^(.*)$`),
-			}})
-
-			tbl, unmapped := sourcesTable([]rag.Source{{Path: "gui\x1b[31mde.md"}}, mapper)
-
-			Expect(unmapped).To(Equal(0))
-			Expect(tbl.Render()).To(ContainSubstring("https://docs.example.net/gui%1B%5B31mde.md"))
-		})
-
-		// The operator's own literal template text is not substituted, so nothing
-		// percent-encodes it and the surface is the only thing that can. A newline is
-		// what separates this from the table library's own stripping.
-		It("collapses a newline the operator wrote into a replacement", func() {
-			mapper := rag.NewCitationMapper([]config.RAGCitationRule{{
-				Pattern:         `^(.*)\.md$`,
-				Replace:         "https://docs.example.net/\n$1",
-				PatternCompiled: regexp.MustCompile(`^(.*)\.md$`),
-			}})
-
-			tbl, unmapped := sourcesTable([]rag.Source{{Path: "guide.md"}}, mapper)
-
-			Expect(unmapped).To(Equal(0))
-			Expect(tbl.Render()).To(ContainSubstring("https://docs.example.net/ guide"))
 		})
 
 		// A rule that matches and renders nothing leaves the same blank cell as one

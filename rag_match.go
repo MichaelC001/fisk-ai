@@ -235,9 +235,8 @@ func terminalText(s string) string {
 // matched, which is the ordinary state of a partly published corpus.
 //
 // The column shows MatchedDoc.MappedCitation, which cites the document at the
-// first chunk that matched, the same chunk knowledge_enumerate reports it at. A
-// rule using ${ordinal} therefore renders here with the ordinal and in knowledge
-// sources without it; see rag.CitationMapper.RenderDocument.
+// first chunk that matched, the same chunk knowledge_enumerate reports it at. See
+// rag.CitationMapper.RenderDocument for how that differs from knowledge sources.
 func matchTable(docs []rag.MatchedDoc, citations bool) *table.Table {
 	tbl := table.NewTableWriter("")
 

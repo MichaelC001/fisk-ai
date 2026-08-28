@@ -270,9 +270,8 @@ func pushHeading(stack []heading, level int, text string) []heading {
 	return append(stack, heading{level: level, text: text})
 }
 
-// crumbSeparator joins the headings of a breadcrumb. Anything reading a
-// breadcrumb back apart, such as the citation renderer taking its deepest crumb,
-// splits on this.
+// crumbSeparator joins the headings of a breadcrumb. citationHeading splits on it
+// to take the deepest crumb.
 const crumbSeparator = " > "
 
 // crumb renders the breadcrumb stack as "A > B > C".

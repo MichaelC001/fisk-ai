@@ -105,8 +105,8 @@ func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writ
 
 // notePartialKnowledgeSet tells an operator who exposed one knowledge tool what
 // serving only that one costs their clients. The two are halves of one capability:
-// search ranks and so cannot separate absence from a low score, which is the whole
-// of what enumerate answers. Selecting one is legitimate and stays legal, so this
+// search ranks and so cannot separate absence from a low score, and enumerate
+// answers exactly that. Selecting one is legitimate and stays legal, so this
 // is a note and not an error, but an operator who did it by omission rather than by
 // choice should find that out here rather than from a client that answers "not
 // documented" about a document it holds.
@@ -245,10 +245,10 @@ type knowledgeSearchOutcome struct {
 // key for the section, the human-readable section breadcrumb, and the verbatim
 // content.
 //
-// Citation carries rag.Hit.MappedCitation, which is what the operator's rules make
-// of the document path and is the raw <relpath>#<ordinal> token itself when no rule
-// matched. IndexRef always carries that raw token, and the two fields are separate
-// so a model that must cite one string is never left choosing between them.
+// Citation carries rag.Hit.MappedCitation: the operator's rules applied to the
+// document path, and the raw <relpath>#<ordinal> token itself when no rule matched.
+// IndexRef always carries that raw token, and the two fields are separate so a
+// model that must cite one string is never left choosing between them.
 type knowledgeHitJSON struct {
 	Citation string `json:"citation"`
 	IndexRef string `json:"index_ref"`

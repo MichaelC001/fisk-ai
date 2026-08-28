@@ -106,11 +106,8 @@ type knowledgeEnumerateOutcome struct {
 // knowledgeEnumDocJSON is one matched document. It carries no text: this tool
 // reports where a word is, and reading it is a separate call to knowledge_search.
 //
-// Citation carries rag.MatchedDoc.MappedCitation, which is what the operator's
-// rules make of the document path and is the raw <relpath>#<ordinal> token itself
-// when no rule matched. IndexRef always carries that raw token, and the two fields
-// are separate so a model that must cite one string is never left choosing between
-// them.
+// Citation and IndexRef carry rag.MatchedDoc.MappedCitation and
+// rag.MatchedDoc.Citation, the pair knowledgeHitJSON describes.
 type knowledgeEnumDocJSON struct {
 	Citation       string `json:"citation"`
 	IndexRef       string `json:"index_ref"`
@@ -119,8 +116,8 @@ type knowledgeEnumDocJSON struct {
 	TotalChunks    int    `json:"total_chunks"`
 }
 
-// knowledgeEnumTermJSON is what the index holds for one query word, which is what
-// lets the model tell "absent" from "spelled differently".
+// knowledgeEnumTermJSON reports what the index holds for one query word, so the
+// model can tell "absent" from "spelled differently".
 type knowledgeEnumTermJSON struct {
 	Term      string   `json:"term"`
 	Documents int      `json:"documents"`
@@ -215,18 +212,12 @@ func enumerateShareBytes(maxTokens int) int {
 }
 
 // enumerateDocBudget is the Limit the store is asked for, which is how many
-// documents Enumerate hands back. It saves the store no work: Enumerate describes
-// every matched document and only then slices, so the rows this drops are rows it
-// already built. What it saves is the JSON below, which would otherwise marshal a
-// row per document in the corpus before the trim threw most of them away.
+// documents Enumerate hands back. It divides the share by the row skeleton,
+// counting nothing for the citation and index reference a row carries, so it is the
+// most rows the share could hold under any citation at all.
 //
-// It bounds the query and nothing else: trimEnumerateDocs measures the rows once
-// they exist, and that is what holds the list inside the share.
-//
-// The count therefore only has to be generous. It divides the share by the row
-// skeleton, counting nothing for the citation and index reference a row carries, so
-// it is the most rows the share could hold under any citation at all and the trim
-// decides how many of them fit.
+// It only has to be generous, because trimEnumerateDocs measures the rows once they
+// exist and holds the list inside the share.
 func enumerateDocBudget(maxTokens int) int {
 	skeleton := len(`{"citation":"","index_ref":"","body_matches":0,"heading_matches":0,"total_chunks":0},`)
 	budget := enumerateShareBytes(maxTokens) / skeleton
@@ -242,14 +233,12 @@ func enumerateDocBudget(maxTokens int) int {
 
 // trimEnumerateDocs drops documents from the end of docs until the list marshals
 // within limit bytes. A citation is whatever an operator's rule renders and has no
-// length limit, so the only honest measure of a row is the row itself: each is
-// marshaled, and the list around them costs the two brackets plus one comma between
-// each pair.
+// length limit, so each row is marshaled and measured as it stands; the list around
+// them costs the two brackets plus one comma between each pair.
 //
 // Documents are dropped from the end because the store sorted them by match count,
-// so what goes is what matched least. The first is kept whatever it costs: a
-// document that matched and is not listed reads as absence, which is the one answer
-// this tool exists to make trustworthy.
+// so what goes is what matched least. The first is kept whatever it costs, since a
+// document that matched and is not listed reads as absence.
 func trimEnumerateDocs(docs []knowledgeEnumDocJSON, limit int) ([]knowledgeEnumDocJSON, error) {
 	used := len("[]")
 

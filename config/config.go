@@ -468,7 +468,7 @@ type RAGCitationRule struct {
 	// Replace is the citation produced when Pattern matches. It is a template in the
 	// syntax of regexp.Regexp.Expand: $1 and ${name} expand to a capture group of
 	// Pattern, and $$ is a literal dollar. Three further names are filled by the
-	// renderer rather than by the pattern, those in RAGCitationReservedNames.
+	// renderer rather than by the pattern: ordinal, heading and anchor.
 	//
 	// A name that is neither a group of this rule's own pattern nor one of the
 	// reserved names fails config load, as does a numbered group beyond what the
@@ -476,9 +476,8 @@ type RAGCitationRule struct {
 	// as a reference to a group named "1x" and expands it to nothing, with no error.
 	Replace string `json:"replace" yaml:"replace"`
 	// PatternCompiled is the compiled form of Pattern, filled by prepare(). It is nil
-	// on a Config built as a struct literal rather than parsed, and
-	// Config.RAGCitationRules then reports no rules, so citations pass through as raw
-	// paths.
+	// on a Config built as a struct literal rather than parsed, and a rule carrying no
+	// compiled pattern matches nothing: the renderer skips it and tries the next rule.
 	PatternCompiled *regexp.Regexp `json:"-" yaml:"-"`
 }
 
@@ -486,15 +485,9 @@ type RAGCitationRule struct {
 // the capture groups of its own pattern. The renderer fills them from the cited
 // chunk: its ordinal within the document, its heading, and the anchor derived from
 // that heading.
+//
+// rag.citationValue resolves the same three names and must list them as this does.
 var ragCitationReservedNames = []string{"ordinal", "heading", "anchor"}
-
-// RAGCitationReservedNames returns the names a citation replacement may reference
-// in addition to the capture groups of its own pattern. Config validates
-// harness.knowledge.citations against this list and the renderer supplies a value
-// for each name in it, so the two cannot drift. The returned slice is a copy.
-func RAGCitationReservedNames() []string {
-	return slices.Clone(ragCitationReservedNames)
-}
 
 // RAGEmbeddingsConfig configures the optional vector tier: a local
 // OpenAI-compatible embeddings server contacted only when this block is present.
@@ -2084,19 +2077,13 @@ func (c *Config) RAGVectorEnabled() bool {
 // harness.knowledge.citations, compiled and validated by prepare. It is nil when
 // none are set.
 //
-// It is also nil for a Config assembled as a struct literal rather than parsed,
-// since prepare never ran over such a config and its rules carry no compiled
-// pattern. A citation then keeps the raw document path, which is what an unmatched
-// path does anyway.
+// A rule reaching here with no compiled pattern, which is what a Config assembled
+// as a struct literal rather than parsed hands over, is still returned: the
+// renderer skips it and tries the next rule, so one such rule costs its own
+// citations rather than every rule's.
 func (c *Config) RAGCitationRules() []RAGCitationRule {
 	if c.Harness.RAG == nil {
 		return nil
-	}
-
-	for _, rule := range c.Harness.RAG.Citations {
-		if rule.PatternCompiled == nil {
-			return nil
-		}
 	}
 
 	return c.Harness.RAG.Citations
@@ -2796,23 +2783,23 @@ func prepareRAGCitations(rules []RAGCitationRule) error {
 
 		names := re.SubexpNames()
 
-		for _, ref := range ragCitationReplaceRefs(rules[i].Replace) {
-			if ref.num >= 0 {
-				if ref.num > re.NumSubexp() {
-					return fmt.Errorf("invalid harness.knowledge.citations[%d] replace %q: $%d refers to capture group %d but the pattern %q has %d", i, rules[i].Replace, ref.num, ref.num, rules[i].Pattern, re.NumSubexp())
+		for _, ref := range rules[i].ReplaceRefs() {
+			if ref.Num >= 0 {
+				if ref.Num > re.NumSubexp() {
+					return fmt.Errorf("invalid harness.knowledge.citations[%d] replace %q: $%d refers to capture group %d but the pattern %q has %d", i, rules[i].Replace, ref.Num, ref.Num, rules[i].Pattern, re.NumSubexp())
 				}
 
 				continue
 			}
 
-			if slices.Contains(names, ref.name) {
+			if slices.Contains(names, ref.Name) {
 				continue
 			}
-			if slices.Contains(ragCitationReservedNames, ref.name) {
+			if slices.Contains(ragCitationReservedNames, ref.Name) {
 				continue
 			}
 
-			return fmt.Errorf("invalid harness.knowledge.citations[%d] replace %q: $%s is neither a named capture group in the pattern %q nor one of %s", i, rules[i].Replace, ref.name, rules[i].Pattern, strings.Join(ragCitationReservedNames, ", "))
+			return fmt.Errorf("invalid harness.knowledge.citations[%d] replace %q: $%s is neither a named capture group in the pattern %q nor one of %s", i, rules[i].Replace, ref.Name, rules[i].Pattern, strings.Join(ragCitationReservedNames, ", "))
 		}
 
 		rules[i].PatternCompiled = re
@@ -2821,44 +2808,56 @@ func prepareRAGCitations(rules []RAGCitationRule) error {
 	return nil
 }
 
-// ragCitationRef is one group reference found in a citation replacement. Num is
-// the group number for a numbered reference and -1 for a named one, matching what
-// regexp resolves the same text to.
-type ragCitationRef struct {
-	name string
-	num  int
+// RAGCitationRef is one group reference in a citation replacement. Num is the
+// group number for a numbered reference and -1 for a named one, matching what
+// regexp resolves the same text to. Start and End are the byte range the reference
+// occupies in the replacement, so a renderer copies the literal text around it
+// rather than reading the replacement a second time.
+type RAGCitationRef struct {
+	Name  string
+	Num   int
+	Start int
+	End   int
 }
 
-// ragCitationReplaceRefs returns the group references in a replacement template,
-// in the order they appear. It reads the template with the grammar of
-// regexp.Regexp.Expand, which is what renders it: $$ is a literal dollar and
+// ReplaceRefs returns the group references in the rule's Replace, in the order
+// they appear. Config checks each of them against the rule's pattern and the
+// renderer substitutes each in turn, so both read a replacement through this one
+// scanner and a reference config accepted resolves to the group it was accepted
+// for.
+//
+// The grammar is regexp.Regexp.Expand's, transcribed: $$ is a literal dollar and
 // yields no reference; $name and ${name} take a name of Unicode letters, digits
-// and underscores; an all-digit name without a leading zero is a numbered group
-// and anything else, $1x included, is a named one; and text that is not a
-// reference at all, such as a $ at the end or one before a punctuation character,
-// stays literal and yields nothing.
-func ragCitationReplaceRefs(template string) []ragCitationRef {
-	var refs []ragCitationRef
+// and underscores; an all-digit name with no leading zero and under the 1e8 cap is
+// a numbered group, while $01, $1x and a ten-digit run are named ones; and text
+// that is no reference at all, such as a $ before a punctuation character, a $ at
+// the end or an unterminated ${, stays literal and yields nothing.
+func (r RAGCitationRule) ReplaceRefs() []RAGCitationRef {
+	var refs []RAGCitationRef
 
-	for len(template) > 0 {
-		_, after, ok := strings.Cut(template, "$")
-		if !ok {
+	pos := 0
+	for pos < len(r.Replace) {
+		i := strings.IndexByte(r.Replace[pos:], '$')
+		if i < 0 {
 			break
 		}
-		template = after
 
-		if template != "" && template[0] == '$' {
-			template = template[1:]
+		start := pos + i
+		pos = start + 1
+
+		if pos < len(r.Replace) && r.Replace[pos] == '$' {
+			pos++
 			continue
 		}
 
-		name, num, rest, ok := ragCitationExtract(template)
+		name, num, rest, ok := ragCitationExtract(r.Replace[pos:])
 		if !ok {
 			continue
 		}
-		template = rest
 
-		refs = append(refs, ragCitationRef{name: name, num: num})
+		end := len(r.Replace) - len(rest)
+		refs = append(refs, RAGCitationRef{Name: name, Num: num, Start: start, End: end})
+		pos = end
 	}
 
 	return refs

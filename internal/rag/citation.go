@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/config"
 )
@@ -23,26 +22,25 @@ import (
 // A mapper holding no rules passes every citation through unrewritten, the raw
 // <relpath>#<ordinal> token from Render and the document path from
 // RenderDocument, so a caller never needs to know whether an operator configured
-// any. That is the default: most corpora are not published.
+// any. Most corpora are published nowhere and are cited that way.
 type CitationMapper struct {
 	rules []config.RAGCitationRule
 }
 
 // NewCitationMapper returns a mapper over rules, which are tried in the order
-// given. Pass what Config.RAGCitationRules returns: it hands back rules whose
-// pattern is compiled and whose replacement config has already checked against
-// that pattern's groups, and nil when there is nothing configured.
+// given. Pass what Config.RAGCitationRules returns: it hands back the rules
+// config compiled and whose replacements it checked against their own pattern's
+// groups.
 //
-// A nil or empty slice yields a mapper that passes every citation through, and so
-// does a rule carrying no compiled pattern, which is skipped.
+// A nil mapper, a nil or empty slice, and a rule carrying no compiled pattern all
+// pass a citation through: the mapper reports no match and the caller keeps the
+// raw token.
 func NewCitationMapper(rules []config.RAGCitationRule) *CitationMapper {
 	return &CitationMapper{rules: rules}
 }
 
 // Render returns the mapped citation for one cited chunk and whether a rule
-// matched. A rule that renders a URL gives a reader something to open; one that
-// renders a ticket key or a document id gives them the corpus's own name for the
-// chunk.
+// matched.
 //
 // docPath is the document path as the indexer stored it, ordinal is the chunk's
 // ordinal within that document, and headingPath is the chunk's breadcrumb in the
@@ -54,11 +52,17 @@ func NewCitationMapper(rules []config.RAGCitationRule) *CitationMapper {
 // Callers need the second value rather than a comparison against
 // Citation(docPath, ordinal): a rule may legitimately render a path unchanged.
 //
-// A mapped citation left ending in a bare "#", which is what ${heading} or
-// ${anchor} does for a chunk with no heading, has that "#" trimmed. ${ordinal}
+// A mapped citation left ending in a bare "#", as ${heading} and ${anchor} leave
+// one for a chunk with no heading, has that "#" trimmed. ${ordinal}
 // always has a value and never reaches the trim. A replacement writing a
 // literal between the "#" and an empty value, such as "#section-${ordinal}",
 // renders "#section-" and is the operator's to get right.
+//
+// Every value substituted into a replacement is percent-encoded, a capture group
+// and a reserved name alike, so a directory named a@evil.example renders as
+// a%40evil.example. "/" is left alone, because a capture routinely spans
+// directories. The literal text of the replacement is the operator's own and is
+// written out as it stands.
 func (m *CitationMapper) Render(docPath string, ordinal int, headingPath string) (string, bool) {
 	citation, ok := m.render(docPath, citationReserved{ordinal: strconv.Itoa(ordinal), headingPath: headingPath})
 	if !ok {
@@ -78,6 +82,9 @@ func (m *CitationMapper) Render(docPath string, ordinal int, headingPath string)
 // trimmed, so a rule written for chunks yields its document-level form here. A
 // path no rule matches is returned as docPath itself, with false: no chunk is
 // cited, so there is no citation token to fall back to.
+//
+// Every value substituted into a replacement is percent-encoded, as Render
+// describes, with "/" left alone.
 //
 // This differs from Render, which cites one chunk and fills all three reserved
 // names. A rule using ${ordinal} therefore renders differently on the two:
@@ -106,7 +113,14 @@ type citationReserved struct {
 // one did. It leaves the unmatched case to the caller, because the two public
 // renderers answer it differently: a chunk citation for Render, the bare path for
 // RenderDocument.
+//
+// A nil mapper holds no rules and matches nothing, so a caller with no rules
+// configured can pass nil rather than build one.
 func (m *CitationMapper) render(docPath string, reserved citationReserved) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+
 	for _, rule := range m.rules {
 		if rule.PatternCompiled == nil {
 			continue
@@ -117,7 +131,7 @@ func (m *CitationMapper) render(docPath string, reserved citationReserved) (stri
 			continue
 		}
 
-		citation := expandCitation(rule.PatternCompiled, rule.Replace, docPath, match, reserved)
+		citation := expandCitation(rule, docPath, match, reserved)
 
 		return strings.TrimSuffix(citation, "#"), true
 	}
@@ -132,50 +146,28 @@ func (m *CitationMapper) render(docPath string, reserved citationReserved) (stri
 // substitutes every match rather than the first, and reports nothing about
 // whether it matched at all.
 //
-// The walk is a single pass. Each reference resolves against the rule's own
-// capture groups or the values supplied for the reserved names, and what was
-// substituted is never rescanned. A second pass would let the corpus write the
-// template, since a file named ${anchor}.md captured into the output would then
-// have its own placeholder filled from the document's heading.
+// The walk is a single pass over the ranges RAGCitationRule.ReplaceRefs found:
+// each reference resolves against the rule's own capture groups or the values
+// supplied for the reserved names, and what was substituted is never rescanned. A
+// second pass would let the corpus write the template, since a file named
+// ${anchor}.md captured into the output would then have its own placeholder filled
+// from the document's heading.
 //
-// The grammar is the one regexp.Regexp.Expand reads and config validates the
-// replacement against, transcribed so that every reference config accepted
-// resolves to the same group here: $$ is a literal dollar, a name is a run of
-// Unicode letters, digits and underscores that may be braced, a $ that starts no
-// name and an unterminated ${ stay literal, and an all-digit name with no leading
-// zero and under the 1e8 cap is a numbered group while $01, $1x and a ten-digit
-// run are named ones.
-func expandCitation(re *regexp.Regexp, template string, path string, match []int, reserved citationReserved) string {
+// The text between references is copied out as the operator wrote it, except for
+// $$, which the scanner passed over and which is written here as one dollar. The
+// second dollar of a pair cannot begin a reference: the scanner consumed both.
+func expandCitation(rule config.RAGCitationRule, path string, match []int, reserved citationReserved) string {
 	var out strings.Builder
-	out.Grow(len(template))
+	out.Grow(len(rule.Replace))
 
-	for len(template) > 0 {
-		before, after, ok := strings.Cut(template, "$")
-		if !ok {
-			break
-		}
-		out.WriteString(before)
-		template = after
-
-		if template != "" && template[0] == '$' {
-			out.WriteByte('$')
-			template = template[1:]
-
-			continue
-		}
-
-		name, num, rest, ok := citationExtract(template)
-		if !ok {
-			out.WriteByte('$')
-
-			continue
-		}
-		template = rest
-
-		out.WriteString(escapeCitationValue(citationValue(re, path, match, name, num, reserved)))
+	pos := 0
+	for _, ref := range rule.ReplaceRefs() {
+		out.WriteString(strings.ReplaceAll(rule.Replace[pos:ref.Start], "$$", "$"))
+		out.WriteString(escapeCitationValue(citationValue(rule.PatternCompiled, path, match, ref.Name, ref.Num, reserved)))
+		pos = ref.End
 	}
 
-	out.WriteString(template)
+	out.WriteString(strings.ReplaceAll(rule.Replace[pos:], "$$", "$"))
 
 	return out.String()
 }
@@ -185,6 +177,9 @@ func expandCitation(re *regexp.Regexp, template string, path string, match []int
 // is the order config validates in, and a group that took part in no match
 // renders empty just as Expand renders it. A reserved name the caller could not
 // supply, such as ${heading} for a chunk with no heading, also renders empty.
+//
+// The three reserved names are the ones config accepts a replacement for; the list
+// config validates against is ragCitationReservedNames and the two must agree.
 func citationValue(re *regexp.Regexp, path string, match []int, name string, num int, reserved citationReserved) string {
 	if num >= 0 {
 		if 2*num+1 < len(match) && match[2*num] >= 0 {
@@ -221,60 +216,6 @@ func citationValue(re *regexp.Regexp, path string, match []int, name string, num
 	return ""
 }
 
-// citationExtract reads a leading "name" or "{name}" from str, which the caller
-// has already stripped the $ from. It is the same read as config's validation
-// scanner and as the unexported extract in the regexp package, so a replacement
-// that loaded resolves the references it was validated for.
-func citationExtract(str string) (name string, num int, rest string, ok bool) {
-	if str == "" {
-		return
-	}
-
-	brace := false
-	if str[0] == '{' {
-		brace = true
-		str = str[1:]
-	}
-
-	i := 0
-	for i < len(str) {
-		r, size := utf8.DecodeRuneInString(str[i:])
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
-			break
-		}
-		i += size
-	}
-	if i == 0 {
-		return
-	}
-
-	name = str[:i]
-	if brace {
-		if i >= len(str) || str[i] != '}' {
-			return
-		}
-		i++
-	}
-
-	num = 0
-	for j := 0; j < len(name); j++ {
-		if name[j] < '0' || '9' < name[j] || num >= 1e8 {
-			num = -1
-			break
-		}
-		num = num*10 + int(name[j]) - '0'
-	}
-	if name[0] == '0' && len(name) > 1 {
-		num = -1
-	}
-
-	rest = str[i:]
-	ok = true
-
-	return
-}
-
-// citationHex is the alphabet escapeCitationValue writes a percent escape with.
 const citationHex = "0123456789ABCDEF"
 
 // escapeCitationValue percent-encodes one substituted value for a URL path,
@@ -286,11 +227,11 @@ const citationHex = "0123456789ABCDEF"
 // whose host is evil.example. It also covers a heading holding a space, an "&" or
 // a "?".
 //
-// Leaving "/" alone is what that guarantee stops at. A capture spanning a
-// directory boundary placed in the authority of a rule still moves the host: with
-// ^(.*)/docs/.*\.md$ and https://$1.docs.example.net/, a stored path beginning
-// evil.example/ renders a URL whose host is evil.example. A rule that puts a
-// capture anywhere but the path is the operator's to get right.
+// The guarantee stops at "/". A capture spanning a directory boundary placed in
+// the authority of a rule still moves the host: with ^(.*)/docs/.*\.md$ and
+// https://$1.docs.example.net/, a stored path beginning evil.example/ renders a
+// URL whose host is evil.example. A rule that puts a capture anywhere but the
+// path is the operator's to get right.
 func escapeCitationValue(value string) string {
 	var out strings.Builder
 	out.Grow(len(value))
@@ -313,8 +254,7 @@ func escapeCitationValue(value string) string {
 }
 
 // citationHeading returns the deepest crumb of a breadcrumb, which is the heading
-// the chunk sits under. A breadcrumb with one crumb is that crumb, and an empty
-// one is empty.
+// the chunk sits under.
 func citationHeading(headingPath string) string {
 	i := strings.LastIndex(headingPath, crumbSeparator)
 	if i < 0 {
@@ -329,9 +269,9 @@ func citationHeading(headingPath string) string {
 // delete anything that is not a letter, digit, underscore, space or hyphen, turn
 // each space into a hyphen, and trim hyphens from both ends.
 //
-// Deleting rather than collapsing is the whole point of matching them: "Don't
-// Panic" is dont-panic there and don-t-panic under a collapsing rule, and a
-// fragment that names no heading fails silently in a browser.
+// It deletes rather than collapses because those slugs do: "Don't Panic" is
+// dont-panic there and don-t-panic under a collapsing rule, and a fragment that
+// names no heading fails silently in a browser.
 func citationAnchor(heading string) string {
 	var out strings.Builder
 	out.Grow(len(heading))

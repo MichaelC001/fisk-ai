@@ -121,12 +121,16 @@ harness:
 			Expect(cfg.RAGCitationRules()).To(BeNil())
 		})
 
-		It("reports no rules for a config built as a struct literal", func() {
+		// A rule prepare never compiled matches nothing and the renderer skips it, so
+		// one of them costs its own citations rather than every rule's.
+		It("hands back an uncompiled rule from a config built as a struct literal", func() {
 			cfg := &Config{Harness: HarnessConfig{RAG: &RAGConfig{
 				Enabled:   true,
 				Citations: []RAGCitationRule{{Pattern: `^docs/(.+)$`, Replace: "https://docs.example.net/$1"}},
 			}}}
-			Expect(cfg.RAGCitationRules()).To(BeNil(), "an uncompiled rule cannot match, so the citation passes through")
+			rules := cfg.RAGCitationRules()
+			Expect(rules).To(HaveLen(1))
+			Expect(rules[0].PatternCompiled).To(BeNil())
 
 			bare := &Config{}
 			Expect(bare.RAGCitationRules()).To(BeNil())
@@ -189,14 +193,6 @@ harness:
 `))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(cfg.RAGCitationRules()).To(HaveLen(1))
-		})
-
-		It("supplies ordinal, heading and anchor as the reserved names", func() {
-			Expect(RAGCitationReservedNames()).To(Equal([]string{"ordinal", "heading", "anchor"}))
-
-			names := RAGCitationReservedNames()
-			names[0] = "mutated"
-			Expect(RAGCitationReservedNames()[0]).To(Equal("ordinal"), "the caller gets a copy")
 		})
 	})
 })
