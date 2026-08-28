@@ -270,6 +270,11 @@ func pushHeading(stack []heading, level int, text string) []heading {
 	return append(stack, heading{level: level, text: text})
 }
 
+// crumbSeparator joins the headings of a breadcrumb. Anything reading a
+// breadcrumb back apart, such as the citation renderer taking its deepest crumb,
+// splits on this.
+const crumbSeparator = " > "
+
 // crumb renders the breadcrumb stack as "A > B > C".
 func crumb(stack []heading) string {
 	parts := make([]string, len(stack))
@@ -277,5 +282,5 @@ func crumb(stack []heading) string {
 		parts[i] = h.text
 	}
 
-	return strings.Join(parts, " > ")
+	return strings.Join(parts, crumbSeparator)
 }
