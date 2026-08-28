@@ -180,6 +180,42 @@ var _ = Describe("CitationMapper", func() {
 			"https://catchall.example.net/notes/todo.txt", true),
 	)
 
+	DescribeTable("rendering a document-level address",
+		func(rules []config.RAGCitationRule, path string, address string, matched bool) {
+			got, ok := NewCitationMapper(rules).RenderDocument(path)
+
+			Expect(got).To(Equal(address))
+			Expect(ok).To(Equal(matched))
+		},
+
+		// The bare path, not Citation(path, 0): no chunk is being addressed, so there
+		// is no ordinal to invent.
+		Entry("keeps the bare path when no rule is configured",
+			nil, "docs/guide.md", "docs/guide.md", false),
+
+		Entry("keeps the bare path when no rule matches",
+			docsRule("https://docs.example.net/$1"), "notes/todo.md", "notes/todo.md", false),
+
+		Entry("fills the capture groups",
+			docsRule("https://docs.example.net/$1/"), "docs/guide/setup.md",
+			"https://docs.example.net/guide/setup/", true),
+
+		Entry("renders ordinal, heading and anchor empty",
+			docsRule("https://docs.example.net/$1/${ordinal}?h=${heading}#${anchor}"), "docs/guide.md",
+			"https://docs.example.net/guide/?h=", true),
+
+		Entry("trims the bare hash a chunk rule leaves behind",
+			docsRule("https://docs.example.net/$1#${anchor}"), "docs/guide.md",
+			"https://docs.example.net/guide", true),
+
+		Entry("takes the first rule that matches",
+			[]config.RAGCitationRule{
+				citationRule(`^docs/api/(.*)\.md$`, "https://api.example.net/$1"),
+				citationRule(`^docs/(.*)\.md$`, "https://docs.example.net/$1"),
+			},
+			"docs/api/v1.md", "https://api.example.net/v1", true),
+	)
+
 	Describe("the replacement grammar", func() {
 		// config validates a replacement with a transcription of regexp's own
 		// expand, verified against ExpandString. The expander has to resolve exactly
@@ -216,7 +252,7 @@ var _ = Describe("CitationMapper", func() {
 					}
 
 					template := string(buf)
-					got := expandCitation(re, template, path, match, 7, "Heading")
+					got := expandCitation(re, template, path, match, citationReserved{ordinal: "7", headingPath: "Heading"})
 					want := string(re.ExpandString(nil, template, path, match))
 					if got != want {
 						Fail(fmt.Sprintf("template %q expanded to %q, ExpandString gives %q", template, got, want))
@@ -378,5 +414,21 @@ var _ = Describe("Store citation rendering", func() {
 
 		Expect(address).To(Equal("https://docs.example.net/guide?c=0"))
 		Expect(mapped).To(BeTrue())
+	})
+
+	// A listing has no ordinal to address a document at, so the same rule renders its
+	// document-level form: knowledge sources differs from knowledge match here, and
+	// only because this rule uses ${ordinal}.
+	It("renders the document-level form of the same rule for a listing", func() {
+		m := reader(cfg).CitationMapper()
+
+		address, mapped := m.RenderDocument(filepath.Join(docsD, "published/guide.md"))
+		Expect(address).To(Equal("https://docs.example.net/guide?c="))
+		Expect(mapped).To(BeTrue())
+
+		unpublished := filepath.Join(docsD, "private/notes.md")
+		address, mapped = m.RenderDocument(unpublished)
+		Expect(address).To(Equal(unpublished))
+		Expect(mapped).To(BeFalse())
 	})
 })

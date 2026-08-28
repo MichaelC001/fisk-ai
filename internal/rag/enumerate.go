@@ -94,6 +94,10 @@ type MatchedDoc struct {
 	// It addresses the document at its first matching chunk: ${ordinal} is filled,
 	// and ${heading} and ${anchor} render empty because enumeration answers which
 	// documents hold a term and never loads a section.
+	//
+	// A listing built on Sources renders the same document with
+	// CitationMapper.RenderDocument, which leaves ${ordinal} empty too, so the two
+	// differ on a rule that uses ${ordinal} and agree on every rule that does not.
 	Address string
 
 	// AddressMapped reports whether a rule produced Address, which Address alone does

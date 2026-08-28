@@ -54,6 +54,53 @@ func NewCitationMapper(rules []config.RAGCitationRule) *CitationMapper {
 // literal between the "#" and an empty value, such as "#section-${ordinal}",
 // renders "#section-" and is the operator's to get right.
 func (m *CitationMapper) Render(docPath string, ordinal int, headingPath string) (string, bool) {
+	address, ok := m.render(docPath, citationReserved{ordinal: strconv.Itoa(ordinal), headingPath: headingPath})
+	if !ok {
+		return Citation(docPath, ordinal), false
+	}
+
+	return address, true
+}
+
+// RenderDocument returns the address for a whole document and whether a rule
+// matched, for a surface that lists documents rather than chunks: knowledge
+// sources, or anything else built on Sources, which carries neither an ordinal nor
+// a heading.
+//
+// Only the rule's own capture groups fill. ${ordinal}, ${heading} and ${anchor}
+// each render empty, and an address left ending in a bare "#" has that "#"
+// trimmed, so a rule written for chunks yields its document-level form here. A
+// path no rule matches is returned as docPath itself, with false: there is no
+// chunk being addressed, so there is no citation token to fall back to.
+//
+// This differs from Render, which addresses one chunk and fills all three reserved
+// names. A rule using ${ordinal} therefore renders a different address on the two:
+// knowledge match shows MatchedDoc.Address, which carries the first matching
+// chunk's ordinal, where knowledge sources shows this. They agree on every rule
+// that does not use ${ordinal}, and a rule that does is a poor one, since ordinals
+// shift on every reindex.
+func (m *CitationMapper) RenderDocument(docPath string) (string, bool) {
+	address, ok := m.render(docPath, citationReserved{})
+	if !ok {
+		return docPath, false
+	}
+
+	return address, true
+}
+
+// citationReserved carries what the reserved names render from for one expansion.
+// Render fills both fields; RenderDocument leaves them empty, which renders
+// ${ordinal}, ${heading} and ${anchor} as nothing.
+type citationReserved struct {
+	ordinal     string
+	headingPath string
+}
+
+// render expands the first rule whose pattern matches docPath and reports whether
+// one did. It leaves the unmatched address to the caller, because the two public
+// renderers answer it differently: a chunk citation for Render, the bare path for
+// RenderDocument.
+func (m *CitationMapper) render(docPath string, reserved citationReserved) (string, bool) {
 	for _, rule := range m.rules {
 		if rule.PatternCompiled == nil {
 			continue
@@ -64,12 +111,12 @@ func (m *CitationMapper) Render(docPath string, ordinal int, headingPath string)
 			continue
 		}
 
-		address := expandCitation(rule.PatternCompiled, rule.Replace, docPath, match, ordinal, headingPath)
+		address := expandCitation(rule.PatternCompiled, rule.Replace, docPath, match, reserved)
 
 		return strings.TrimSuffix(address, "#"), true
 	}
 
-	return Citation(docPath, ordinal), false
+	return "", false
 }
 
 // expandCitation renders one rule's replacement against a match on the document
@@ -92,7 +139,7 @@ func (m *CitationMapper) Render(docPath string, ordinal int, headingPath string)
 // name and an unterminated ${ stay literal, and an all-digit name with no leading
 // zero and under the 1e8 cap is a numbered group while $01, $1x and a ten-digit
 // run are named ones.
-func expandCitation(re *regexp.Regexp, template string, path string, match []int, ordinal int, headingPath string) string {
+func expandCitation(re *regexp.Regexp, template string, path string, match []int, reserved citationReserved) string {
 	var out strings.Builder
 	out.Grow(len(template))
 
@@ -119,7 +166,7 @@ func expandCitation(re *regexp.Regexp, template string, path string, match []int
 		}
 		template = rest
 
-		out.WriteString(escapeCitationValue(citationValue(re, path, match, name, num, ordinal, headingPath)))
+		out.WriteString(escapeCitationValue(citationValue(re, path, match, name, num, reserved)))
 	}
 
 	out.WriteString(template)
@@ -132,7 +179,7 @@ func expandCitation(re *regexp.Regexp, template string, path string, match []int
 // is the order config validates in, and a group that took part in no match
 // renders empty just as Expand renders it. A reserved name the caller could not
 // supply, such as ${heading} for a chunk with no heading, also renders empty.
-func citationValue(re *regexp.Regexp, path string, match []int, name string, num int, ordinal int, headingPath string) string {
+func citationValue(re *regexp.Regexp, path string, match []int, name string, num int, reserved citationReserved) string {
 	if num >= 0 {
 		if 2*num+1 < len(match) && match[2*num] >= 0 {
 			return path[match[2*num]:match[2*num+1]]
@@ -158,11 +205,11 @@ func citationValue(re *regexp.Regexp, path string, match []int, name string, num
 
 	switch name {
 	case "ordinal":
-		return strconv.Itoa(ordinal)
+		return reserved.ordinal
 	case "heading":
-		return citationHeading(headingPath)
+		return citationHeading(reserved.headingPath)
 	case "anchor":
-		return citationAnchor(citationHeading(headingPath))
+		return citationAnchor(citationHeading(reserved.headingPath))
 	}
 
 	return ""
