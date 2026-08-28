@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -56,6 +57,79 @@ var _ = Describe("resolveDir", func() {
 	// lets a caller report an index it could not open.
 	It("names the index file under the resolved directory", func() {
 		Expect(StorePath(ragCfg("kb"), "/srv/base")).To(Equal(filepath.Join("/srv/base", "kb", dbFileName)))
+	})
+})
+
+var _ = Describe("newStore", func() {
+	// A reader and a writer are built from one config by one helper, so every value
+	// that config decides has to be the same on both. Before the helper existed each
+	// constructor filled these itself, and a field written into one alone was a store
+	// that searched differently depending on which one opened it.
+	It("gives a reader and a writer the same config-derived fields", func() {
+		storeD := filepath.Join(GinkgoT().TempDir(), "knowledge")
+
+		cfg := &config.Config{
+			Identity: "test",
+			Harness: config.HarnessConfig{
+				RAG: &config.RAGConfig{
+					Enabled:           true,
+					Directory:         storeD,
+					TopK:              7,
+					MaxInjectedTokens: 4242,
+					Embeddings: &config.RAGEmbeddingsConfig{
+						BaseURL: "http://127.0.0.1:11434/v1",
+						Model:   "bge-small",
+					},
+					Citations: []config.RAGCitationRule{{
+						Pattern:         `^docs/(.+)\.md$`,
+						Replace:         "https://example.net/$1#${anchor}",
+						PatternCompiled: regexp.MustCompile(`^docs/(.+)\.md$`),
+					}},
+				},
+			},
+		}
+
+		// The reader opens first, while no index file exists: a configured vector tier
+		// against the writer's freshly created, unpinned manifest is a meta mismatch,
+		// which says nothing about the fields under test.
+		r, err := Open(cfg, "")
+		Expect(err).ToNot(HaveOccurred())
+		defer r.Close()
+
+		w, err := OpenWriter(cfg, "")
+		Expect(err).ToNot(HaveOccurred())
+		defer w.Close()
+
+		Expect(r.dir).To(Equal(storeD))
+		Expect(w.dir).To(Equal(storeD))
+
+		Expect(r.dbPath).To(Equal(filepath.Join(storeD, dbFileName)))
+		Expect(w.dbPath).To(Equal(filepath.Join(storeD, dbFileName)))
+
+		Expect(r.topK).To(Equal(7))
+		Expect(w.topK).To(Equal(7))
+
+		Expect(r.maxInjectedTokens).To(Equal(4242))
+		Expect(w.maxInjectedTokens).To(Equal(4242))
+
+		Expect(r.emb).ToNot(BeNil())
+		Expect(w.emb).ToNot(BeNil())
+		Expect(r.emb.Model()).To(Equal("bge-small"))
+		Expect(w.emb.Model()).To(Equal("bge-small"))
+
+		// The writer answers searches too, so its mapper has to rewrite the same paths
+		// the reader's does rather than hand the model a raw token.
+		readerAddr, readerOK := r.citations.Render("docs/guide.md", 3, "Design > Backpressure")
+		writerAddr, writerOK := w.citations.Render("docs/guide.md", 3, "Design > Backpressure")
+		Expect(readerOK).To(BeTrue())
+		Expect(writerOK).To(BeTrue())
+		Expect(readerAddr).To(Equal("https://example.net/guide#backpressure"))
+		Expect(writerAddr).To(Equal("https://example.net/guide#backpressure"))
+
+		// readOnly comes from the helper's parameter, and is the one field the two are
+		// meant to disagree on.
+		Expect(r.readOnly).To(BeTrue())
+		Expect(w.readOnly).To(BeFalse())
 	})
 })
 
