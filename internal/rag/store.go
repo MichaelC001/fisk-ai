@@ -132,6 +132,11 @@ type Store struct {
 
 	topK              int
 	maxInjectedTokens int
+
+	// citations renders the published address of every result this store returns. It
+	// is built in both Open and OpenWriter, since a store keeps no *config.Config to
+	// build one from later and a writer answers searches too.
+	citations *CitationMapper
 }
 
 // resolveDir returns the store directory for cfg: the configured directory when
@@ -259,6 +264,7 @@ func Open(cfg *config.Config, storeDir string) (*Store, error) {
 		readOnly:          true,
 		topK:              resolvedTopK(cfg.Harness.RAG),
 		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
+		citations:         NewCitationMapper(cfg.RAGCitationRules()),
 	}
 
 	// A read-only connection against a nonexistent file errors (mode=ro does not
@@ -347,6 +353,7 @@ func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
 		lock:              lock,
 		topK:              resolvedTopK(cfg.Harness.RAG),
 		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
+		citations:         NewCitationMapper(cfg.RAGCitationRules()),
 	}
 
 	ctx := context.Background()
@@ -785,6 +792,12 @@ func (s *Store) MaxInjectedTokens() int { return s.maxInjectedTokens }
 
 // Dir returns the store directory, excluded from its own index walk.
 func (s *Store) Dir() string { return s.dir }
+
+// CitationMapper returns the renderer this store built from the configured
+// citation rules. Every Hit and MatchedDoc already carries its rendered address, so
+// this is for a surface that addresses a document without running a search, such as
+// a listing of the indexed documents.
+func (s *Store) CitationMapper() *CitationMapper { return s.citations }
 
 // Meta is the pinned vector identity read from rag_meta. FormatVersion is always
 // present; the remaining fields are set only for an index built with the vector

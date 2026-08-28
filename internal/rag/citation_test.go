@@ -5,7 +5,9 @@
 package rag
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -225,5 +227,156 @@ var _ = Describe("CitationMapper", func() {
 
 			Expect(checked).To(Equal(66429))
 		})
+	})
+})
+
+// citationConfig builds the lexical-only config of lexicalConfig with citation
+// rules attached, compiled the way a parsed config hands them over.
+func citationConfig(dir string, rules ...config.RAGCitationRule) *config.Config {
+	cfg := lexicalConfig(dir)
+	cfg.Harness.RAG.Citations = rules
+
+	return cfg
+}
+
+var _ = Describe("Store citation rendering", func() {
+	ctx := context.Background()
+
+	var (
+		docsD  string
+		storeD string
+		cfg    *config.Config
+	)
+
+	BeforeEach(func() {
+		tmp := GinkgoT().TempDir()
+		docsD = filepath.Join(tmp, "docs")
+		storeD = filepath.Join(tmp, "knowledge")
+
+		// The one rule fills both the ordinal and the anchor, so a single corpus pins
+		// what a chunk-level address carries and what a document-level one leaves
+		// empty. It is unanchored because the indexer stores the absolute path it
+		// walked, which here is under a temporary directory.
+		cfg = citationConfig(storeD, citationRule(`published/(.*)\.md$`, "https://docs.example.net/$1?c=${ordinal}#${anchor}"))
+
+		writeDoc(docsD, "published/guide.md", "# Guide\n\n## Getting Started\n\nInstall the binary and run it once to write a configuration file.\n\n"+
+			"## Backpressure\n\nThe queue applies backpressure when the buffer is full so producers slow down.\n")
+
+		// Outside the published tree, so no rule reaches it, and holding the same word
+		// so one query returns both.
+		writeDoc(docsD, "private/notes.md", "# Notes\n\nThe rollout notes mention backpressure once, in passing.\n")
+	})
+
+	// reader indexes the fixture and opens it through readCfg, so a spec can read the
+	// same index through a config carrying no rules.
+	reader := func(readCfg *config.Config) *Store {
+		GinkgoHelper()
+
+		w, err := OpenWriter(cfg, "")
+		Expect(err).ToNot(HaveOccurred())
+		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
+		Expect(err).ToNot(HaveOccurred())
+		w.Close()
+
+		r, err := Open(readCfg, "")
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(r.Close)
+
+		return r
+	}
+
+	// The two corpus documents are named rather than ranked, so a spec asserts about
+	// the document it means.
+	hitsByDoc := func(r *Store) map[string]Hit {
+		GinkgoHelper()
+
+		res, err := r.Search(ctx, "backpressure buffer producers", 5)
+		Expect(err).ToNot(HaveOccurred())
+
+		out := map[string]Hit{}
+		for _, h := range res.Hits {
+			out[filepath.Base(h.DocPath)] = h
+		}
+
+		return out
+	}
+
+	docsByDoc := func(r *Store) map[string]MatchedDoc {
+		GinkgoHelper()
+
+		res, err := r.Enumerate(ctx, "backpressure", EnumerateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		out := map[string]MatchedDoc{}
+		for _, d := range res.Docs {
+			out[filepath.Base(d.Path)] = d
+		}
+
+		return out
+	}
+
+	It("renders a mapped address for a search hit, anchored at the chunk's heading", func() {
+		hits := hitsByDoc(reader(cfg))
+		Expect(hits).To(HaveKey("guide.md"))
+
+		hit := hits["guide.md"]
+		Expect(hit.Ordinal).To(Equal(1))
+		Expect(hit.HeadingPath).To(Equal("Guide > Backpressure"))
+		Expect(hit.Address).To(Equal("https://docs.example.net/guide?c=1#backpressure"))
+		Expect(hit.AddressMapped).To(BeTrue())
+
+		// The raw token is kept alongside it rather than replaced.
+		Expect(hit.Citation).To(Equal(Citation(hit.DocPath, 1)))
+	})
+
+	// Enumeration never loads a heading, so the anchor renders empty and the address
+	// is the document at its first matching chunk.
+	It("renders a document-level address for an enumerate row", func() {
+		docs := docsByDoc(reader(cfg))
+		Expect(docs).To(HaveKey("guide.md"))
+
+		doc := docs["guide.md"]
+		Expect(doc.Citation).To(Equal(Citation(doc.Path, 1)))
+		Expect(doc.Address).To(Equal("https://docs.example.net/guide?c=1"))
+		Expect(doc.AddressMapped).To(BeTrue())
+	})
+
+	It("keeps the raw token for a document in the same corpus that no rule matches", func() {
+		r := reader(cfg)
+
+		hits := hitsByDoc(r)
+		Expect(hits).To(HaveKey("notes.md"))
+		Expect(hits["notes.md"].Address).To(Equal(hits["notes.md"].Citation))
+		Expect(hits["notes.md"].AddressMapped).To(BeFalse())
+
+		docs := docsByDoc(r)
+		Expect(docs).To(HaveKey("notes.md"))
+		Expect(docs["notes.md"].Address).To(Equal(docs["notes.md"].Citation))
+		Expect(docs["notes.md"].AddressMapped).To(BeFalse())
+	})
+
+	It("leaves every address at the raw citation when no rules are configured", func() {
+		r := reader(lexicalConfig(storeD))
+
+		hits := hitsByDoc(r)
+		Expect(hits).To(HaveLen(2))
+		for _, h := range hits {
+			Expect(h.Address).To(Equal(h.Citation))
+			Expect(h.AddressMapped).To(BeFalse())
+		}
+
+		docs := docsByDoc(r)
+		Expect(docs).To(HaveLen(2))
+		for _, d := range docs {
+			Expect(d.Address).To(Equal(d.Citation))
+			Expect(d.AddressMapped).To(BeFalse())
+		}
+	})
+
+	It("exposes the mapper for a surface that addresses a document without searching", func() {
+		address, mapped := reader(cfg).CitationMapper().Render(filepath.Join(docsD, "published/guide.md"), 0, "")
+
+		Expect(address).To(Equal("https://docs.example.net/guide?c=0"))
+		Expect(mapped).To(BeTrue())
 	})
 })
