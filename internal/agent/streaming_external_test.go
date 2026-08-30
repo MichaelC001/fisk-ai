@@ -9,6 +9,7 @@ package agent_test
 import (
 	"context"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -17,6 +18,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // deltaProvider answers one terminal turn on either call path and records which path
@@ -25,6 +27,10 @@ import (
 // which is the equivalence llm.StreamingProvider requires of a backend.
 type deltaProvider struct {
 	deltas []llm.Delta
+	// pause is held once, after the first fragment, so a spec asserting on the time to
+	// the first one can tell it from the time to the last: the two are microseconds
+	// apart otherwise and either value would pass.
+	pause time.Duration
 
 	mu       sync.Mutex
 	calls    int
@@ -46,7 +52,11 @@ func (p *deltaProvider) CallStream(_ context.Context, _ llm.Request, fn func(llm
 	defer p.mu.Unlock()
 	p.streamed++
 
-	for _, d := range p.deltas {
+	for i, d := range p.deltas {
+		if i == 1 {
+			time.Sleep(p.pause)
+		}
+
 		fn(d)
 	}
 
@@ -133,6 +143,14 @@ func (s *streamingSink) Deltas() []llm.Delta {
 func streamingRun(provider llm.Provider, events agent.Events) (*agent.Result, error) {
 	GinkgoHelper()
 
+	return tracedStreamingRun(provider, events, nil)
+}
+
+// tracedStreamingRun is streamingRun with a telemetry provider, for the specs that read
+// what the run's chat span recorded about the call it made.
+func tracedStreamingRun(provider llm.Provider, events agent.Events, tel *telemetry.Provider) (*agent.Result, error) {
+	GinkgoHelper()
+
 	app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
 
 	return agent.Run(context.Background(), agent.Options{
@@ -140,6 +158,7 @@ func streamingRun(provider llm.Provider, events agent.Events) (*agent.Result, er
 		ConfigFile: "agent.yaml",
 		Prompt:     []string{"go"},
 		Provider:   provider,
+		Telemetry:  tel,
 	}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
 }
 
@@ -205,6 +224,58 @@ var _ = Describe("streaming an assistant turn", func() {
 		final, ok := sink.FinalMessage()
 		Expect(ok).To(BeTrue())
 		Expect(final.Content[0].Text.Text).To(Equal("the answer is 42"))
+	})
+
+	// How long a person waits before an answer starts is the number streaming exists to
+	// change, and the two durations already on the model path both end elsewhere: the
+	// span covers the whole call, and the HTTP attempt ends at the response headers.
+	//
+	// The provider holds its second fragment back, so a value taken from the last one
+	// rather than the first would be past the pause and fail the bound below.
+	It("Should record the wait for the first fragment on the chat span", func() {
+		pause := 200 * time.Millisecond
+		provider := &deltaProvider{deltas: fragments, pause: pause}
+		sink := newStreamingSink(true)
+		tel, exp := recordingTelemetry()
+
+		res, err := tracedStreamingRun(provider, sink, tel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(sink.Deltas()).To(Equal(fragments))
+
+		chat := spanNamed(exp, "chat ")
+
+		streamed, ok := spanAttr(chat, "fisk.llm.streamed")
+		Expect(ok).To(BeTrue())
+		Expect(streamed.AsBool()).To(BeTrue())
+
+		ttft, ok := spanAttr(chat, "gen_ai.server.time_to_first_token")
+		Expect(ok).To(BeTrue())
+		Expect(ttft.AsFloat64()).To(BeNumerically(">", 0))
+		Expect(ttft.AsFloat64()).To(BeNumerically("<", pause.Seconds()),
+			"the value must be the first fragment's arrival, not the last's")
+	})
+
+	// A batched call has no first fragment to time, and says so rather than leaving a
+	// reader to infer it: the flag is what tells the two meanings of the HTTP attempt
+	// duration apart on a dashboard that mixes streamed and batched runs.
+	It("Should record the flag as false and no first-token time for a call that did not stream", func() {
+		provider := &deltaProvider{deltas: fragments}
+		sink := newStreamingSink(false)
+		tel, exp := recordingTelemetry()
+
+		res, err := tracedStreamingRun(provider, sink, tel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+
+		chat := spanNamed(exp, "chat ")
+
+		streamed, ok := spanAttr(chat, "fisk.llm.streamed")
+		Expect(ok).To(BeTrue())
+		Expect(streamed.AsBool()).To(BeFalse())
+
+		_, ok = spanAttr(chat, "gen_ai.server.time_to_first_token")
+		Expect(ok).To(BeFalse())
 	})
 
 	// A sink asking for fragments from a backend that has none gets the ordinary call

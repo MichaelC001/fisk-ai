@@ -1070,10 +1070,26 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		var err error
 
 		if streams && provides {
-			// The delta function is the sink's method and captures nothing else: the
-			// fragments carry their own block index, and everything the run does with the
-			// turn below reads the assembled Response either way.
-			resp, err = sp.CallStream(util.WithTraceIteration(callCtx, int(i)), req, streamer.MessageDelta)
+			// The delta function timestamps the first fragment on its way to the sink and
+			// then forwards it: the fragments carry their own block index, and everything
+			// the run does with the turn below reads the assembled Response either way.
+			//
+			// It runs on this goroutine, synchronously, and never after CallStream returns,
+			// which llm.StreamingProvider requires of a backend, so firstToken is written
+			// and read from one goroutine and needs no lock. The timestamp is taken before
+			// the sink is called so what it measures is when the fragment arrived rather
+			// than how long the sink took to render it.
+			var firstToken time.Time
+
+			resp, err = sp.CallStream(util.WithTraceIteration(callCtx, int(i)), req, func(d llm.Delta) {
+				if firstToken.IsZero() {
+					firstToken = time.Now()
+				}
+
+				streamer.MessageDelta(d)
+			})
+
+			chatSpan.Streamed(firstToken)
 		} else {
 			resp, err = r.provider.Call(util.WithTraceIteration(callCtx, int(i)), req)
 		}
