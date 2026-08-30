@@ -632,7 +632,10 @@ func (t *task) events() agent.Events {
 		replay = t.req.Replay
 	}
 
-	return &eventSink{stream: t.stream, log: t.log, replay: replay}
+	// Fragments are asked for per request as replay is, and a caller that said nothing
+	// gets none, so a client that renders a turn as it is written pays for them and one
+	// that reads the whole blocks does not.
+	return &eventSink{stream: t.stream, log: t.log, replay: replay, deltas: t.req.WantsDeltas()}
 }
 
 // runContext derives the context the run executes under: the caller's trace joined so

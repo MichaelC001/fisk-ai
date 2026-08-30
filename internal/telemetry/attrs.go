@@ -490,15 +490,15 @@ const EventSessionRotated = "fisk.session.rotated"
 // AttrTimeToFirstToken is how long a streamed model call took to produce the first
 // fragment of its answer, in seconds, on the chat span.
 //
-// It is the number a person waiting on an answer actually feels, and nothing else in a
-// run reports it: both duration measurements on the model path end when the whole call
-// does, or, for the HTTP attempt, when the response headers arrive.
+// Nothing else in a run reports it. The other duration measurements on the model path
+// end when the whole call does, or, for the HTTP attempt, when the response headers
+// arrive.
 //
 // The conventions name this measure, so it is not given a fisk name, but they name it
-// only as the gen_ai.server.time_to_first_token instrument and there is no attribute
-// key for it. The key is therefore taken off that instrument rather than transcribed,
-// which is what keeps a semconv bump from letting the two drift apart, and the value is
-// in seconds because that is the unit the instrument declares.
+// only as the gen_ai.server.time_to_first_token instrument and define no attribute key
+// for it. The key is read off that instrument instead of being transcribed, so a semconv
+// bump moves both together, and the value is in seconds because that is the unit the
+// instrument declares.
 //
 // The instrument itself is not recorded. The conventions define it for the inference
 // server, so a series under that name is aggregated as the server's own, and this

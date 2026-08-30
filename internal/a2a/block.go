@@ -78,9 +78,9 @@ type TextBlock struct {
 	// blocks are not sent, so counting the text blocks that arrive gives a different
 	// number the moment one of those sits between two of them.
 	//
-	// Zero is both the first block and a worker that predates the field, which is what
-	// omitting it when unset costs. A receiver that asked for no fragments has nothing
-	// to reconcile and ignores it.
+	// Zero is both the first block and a worker that predates the field. That ambiguity
+	// is what omitting it when unset costs, and it costs nothing in practice: a worker
+	// too old to set it sends no fragments, so a receiver has no buffer to key on it.
 	Index int `json:"index,omitempty"`
 	// Trimmed reports that Text was cut to MaxBlockText and the rest of it is only in
 	// the serving worker's run journal.

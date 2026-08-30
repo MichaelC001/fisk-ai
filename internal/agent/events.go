@@ -32,10 +32,9 @@ import (
 //     consumer is free to render, log, or stream it. The two terminal renderers happen
 //     to flatten to prose; a structured (for example slog) consumer keeps the types.
 //   - Every method here is told something and answers nothing, so an implementation
-//     decides only how a run looks. One optional half breaks that: MessageStreamer.
-//     StreamDeltas is a question the runner asks before a model call, and its answer
-//     picks which call the runner makes, so it steers the run rather than the
-//     rendering. An implementation answers it from state it already holds.
+//     decides only how a run looks. MessageStreamer.StreamDeltas is the exception. The
+//     runner asks it before a model call and its answer picks which call is made, so it
+//     changes what the run does. An implementation answers from state it already holds.
 type Events interface {
 	// Warn reports an operator-facing advisory as structured data.
 	Warn(Warning)
@@ -121,20 +120,18 @@ type TranscriptReplayer interface {
 }
 
 // MessageStreamer is the optional half of Events that hears an assistant turn in
-// fragments while the model writes it. A surface somebody is watching implements it, so
-// the answer appears as it is written; a sink that records the run, forwards it to a
-// queue or renders nothing has no use for it.
+// fragments while the model writes it. A sink rendering to somebody who is watching
+// implements it; one that records the run or forwards it to a queue has no use for it.
 //
-// It is separate from Events because a fragment is not an event on its own: a consumer
-// reconciles it against the assembled turn through llm.Delta.Index, and a sink that does
-// not want that work should not have to implement it to compile.
+// It is separate from Events so a sink is not made to implement it to compile. A
+// fragment is only useful once it has been reconciled against the assembled turn through
+// llm.Delta.Index, and that is work a sink should be able to decline.
 //
-// StreamDeltas is what makes this half unlike the other three. There the assertion is
-// the whole opt-in, because a type implementing the interface is a type that wants the
-// events. That does not hold here, because serve.eventRecorder implements every optional
-// half unconditionally and forwards to whatever sink a channel supplied, so the
-// assertion succeeds for every hosted run and says nothing about whether anything
-// downstream renders a fragment. The question has to be asked rather than inferred.
+// The other three optional halves treat the type assertion as the opt-in, because a type
+// implementing the interface is a type that wants the events. That does not work here.
+// serve.eventRecorder implements every optional half unconditionally and forwards to
+// whatever sink a channel supplied, so the assertion succeeds for every hosted run and
+// says nothing about what is downstream. StreamDeltas asks instead.
 //
 // Message is unchanged by this half: it still reports the whole assistant turn on every
 // call, streamed or not. A sink implementing this hears the turn twice, in fragments and

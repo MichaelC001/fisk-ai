@@ -1055,10 +1055,9 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		// conversation on the retry.
 		r.contentFrom = len(r.messages)
 
-		// Whether this call streams is decided here, before it is made, and needs both
-		// sides to agree: a backend that reports fragments, and a sink that wants them.
-		// The sink is asked once per call rather than once per run, so one whose viewer
-		// came or went is heard from the next call on.
+		// A call streams when both sides agree: a backend that reports fragments and a
+		// sink that wants them. The sink is asked once per call rather than once per run,
+		// so a sink whose viewer arrived or left takes effect from the next call.
 		streamer, streams := r.events.(MessageStreamer)
 		if streams {
 			streams = streamer.StreamDeltas()
@@ -1070,15 +1069,15 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		var err error
 
 		if streams && provides {
-			// The delta function timestamps the first fragment on its way to the sink and
-			// then forwards it: the fragments carry their own block index, and everything
-			// the run does with the turn below reads the assembled Response either way.
+			// The delta function timestamps the first fragment and forwards it to the sink.
+			// Everything the run does with the turn below reads the assembled Response on
+			// both paths.
 			//
 			// It runs on this goroutine, synchronously, and never after CallStream returns,
 			// which llm.StreamingProvider requires of a backend, so firstToken is written
 			// and read from one goroutine and needs no lock. The timestamp is taken before
-			// the sink is called so what it measures is when the fragment arrived rather
-			// than how long the sink took to render it.
+			// the sink is called, so it measures when the fragment arrived and not how long
+			// the sink took to render it.
 			var firstToken time.Time
 
 			resp, err = sp.CallStream(util.WithTraceIteration(callCtx, int(i)), req, func(d llm.Delta) {

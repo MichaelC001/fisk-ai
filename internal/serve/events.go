@@ -91,11 +91,11 @@ func (e *eventRecorder) ResumeTranscript(rs *runstate.RunState) {
 	}
 }
 
-// StreamDeltas asks the channel's sink rather than answering with a constant. This
-// recorder implements the half unconditionally like the three above, so the runner's
-// assertion succeeds for every hosted run: a constant true would put Slack, asyncjobs
-// and every other channel on the streaming call path, and a constant false would leave
-// a channel that renders fragments unable to ask for them.
+// StreamDeltas asks the channel's sink. This recorder implements the half
+// unconditionally, like the three above, so the runner's assertion succeeds for every
+// hosted run: a constant true would put Slack, asyncjobs and every other channel on the
+// streaming call path, and a constant false would leave a channel that renders fragments
+// unable to ask for them.
 func (e *eventRecorder) StreamDeltas() bool {
 	streamer, ok := e.inner.(agent.MessageStreamer)
 	if !ok {

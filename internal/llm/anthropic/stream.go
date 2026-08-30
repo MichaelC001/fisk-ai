@@ -15,8 +15,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-// Provider streams, so a caller can assert llm.StreamingProvider on a registered
-// anthropic backend and get the fragments as well as the turn.
+// A caller asserts llm.StreamingProvider on a registered anthropic backend, so the
+// method set is checked here.
 var _ llm.StreamingProvider = (*Provider)(nil)
 
 // CallStream issues one Anthropic request as a stream under the provider's
@@ -34,9 +34,8 @@ var _ llm.StreamingProvider = (*Provider)(nil)
 // terminal, and the caller journals it and answers with it.
 //
 // fn is called on the calling goroutine, in the order the events arrive, and never
-// after this returns. It must not be nil. A block still open when the stream ends
-// gets its Final then, in index order, so nothing depends on the stream having
-// stopped every block it started.
+// after this returns. It must not be nil. A block still open when the stream ends gets
+// its Final then, in index order, even when the stream never stopped it.
 func (p *Provider) CallStream(ctx context.Context, req llm.Request, fn func(llm.Delta)) (*llm.Response, error) {
 	if fn == nil {
 		return nil, fmt.Errorf("a delta function is required")
@@ -108,10 +107,9 @@ func (p *Provider) CallStream(ctx context.Context, req llm.Request, fn func(llm.
 		return nil, fmt.Errorf("stream ended without message_stop after %d content blocks", len(msg.Content))
 	}
 
-	// Anthropic stops every block it starts, but a proxy that renders the stream
-	// itself is the same door the message_stop guard is here for, and a block left
-	// open would leave its consumer holding the tail of it. Ascending index so the
-	// order does not depend on the map.
+	// Anthropic stops every block it starts. A proxy rendering the stream itself may
+	// not, and a block left open leaves its consumer holding the tail. Ascending index
+	// so the order does not depend on the map.
 	for _, idx := range slices.Sorted(maps.Keys(streaming)) {
 		fn(llm.Delta{Kind: streaming[idx], Index: int(idx), Final: true})
 	}

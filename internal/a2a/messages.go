@@ -35,15 +35,14 @@ type Request struct {
 	Stream *bool `json:"stream,omitempty"`
 	// Deltas, when true, asks for the text and reasoning of an assistant turn as the
 	// model writes it, as TextDeltaBlock and ThinkingDeltaBlock events alongside the
-	// whole blocks. A nil value means the default, which is to send none, so a caller
-	// that says nothing pays nothing.
+	// whole blocks. A nil value sends none, so a caller that says nothing pays nothing.
 	//
-	// It has no meaning without Stream: fragments are events, and a caller that asked
-	// for no event stream is sent none.
+	// It has no meaning without Stream. Fragments are events, so a caller that asked for
+	// no event stream is sent none.
 	//
-	// A worker that predates the property ignores it and sends whole blocks, and a
-	// receiver reconciling fragments against those blocks is correct without knowing
-	// any were missing.
+	// A worker that predates the property ignores it and sends whole blocks. A receiver
+	// reconciles fragments against those blocks, so it stays correct without knowing any
+	// were missing.
 	Deltas *bool `json:"deltas,omitempty"`
 	// ConversationToken runs Prompt as the next turn of the conversation the token
 	// names, which is the one an earlier Ack handed back. Empty starts a conversation
@@ -240,8 +239,8 @@ func (r *Request) WantsStream() bool {
 }
 
 // WantsDeltas reports whether the caller wants the fragments of an assistant turn as
-// the model writes it. It defaults to false when Deltas is unset, and is false for a
-// caller that wants no event stream, a fragment being an event.
+// the model writes it. It defaults to false when Deltas is unset. Fragments are events,
+// so it is also false for a caller that wants no event stream.
 func (r *Request) WantsDeltas() bool {
 	if !r.WantsStream() {
 		return false

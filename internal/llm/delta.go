@@ -39,41 +39,39 @@ type Delta struct {
 	Kind DeltaKind
 
 	// Index is the position of this fragment's block in the Content slice of the
-	// *Response that CallStream returns, so every fragment carrying the same Index
-	// belongs to Response.Content[Index]. It is what lets a consumer reconcile the
-	// fragments it received against the assembled turn, and every consumer that
-	// coalesces, renders or forwards fragments relies on it.
+	// *Response that CallStream returns: every fragment carrying the same Index belongs
+	// to Response.Content[Index]. A consumer reconciles the fragments it received
+	// against the assembled turn with it.
 	//
-	// It is a requirement on the implementer rather than a property of one codec: a
-	// backend that merged or dropped a block while assembling the Response would
-	// leave every consumer silently misaligned. For the Anthropic backend it holds
-	// because MessageToNeutral appends one neutral block per Anthropic block, in
-	// order.
+	// Implementers must hold to that. A backend that merged or dropped a block while
+	// assembling the Response would leave every consumer misaligned with no error
+	// raised. For the Anthropic backend it holds because MessageToNeutral appends one
+	// neutral block per Anthropic block, in order.
 	Index int
 
 	// Text is this fragment's text, to be appended to the text already delivered for
 	// the same Index. It is empty on a Final delta that has no text left to send.
 	Text string
 
-	// Final marks the last fragment of the block at Index. A backend emits one for
-	// every block it streamed, with an empty Text when there is nothing left to send,
-	// because the end of a block cannot be inferred from the fragments themselves:
-	// the a2a sink flushes its coalescing buffer on it and would otherwise hold the
-	// tail of every block until the next delta or the end of the call, and both
-	// target web protocols need an explicit end event per content block.
+	// Final marks the last fragment of the block at Index. A backend emits one for every
+	// block it streamed, with an empty Text when there is nothing left to send. The
+	// fragments do not say where a block ends: the a2a sink flushes its coalescing
+	// buffer on Final and would otherwise hold the tail of every block until the next
+	// fragment or the end of the call, and both target web protocols need an explicit
+	// end event per content block.
 	Final bool
 }
 
-// StreamingProvider is a Provider whose backend reports an assistant turn as the
-// model produces it. It embeds Provider rather than standing beside it, so a value
-// satisfying it is usable everywhere a Provider is and a caller asserts one thing:
+// StreamingProvider is a Provider whose backend reports an assistant turn as the model
+// produces it. It embeds Provider, so a value satisfying it is usable everywhere a
+// Provider is and a caller makes one assertion:
 //
 //	sp, ok := p.(llm.StreamingProvider)
 //
-// That assertion is the whole answer for a registered backend. Caps declares
-// nothing about streaming: it grows as a second provider makes a capability
-// difference concrete rather than predicted, and a proxied BaseURL that cannot
-// stream is a runtime fact no declaration could know.
+// Caps declares nothing about streaming. It grows as a second provider makes a
+// capability difference concrete, the assertion above answers the question for a
+// registered backend, and a proxied BaseURL that cannot stream is not something a
+// declaration could report.
 type StreamingProvider interface {
 	Provider
 
