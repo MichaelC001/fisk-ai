@@ -17,6 +17,7 @@ var _ = Describe("knowledge match flags", func() {
 		knowledgeMatchCount = false
 		knowledgeMatchPathsOnly = false
 		knowledgeMatchExplain = false
+		knowledgeMatchJSON = false
 		knowledgeMatchMinMatches = 0
 		knowledgeMatchQuery = ""
 	})
@@ -41,7 +42,16 @@ var _ = Describe("knowledge match flags", func() {
 		Entry("count with paths-only", func() { knowledgeMatchCount = true; knowledgeMatchPathsOnly = true }),
 		Entry("count with explain", func() { knowledgeMatchCount = true; knowledgeMatchExplain = true }),
 		Entry("paths-only with explain", func() { knowledgeMatchPathsOnly = true; knowledgeMatchExplain = true }),
+		Entry("json with count", func() { knowledgeMatchJSON = true; knowledgeMatchCount = true }),
+		Entry("json with paths-only", func() { knowledgeMatchJSON = true; knowledgeMatchPathsOnly = true }),
+		Entry("json with explain", func() { knowledgeMatchJSON = true; knowledgeMatchExplain = true }),
 	)
+
+	It("accepts --json with the flags that shape the set", func() {
+		knowledgeMatchJSON = true
+		knowledgeMatchAll = true
+		Expect(validateMatchFlags(false)).To(Succeed())
+	})
 
 	It("rejects a negative --min-matches", func() {
 		knowledgeMatchMinMatches = -1
