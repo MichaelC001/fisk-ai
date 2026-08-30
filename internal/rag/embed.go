@@ -173,7 +173,7 @@ func (e *openAIEmbedder) Dim(ctx context.Context) (int, error) {
 
 	vecs, err := e.embedBatch(ctx, telemetry.EmbeddingsPurposeDimensionProbe, []string{"dimension probe"})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to confirm embeddings model %q exists: %w", e.model, err)
 	}
 	if len(vecs) != 1 || len(vecs[0]) == 0 {
 		return 0, fmt.Errorf("embeddings server at %s returned an empty dimension probe for model %q", e.baseURL, e.model)
@@ -269,6 +269,10 @@ type embedResponse struct {
 		Embedding []float32 `json:"embedding"`
 		Index     int       `json:"index"`
 	} `json:"data"`
+	// Model is the model the server actually used, which is not always the one that
+	// was asked for: a local server handed a name it does not have may serve whichever
+	// model is loaded and report the substitution only here.
+	Model string `json:"model"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -342,8 +346,10 @@ func (e *openAIEmbedder) embedBatch(ctx context.Context, purpose string, inputs 
 	if err != nil {
 		return nil, fmt.Errorf("reading embeddings response: %w", err)
 	}
+	// The body is deliberately not included: its shape is provider-specific, and a
+	// server's JSON or HTML error page is not something to print at a user.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embeddings server at %s returned %s: %s", e.baseURL, resp.Status, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("embeddings server at %s returned %s", e.baseURL, resp.Status)
 	}
 
 	var parsed embedResponse
@@ -354,6 +360,13 @@ func (e *openAIEmbedder) embedBatch(ctx context.Context, purpose string, inputs 
 	// broken response is never mistaken for a valid (empty) result.
 	if parsed.Error != nil && parsed.Error.Message != "" {
 		return nil, fmt.Errorf("embeddings server at %s reported: %s", e.baseURL, parsed.Error.Message)
+	}
+	// A server that serves a different model than the one asked for produces vectors
+	// from the wrong space, and every downstream check passes: the dimensions can
+	// agree, so an index is written and pinned to a model that never embedded it.
+	// Servers that omit the field are taken at their word.
+	if parsed.Model != "" && parsed.Model != e.model {
+		return nil, fmt.Errorf("%w: asked %s for model %q but it served %q", ErrModelMismatch, e.baseURL, e.model, parsed.Model)
 	}
 	if len(parsed.Data) != len(inputs) {
 		return nil, fmt.Errorf("embeddings server returned %d vectors for %d inputs", len(parsed.Data), len(inputs))

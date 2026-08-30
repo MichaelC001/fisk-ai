@@ -97,6 +97,12 @@ var (
 	// path.
 	ErrDimensionMismatch = errors.New("embedding dimension does not match the index")
 
+	// ErrModelMismatch reports that the embeddings server answered with a different
+	// model than the one it was asked for. It is never degraded to lexical and never
+	// written past: the vectors come from the wrong space, and the dimensions can
+	// still agree, so this is the only check that catches the substitution.
+	ErrModelMismatch = errors.New("embeddings server served a different model than the one configured")
+
 	// ErrFormatTooNew reports an index written by a newer fisk-ai than this one.
 	ErrFormatTooNew = errors.New("knowledge index format is newer than this build supports")
 

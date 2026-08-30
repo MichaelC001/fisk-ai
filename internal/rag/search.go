@@ -190,7 +190,7 @@ func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (re
 	if s.emb != nil {
 		qv, kind, derr := s.embedQueryVector(ctx, query)
 		switch {
-		case errors.Is(derr, ErrDimensionMismatch):
+		case errors.Is(derr, ErrDimensionMismatch), errors.Is(derr, ErrModelMismatch):
 			return nil, derr
 		case derr != nil:
 			// A transient outage degrades to lexical rather than failing the query,
@@ -252,7 +252,7 @@ func searchErrorClass(err error) telemetry.ErrorClass {
 	if ok {
 		return class
 	}
-	if errors.Is(err, ErrDimensionMismatch) {
+	if errors.Is(err, ErrDimensionMismatch) || errors.Is(err, ErrModelMismatch) {
 		return telemetry.ClassConfig
 	}
 
