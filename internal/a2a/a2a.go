@@ -17,7 +17,7 @@
 // Message bodies are versioned by their protocol id, e.g.
 // "io.choria.fisk-ai.v1.request.prompt". One id names one shape, so nothing in a body says
 // what kind of message it is: a prompt, an answer, a resume and a read are four ids, and so
-// are the eight kinds of streamed block and the eleven questions and answers of the elicit
+// are the ten kinds of streamed block and the eleven questions and answers of the elicit
 // family. The matching JSON schemas live under internal/a2a/schemas/io.choria.fisk-ai.v1,
 // one per id, each stating what its own shape requires and refusing by name the fields
 // belonging to its siblings.
@@ -96,6 +96,13 @@ const (
 	EventStatusProtocol     = EventProtocol + "." + string(BlockStatus)
 	EventWarningProtocol    = EventProtocol + "." + string(BlockWarning)
 	EventPromptProtocol     = EventProtocol + "." + string(BlockPrompt)
+
+	// The id of each kind of fragment. A receiver that wants text and not reasoning
+	// drops one id without reading the body, and a build naming neither reads both as
+	// UnknownBlock against the framing schema, which is why the two are separate ids
+	// rather than one carrying a kind.
+	EventTextDeltaProtocol     = EventProtocol + "." + string(BlockTextDelta)
+	EventThinkingDeltaProtocol = EventProtocol + "." + string(BlockThinkingDelta)
 
 	// ElicitProtocol is the family a question a running task puts to its caller, and
 	// the caller's answer, both belong to rather than an id itself. The question

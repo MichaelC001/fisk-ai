@@ -36,6 +36,9 @@
     "stream": {
       "$ref": "common.json#/$defs/stream"
     },
+    "deltas": {
+      "$ref": "common.json#/$defs/deltas"
+    },
     "conversation_token": {
       "$ref": "common.json#/$defs/conversation_token"
     },

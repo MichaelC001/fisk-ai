@@ -33,6 +33,18 @@ type Request struct {
 	// Stream, when false, asks for only a terminal result with no event stream.
 	// A nil value means the default, which is to stream.
 	Stream *bool `json:"stream,omitempty"`
+	// Deltas, when true, asks for the text and reasoning of an assistant turn as the
+	// model writes it, as TextDeltaBlock and ThinkingDeltaBlock events alongside the
+	// whole blocks. A nil value means the default, which is to send none, so a caller
+	// that says nothing pays nothing.
+	//
+	// It has no meaning without Stream: fragments are events, and a caller that asked
+	// for no event stream is sent none.
+	//
+	// A worker that predates the property ignores it and sends whole blocks, and a
+	// receiver reconciling fragments against those blocks is correct without knowing
+	// any were missing.
+	Deltas *bool `json:"deltas,omitempty"`
 	// ConversationToken runs Prompt as the next turn of the conversation the token
 	// names, which is the one an earlier Ack handed back. Empty starts a conversation
 	// of its own, which is what every first request carries.
@@ -225,6 +237,17 @@ func NewFollowUp(ack *Ack, prompt string) *Request {
 // true when Stream is unset.
 func (r *Request) WantsStream() bool {
 	return r.Stream == nil || *r.Stream
+}
+
+// WantsDeltas reports whether the caller wants the fragments of an assistant turn as
+// the model writes it. It defaults to false when Deltas is unset, and is false for a
+// caller that wants no event stream, a fragment being an event.
+func (r *Request) WantsDeltas() bool {
+	if !r.WantsStream() {
+		return false
+	}
+
+	return r.Deltas != nil && *r.Deltas
 }
 
 // requestWire is Request without its methods, so marshaling and unmarshaling one can use
