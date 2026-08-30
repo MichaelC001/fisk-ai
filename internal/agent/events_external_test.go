@@ -18,7 +18,7 @@ var _ = Describe("the Events sink", func() {
 	// recording fake implements neither and is the sink every resume spec in this
 	// package runs against, so the run path is exercised without them throughout rather
 	// than only here.
-	It("Should let a sink implement neither optional half", func() {
+	It("Should let a sink implement none of the optional halves", func() {
 		var sink agent.Events = agenttest.NewRecordingEvents()
 
 		_, reports := sink.(agent.RemoteHostReporter)
@@ -26,6 +26,12 @@ var _ = Describe("the Events sink", func() {
 
 		_, replays := sink.(agent.TranscriptReplayer)
 		Expect(replays).To(BeFalse(), "nor should one that replays no transcript")
+
+		_, imports := sink.(agent.MCPServerReporter)
+		Expect(imports).To(BeFalse(), "nor should one that renders no import notes")
+
+		_, streams := sink.(agent.MessageStreamer)
+		Expect(streams).To(BeFalse(), "nor should one that renders no fragments")
 	})
 
 	// This guards the other direction. SlogEvents is the sink an operator reads a run

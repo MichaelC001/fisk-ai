@@ -34,7 +34,7 @@ import (
 //   - Every method here is told something and answers nothing, so an implementation
 //     decides only how a run looks. MessageStreamer.StreamDeltas is the exception. The
 //     runner asks it before a model call and its answer picks which call is made, so it
-//     changes what the run does. An implementation answers from state it already holds.
+//     changes what the run does. The run waits on the answer, so it must not block.
 type Events interface {
 	// Warn reports an operator-facing advisory as structured data.
 	Warn(Warning)
@@ -138,9 +138,10 @@ type TranscriptReplayer interface {
 // then assembled, and the assembled turn is the authoritative one.
 type MessageStreamer interface {
 	// StreamDeltas reports whether this sink wants the fragments of the assistant turn
-	// about to be written. The runner asks once per model call, before making the call,
-	// on the run goroutine, so an implementation answers from state it already holds
-	// rather than blocking or doing work of its own.
+	// about to be written. The runner asks once per model call, on the run goroutine,
+	// immediately before making the call, so an implementation must not block: the run
+	// waits on it. Bookkeeping is fine, and a sink that buffers fragments per call has
+	// this as the only call boundary it sees.
 	//
 	// The run streams only when this answers true and the provider also implements
 	// llm.StreamingProvider. Answering true against a provider that cannot stream is not
