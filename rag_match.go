@@ -38,6 +38,7 @@ var (
 	knowledgeMatchExplain    bool
 	knowledgeMatchCount      bool
 	knowledgeMatchExitCode   bool
+	knowledgeMatchJSON       bool
 )
 
 // registerRAGMatchCommand adds the match verb to the knowledge command. The
@@ -57,6 +58,7 @@ func registerRAGMatchCommand(k *fisk.CmdClause) {
 	match.Flag("explain", "Show the compiled expression and what the index holds for each term").UnNegatableBoolVar(&knowledgeMatchExplain)
 	match.Flag("count", "Print the number of matching documents and nothing else").UnNegatableBoolVar(&knowledgeMatchCount)
 	match.Flag("exit-code", "Exit 1 when nothing matched, like grep; without it, zero matches is a successful answer").UnNegatableBoolVar(&knowledgeMatchExitCode)
+	match.Flag("json", "Render the result as a single JSON object for scripting").UnNegatableBoolVar(&knowledgeMatchJSON)
 }
 
 // validateMatchFlags rejects the combinations that contradict each other rather
@@ -71,6 +73,15 @@ func validateMatchFlags(limitSet bool) error {
 	}
 	if knowledgeMatchPathsOnly && knowledgeMatchExplain {
 		return fmt.Errorf("--paths-only prints only paths, so it cannot be combined with --explain")
+	}
+	if knowledgeMatchJSON && (knowledgeMatchCount || knowledgeMatchPathsOnly) {
+		return fmt.Errorf("--json is a complete output format, so it cannot be combined with --count or --paths-only")
+	}
+	// Not a contradiction but a flag that would do nothing: the term reports are in
+	// the JSON either way, and a flag typed and not got is what these checks exist
+	// to prevent.
+	if knowledgeMatchJSON && knowledgeMatchExplain {
+		return fmt.Errorf("--json always includes the term reports, so --explain adds nothing to it")
 	}
 	if knowledgeMatchMinMatches < 0 {
 		return fmt.Errorf("--min-matches cannot be negative")
@@ -129,6 +140,14 @@ func runKnowledgeMatch(pc *fisk.ParseContext) (int, error) {
 	res, err := store.Enumerate(ctx, knowledgeMatchQuery, opts)
 	if err != nil {
 		return 0, err
+	}
+
+	// Before the document is built: every soft outcome renderMatch prints or errors
+	// on is a status field here instead, so a consumer separates an unbuilt index
+	// from an empty answer without matching on prose. --exit-code still applies,
+	// since a caller asking for grep semantics wants them in either format.
+	if knowledgeMatchJSON {
+		return res.Matched, writeRAGJSON(newRAGMatchJSON(knowledgeMatchQuery, res))
 	}
 
 	c := columns.New()

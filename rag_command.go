@@ -30,6 +30,7 @@ var (
 	knowledgeQuery    string
 	knowledgeTopK     int
 	knowledgeFull     bool
+	knowledgeJSON     bool
 	knowledgeCitation string
 	knowledgeSources  []string
 	knowledgeForce    bool
@@ -67,6 +68,7 @@ func registerRAGCommand(cmd *fisk.Application) {
 	search.Arg("query", "The search query").Required().StringVar(&knowledgeQuery)
 	search.Flag("top-k", "Maximum number of results to return").IntVar(&knowledgeTopK)
 	search.Flag("full", "Print the full chunk content instead of a snippet").UnNegatableBoolVar(&knowledgeFull)
+	search.Flag("json", "Render the result as a single JSON object for scripting; chunk bodies are carried only with --full").UnNegatableBoolVar(&knowledgeJSON)
 
 	registerRAGMatchCommand(k)
 
@@ -278,6 +280,13 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 	res, err := store.Search(ctx, knowledgeQuery, knowledgeTopK)
 	if err != nil {
 		return err
+	}
+
+	// Before the document is built: every soft outcome below is a status field in
+	// the JSON rather than a printed line, so a consumer tells "no index" from "no
+	// results" without matching on prose, and the exit stays 0 for both.
+	if knowledgeJSON {
+		return writeRAGJSON(newRAGSearchJSON(knowledgeQuery, res, store.VectorEnabled(), knowledgeFull))
 	}
 
 	c := columns.New()
