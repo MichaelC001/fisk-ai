@@ -524,7 +524,7 @@ var _ = Describe("ChatSpan streaming", func() {
 	})
 
 	// The span's own start is fixed so the recorded value is arithmetic on two times
-	// rather than a clock read, which is what lets these assert an exact number.
+	// rather than a clock read, so these can assert an exact number.
 	chatting := func(p *Provider) *ChatSpan {
 		_, chat := p.StartChat(ctx, ChatInfo{Model: "m"})
 		chat.Span.started = time.Now().Add(-2 * time.Second)
@@ -551,9 +551,9 @@ var _ = Describe("ChatSpan streaming", func() {
 		Expect(streamed.AsBool()).To(BeTrue())
 	})
 
-	// A batched call has no first fragment to time, and its flag is present and false
-	// rather than absent: it is what says that fisk.llm.http_duration_ms on this span
-	// measured the whole call rather than the time to the response headers.
+	// A batched call has no first fragment to time. Its flag is present and false rather
+	// than absent, and it says that fisk.llm.http_duration_ms on this span measured the
+	// whole call rather than the time to the response headers.
 	It("should report a batched call as not streamed and time nothing", func() {
 		p, exp := recording()
 

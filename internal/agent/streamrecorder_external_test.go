@@ -70,8 +70,8 @@ var _ = Describe("the recording delta sink", func() {
 		{Kind: llm.DeltaText, Index: 0, Final: true},
 	}
 
-	// A sink built to decline is the case an embedder reaches for to prove their adapter
-	// does not stream, so the answer has to reach the runner and stop the streaming call.
+	// An embedder proving their adapter does not stream builds a sink that declines, so
+	// the answer has to reach the runner and stop the streaming call.
 	It("Should answer StreamDeltas with what it was constructed with", func() {
 		provider := &deltaProvider{deltas: fragments}
 		sink := agenttest.NewRecordingStreamEvents(false)
@@ -87,8 +87,8 @@ var _ = Describe("the recording delta sink", func() {
 		Expect(sink.Deltas()).To(BeEmpty())
 	})
 
-	// Both halves of what the recorder is for: the fragments as they arrived, and the text
-	// the reconciler decided for the index once the turn ended it.
+	// The recorder holds the fragments as they arrived and the text the reconciler decided
+	// for the index once the turn ended it.
 	It("Should record every fragment in order and what the call assembles to", func() {
 		provider := &deltaProvider{deltas: fragments}
 		sink := agenttest.NewRecordingStreamEvents(true)
@@ -116,8 +116,8 @@ var _ = Describe("the recording delta sink", func() {
 		Expect(final.Content[0].Text.Text).To(Equal("the answer is 42"))
 	})
 
-	// The outcome a delta sink behind a2a has to get right: the whole block is a cut copy
-	// of text the fragments carried in full, so the fragments stand.
+	// The whole block is a cut copy of text the fragments carried in full, so the
+	// fragments stand. A delta sink behind a2a has to get this right.
 	It("Should keep the fragments over a block that arrived trimmed", func() {
 		sink := agenttest.NewRecordingStreamEvents(true)
 
@@ -202,7 +202,7 @@ var _ = Describe("the recording delta sink", func() {
 		Expect(calls[0].Deltas).To(Equal(narration))
 		Expect(calls[0].Terminal).To(BeFalse())
 		// The tool call the turn also carried has no delta kind and streams nothing, so
-		// index 1 assembles to nothing at all.
+		// index 1 assembles to nothing.
 		Expect(calls[0].Blocks).To(Equal([]llm.AssembledBlock{
 			{Kind: llm.DeltaText, Index: 0, Text: "looking it up", Source: llm.SourceBlock},
 		}))

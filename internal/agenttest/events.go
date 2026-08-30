@@ -27,7 +27,7 @@ type RecordedMessage struct {
 // It implements none of the four optional halves of agent.Events, so it is the fixture
 // for a sink that opts into nothing, and an external test in the agent package holds it
 // to that. RecordingStreamEvents is the fixture for a sink that opts into the streaming
-// half and hears an assistant turn in fragments.
+// half and receives an assistant turn in fragments.
 type RecordingEvents struct {
 	mu          sync.Mutex
 	warnings    []agent.Warning
@@ -196,7 +196,7 @@ type RecordedCall struct {
 //
 // It reconciles through llm.DeltaAssembler. The rule for a whole block that diverges from
 // the fragments of its index has one implementation, and a buffer here would be a second
-// one living in a test package.
+// copy of it in a test package.
 //
 // StreamDeltas starts a model call and Message ends one, which is how the runner drives a
 // sink: it asks once per call, before the call. A test driving this recorder by hand calls
@@ -314,8 +314,8 @@ func (e *RecordingStreamEvents) Assembled() []llm.AssembledBlock {
 	return e.assembler.Blocks()
 }
 
-// Asked returns how many times StreamDeltas was called, which the runner does once per
-// model call whatever the answer was.
+// Asked returns how many times StreamDeltas was called. The runner calls it once per
+// model call, whatever the answer.
 func (e *RecordingStreamEvents) Asked() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -30,10 +30,9 @@ const maxReplayBlocks = 200
 // coalescing buffer flushes at.
 //
 // ReplyStream refuses a message larger than a2a.MaxMessageSize and does not advance the
-// sequence when it does, so an oversized delta is dropped and the caller sees no gap
-// where it was. The text it assembles is then wrong and nothing says so. A whole block
-// avoids that by trimming, which the reader can see; a trimmed fragment corrupts the
-// text instead.
+// sequence when it does, so an oversized delta is dropped, the sequence carries no hole,
+// and the caller assembles text that is silently wrong. A whole block avoids that by
+// trimming, which the reader can see; a trimmed fragment corrupts the text instead.
 //
 // The value is a fraction of the limit so the two move together. A sixty-fourth leaves
 // room for the message header and for JSON escaping, which can cost six bytes for one
@@ -50,7 +49,7 @@ const deltaFlushWindow = 100 * time.Millisecond
 // maxDeltaBlocks caps how many content blocks the sink buffers fragments for at once.
 //
 // A backend checks a fragment's index against the blocks it has started, so a provider
-// bounds its own indexes. This sink sees only fragments, and without a cap it would hold
+// limits its own indexes. This sink sees only fragments, and without a cap it would hold
 // a buffer for every index a broken or hostile upstream sent, for the length of the call.
 // No model call writes 32 blocks of text and reasoning.
 const maxDeltaBlocks = 32
@@ -193,8 +192,8 @@ func (e *eventSink) StreamDeltas() bool { return e.deltas }
 // The window is read here and never on a timer. ReplyStream is owned by one goroutine at
 // a time, its sequence counter is unguarded, and every method of this sink runs on the
 // run goroutine, so a timer publishing a partial buffer would race the run's own events
-// and corrupt the numbering. Nothing is left behind: a block ends with a Final fragment,
-// and a call that wrote nothing buffered nothing.
+// and corrupt the numbering. Every block ends with a Final fragment that sends what is
+// left, and a call that wrote nothing buffered nothing.
 func (e *eventSink) MessageDelta(d llm.Delta) {
 	if !e.deltas {
 		return
@@ -261,8 +260,7 @@ func (e *eventSink) MessageDelta(d llm.Delta) {
 	buf.since = time.Now()
 }
 
-// sendDelta publishes one fragment of the block at index, as the block kind it is a
-// fragment of.
+// sendDelta publishes one fragment of the block at index, under the id for its kind.
 func (e *eventSink) sendDelta(index, iteration int, kind llm.DeltaKind, text string, final bool) {
 	if kind == llm.DeltaThinking {
 		e.send(a2a.NewBlock(a2a.ThinkingDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
@@ -408,11 +406,4 @@ func objectInput(input json.RawMessage) json.RawMessage {
 // lived here and the adapter that replays a stored conversation trims identically.
 func trimForWire(s string) string { return a2a.TrimBlockText(s) }
 
-// trimmedForWire is trimForWire for a block that reports whether it was cut. It compares
-// the value that came back with the one that went in, so the limit and the cutting rule
-// stay in a2a.TrimBlockText and nothing here restates them.
-func trimmedForWire(s string) (string, bool) {
-	out := trimForWire(s)
-
-	return out, out != s
-}
+func trimmedForWire(s string) (string, bool) { return a2a.TrimmedBlockText(s) }

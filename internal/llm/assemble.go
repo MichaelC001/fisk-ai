@@ -18,8 +18,8 @@ const (
 	// SourceFragments is text held as fragments alone, no whole block having arrived for
 	// the index. A consumer reads it while a call is still being written, after a call
 	// that failed before it returned a turn, and on an a2a stream that dropped the whole
-	// block. The last of those is the one a consumer may want to act on, and only it can
-	// tell the three apart.
+	// block. Only the consumer can tell those three apart, and a dropped whole block is
+	// the one it may want to act on.
 	SourceFragments BlockSource = "fragments"
 
 	// SourceBlock is the whole block. It replaced the fragments the index held, or the
@@ -79,7 +79,8 @@ type AssembledBlock struct {
 
 // DeltaAssembler collects the fragments of a model call and reconciles them against the
 // whole blocks that end it. A consumer of a delta stream needs a buffer per block index
-// and the rule below, so both are here rather than in each adapter that renders a stream.
+// and the reconcile rule, so both are here rather than in each adapter that renders a
+// stream.
 //
 // The rule: a whole block replaces the fragments of its index, unless it arrived trimmed
 // and the index holds fragments. A trimmed block is a cut copy of text the fragments
@@ -89,8 +90,8 @@ type AssembledBlock struct {
 //
 // The rule assumes every fragment of an index arrived. Fragments dropped in transit
 // leave holes the assembler cannot see, and it will then keep holed fragments over a
-// trimmed block that was merely cut. A consumer on a lossy path knows what it lost, an
-// a2a receiver from a2a.TaskStream.Gaps, and decides for itself.
+// trimmed block that was merely cut. A consumer on a lossy path knows what it lost and
+// decides for itself; an a2a receiver reads that from a2a.TaskStream.Gaps.
 //
 // One assembler holds one model call. Index restarts at 0 on every call, so a consumer
 // following a run of several calls resets between them. A caller of CallStream makes an
@@ -103,8 +104,8 @@ type AssembledBlock struct {
 // concurrent use: fragments arrive on the goroutine that called CallStream and are often
 // rendered on another, so every method locks and Blocks returns a slice the caller owns.
 type DeltaAssembler struct {
-	blocks map[int]*blockState
 	mu     sync.Mutex
+	blocks map[int]*blockState
 }
 
 // blockState is one index's fragments together with its whole block, once that arrives.
@@ -119,8 +120,8 @@ type blockState struct {
 // AddDelta appends a fragment's text to the block at its index. The first fragment of an
 // index names the block's kind until a whole block says otherwise.
 //
-// A Final fragment adds its text like any other. AddBlock ends an index, not Final; a
-// consumer rendering fragments as they arrive reads Final off the Delta.
+// A Final fragment adds its text like any other; only AddBlock ends an index. A consumer
+// rendering fragments as they arrive reads Final off the Delta.
 func (a *DeltaAssembler) AddDelta(d Delta) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

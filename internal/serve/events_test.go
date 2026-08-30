@@ -12,9 +12,9 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-// quietEvents is the sink a channel that renders nothing supplies: it implements
-// agent.Events and none of its optional halves. agenttest holds a recording one and
-// this package cannot import it, since the fakes import serve.
+// quietEvents is the sink supplied by a channel that renders nothing. It implements
+// agent.Events and none of its optional halves. agenttest holds a recording one, and
+// this package cannot import it because those fakes import serve.
 type quietEvents struct{}
 
 func (quietEvents) Warn(agent.Warning)               {}
@@ -26,7 +26,7 @@ func (quietEvents) Message(llm.Response, bool)       {}
 func (quietEvents) SessionRotated(string)            {}
 func (quietEvents) Panicked(any, []byte)             {}
 
-// deltaEvents is a channel's sink that hears fragments, answering as the spec sets it.
+// deltaEvents is a channel's sink that receives fragments, answering as the spec sets it.
 type deltaEvents struct {
 	quietEvents
 
@@ -40,7 +40,7 @@ func (e *deltaEvents) MessageDelta(d llm.Delta) { e.deltas = append(e.deltas, d)
 
 var _ = Describe("eventRecorder", func() {
 	// The recorder implements the half for every run, so the runner's assertion on it
-	// always succeeds. What the run reads is the answer, and the answer is the channel's.
+	// always succeeds. The run reads the answer, which comes from the channel's sink.
 	It("Should answer StreamDeltas from the channel's sink", func() {
 		var sink agent.Events = newEventRecorder(nil, quietLogger())
 		streamer, ok := sink.(agent.MessageStreamer)
@@ -57,9 +57,9 @@ var _ = Describe("eventRecorder", func() {
 		Expect(streamer.StreamDeltas()).To(BeTrue())
 	})
 
-	// Fragments are forwarded to a sink that hears them and dropped for one that does
-	// not, which is the same transparency the other three halves have.
-	It("Should forward fragments only to a sink that hears them", func() {
+	// The recorder forwards fragments to a sink that implements the half and drops them
+	// for one that does not, as it does for the other three halves.
+	It("Should forward fragments only to a sink that implements the half", func() {
 		inner := &deltaEvents{wants: true}
 		recorder := newEventRecorder(inner, quietLogger())
 

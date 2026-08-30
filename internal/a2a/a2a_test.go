@@ -489,7 +489,7 @@ var _ = Describe("A2A", func() {
 			Expect(decoded.(*Request).WantsStream()).To(BeFalse())
 		})
 
-		// Defaulting to none is what keeps a caller that says nothing paying nothing.
+		// A caller that sets nothing gets no fragments.
 		It("Should send no fragments unless the caller asks for them", func() {
 			Expect(NewRequest("p").WantsDeltas()).To(BeFalse())
 

@@ -109,7 +109,7 @@ func (p *streamingScript) Counts() (int, int) {
 //
 // The message is published and numbered by the worker and never reaches the caller, so the
 // sequence carries a hole and a2a.TaskStream.Gaps reports it. A sink told not to send the
-// fragment would leave no hole, and it is the hole the reconcile rule exists for.
+// fragment would leave no hole, and the rule exists for the hole.
 type lossyTransport struct {
 	a2a.StreamingTransport
 
@@ -552,9 +552,9 @@ var _ = Describe("A run streamed to a caller", func() {
 		})
 	})
 
-	// The constraint the whole project rests on: a caller that asked for no fragments gets
-	// what it got before there were any. A change that moved the recorder's answer, or made
-	// the sink send a fragment whatever the request said, fails here.
+	// A caller that asked for no fragments gets what it got before there were any. A change
+	// that moved the recorder's answer, or made the sink send a fragment whatever the
+	// request said, fails here.
 	It("Should send no fragment to a caller that asked for none, and the blocks a run that cannot stream sends", func() {
 		reasoning, answer := scripted()
 
@@ -592,8 +592,8 @@ var _ = Describe("A run streamed to a caller", func() {
 		Expect(streamedRun).To(Equal(plainRun))
 	})
 
-	// The reason the reconcile rule takes the whole block: the fragments an index holds may
-	// have a hole in them that nothing downstream can see.
+	// The fragments an index holds may have a hole in them that nothing downstream can
+	// see, which is why the rule takes the whole block.
 	It("Should assemble from the whole block when a fragment was lost on the way", func() {
 		// One fragment over the flush cap, so the sink puts the block on the wire as more
 		// than one message and losing one still leaves the caller part of the text.
@@ -621,9 +621,8 @@ var _ = Describe("A run streamed to a caller", func() {
 		})
 	})
 
-	// The other half of the rule, and the case that makes it a rule rather than a
-	// preference: the whole block is cut to what a block carries while the fragments, capped
-	// one message at a time and never in aggregate, carry all of it.
+	// The whole block is cut to what one block carries. The fragments are capped one
+	// message at a time and never in aggregate, so they carry all of it.
 	It("Should keep the fragments when the whole block arrives trimmed", func() {
 		text := strings.Repeat("a", a2a.MaxBlockText+6000)
 

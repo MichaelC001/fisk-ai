@@ -35,7 +35,7 @@ type Request struct {
 	Stream *bool `json:"stream,omitempty"`
 	// Deltas, when true, asks for the text and reasoning of an assistant turn as the
 	// model writes it, as TextDeltaBlock and ThinkingDeltaBlock events alongside the
-	// whole blocks. A nil value sends none, so a caller that says nothing pays nothing.
+	// whole blocks. A caller that leaves it nil gets no fragments.
 	//
 	// It has no meaning without Stream. Fragments are events, so a caller that asked for
 	// no event stream is sent none.

@@ -223,7 +223,7 @@ const (
 	// AttrLLMStreamed reports that the answer to this model call arrived in fragments.
 	//
 	// It is on every chat span, false included, because it says which of two things
-	// fisk.llm.http_duration_ms measured. The middleware brackets next(req) returning,
+	// fisk.llm.http_duration_ms measured on this call. The middleware brackets next(req),
 	// which on a streamed call is the time to the response headers and on a batched one
 	// is the whole call, so a dashboard mixing the two compares two different numbers
 	// and nothing else on the span separates them.
@@ -490,19 +490,20 @@ const EventSessionRotated = "fisk.session.rotated"
 // AttrTimeToFirstToken is how long a streamed model call took to produce the first
 // fragment of its answer, in seconds, on the chat span.
 //
-// Nothing else in a run reports it. The other duration measurements on the model path
-// end when the whole call does, or, for the HTTP attempt, when the response headers
-// arrive.
+// The other duration measurements on the model path end when the whole call does, or,
+// for the HTTP attempt, when the response headers arrive.
 //
-// The conventions name this measure, so it is not given a fisk name, but they name it
-// only as the gen_ai.server.time_to_first_token instrument and define no attribute key
-// for it. The key is read off that instrument instead of being transcribed, so a semconv
-// bump moves both together, and the value is in seconds because that is the unit the
+// The conventions name this measure, so it keeps their name rather than a fisk one. They
+// name it only as the gen_ai.server.time_to_first_token instrument and define no
+// attribute key. This key is read off that instrument rather than copied, so a semconv
+// bump renames it too, and the value is in seconds because that is the unit the
 // instrument declares.
 //
-// The instrument itself is not recorded. The conventions define it for the inference
-// server, so a series under that name is aggregated as the server's own, and this
-// process is the client. A labeled value on a client span is read as that span's own.
+// This span carries the value as an attribute and records no instrument. The conventions
+// define that instrument for the inference server, so a series under its name is
+// aggregated as the server's own, and this process is the client. A reader takes a
+// labeled value on a client span as that span's own measurement.
+//
 // It is client wall time: the clock starts before the request leaves the process, so it
 // carries serialization, TLS, the network and whatever the server queued, and it reads
 // higher than the number the server would report for the same call.

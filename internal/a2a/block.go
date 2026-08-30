@@ -50,9 +50,9 @@ type ThinkingBlock struct {
 	Text      string `json:"text"`
 	Signature string `json:"signature,omitempty"`
 	Provider  string `json:"provider,omitempty"`
-	// Index is where this block sat in the model call that produced it, and pairs with
-	// Iteration on the ThinkingDeltaBlock values that carried its fragments. It means
-	// what TextBlock.Index means, for reasoning rather than answer text.
+	// Index is TextBlock.Index for a reasoning block: where this block sat in the model
+	// call that produced it, pairing with the ThinkingDeltaBlock values that carried its
+	// fragments.
 	Index int `json:"index,omitempty"`
 	// Trimmed reports that Text was cut to MaxBlockText, on the terms
 	// TextBlock.Trimmed states.
@@ -74,13 +74,13 @@ type TextBlock struct {
 	// with Iteration on the TextDeltaBlock values that carried this block's fragments,
 	// so a receiver that asked for fragments knows which buffer this block replaces.
 	//
-	// Position in the reply set does not answer that: a turn's tool_use and provider
-	// blocks are not sent, so counting the text blocks that arrive gives a different
-	// number the moment one of those sits between two of them.
+	// A worker does not send a turn's tool_use and provider blocks, so a receiver
+	// counting the text blocks that arrive gets a different number as soon as a tool
+	// call sits between two of them.
 	//
-	// Zero is both the first block and a worker that predates the field. That ambiguity
-	// is what omitting it when unset costs, and it costs nothing in practice: a worker
-	// too old to set it sends no fragments, so a receiver has no buffer to key on it.
+	// Omitting it when unset makes zero mean both the first block and a worker that
+	// predates the field, and that costs nothing: a worker too old to set it sends no
+	// fragments, so a receiver has no buffer to key on it.
 	Index int `json:"index,omitempty"`
 	// Trimmed reports that Text was cut to MaxBlockText and the rest of it is only in
 	// the serving worker's run journal.
@@ -112,10 +112,10 @@ type TextDeltaBlock struct {
 	// Iteration is the model call this fragment came from, 1-based, counted as
 	// StatusBlock counts it.
 	//
-	// It is here because Index restarts at 0 on every call while the status block that
-	// separates two calls arrives after the first has ended, so a receiver keying on
-	// Index alone would append the first block of one call to the last block of the one
-	// before. Zero is a worker that does not report it.
+	// Index restarts at 0 on every call while the status block that separates two calls
+	// arrives after the first has ended, so a receiver keying on Index alone would append
+	// the first block of one call to the last block of the one before. A worker that does
+	// not report it sends zero.
 	Iteration int `json:"iteration,omitempty"`
 	// Text is this fragment's text, to be appended to what has already arrived for the
 	// same Iteration and Index. It is empty on a Final fragment with nothing left to

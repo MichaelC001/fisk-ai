@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/event.text_delta.json",
   "title": "fisk-ai A2A v1 text delta event",
-  "description": "One fragment of a text block as the model writes it. It has an id of its own so a receiver that wants text and not reasoning drops the other without reading a body, and so a build naming neither reads both against the framing schema.",
+  "description": "One fragment of a text block as the model writes it. It has an id of its own so a receiver that wants text and not reasoning drops the reasoning fragments without reading a body, and so a build naming neither reads both against the framing schema.",
   "allOf": [
     {
       "$ref": "common.json#/$defs/header"

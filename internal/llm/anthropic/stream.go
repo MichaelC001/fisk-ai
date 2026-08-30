@@ -15,8 +15,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-// A caller asserts llm.StreamingProvider on a registered anthropic backend, so the
-// method set is checked here.
+// A caller asserts llm.StreamingProvider on a registered anthropic backend, so this
+// fails the build if the method set drifts.
 var _ llm.StreamingProvider = (*Provider)(nil)
 
 // CallStream issues one Anthropic request as a stream under the provider's
@@ -128,10 +128,9 @@ func (p *Provider) CallStream(ctx context.Context, req llm.Request, fn func(llm.
 // Only the two deltas the neutral model renders produce a fragment.
 // signature_delta arrives beside thinking_delta for the same block and carries the
 // opaque signature, which llm.ThinkingBlock keeps as bytes and nothing renders;
-// forwarding it would put it on the wire as delta text, undoing on the streamed
-// path the strip the assembled path performs. input_json_delta is deliberately not
-// streamed at all, for the reason llm.Delta gives: PreToolUse cannot run until the
-// tool_use block exists, so arguments reach a consumer only in the assembled turn.
+// forwarding it would put it on the wire as delta text, which the assembled path
+// strips. input_json_delta is not forwarded: PreToolUse cannot run until the tool_use
+// block exists, so arguments reach a consumer only in the assembled turn.
 // citations_delta carries a citation rather than text.
 //
 // The signature, the tool arguments and the citations all reach the caller in the

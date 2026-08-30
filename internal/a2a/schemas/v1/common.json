@@ -163,7 +163,7 @@
     "deltas": {
       "type": "boolean",
       "default": false,
-      "description": "true asks for the text and reasoning of an assistant turn as the model writes it, as text_delta and thinking_delta events alongside the whole blocks. It has no meaning without stream, a fragment being an event. A worker that predates it ignores it and sends whole blocks."
+      "description": "true asks for the text and reasoning of an assistant turn as the model writes it, as text_delta and thinking_delta events alongside the whole blocks. It has no meaning without stream, since a fragment is an event. A worker that predates it ignores it and sends whole blocks."
     },
     "force": {
       "type": "boolean",
@@ -318,7 +318,7 @@
     "block_index": {
       "type": "integer",
       "minimum": 0,
-      "description": "Where this block sat in the model call that produced it, counted over every block of that call including the ones that never reach the wire. It pairs with the index of the delta blocks that carried this block's fragments, which also name the model call this does not. Absent is both the first block and a worker that predates the field; a receiver that asked for no deltas has nothing to reconcile and ignores it."
+      "description": "Where this block sat in the model call that produced it, counted over every block of that call including the ones that never reach the wire. It pairs with the index of the delta blocks that carried this block's fragments; those also name the model call, and this does not. Omitting it when unset makes absent mean both the first block and a worker that predates the field, which costs nothing: a receiver that asked for no deltas has nothing to reconcile."
     },
     "block_trimmed": {
       "type": "boolean",
@@ -386,7 +386,7 @@
         "iteration": {
           "type": "integer",
           "minimum": 0,
-          "description": "The model call this fragment came from, 1-based, counted as a status block counts it. Indices restart at 0 on every call and the status block separating two calls arrives after the first has ended, so a receiver keying on index alone would append the first block of one call to the last block of the one before. Absent is a worker that does not report it."
+          "description": "The model call this fragment came from, 1-based, counted as a status block counts it. Indices restart at 0 on every call and the status block separating two calls arrives after the first has ended, so a receiver keying on index alone would append the first block of one call to the last block of the one before. A worker that does not report it leaves it absent."
         },
         "text": {
           "type": "string",

@@ -38,5 +38,14 @@ func TrimBlockText(s string) string {
 	return s[:cut] + trimMarker
 }
 
+// TrimmedBlockText is TrimBlockText for a producer that also fills in TextBlock.Trimmed
+// or ThinkingBlock.Trimmed. It compares what came back with what went in, so the limit
+// and the cutting rule stay above and no caller restates them.
+func TrimmedBlockText(s string) (string, bool) {
+	out := TrimBlockText(s)
+
+	return out, out != s
+}
+
 // utf8Start reports whether b begins a rune rather than continuing one.
 func utf8Start(b byte) bool { return b&0xC0 != 0x80 }

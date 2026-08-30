@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -107,6 +109,49 @@ var _ = Describe("Provider.CallStream", func() {
 		return deltas, resp, err
 	}
 
+	// Every other spec here writes the whole body at once, so all of them would pass
+	// against a CallStream that read the stream to the end and replayed the fragments
+	// afterwards. This one holds the tail of the body back until a fragment has been
+	// reported: a provider that buffered would never report one, and the handler would
+	// take the timeout instead.
+	It("Should report a fragment before the stream ends", func() {
+		reported := make(chan struct{})
+		early := &atomic.Bool{}
+
+		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w,
+				sseEvent("message_start", messageStart),
+				sseEvent("content_block_start", startText(0)),
+				sseEvent("content_block_delta", textDelta(0, "first")),
+			)
+			w.(http.Flusher).Flush()
+
+			select {
+			case <-reported:
+				early.Store(true)
+			case <-time.After(2 * time.Second):
+			}
+
+			fmt.Fprint(w,
+				sseEvent("content_block_stop", blockStop(0)),
+				sseEvent("message_delta", messageDelta),
+				sseEvent("message_stop", messageStop),
+			)
+		}))
+
+		p := NewProvider(Options{APIKey: "test-key", BaseURL: server.URL, Timeout: 10 * time.Second})
+
+		var once sync.Once
+		resp, err := p.CallStream(context.Background(), req, func(llm.Delta) {
+			once.Do(func() { close(reported) })
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(early.Load()).To(BeTrue(), "the fragment reached fn while the body was still open")
+		Expect(resp.Content[0].Text.Text).To(Equal("first"))
+	})
+
 	It("assembles the same response a batched call returns", func() {
 		p := streaming(
 			sseEvent("message_start", messageStart),
@@ -173,8 +218,8 @@ var _ = Describe("Provider.CallStream", func() {
 			{Kind: llm.DeltaThinking, Index: 0, Final: true},
 		}))
 
-		// The signature is not lost, it is only not streamed: it reaches the caller in
-		// the assembled block, where nothing renders it.
+		// The signature reaches the caller in the assembled block, where nothing renders
+		// it.
 		Expect(resp.Content).To(HaveLen(1))
 		Expect(resp.Content[0].Thinking.Text).To(Equal("weighing it up"))
 		Expect(string(resp.Content[0].Thinking.Signature)).To(Equal("c2lnbmF0dXJl"))
@@ -212,13 +257,7 @@ var _ = Describe("Provider.CallStream", func() {
 			{Kind: llm.DeltaThinking, Index: 1, Text: " more"},
 			{Kind: llm.DeltaThinking, Index: 1, Final: true},
 			{Kind: llm.DeltaText, Index: 2, Final: true},
-		}))
-
-		// The redacted thinking block streamed nothing, so it has no fragments and no
-		// Final, and the blocks after it are still addressed by their own position.
-		for _, d := range deltas {
-			Expect(d.Index).NotTo(Equal(0))
-		}
+		}), "the redacted thinking block at index 0 streams no fragment and no Final, and the blocks after it keep their own positions")
 	})
 
 	It("reports one Final for every block that streamed", func() {
@@ -241,16 +280,16 @@ var _ = Describe("Provider.CallStream", func() {
 		finals := map[int]int{}
 		for _, d := range deltas {
 			if d.Final {
-				Expect(d.Text).To(BeEmpty(), "a Final delta carries what is left, and nothing is")
+				Expect(d.Text).To(BeEmpty(), "a Final delta carries what is left, and there is nothing left")
 				finals[d.Index]++
 			}
 		}
 		Expect(finals).To(Equal(map[int]int{0: 1, 1: 1}))
 	})
 
-	// Anthropic stops every block it starts. A proxy rendering the stream itself is
-	// the case, and a consumer holding an unfinished block would keep its tail.
-	It("finals a block the stream left open, in index order", func() {
+	// Anthropic stops every block it starts. A proxy rendering the stream itself may
+	// not, and a consumer holding an unfinished block would keep its tail.
+	It("Should final a block the stream left open, in index order", func() {
 		p := streaming(
 			sseEvent("message_start", messageStart),
 			sseEvent("content_block_start", startText(0)),

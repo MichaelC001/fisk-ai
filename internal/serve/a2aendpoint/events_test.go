@@ -286,8 +286,7 @@ var _ = Describe("The events adapter", func() {
 			return out.String()
 		}
 
-		// A caller that asked for nothing pays nothing, and reads the conversation it
-		// reads without the property.
+		// A caller that asked for nothing gets the blocks it gets without the property.
 		Context("for a caller that asked for none", func() {
 			It("Should send no fragment and the whole blocks unchanged", func() {
 				Expect(events.StreamDeltas()).To(BeFalse())
@@ -314,26 +313,32 @@ var _ = Describe("The events adapter", func() {
 				Expect(events.StreamDeltas()).To(BeTrue())
 			})
 
-			// A message per fragment would put the wire cost of a run at the mercy of
-			// whatever rate the backend writes at.
-			It("Should hold a fragment that is under both bounds", func() {
+			// A message per fragment would tie the wire cost of a run to the rate the
+			// backend writes at.
+			//
+			// The window is measured from a wall clock, so a spec that must not flush on
+			// it holds the buffer's clock ahead of now. A loaded machine would otherwise
+			// take longer between two statements here than a run takes between fragments.
+			It("Should hold a fragment that is under both limits", func() {
 				events.MessageDelta(fragment(0, "the ", false))
+				events.buffered[0].since = time.Now().Add(time.Hour)
 				events.MessageDelta(fragment(0, "answer", false))
 
 				Expect(sink.sent).To(BeEmpty())
 			})
 
-			It("Should send what it holds when the fragments reach the byte bound", func() {
+			It("Should send what it holds when the fragments reach the byte limit", func() {
 				events.MessageDelta(fragment(0, strings.Repeat("x", maxDeltaText-1), false))
 				Expect(sink.sent).To(BeEmpty())
 
+				events.buffered[0].since = time.Now().Add(time.Hour)
 				events.MessageDelta(fragment(0, "yz", false))
 
 				Expect(sink.sent).To(HaveLen(1))
 				delta := blocks()[0].Content().(a2a.TextDeltaBlock)
 				Expect(delta.Text).To(HaveLen(maxDeltaText))
 				Expect(delta.Final).To(BeFalse())
-				Expect(deltaText(0)).To(Equal(strings.Repeat("x", maxDeltaText-1)+"y"), "the byte over the bound is still held")
+				Expect(deltaText(0)).To(Equal(strings.Repeat("x", maxDeltaText-1)+"y"), "the byte over the limit is still held")
 			})
 
 			// The window is read when a fragment arrives and never on a timer: a timer
@@ -396,11 +401,24 @@ var _ = Describe("The events adapter", func() {
 				}
 			})
 
-			// The whole block is what a caller reconciles its buffer against, so it never
+			// Text that is not valid UTF-8 has no rune boundary to cut back to. Without a
+			// floor the cut walks to zero, the split loop re-slices by nothing and the run
+			// goroutine hangs inside the provider call, so this spec hangs the suite when
+			// the floor is gone. JSON encoding replaces the bytes on the way out, so what
+			// arrives cannot be compared with what was written.
+			It("Should move text that begins no rune rather than stalling on it", func() {
+				events.MessageDelta(fragment(0, strings.Repeat("\x80", maxDeltaText+1), true))
+
+				Expect(len(sink.sent)).To(BeNumerically(">", 1))
+				Expect(blocks()[len(sink.sent)-1].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+			})
+
+			// A caller reconciles its buffer against the whole block, so the block never
 			// arrives before the fragments it replaces.
 			It("Should send every fragment of a block before the block itself", func() {
 				events.MessageDelta(llm.Delta{Kind: llm.DeltaThinking, Index: 0, Text: "considering", Final: true})
 				events.MessageDelta(fragment(1, "the ", false))
+				events.buffered[1].since = time.Now().Add(time.Hour)
 				events.MessageDelta(fragment(1, "answer", true))
 				events.Message(llm.Response{Content: []llm.ContentBlock{
 					{Thinking: &llm.ThinkingBlock{Text: "considering"}},

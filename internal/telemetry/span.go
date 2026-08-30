@@ -481,22 +481,22 @@ type ChatSpan struct {
 
 	// streamed reports that the answer arrived in fragments and firstToken is when the
 	// first of them did. Both are written once by Streamed and read once by Finish, on
-	// the goroutine that made the call. The attempt counter above needs an atomic and
-	// these do not, because nothing a provider does on its own goroutines reaches them.
+	// the goroutine that made the call. attempts needs an atomic and these do not,
+	// because nothing a provider does on its own goroutines reaches them.
 	streamed   bool
 	firstToken time.Time
 }
 
-// Streamed records that this call's answer arrived in fragments, at being when the
-// first of them did.
+// Streamed records that this call's answer arrived in fragments, with at the time the
+// first one arrived.
 //
 // The caller supplies the moment because this package never sees a fragment. A fragment
 // reaches only the delta function the run loop hands the provider, and that runs on the
 // run goroutine while the call is still in flight.
 //
 // A zero at is a streamed call that produced no fragment, and the span then says it
-// streamed and carries no time to first token. Two calls look like that: one that failed
-// before the model wrote anything, and a turn whose only content is a tool call, since
+// streamed and carries no time to first token. A call that failed before the model wrote
+// anything looks like that, and so does a turn whose only content is a tool call, since
 // tool arguments do not stream. The error attributes separate them.
 //
 // Finish reads both fields, so call this before it.
@@ -594,10 +594,10 @@ func (s *ChatSpan) Finish(ctx context.Context, i ChatInfo, o ChatOutcome) {
 		span.SetAttributes(semconv.HTTPRequestResendCount(int(resends)))
 	}
 
-	// Set on every call, false included, where the resend count above is not. It tells a
-	// reader which of two things fisk.llm.http_duration_ms measured on the call in front
-	// of them, and reading an absent attribute as batched would mean knowing which build
-	// wrote the span.
+	// Set on every call, false included, where the resend count is set only when there
+	// were resends. It says which of two things fisk.llm.http_duration_ms measured on
+	// this call, and reading an absent attribute as batched would mean knowing which
+	// build wrote the span.
 	span.SetAttributes(AttrLLMStreamed.Bool(s.streamed))
 
 	// How long the caller waited for the answer to start, measured from the moment this

@@ -6,6 +6,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"io/fs"
 	"strings"
 	"time"
 
@@ -263,10 +264,9 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
-		// The two fragments have one shape between them, so what tells them apart is the
-		// id. What each side refuses of the other is what it requires and the other has no
-		// reason to send: a fragment requires an index, and a whole block requires its
-		// text.
+		// The two fragments have one shape between them, so only the id tells them apart.
+		// Each side refuses what it requires and the other has no reason to send: a
+		// fragment requires an index, a whole block requires its text.
 		It("Should refuse a whole block under a fragment's id and a fragment under a whole block's", func() {
 			for _, tc := range []struct {
 				protocol string
@@ -290,9 +290,33 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
+		// An event id with no entry in protocolSchemaFile falls back to the framing
+		// schema, which checks only that the block is an object, so the block's own
+		// schema is never applied and nothing fails. A missing file fails loudly in
+		// NewValidator; this is the half that fails nothing.
+		It("Should map every event schema to a protocol id", func() {
+			entries, err := fs.ReadDir(schemaFS, schemaDir)
+			Expect(err).ToNot(HaveOccurred())
+
+			mapped := map[string]bool{}
+			for _, file := range protocolSchemaFile {
+				mapped[file] = true
+			}
+
+			for _, entry := range entries {
+				name := entry.Name()
+				// event.json is the fallback itself, compiled by name rather than mapped.
+				if !strings.HasPrefix(name, "event.") || name == eventFallbackSchemaFile {
+					continue
+				}
+
+				Expect(mapped).To(HaveKey(name), "%s validates nothing until a protocol id names it", name)
+			}
+		})
+
 		// No request schema closes its properties, so validating a body proves nothing
-		// about where the property is declared. The schemas are the wire contract a peer
-		// reads, so what is declared is read off the files themselves: deltas goes where
+		// about where the property is declared. A peer reads the schemas as the wire
+		// contract, so this spec reads the declarations off the files: deltas goes where
 		// stream goes, on the three requests that run a model, and nowhere else.
 		It("Should declare deltas on every request that runs a model and on no other", func() {
 			for file, wanted := range map[string]bool{

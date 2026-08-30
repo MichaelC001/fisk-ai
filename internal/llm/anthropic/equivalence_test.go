@@ -343,14 +343,12 @@ var _ = Describe("Provider.CallStream equivalence with Provider.Call", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// The whole design rests on this: content blocks, stop reason and every usage
-			// counter the codec reads, compared as one value rather than field by field
-			// against numbers a spec author chose.
+			// Content blocks, stop reason and every usage counter the codec reads, compared
+			// as one value rather than field by field against numbers a spec author chose.
 			Expect(streamed).To(Equal(batched))
 
-			// The other half of the claim, and what every consumer above reconciles against:
-			// the fragments for an index concatenate to that block's text, and an index that
-			// streamed is finished exactly once.
+			// The fragments for an index concatenate to that block's text, and an index
+			// that streamed is finished exactly once.
 			joined := map[int]string{}
 			finals := map[int]int{}
 			reported := 0
@@ -359,7 +357,7 @@ var _ = Describe("Provider.CallStream equivalence with Provider.Call", func() {
 				Expect(d.Index).To(BeNumerically("<", len(streamed.Content)))
 
 				if d.Final {
-					Expect(d.Text).To(BeEmpty(), "a Final delta carries what is left, and nothing is")
+					Expect(d.Text).To(BeEmpty(), "a Final delta carries what is left, and there is nothing left")
 					finals[d.Index]++
 					continue
 				}

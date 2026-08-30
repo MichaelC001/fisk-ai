@@ -24,16 +24,15 @@ const (
 // and returns the whole turn at the end, so the fragments are an addition to the
 // assembled Response and never a replacement for it.
 //
-// Tool call arguments are deliberately not carried here, and a backend must not
-// add them. Anthropic delivers them as input_json_delta and both target web
-// protocols have an event for them, but the PreToolUse hook cannot run until the
-// turn ends, because the tool_use block does not exist until then. Anything
-// streamed before that point is pre-hook, so a hook using RewriteInput to strip a
-// credential from the arguments, or denying the call outright, would be defeated
-// by a peer that already held the original. Buffering the fragments until dispatch
-// does not rescue it either, since ToolCall fires with the rewritten input. Tool
-// arguments therefore reach a consumer only in the whole ToolUseBlock of the
-// assembled Response, after PreToolUse has run.
+// A Delta never carries tool call arguments, and a backend must not add them.
+// Anthropic delivers them as input_json_delta and both target web protocols have an
+// event for them, but the PreToolUse hook cannot run until the turn ends, because
+// the tool_use block does not exist until then. Anything streamed before that point
+// is pre-hook, so a peer that already held the original arguments defeats a hook
+// that uses RewriteInput to strip a credential from them, or that denies the call
+// outright. Buffering the fragments until dispatch does not rescue it either, since
+// ToolCall fires with the rewritten input. Tool arguments therefore reach a consumer
+// only in the whole ToolUseBlock of the assembled Response, after PreToolUse has run.
 type Delta struct {
 	// Kind is the kind of block this fragment belongs to.
 	Kind DeltaKind
@@ -43,10 +42,10 @@ type Delta struct {
 	// to Response.Content[Index]. A consumer reconciles the fragments it received
 	// against the assembled turn with it.
 	//
-	// Implementers must hold to that. A backend that merged or dropped a block while
-	// assembling the Response would leave every consumer misaligned with no error
-	// raised. For the Anthropic backend it holds because MessageToNeutral appends one
-	// neutral block per Anthropic block, in order.
+	// A backend that merged or dropped a block while assembling the Response would
+	// leave every consumer misaligned with no error raised. For the Anthropic backend
+	// it holds because MessageToNeutral appends one neutral block per Anthropic block,
+	// in order.
 	Index int
 
 	// Text is this fragment's text, to be appended to the text already delivered for
@@ -69,9 +68,9 @@ type Delta struct {
 //	sp, ok := p.(llm.StreamingProvider)
 //
 // Caps declares nothing about streaming. It grows as a second provider makes a
-// capability difference concrete, the assertion above answers the question for a
-// registered backend, and a proxied BaseURL that cannot stream is not something a
-// declaration could report.
+// capability difference concrete. The type assertion answers the question for a
+// registered backend, and a proxied BaseURL can fail to stream whatever a declaration
+// said.
 type StreamingProvider interface {
 	Provider
 
@@ -90,9 +89,9 @@ type StreamingProvider interface {
 	// sends as the final answer.
 	//
 	// Fragments already passed to fn are not withdrawn when CallStream returns an
-	// error. They were never authoritative: the assembled Response is what a consumer
-	// reconciles them against, and a failed call sends none, so a consumer holding
-	// fragments for a call that failed discards them.
+	// error. They were never authoritative: a consumer reconciles them against the
+	// assembled Response, and a failed call sends none, so a consumer holding fragments
+	// for a call that failed discards them.
 	//
 	// fn is called on the goroutine that called CallStream, in the order the provider
 	// produced the fragments, and never after CallStream returns. It must not be nil;

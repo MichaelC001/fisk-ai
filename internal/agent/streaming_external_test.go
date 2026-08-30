@@ -3,7 +3,7 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 // These tests cover the MessageStreamer half of agent.Events: which call the runner
-// makes, and who hears the fragments when it streams.
+// makes, and which sink receives the fragments when it streams.
 package agent_test
 
 import (
@@ -94,52 +94,6 @@ func (p *plainProvider) Calls() int {
 	return p.calls
 }
 
-// streamingSink is a recording sink that also implements agent.MessageStreamer, with
-// the answer it gives set per spec.
-type streamingSink struct {
-	*agenttest.RecordingEvents
-
-	wants bool
-
-	mu     sync.Mutex
-	asked  int
-	deltas []llm.Delta
-}
-
-func newStreamingSink(wants bool) *streamingSink {
-	return &streamingSink{RecordingEvents: agenttest.NewRecordingEvents(), wants: wants}
-}
-
-func (s *streamingSink) StreamDeltas() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.asked++
-
-	return s.wants
-}
-
-func (s *streamingSink) MessageDelta(d llm.Delta) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.deltas = append(s.deltas, d)
-}
-
-func (s *streamingSink) Asked() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.asked
-}
-
-func (s *streamingSink) Deltas() []llm.Delta {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]llm.Delta, len(s.deltas))
-	copy(out, s.deltas)
-
-	return out
-}
-
 func streamingRun(provider llm.Provider, events agent.Events) (*agent.Result, error) {
 	GinkgoHelper()
 
@@ -182,7 +136,7 @@ var _ = Describe("streaming an assistant turn", func() {
 
 		calls, streamed := provider.Counts()
 		Expect(calls).To(Equal(1))
-		Expect(streamed).To(BeZero(), "a sink that cannot hear fragments should not put the run on the streaming path")
+		Expect(streamed).To(BeZero(), "a sink that implements no streaming half should not put the run on the streaming path")
 
 		final, ok := sink.FinalMessage()
 		Expect(ok).To(BeTrue())
@@ -190,10 +144,10 @@ var _ = Describe("streaming an assistant turn", func() {
 	})
 
 	// The recorder every hosted run sits behind implements the half unconditionally, so
-	// the assertion succeeding is not the opt-in: the answer is.
+	// the assertion succeeding is not the opt-in; the sink's answer decides.
 	It("Should not stream for a sink that answers false", func() {
 		provider := &deltaProvider{deltas: fragments}
-		sink := newStreamingSink(false)
+		sink := agenttest.NewRecordingStreamEvents(false)
 
 		res, err := streamingRun(provider, sink)
 		Expect(err).NotTo(HaveOccurred())
@@ -210,7 +164,7 @@ var _ = Describe("streaming an assistant turn", func() {
 	// provider produced them. Message still reports the whole turn afterwards.
 	It("Should stream when the sink and the provider both agree", func() {
 		provider := &deltaProvider{deltas: fragments}
-		sink := newStreamingSink(true)
+		sink := agenttest.NewRecordingStreamEvents(true)
 
 		res, err := streamingRun(provider, sink)
 		Expect(err).NotTo(HaveOccurred())
@@ -231,11 +185,11 @@ var _ = Describe("streaming an assistant turn", func() {
 	// span covers the whole call, and the HTTP attempt ends at the response headers.
 	//
 	// The provider holds its second fragment back, so a value taken from the last one
-	// rather than the first would be past the pause and fail the bound below.
+	// rather than the first would be past the pause and fail the assertion.
 	It("Should record the wait for the first fragment on the chat span", func() {
 		pause := 200 * time.Millisecond
 		provider := &deltaProvider{deltas: fragments, pause: pause}
-		sink := newStreamingSink(true)
+		sink := agenttest.NewRecordingStreamEvents(true)
 		tel, exp := recordingTelemetry()
 
 		res, err := tracedStreamingRun(provider, sink, tel)
@@ -256,12 +210,12 @@ var _ = Describe("streaming an assistant turn", func() {
 			"the value must be the first fragment's arrival, not the last's")
 	})
 
-	// A batched call has no first fragment to time, and says so rather than leaving a
-	// reader to infer it: the flag is what tells the two meanings of the HTTP attempt
-	// duration apart on a dashboard that mixes streamed and batched runs.
+	// A batched call has no first fragment to time and records the flag as false, which
+	// tells the two meanings of the HTTP attempt duration apart on a dashboard that mixes
+	// streamed and batched runs.
 	It("Should record the flag as false and no first-token time for a call that did not stream", func() {
 		provider := &deltaProvider{deltas: fragments}
-		sink := newStreamingSink(false)
+		sink := agenttest.NewRecordingStreamEvents(false)
 		tel, exp := recordingTelemetry()
 
 		res, err := tracedStreamingRun(provider, sink, tel)
@@ -279,10 +233,10 @@ var _ = Describe("streaming an assistant turn", func() {
 	})
 
 	// A sink asking for fragments from a backend that has none gets the ordinary call
-	// and the whole turn, with nothing reported about the difference.
+	// and the whole turn, and no warning.
 	It("Should make the ordinary call when the provider cannot stream", func() {
 		provider := &plainProvider{}
-		sink := newStreamingSink(true)
+		sink := agenttest.NewRecordingStreamEvents(true)
 
 		res, err := streamingRun(provider, sink)
 		Expect(err).NotTo(HaveOccurred())

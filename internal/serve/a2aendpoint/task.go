@@ -632,9 +632,8 @@ func (t *task) events() agent.Events {
 		replay = t.req.Replay
 	}
 
-	// Fragments are asked for per request as replay is, and a caller that said nothing
-	// gets none, so a client that renders a turn as it is written pays for them and one
-	// that reads the whole blocks does not.
+	// A caller asks for fragments per request, as it asks for replay, so only a client
+	// that renders a turn as it is written pays for them.
 	return &eventSink{stream: t.stream, log: t.log, replay: replay, deltas: t.req.WantsDeltas()}
 }
 
