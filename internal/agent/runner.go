@@ -1055,7 +1055,29 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		// conversation on the retry.
 		r.contentFrom = len(r.messages)
 
-		resp, err := r.provider.Call(util.WithTraceIteration(callCtx, int(i)), req)
+		// Whether this call streams is decided here, before it is made, and needs both
+		// sides to agree: a backend that reports fragments, and a sink that wants them.
+		// The sink is asked once per call rather than once per run, so one whose viewer
+		// came or went is heard from the next call on.
+		streamer, streams := r.events.(MessageStreamer)
+		if streams {
+			streams = streamer.StreamDeltas()
+		}
+
+		sp, provides := r.provider.(llm.StreamingProvider)
+
+		var resp *llm.Response
+		var err error
+
+		if streams && provides {
+			// The delta function is the sink's method and captures nothing else: the
+			// fragments carry their own block index, and everything the run does with the
+			// turn below reads the assembled Response either way.
+			resp, err = sp.CallStream(util.WithTraceIteration(callCtx, int(i)), req, streamer.MessageDelta)
+		} else {
+			resp, err = r.provider.Call(util.WithTraceIteration(callCtx, int(i)), req)
+		}
+
 		// Finished on both paths, from one place, so the span cannot be left open by an
 		// early return; the span covers the call alone, not the journaling below it.
 		chatSpan.Finish(ctx, chatInfo, chatOutcome(resp, err))
