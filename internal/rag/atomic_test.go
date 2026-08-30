@@ -136,7 +136,7 @@ var _ = Describe("Schema changes are atomic", func() {
 			defer w.Close()
 
 			_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reindex: true, Reconcile: true})
-			Expect(err).To(MatchError(ContainSubstring("probing embedding dimension")))
+			Expect(err).To(MatchError(ContainSubstring("connection refused")))
 
 			intact(w, 2)
 

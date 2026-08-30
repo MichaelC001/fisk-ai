@@ -7,6 +7,7 @@ package rag
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -27,6 +28,9 @@ type fakeEmbedder struct {
 	qp, dp    string
 	dim       int
 	failQuery bool
+	// queryErr is returned by EmbedQuery when set, so a test can choose the class of
+	// failure rather than only the transient one failQuery produces.
+	queryErr error
 }
 
 func (f *fakeEmbedder) Model() string                    { return f.model }
@@ -35,6 +39,9 @@ func (f *fakeEmbedder) DocumentPrefix() string           { return f.dp }
 func (f *fakeEmbedder) Dim(context.Context) (int, error) { return f.dim, nil }
 
 func (f *fakeEmbedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
 	if f.failQuery {
 		return nil, errors.New("connection refused")
 	}
@@ -215,6 +222,80 @@ var _ = Describe("Store (vector tier)", func() {
 		Expect(res.Degraded).To(BeTrue())
 		Expect(res.DegradeReason).To(ContainSubstring("connection refused"))
 		Expect(res.Hits).ToNot(BeEmpty()) // lexical still answers
+	})
+
+	Describe("OnFile events", func() {
+		collect := func(opts IndexOptions) []IndexEvent {
+			var events []IndexEvent
+			opts.OnFile = func(ev IndexEvent) { events = append(events, ev) }
+			w := openWriterMock(vectorConfig(storeD, "m1"), &fakeEmbedder{model: "m1", dim: 32})
+			defer w.Close()
+			_, err := w.Index(ctx, []string{docsD}, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			return events
+		}
+
+		It("reports every embedded chunk on a first build", func() {
+			events := collect(IndexOptions{Reconcile: true})
+			Expect(events).To(HaveLen(2))
+
+			total := 0
+			for _, ev := range events {
+				Expect(ev.Action).To(Equal(IndexAdded))
+				Expect(ev.Path).ToNot(BeEmpty())
+				Expect(ev.Embeddings).To(Equal(ev.Chunks))
+				total += ev.Embeddings
+			}
+			Expect(total).To(BeNumerically(">", 0))
+		})
+
+		It("reports no embeddings for an unchanged file, so a progress total is not overrun", func() {
+			// The chunk count of an unchanged file is what a previous run produced.
+			// Counting it against a total covering only the files being embedded is
+			// what would complete a progress display before the work was done.
+			indexVector("m1", 32)
+
+			events := collect(IndexOptions{Reconcile: true})
+			Expect(events).To(HaveLen(2))
+			for _, ev := range events {
+				Expect(ev.Action).To(Equal(IndexUnchanged))
+				Expect(ev.Chunks).To(BeNumerically(">", 0))
+				Expect(ev.Embeddings).To(BeZero())
+			}
+		})
+
+		It("reports an updated file with the chunks it re-embedded", func() {
+			indexVector("m1", 32)
+			writeDoc(docsD, "auth.md", "# Authentication\n\nTokens are validated against the issuer and the audience.\n")
+
+			events := collect(IndexOptions{Reconcile: true})
+			byAction := map[IndexAction]IndexEvent{}
+			for _, ev := range events {
+				byAction[ev.Action] = ev
+			}
+			Expect(byAction).To(HaveKey(IndexUpdated))
+			Expect(byAction[IndexUpdated].Embeddings).To(Equal(byAction[IndexUpdated].Chunks))
+			Expect(byAction[IndexUnchanged].Embeddings).To(BeZero())
+		})
+
+		It("stays silent on a dry run, which commits nothing", func() {
+			Expect(collect(IndexOptions{Reconcile: true, DryRun: true})).To(BeEmpty())
+		})
+	})
+
+	It("fails the query rather than degrading when the server serves a different model", func() {
+		// The wrong model's vectors would silently answer from the wrong space, so this
+		// is a config disagreement like a dimension mismatch, not a transient outage.
+		indexVector("m1", 32)
+
+		r, err := Open(vectorConfig(storeD, "m1"), "")
+		Expect(err).ToNot(HaveOccurred())
+		defer r.Close()
+		r.emb = &fakeEmbedder{model: "m1", dim: 32, queryErr: fmt.Errorf("%w: served %q", ErrModelMismatch, "m2")}
+
+		_, err = r.Search(ctx, "backpressure buffer", 5)
+		Expect(err).To(MatchError(ErrModelMismatch))
 	})
 
 	It("clears vector rows via the trigger when a document is reconciled away", func() {

@@ -123,6 +123,75 @@ var _ = Describe("Embedding client", func() {
 		})
 	})
 
+	Describe("served model", func() {
+		// writeVectorsAs answers like a server that reports which model it used.
+		writeVectorsAs := func(w http.ResponseWriter, model string) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model": model,
+				"data":  []map[string]any{{"embedding": []float32{1, 0.5}, "index": 0}},
+			})
+		}
+
+		It("refuses vectors from a model other than the configured one", func() {
+			// A local server handed a model name it does not have may answer 200 with
+			// whichever model happens to be loaded, at a dimension that agrees with the
+			// index. The reported model is the only evidence of the substitution.
+			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
+				writeVectorsAs(w, "some-other-model")
+			})
+			defer srv.Close()
+
+			_, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a"})
+			Expect(err).To(MatchError(ErrModelMismatch))
+			Expect(err).To(MatchError(ContainSubstring("test-model")))
+			Expect(err).To(MatchError(ContainSubstring("some-other-model")))
+		})
+
+		It("names the model and the status, without the server's body, when the probe is rejected", func() {
+			// The body's shape is provider-specific, so it never reaches the user.
+			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"Invalid model identifier \"test-model\"."}`))
+			})
+			defer srv.Close()
+
+			_, err := newEmbedder(srv.URL).Dim(ctx)
+			Expect(err).To(MatchError(ContainSubstring(`failed to confirm embeddings model "test-model" exists`)))
+			Expect(err).To(MatchError(ContainSubstring("400 Bad Request")))
+			Expect(err.Error()).ToNot(ContainSubstring("Invalid model identifier"))
+		})
+
+		It("fails the dimension probe, so a substitution is caught before any index is written", func() {
+			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
+				writeVectorsAs(w, "some-other-model")
+			})
+			defer srv.Close()
+
+			_, err := newEmbedder(srv.URL).Dim(ctx)
+			Expect(err).To(MatchError(ErrModelMismatch))
+		})
+
+		It("accepts vectors when the server reports the configured model", func() {
+			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
+				writeVectorsAs(w, "test-model")
+			})
+			defer srv.Close()
+
+			vecs, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(vecs).To(HaveLen(1))
+		})
+
+		It("takes a server that omits the model at its word", func() {
+			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) { writeVectors(w, []int{0}) })
+			defer srv.Close()
+
+			vecs, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(vecs).To(HaveLen(1))
+		})
+	})
+
 	Describe("batch fallback", func() {
 		It("falls back to smaller batches when the server rejects a multi-input batch", func() {
 			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {

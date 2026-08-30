@@ -156,58 +156,94 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 		Reindex:   knowledgeReindex,
 		DryRun:    knowledgeDryRun,
 		Reconcile: reconcile,
-		Progress:  func(msg string) { fmt.Println(msg) },
 	}
 
-	// On a first full build (or a reindex) with the vector tier on, preview the
-	// embedding cost the operator has no intuition for. The preview is an offline
-	// dry pass (it embeds nothing); the real run follows.
+	// With the vector tier on, an offline dry pass (it embeds nothing) says how many
+	// chunks the real run will embed: the cost preview for a first build, and the
+	// total the progress bar counts up to.
+	var bar *indexBar
 	if !knowledgeDryRun && cfg.RAGVectorEnabled() {
-		if err := previewFirstBuild(ctx, store, roots, opts); err != nil {
+		total, err := estimateEmbeddings(ctx, store, roots, opts)
+		if errors.Is(err, context.Canceled) {
+			indexCanceled(false)
+			return nil
+		}
+		if err != nil {
 			return err
 		}
+		bar = newIndexBar(total)
 	}
+	// Covers the error return below: fisk prints that error after this function
+	// returns, and a live render loop would erase it.
+	defer bar.stop()
+
+	opts.Progress = func(msg string) { bar.note(msg) }
+	opts.OnFile = func(ev rag.IndexEvent) { bar.advance(ev.Embeddings) }
 
 	stats, err := store.Index(ctx, roots, opts)
 	if errors.Is(err, context.Canceled) {
 		// The index is incremental by content hash, so the files embedded before
 		// the interrupt are committed and re-running skips them; say so rather than
-		// dumping a raw cancellation error or exiting silently.
-		fmt.Fprintln(os.Stderr, "\nindex canceled; already-indexed files are skipped on re-run")
+		// dumping a raw cancellation error or exiting silently. The bar is left where
+		// it stopped, which is the honest answer to how far the run got.
+		barShown := bar != nil
+		bar.stop()
+		indexCanceled(barShown)
+
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 
+	bar.done()
+	bar.stop()
 	printIndexStats(stats, knowledgeDryRun)
 
 	return nil
 }
 
-// previewFirstBuild prints an embedding-cost estimate before the first full build
-// or a reindex, so a large embedding job is never a surprise.
-func previewFirstBuild(ctx context.Context, store *rag.Store, roots []string, opts rag.IndexOptions) error {
+// indexCanceled reports an interrupted index run. The newline separates the message
+// from the echoed interrupt, which a rendered bar has already ended.
+func indexCanceled(barShown bool) {
+	if barShown {
+		fmt.Fprintln(os.Stderr, "index canceled; already-indexed files are skipped on re-run")
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "\nindex canceled; already-indexed files are skipped on re-run")
+}
+
+// estimateEmbeddings runs an offline dry pass and returns how many chunks the real
+// run will embed, printing the cost preview when this is a first full build or a
+// reindex, so a large embedding job is never a surprise. It returns zero when
+// nothing would consume the answer, rather than walking the corpus for no reader.
+func estimateEmbeddings(ctx context.Context, store *rag.Store, roots []string, opts rag.IndexOptions) (int, error) {
 	st, err := store.Stats(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if st.Documents != 0 && !opts.Reindex {
-		return nil
+
+	firstBuild := st.Documents == 0 || opts.Reindex
+	if !firstBuild && !util.StdoutIsTerminal() {
+		return 0, nil
 	}
 
 	dry := opts
 	dry.DryRun = true
 	dry.Progress = nil
+	dry.OnFile = nil
 	est, err := store.Index(ctx, roots, dry)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	fmt.Printf("first full build: about to embed %d chunks across %d files; run with --dry-run to preview\n",
-		est.Embeddings, est.Files)
+	if firstBuild {
+		fmt.Printf("first full build: about to embed %d chunks across %d files; run with --dry-run to preview\n",
+			est.Embeddings, est.Files)
+	}
 
-	return nil
+	return est.Embeddings, nil
 }
 
 // printIndexStats prints the outcome of an index run.

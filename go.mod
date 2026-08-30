@@ -14,6 +14,7 @@ require (
 	github.com/gdamore/tcell/v2 v2.13.10
 	github.com/go-logr/stdr v1.2.2
 	github.com/goccy/go-yaml v1.19.2
+	github.com/jedib0t/go-pretty/v6 v6.8.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/muesli/termenv v0.16.0
 	github.com/nats-io/jsm.go v0.4.1
@@ -74,7 +75,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/hhrutter/tiff v1.0.6 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
-	github.com/jedib0t/go-pretty/v6 v6.8.3 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect

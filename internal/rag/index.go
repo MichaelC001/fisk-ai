@@ -52,6 +52,42 @@ type IndexOptions struct {
 	// Progress, when set, receives human-readable progress notes (skipped files,
 	// counts) for the CLI to print. It is never called with model-facing data.
 	Progress func(string)
+	// OnFile, when set, is called once per file the walk processed, after the file
+	// is committed, so a caller can drive a progress display. It is called
+	// synchronously on the walk goroutine and must not block. A dry run never calls
+	// it: nothing is committed, so there is no progress to report.
+	OnFile func(IndexEvent)
+}
+
+// IndexAction is what an index run did with one file.
+type IndexAction string
+
+const (
+	// IndexAdded reports a file the index did not hold before.
+	IndexAdded IndexAction = "added"
+	// IndexUpdated reports a file whose content hash changed.
+	IndexUpdated IndexAction = "updated"
+	// IndexUnchanged reports a file whose content hash matched, which is re-used as
+	// it stands. Files the walk rejects outright (oversized, not UTF-8) are reported
+	// through Progress and produce no event.
+	IndexUnchanged IndexAction = "unchanged"
+)
+
+// IndexEvent reports one processed file to IndexOptions.OnFile.
+type IndexEvent struct {
+	// Path is the file, as the index keys it.
+	Path string
+	// Action is what the run did with it.
+	Action IndexAction
+	// Chunks is how many chunks the file holds, whether or not this run produced
+	// them.
+	Chunks int
+	// Embeddings is how many chunks this run sent to the embedder, which is zero for
+	// an unchanged file and for a run with no vector tier. A caller measuring
+	// embedding progress counts this, never Chunks: an unchanged file carries the
+	// chunk count it was indexed with, and charging that to a total covering only
+	// the files being embedded completes the display before the work does.
+	Embeddings int
 }
 
 // IndexStats summarizes an index run.
@@ -80,6 +116,14 @@ func (o IndexOptions) note(msg string) {
 	if o.Progress != nil {
 		o.Progress(msg)
 	}
+}
+
+func (o IndexOptions) event(path string, action IndexAction, chunks, embeddings int) {
+	if o.OnFile == nil || o.DryRun {
+		return
+	}
+
+	o.OnFile(IndexEvent{Path: path, Action: action, Chunks: chunks, Embeddings: embeddings})
 }
 
 // Index walks roots and brings the index into line with them: it adds new files,
@@ -237,6 +281,8 @@ func (s *Store) ingestOne(ctx context.Context, key string, mtime int64, data []b
 			return err
 		}
 		stats.Chunks += n
+		// Nothing was embedded: these chunks are the ones a previous run produced.
+		opts.event(key, IndexUnchanged, n, 0)
 		return nil
 	default:
 		// update
@@ -263,15 +309,21 @@ func (s *Store) ingestOne(ctx context.Context, key string, mtime int64, data []b
 	if err := s.ingestFile(ctx, key, mtime, hash, string(data), chunks); err != nil {
 		return fmt.Errorf("indexing %q: %w", key, err)
 	}
+	action := IndexUpdated
 	if isNew {
 		stats.Added++
+		action = IndexAdded
 	} else {
 		stats.Updated++
 	}
 	stats.Chunks += len(chunks)
+	embedded := 0
 	if s.emb != nil {
-		stats.Embeddings += len(chunks)
+		embedded = len(chunks)
+		stats.Embeddings += embedded
 	}
+	// After the commit, so the event never reports work still in the embedder.
+	opts.event(key, action, len(chunks), embedded)
 
 	return nil
 }
@@ -464,7 +516,7 @@ func (s *Store) planVectorTier(ctx context.Context, reindex bool) (vectorPlan, e
 
 	dim, err := s.emb.Dim(ctx)
 	if err != nil {
-		return vectorPlan{}, fmt.Errorf("probing embedding dimension: %w", err)
+		return vectorPlan{}, err
 	}
 
 	desired := Meta{
