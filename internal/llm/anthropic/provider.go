@@ -114,25 +114,7 @@ func (p *Provider) Call(ctx context.Context, req llm.Request) (*llm.Response, er
 
 	msg, err := p.client.Messages.New(callCtx, params)
 	if err != nil {
-		var apiErr *sdk.Error
-		// Either explicit thinking mode sends a parameter, and so does an effort level, so
-		// either can be what a model or a proxy rejected. The thinking remedy is to remove
-		// the block rather than to set it false, since false is still a parameter and would
-		// be rejected the same way. An effort level is refused here rather than at start-up
-		// because the levels a model takes are its own.
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
-			thinking := req.Thinking != llm.ThinkingUnset
-
-			switch {
-			case thinking && req.ReasoningEffort != "":
-				return nil, fmt.Errorf("%w; model %q may not accept a thinking parameter or the effort level %q; remove the llm.thinking block or llm.reasoning_effort", err, req.Model, req.ReasoningEffort)
-			case thinking:
-				return nil, fmt.Errorf("%w; model %q may not accept a thinking parameter, remove the llm.thinking block to send none", err, req.Model)
-			case req.ReasoningEffort != "":
-				return nil, fmt.Errorf("%w; model %q may not accept the effort level %q, set llm.reasoning_effort to one it takes or remove it", err, req.Model, req.ReasoningEffort)
-			}
-		}
-		return nil, err
+		return nil, badRequestHint(err, req)
 	}
 
 	resp, err := ResponseToNeutral(msg)
@@ -141,6 +123,39 @@ func (p *Provider) Call(ctx context.Context, req llm.Request) (*llm.Response, er
 	}
 
 	return &resp, nil
+}
+
+// badRequestHint returns err with a hint about the reasoning parameters the
+// backend may have refused, when the request set either of them and the API
+// answered 400. Any other error is returned unchanged.
+//
+// Either explicit thinking mode sends a parameter, and so does an effort level, so
+// either can be what a model or a proxy rejected. The thinking remedy is to remove
+// the block rather than to set it false, since false is still a parameter and would
+// be rejected the same way. An effort level is refused here rather than at start-up
+// because the levels a model takes are its own.
+//
+// Both call paths use it: the SDK builds the API error from the response headers
+// before a stream is handed back, so a streamed call is refused the same way a
+// batched one is.
+func badRequestHint(err error, req llm.Request) error {
+	var apiErr *sdk.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return err
+	}
+
+	thinking := req.Thinking != llm.ThinkingUnset
+
+	switch {
+	case thinking && req.ReasoningEffort != "":
+		return fmt.Errorf("%w; model %q may not accept a thinking parameter or the effort level %q; remove the llm.thinking block or llm.reasoning_effort", err, req.Model, req.ReasoningEffort)
+	case thinking:
+		return fmt.Errorf("%w; model %q may not accept a thinking parameter, remove the llm.thinking block to send none", err, req.Model)
+	case req.ReasoningEffort != "":
+		return fmt.Errorf("%w; model %q may not accept the effort level %q, set llm.reasoning_effort to one it takes or remove it", err, req.Model, req.ReasoningEffort)
+	}
+
+	return err
 }
 
 // buildParams renders a neutral Request to Anthropic MessageNewParams. It is
