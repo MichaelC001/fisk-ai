@@ -31,6 +31,10 @@ import (
 //   - It is a structured sink: methods carry typed data, not preformatted prose, so a
 //     consumer is free to render, log, or stream it. The two terminal renderers happen
 //     to flatten to prose; a structured (for example slog) consumer keeps the types.
+//   - Every method here takes data and returns nothing, so an implementation decides
+//     only how a run looks. MessageStreamer.StreamDeltas is the exception: the runner
+//     asks it before each model call and its answer picks which call it makes. The run
+//     waits on the answer, so it must not block.
 type Events interface {
 	// Warn reports an operator-facing advisory as structured data.
 	Warn(Warning)
@@ -113,6 +117,49 @@ type TranscriptReplayer interface {
 	// second rendering of the same thing. It used to be handed the tool registry to
 	// resolve a command line with, which no sink outside this program could hold.
 	ResumeTranscript(rs *runstate.RunState)
+}
+
+// MessageStreamer is the optional half of Events that receives an assistant turn in
+// fragments while the model writes it. A sink rendering to somebody who is watching
+// implements it; one that records the run or forwards it to a queue has no use for it.
+//
+// It is separate from Events so an existing sink still compiles. A fragment is only
+// useful once it has been reconciled against the assembled turn through llm.Delta.Index,
+// and that is work a sink should be able to decline.
+//
+// The other three optional halves treat the type assertion as the opt-in, because only a
+// sink that wants those events implements them. serve.eventRecorder implements every
+// optional half unconditionally and forwards to whatever sink a channel supplied, so the
+// assertion succeeds for every hosted run whatever is downstream. StreamDeltas asks
+// instead.
+//
+// Message still reports the whole assistant turn on every call, streamed or not. A sink
+// implementing this receives the turn twice, in fragments and then assembled, and the
+// assembled turn is the authoritative one.
+type MessageStreamer interface {
+	// StreamDeltas reports whether this sink wants the fragments of the assistant turn
+	// about to be written. The runner asks once per model call, on the run goroutine,
+	// immediately before making the call, so an implementation must not block: the run
+	// waits on it. Bookkeeping is fine: for a sink that buffers fragments per call, this
+	// is the only call boundary it sees.
+	//
+	// The run streams only when this answers true and the provider also implements
+	// llm.StreamingProvider. Against a provider that cannot stream, the run makes the
+	// ordinary call and the turn arrives through Message alone, with no warning.
+	StreamDeltas() bool
+
+	// MessageDelta reports one fragment of the assistant turn being written. Fragments
+	// arrive on the run goroutine, in the order the provider produced them, and never
+	// after the model call they belong to has returned. Fragments for different
+	// llm.Delta.Index values interleave, so an implementation keys whatever it
+	// accumulates on Index.
+	//
+	// A failed call sends no Message, and a run that ends between the call returning and
+	// Message, on a journal write or a PostModelCall hook refusing the turn, leaves the
+	// fragments it already sent without their assembled turn. An implementation that
+	// accumulates drops what it holds when the run ends rather than waiting for a Message
+	// that is not coming.
+	MessageDelta(llm.Delta)
 }
 
 // WarningKind selects which advisory a Warning carries and which of its fields

@@ -292,6 +292,12 @@ var _ = Describe("A2A", func() {
 				NewBlock(StatusBlock{Iteration: 2, Phase: "calling-llm"}),
 				NewBlock(WarningBlock{Kind: "tool_timeout", Name: "ls"}),
 				NewBlock(PromptBlock{Text: "remove the stream"}),
+				NewBlock(TextDeltaBlock{Index: 1, Iteration: 3, Text: "part"}),
+				NewBlock(TextDeltaBlock{Index: 1, Iteration: 3, Final: true}),
+				NewBlock(ThinkingDeltaBlock{Index: 0, Iteration: 3, Text: "hmm"}),
+				NewBlock(ThinkingDeltaBlock{Index: 0, Iteration: 3, Final: true}),
+				NewBlock(TextBlock{Text: "answer", Index: 1, Trimmed: true}),
+				NewBlock(ThinkingBlock{Text: "reasoning", Index: 0, Trimmed: true}),
 			}
 
 			for _, b := range blocks {
@@ -348,6 +354,71 @@ var _ = Describe("A2A", func() {
 				"it goes back out under the id it arrived on")
 			Expect(fields["block"]).To(MatchJSON(`{"source":"rfc1","page":12}`),
 				"and with the peer's own value, not one this build re-made")
+		})
+
+		// A fragment travels under an id of its own, so a build with no case for either
+		// still reads the message: the id puts it in the event family, and the block it
+		// cannot name is kept as the peer sent it.
+		It("Should reach a build naming neither fragment as an unknown block", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, b := range []Block{
+				NewBlock(TextDeltaBlock{Index: 1, Iteration: 3, Text: "part"}),
+				NewBlock(ThinkingDeltaBlock{Index: 0, Iteration: 3, Text: "hmm", Final: true}),
+			} {
+				id := EventProtocolFor(b.Type())
+				kind, ok := blockTypeOf(id)
+				Expect(ok).To(BeTrue(), id)
+				Expect(kind).To(Equal(b.Type()))
+
+				ev := NewEvent(b)
+				fillHeader(&ev.Header)
+				body, err := json.Marshal(ev)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(validator.Validate(body)).To(Succeed(), id)
+
+				var fields map[string]json.RawMessage
+				Expect(json.Unmarshal(body, &fields)).To(Succeed())
+
+				// The same bytes under an id nobody names, which is what the pair is to a
+				// build that has neither case.
+				older := tamper(body, func(m map[string]any) {
+					m["protocol"] = id + "_future"
+				})
+				Expect(validator.Validate(older)).To(Succeed(), "the framing is what is left to check")
+
+				decoded, err := Decode(older)
+				Expect(err).ToNot(HaveOccurred())
+
+				unknown, ok := decoded.(*Event).Block.Content().(UnknownBlock)
+				Expect(ok).To(BeTrue(), "a kind nobody here names decodes to an UnknownBlock")
+				Expect(unknown.Raw).To(MatchJSON(fields["block"]))
+			}
+		})
+
+		// Index is 0 for the first block of a call, so it cannot be omitted when unset
+		// and still name that block. The two fields the whole blocks gained are the other
+		// way round: absent is what every producer sends today.
+		It("Should send a fragment's index always and a whole block's only when set", func() {
+			body := eventOf(NewBlock(TextDeltaBlock{Index: 0, Final: true}))
+
+			var ev map[string]json.RawMessage
+			Expect(json.Unmarshal(body, &ev)).To(Succeed())
+
+			var fragment map[string]any
+			Expect(json.Unmarshal(ev["block"], &fragment)).To(Succeed())
+			Expect(fragment).To(HaveKeyWithValue("index", BeEquivalentTo(0)))
+			Expect(fragment).ToNot(HaveKey("iteration"))
+			Expect(fragment).ToNot(HaveKey("text"))
+
+			Expect(json.Unmarshal(eventOf(NewTextBlock("answer")), &ev)).To(Succeed())
+
+			var whole map[string]any
+			Expect(json.Unmarshal(ev["block"], &whole)).To(Succeed())
+			Expect(whole).To(HaveKeyWithValue("text", "answer"))
+			Expect(whole).ToNot(HaveKey("index"))
+			Expect(whole).ToNot(HaveKey("trimmed"))
 		})
 
 		It("Should keep an unknown block distinguishable from an empty one", func() {
@@ -416,6 +487,55 @@ var _ = Describe("A2A", func() {
 			decoded, err := Decode(body)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(decoded.(*Request).WantsStream()).To(BeFalse())
+		})
+
+		// A caller that sets nothing gets no fragments.
+		It("Should send no fragments unless the caller asks for them", func() {
+			Expect(NewRequest("p").WantsDeltas()).To(BeFalse())
+
+			yes := true
+			req := NewRequest("p")
+			req.Deltas = &yes
+			Expect(req.WantsDeltas()).To(BeTrue())
+
+			no := false
+			req.Deltas = &no
+			Expect(req.WantsDeltas()).To(BeFalse())
+		})
+
+		It("Should send no fragments to a caller that asked for no stream", func() {
+			yes, no := true, false
+			req := NewRequest("p")
+			req.Deltas = &yes
+			req.Stream = &no
+
+			Expect(req.WantsStream()).To(BeFalse())
+			Expect(req.WantsDeltas()).To(BeFalse(), "a fragment is an event")
+		})
+
+		It("Should carry the ask across a round-trip on every request that runs a model", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			yes := true
+			answer := &Answer{ToolUseID: "toolu_1", Kind: ElicitConfirm, Answer: AnswerConfirmed, Confirmed: true}
+
+			for _, req := range []*Request{
+				NewRequest("p"),
+				NewResume("2Ab3Cd4Ef5Gh"),
+				NewAnswerRequest("2Ab3Cd4Ef5Gh", answer),
+			} {
+				req.Deltas = &yes
+				fillHeader(&req.Header)
+
+				body, err := json.Marshal(req)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(validator.Validate(body)).To(Succeed(), string(req.Kind))
+
+				decoded, err := Decode(body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(decoded.(*Request).WantsDeltas()).To(BeTrue(), string(req.Kind))
+			}
 		})
 	})
 

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"time"
+	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/a2a/transcript"
@@ -23,6 +25,38 @@ import (
 // stops one turn's resume from being thousands of messages. A caller is told when older
 // blocks were left behind and can read the rest from the store, where the journal is.
 const maxReplayBlocks = 200
+
+// maxDeltaText is the most fragment text one delta message carries, and the size the
+// coalescing buffer flushes at.
+//
+// ReplyStream refuses a message larger than a2a.MaxMessageSize and does not advance the
+// sequence when it does, so an oversized delta is dropped, the sequence carries no hole,
+// and the caller assembles text that is silently wrong. A whole block avoids that by
+// trimming, which the reader can see; a trimmed fragment corrupts the text instead.
+//
+// The value is a fraction of the limit so the two move together. A sixty-fourth leaves
+// room for the message header and for JSON escaping, which can cost six bytes for one
+// byte of text.
+const maxDeltaText = a2a.MaxMessageSize / 64
+
+// deltaFlushWindow is how long buffered fragment text waits for more before it is sent.
+//
+// Without it a provider writing a word at a time would put one message on the wire per
+// word. The window is read when a fragment arrives, never on a timer, so it delays a
+// fragment only when another follows it.
+const deltaFlushWindow = 100 * time.Millisecond
+
+// maxDeltaBlocks caps how many content blocks the sink buffers fragments for at once.
+//
+// A backend checks a fragment's index against the blocks it has started, so a provider
+// limits its own indexes. This sink sees only fragments, and without a cap it would hold
+// a buffer for every index a broken or hostile upstream sent, for the length of the call.
+// No model call writes 32 blocks of text and reasoning.
+const maxDeltaBlocks = 32
+
+// The runner asserts this half at runtime, so a sink that stopped satisfying it would
+// stop streaming with no error raised anywhere.
+var _ agent.MessageStreamer = (*eventSink)(nil)
 
 // eventSink turns a run's narration into blocks on the task's reply set.
 //
@@ -39,6 +73,31 @@ type eventSink struct {
 	// sent before the run's own events. Zero, which is what a caller that asked for
 	// nothing has, makes the sink no replayer at all.
 	replay int
+
+	// deltas is whether this caller asked for the fragments of an assistant turn as the
+	// model writes it. It is set from the task request, and StreamDeltas reports it to
+	// the runner.
+	deltas bool
+	// buffered coalesces fragments per content block index, so the sink paces what
+	// reaches the wire instead of sending a message per fragment.
+	buffered map[int]*deltaBuffer
+	// bufferedCall is the model call buffered holds the fragments of. Index restarts at
+	// 0 on every call, so without this a block left open by one call would collect the
+	// next call's first fragment.
+	bufferedCall int
+	// cappedLogged is whether this call has already logged hitting maxDeltaBlocks, so an
+	// upstream inventing an index per fragment is logged once and not per fragment.
+	cappedLogged bool
+}
+
+// deltaBuffer is the unsent fragment text of one content block.
+type deltaBuffer struct {
+	kind llm.DeltaKind
+	// pending is the text that has arrived and not yet been sent.
+	pending []byte
+	// since is when the oldest byte in pending arrived. deltaFlushWindow is measured
+	// from it.
+	since time.Time
 }
 
 // ResumeTranscript sends the stored conversation a resume is continuing, so a caller
@@ -84,26 +143,27 @@ func (e *eventSink) ResumeTranscript(rs *runstate.RunState) {
 //
 // Tool-use content is not sent here. ToolCall carries the same call with the tool's own
 // description of it, and a caller reading both would render each call twice.
+//
+// Each block carries its position in the call that produced it, counted over the whole
+// turn including the blocks that are not sent, so a caller that asked for fragments
+// knows which buffer this block replaces. Counting only the blocks that reach the wire
+// would give a different number as soon as a tool call sat between two of them.
 func (e *eventSink) Message(resp llm.Response, terminal bool) {
-	for _, block := range resp.Content {
+	for index, block := range resp.Content {
 		switch {
 		case block.Text != nil:
 			// The text of the terminal turn is the answer and travels again in the
 			// result. Only the run knows which message ended it, so it says: without
 			// this a caller cannot tell the answer from the narration on the way to it,
 			// and renders it twice.
-			if terminal {
-				e.send(a2a.NewFinalTextBlock(trimForWire(block.Text.Text)))
-
-				continue
-			}
-
-			e.send(a2a.NewTextBlock(trimForWire(block.Text.Text)))
+			text, trimmed := trimmedForWire(block.Text.Text)
+			e.send(a2a.NewBlock(a2a.TextBlock{Text: text, Final: terminal, Index: index, Trimmed: trimmed}))
 		case block.Thinking != nil:
 			// The signature stays local. It is the opaque payload that lets a turn be
 			// replayed to the provider that produced it, it is never replayed across an
 			// agent boundary, and no peer can do anything with the bytes.
-			e.send(a2a.NewBlock(a2a.ThinkingBlock{Text: trimForWire(block.Thinking.Text)}))
+			text, trimmed := trimmedForWire(block.Thinking.Text)
+			e.send(a2a.NewBlock(a2a.ThinkingBlock{Text: text, Index: index, Trimmed: trimmed}))
 		}
 	}
 
@@ -113,6 +173,123 @@ func (e *eventSink) Message(resp llm.Response, terminal bool) {
 
 	e.iteration++
 	e.send(a2a.NewBlock(a2a.StatusBlock{Iteration: e.iteration, Usage: callUsage(resp.Usage)}))
+}
+
+// StreamDeltas reports whether this caller asked for the fragments of an assistant turn
+// as the model writes it. The value comes from the request's deltas property. The runner
+// asks once per model call, and the answer is a field the sink already holds.
+func (e *eventSink) StreamDeltas() bool { return e.deltas }
+
+// MessageDelta sends one fragment of the assistant turn being written, coalesced with
+// the fragments around it.
+//
+// A provider emits a fragment every few tokens, so one message each would tie the wire
+// cost of a run to the rate the backend writes at. Fragments are buffered per content
+// block index and sent when the buffer reaches maxDeltaText or its oldest byte has
+// waited deltaFlushWindow, whichever comes first. The Final fragment of a block sends
+// what is left along with the mark that closes the block.
+//
+// The window is read here and never on a timer. ReplyStream is owned by one goroutine at
+// a time, its sequence counter is unguarded, and every method of this sink runs on the
+// run goroutine, so a timer publishing a partial buffer would race the run's own events
+// and corrupt the numbering. Every block ends with a Final fragment that sends what is
+// left, and a call that wrote nothing buffered nothing.
+func (e *eventSink) MessageDelta(d llm.Delta) {
+	if !e.deltas {
+		return
+	}
+
+	if d.Kind != llm.DeltaText && d.Kind != llm.DeltaThinking {
+		return
+	}
+
+	// e.iteration counts the status blocks Message has sent, so the call being written is
+	// the next one. Reading it here keeps the fragments and the status block that ends
+	// their call on the same number.
+	call := e.iteration + 1
+	if call != e.bufferedCall {
+		clear(e.buffered)
+		e.bufferedCall = call
+		e.cappedLogged = false
+	}
+
+	buf, held := e.buffered[d.Index]
+	if !held {
+		if len(e.buffered) >= maxDeltaBlocks {
+			if !e.cappedLogged {
+				e.log.Warn("Dropping fragments of a model call writing more blocks than the sink buffers", "iteration", call, "blocks", maxDeltaBlocks)
+				e.cappedLogged = true
+			}
+
+			return
+		}
+
+		if e.buffered == nil {
+			e.buffered = make(map[int]*deltaBuffer, 4)
+		}
+
+		buf = &deltaBuffer{kind: d.Kind, since: time.Now()}
+		e.buffered[d.Index] = buf
+	}
+
+	buf.pending = append(buf.pending, d.Text...)
+
+	// A fragment larger than the flush cap is split across messages. A caller assembling
+	// the text cannot notice a missing one, so what does not fit in this message goes in
+	// the next.
+	for len(buf.pending) >= maxDeltaText {
+		cut := runeCut(buf.pending, maxDeltaText)
+		e.sendDelta(d.Index, call, buf.kind, string(buf.pending[:cut]), false)
+		buf.pending = buf.pending[cut:]
+		buf.since = time.Now()
+	}
+
+	if d.Final {
+		e.sendDelta(d.Index, call, buf.kind, string(buf.pending), true)
+		delete(e.buffered, d.Index)
+
+		return
+	}
+
+	if len(buf.pending) == 0 || time.Since(buf.since) < deltaFlushWindow {
+		return
+	}
+
+	e.sendDelta(d.Index, call, buf.kind, string(buf.pending), false)
+	buf.pending = buf.pending[:0]
+	buf.since = time.Now()
+}
+
+// sendDelta publishes one fragment of the block at index, under the id for its kind.
+func (e *eventSink) sendDelta(index, iteration int, kind llm.DeltaKind, text string, final bool) {
+	if kind == llm.DeltaThinking {
+		e.send(a2a.NewBlock(a2a.ThinkingDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
+
+		return
+	}
+
+	e.send(a2a.NewBlock(a2a.TextDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
+}
+
+// runeCut is the largest cut of b at or below limit that does not split a rune, since
+// half a rune reaches a caller as a replacement character in the middle of an answer.
+// Bytes that begin no rune at all are cut at the limit, so text that is not valid UTF-8
+// still moves rather than stalling the buffer.
+func runeCut(b []byte, limit int) int {
+	if len(b) <= limit {
+		return len(b)
+	}
+
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(b[cut]) {
+		cut--
+	}
+
+	if cut == 0 {
+		return limit
+	}
+
+	return cut
 }
 
 // ToolCall sends what the run is about to do to the world, with the id a result answers
@@ -228,3 +405,5 @@ func objectInput(input json.RawMessage) json.RawMessage {
 // under a local name, so this package's call sites read as they did when the bound
 // lived here and the adapter that replays a stored conversation trims identically.
 func trimForWire(s string) string { return a2a.TrimBlockText(s) }
+
+func trimmedForWire(s string) (string, bool) { return a2a.TrimmedBlockText(s) }

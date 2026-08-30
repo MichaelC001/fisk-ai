@@ -160,6 +160,11 @@
       "default": true,
       "description": "false means the caller wants only a terminal result, no event stream."
     },
+    "deltas": {
+      "type": "boolean",
+      "default": false,
+      "description": "true asks for the text and reasoning of an assistant turn as the model writes it, as text_delta and thinking_delta events alongside the whole blocks. It has no meaning without stream, since a fragment is an event. A worker that predates it ignores it and sends whole blocks."
+    },
     "force": {
       "type": "boolean",
       "description": "Continue a conversation whose stored fingerprint no longer matches the worker's configuration, which is otherwise refused. Standing approvals that cannot be vouched for across the change are dropped."
@@ -310,6 +315,15 @@
         }
       }
     },
+    "block_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Where this block sat in the model call that produced it, counted over every block of that call including the ones that never reach the wire. It pairs with the index of the delta blocks that carried this block's fragments; those also name the model call, and this does not. Omitting it when unset makes absent mean both the first block and a worker that predates the field, which costs nothing: a receiver that asked for no deltas has nothing to reconcile."
+    },
+    "block_trimmed": {
+      "type": "boolean",
+      "description": "The text was cut to 64 KiB and the rest of it is only in the serving worker's run journal. A receiver holding delta fragments of this block needs it: the fragments were never capped in aggregate, so for a long answer they are the more complete copy."
+    },
     "thinkingBlock": {
       "type": "object",
       "description": "Each block definition below is referenced by the event schema of one protocol id. What kind of block it is travels as that id, so nothing in the block itself names its kind.",
@@ -327,6 +341,12 @@
         "provider": {
           "type": "string",
           "description": "Originating provider for the signature, e.g. anthropic."
+        },
+        "index": {
+          "$ref": "#/$defs/block_index"
+        },
+        "trimmed": {
+          "$ref": "#/$defs/block_trimmed"
         }
       }
     },
@@ -342,6 +362,66 @@
         "final": {
           "type": "boolean",
           "description": "Marks the text of the turn that ended the run, which is the answer rather than narration on the way to it. The same text arrives again in the result."
+        },
+        "index": {
+          "$ref": "#/$defs/block_index"
+        },
+        "trimmed": {
+          "$ref": "#/$defs/block_trimmed"
+        }
+      }
+    },
+    "textDeltaBlock": {
+      "type": "object",
+      "description": "One fragment of a text block as the model writes it. The whole block follows when the model call ends, carrying the same index, so a fragment adds to it and never replaces it. It carries no iteration: a receiver takes the call from the status blocks it has already seen. Sent only to a caller that asked for deltas.",
+      "required": [
+        "index"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The position of this fragment's block in the model call that produced it. Fragments of different blocks may interleave, so a receiver keys its buffer on this rather than assuming one block finishes before the next begins."
+        },
+        "iteration": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The model call this fragment came from, 1-based, counted as a status block counts it. Indices restart at 0 on every call and the status block separating two calls arrives after the first has ended, so a receiver keying on index alone would append the first block of one call to the last block of the one before. A worker that does not report it leaves it absent."
+        },
+        "text": {
+          "type": "string",
+          "description": "This fragment's text, appended to what has already arrived for the same iteration and index. Absent on a final fragment with nothing left to send."
+        },
+        "final": {
+          "type": "boolean",
+          "description": "The last fragment of this block, so a receiver closes the buffer when the block ends rather than holding its tail until the next fragment or the end of the run. The end of a block cannot be read off the fragments themselves."
+        }
+      }
+    },
+    "thinkingDeltaBlock": {
+      "type": "object",
+      "description": "One fragment of a thinking block's reasoning as the model writes it, on the terms textDeltaBlock states. The signature does not stream; it arrives with the whole block.",
+      "required": [
+        "index"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The position of this fragment's block in the model call that produced it, as it is on a text delta."
+        },
+        "iteration": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The model call this fragment came from, 1-based, as it is on a text delta."
+        },
+        "text": {
+          "type": "string",
+          "description": "This fragment's reasoning text, appended to what has already arrived for the same iteration and index."
+        },
+        "final": {
+          "type": "boolean",
+          "description": "The last fragment of this block, as it is on a text delta."
         }
       }
     },

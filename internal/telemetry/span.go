@@ -478,6 +478,35 @@ type ChatSpan struct {
 	// can silently stop being sent. Atomic because the counter and Finish are the only
 	// two readers and neither should depend on how a backend sequences its retries.
 	attempts atomic.Int64
+
+	// streamed reports that the answer arrived in fragments and firstToken is when the
+	// first of them did. Both are written once by Streamed and read once by Finish, on
+	// the goroutine that made the call. attempts needs an atomic and these do not,
+	// because nothing a provider does on its own goroutines reaches them.
+	streamed   bool
+	firstToken time.Time
+}
+
+// Streamed records that this call's answer arrived in fragments, with at the time the
+// first one arrived.
+//
+// The caller supplies the moment because this package never sees a fragment. A fragment
+// reaches only the delta function the run loop hands the provider, and that runs on the
+// run goroutine while the call is still in flight.
+//
+// A zero at is a streamed call that produced no fragment, and the span then says it
+// streamed and carries no time to first token. A call that failed before the model wrote
+// anything looks like that, and so does a turn whose only content is a tool call, since
+// tool arguments do not stream. The error attributes separate them.
+//
+// Finish reads both fields, so call this before it.
+func (s *ChatSpan) Streamed(at time.Time) {
+	if s == nil || s.Span == nil || s.Span.span == nil {
+		return
+	}
+
+	s.streamed = true
+	s.firstToken = at
 }
 
 // StartChat starts a span over one model call.
@@ -563,6 +592,19 @@ func (s *ChatSpan) Finish(ctx context.Context, i ChatInfo, o ChatOutcome) {
 	// provider this package builds, so an injected one reports no attempts at all.
 	if resends := s.attempts.Load() - 1; resends > 0 {
 		span.SetAttributes(semconv.HTTPRequestResendCount(int(resends)))
+	}
+
+	// Set on every call, false included, where the resend count is set only when there
+	// were resends. It says which of two things fisk.llm.http_duration_ms measured on
+	// this call, and reading an absent attribute as batched would mean knowing which
+	// build wrote the span.
+	span.SetAttributes(AttrLLMStreamed.Bool(s.streamed))
+
+	// How long the caller waited for the answer to start, measured from the moment this
+	// span opened, before the request went out. Absent where there was no first fragment:
+	// a batched call, and a streamed one that produced none, which Streamed accounts for.
+	if !s.firstToken.IsZero() {
+		span.SetAttributes(AttrTimeToFirstToken.Float64(s.firstToken.Sub(s.Span.started).Seconds()))
 	}
 
 	// The input carries the index marker: it is the one attribute here whose position

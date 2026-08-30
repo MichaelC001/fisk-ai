@@ -10,6 +10,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/semconv/v1.41.0/genaiconv"
 )
 
 // The fisk.* attribute keys. Anything fisk-specific with no home in the
@@ -218,6 +219,15 @@ const (
 	// report a 200 for a call that spent most of its time being rate limited.
 	AttrLLMHTTPAttempt    = attribute.Key("fisk.llm.http_attempt")
 	AttrLLMHTTPDurationMS = attribute.Key("fisk.llm.http_duration_ms")
+
+	// AttrLLMStreamed reports that the answer to this model call arrived in fragments.
+	//
+	// It is on every chat span, false included, because it says which of two things
+	// fisk.llm.http_duration_ms measured on this call. The middleware brackets next(req),
+	// which on a streamed call is the time to the response headers and on a batched one
+	// is the whole call, so a dashboard mixing the two compares two different numbers
+	// and nothing else on the span separates them.
+	AttrLLMStreamed = attribute.Key("fisk.llm.streamed")
 
 	// AttrSessionEndID is the session id the run ended on, set only when a context
 	// reset rotated it away from the one it started with. It is the id an operator
@@ -476,6 +486,28 @@ const (
 // fisk.session.end_id, the one it ended on; this records that the transition happened
 // rather than leaving two ids on a span with no account of how.
 const EventSessionRotated = "fisk.session.rotated"
+
+// AttrTimeToFirstToken is how long a streamed model call took to produce the first
+// fragment of its answer, in seconds, on the chat span.
+//
+// The other duration measurements on the model path end when the whole call does, or,
+// for the HTTP attempt, when the response headers arrive.
+//
+// The conventions name this measure, so it keeps their name rather than a fisk one. They
+// name it only as the gen_ai.server.time_to_first_token instrument and define no
+// attribute key. This key is read off that instrument rather than copied, so a semconv
+// bump renames it too, and the value is in seconds because that is the unit the
+// instrument declares.
+//
+// This span carries the value as an attribute and records no instrument. The conventions
+// define that instrument for the inference server, so a series under its name is
+// aggregated as the server's own, and this process is the client. A reader takes a
+// labeled value on a client span as that span's own measurement.
+//
+// It is client wall time: the clock starts before the request leaves the process, so it
+// carries serialization, TLS, the network and whatever the server queued, and it reads
+// higher than the number the server would report for the same call.
+var AttrTimeToFirstToken = attribute.Key(genaiconv.ServerTimeToFirstToken{}.Name())
 
 // The four GenAI metric instruments this repository declares locally. They are in
 // the current OpenTelemetry GenAI metrics registry but postdate the semconv package

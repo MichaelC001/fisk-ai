@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -230,6 +231,270 @@ var _ = Describe("The events adapter", func() {
 		events.SessionRotated("session1")
 
 		Expect(sink.sent).To(BeEmpty())
+	})
+
+	// A caller reconciles the fragments it buffered against the whole block, so the block
+	// says where it sat in the call that produced it rather than where it sat in what
+	// reached the wire.
+	It("Should number a block by its place in the model call", func() {
+		events.Message(llm.Response{Content: []llm.ContentBlock{
+			{Thinking: &llm.ThinkingBlock{Text: "considering"}},
+			{ToolUse: &llm.ToolUseBlock{ID: "toolu_1", Name: "backup"}},
+			{Text: &llm.TextBlock{Text: "the answer"}},
+		}}, true)
+
+		sent := blocks()
+		Expect(sent).To(HaveLen(2), "the tool-use block is left to ToolCall")
+		Expect(sent[0].Content().(a2a.ThinkingBlock).Index).To(Equal(0))
+		Expect(sent[1].Content().(a2a.TextBlock).Index).To(Equal(2), "a block that never reaches the wire still counts")
+	})
+
+	// A caller holding fragments of a trimmed block has the more complete copy of it, the
+	// fragments never having been capped in aggregate, so it is told which block was cut.
+	It("Should mark a block whose text was cut", func() {
+		events.Message(llm.Response{Content: []llm.ContentBlock{
+			{Text: &llm.TextBlock{Text: strings.Repeat("x", a2a.MaxBlockText+1)}},
+			{Thinking: &llm.ThinkingBlock{Text: "considering"}},
+		}}, false)
+
+		sent := blocks()
+		Expect(sent[0].Content().(a2a.TextBlock).Trimmed).To(BeTrue())
+		Expect(sent[0].Content().(a2a.TextBlock).Text).To(Equal(a2a.TrimBlockText(strings.Repeat("x", a2a.MaxBlockText+1))))
+		Expect(sent[1].Content().(a2a.ThinkingBlock).Trimmed).To(BeFalse(), "nothing was cut from it")
+	})
+
+	Describe("Streaming an assistant turn as it is written", func() {
+		// fragment is one text fragment of the block at index, so a spec says what the
+		// provider produced rather than building the value each time.
+		fragment := func(index int, text string, final bool) llm.Delta {
+			return llm.Delta{Kind: llm.DeltaText, Index: index, Text: text, Final: final}
+		}
+
+		// deltaText is what the fragments of the block at index carried, in the order
+		// they reached the wire.
+		deltaText := func(index int) string {
+			GinkgoHelper()
+
+			var out strings.Builder
+			for _, block := range blocks() {
+				delta, ok := block.Content().(a2a.TextDeltaBlock)
+				if ok && delta.Index == index {
+					out.WriteString(delta.Text)
+				}
+			}
+
+			return out.String()
+		}
+
+		// A caller that asked for nothing gets the blocks it gets without the property.
+		Context("for a caller that asked for none", func() {
+			It("Should send no fragment and the whole blocks unchanged", func() {
+				Expect(events.StreamDeltas()).To(BeFalse())
+
+				events.MessageDelta(fragment(0, "the ", false))
+				events.MessageDelta(fragment(0, "answer", true))
+				Expect(sink.sent).To(BeEmpty())
+
+				events.Message(llm.Response{Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "the answer"}}}}, true)
+
+				Expect(sink.sent).To(HaveLen(1))
+				body, err := json.Marshal(blocks()[0])
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(`{"text":"the answer","final":true}`), "the two new fields are unset and omitted")
+			})
+		})
+
+		Context("for a caller that asked for them", func() {
+			BeforeEach(func() {
+				events.deltas = true
+			})
+
+			It("Should answer the runner from the request", func() {
+				Expect(events.StreamDeltas()).To(BeTrue())
+			})
+
+			// A message per fragment would tie the wire cost of a run to the rate the
+			// backend writes at.
+			//
+			// The window is measured from a wall clock, so a spec that must not flush on
+			// it holds the buffer's clock ahead of now. A loaded machine would otherwise
+			// take longer between two statements here than a run takes between fragments.
+			It("Should hold a fragment that is under both limits", func() {
+				events.MessageDelta(fragment(0, "the ", false))
+				events.buffered[0].since = time.Now().Add(time.Hour)
+				events.MessageDelta(fragment(0, "answer", false))
+
+				Expect(sink.sent).To(BeEmpty())
+			})
+
+			It("Should send what it holds when the fragments reach the byte limit", func() {
+				events.MessageDelta(fragment(0, strings.Repeat("x", maxDeltaText-1), false))
+				Expect(sink.sent).To(BeEmpty())
+
+				events.buffered[0].since = time.Now().Add(time.Hour)
+				events.MessageDelta(fragment(0, "yz", false))
+
+				Expect(sink.sent).To(HaveLen(1))
+				delta := blocks()[0].Content().(a2a.TextDeltaBlock)
+				Expect(delta.Text).To(HaveLen(maxDeltaText))
+				Expect(delta.Final).To(BeFalse())
+				Expect(deltaText(0)).To(Equal(strings.Repeat("x", maxDeltaText-1)+"y"), "the byte over the limit is still held")
+			})
+
+			// The window is read when a fragment arrives and never on a timer: a timer
+			// publishing a partial buffer would race the run's own events on a stream
+			// whose sequence counter is unguarded.
+			It("Should send what it holds once the oldest byte has waited", func() {
+				events.MessageDelta(fragment(0, "the ", false))
+				Expect(sink.sent).To(BeEmpty())
+
+				events.buffered[0].since = time.Now().Add(-2 * deltaFlushWindow)
+				events.MessageDelta(fragment(0, "answer", false))
+
+				Expect(sink.sent).To(HaveLen(1))
+				Expect(deltaText(0)).To(Equal("the answer"))
+			})
+
+			It("Should send what it holds when the block ends", func() {
+				events.MessageDelta(fragment(0, "the ", false))
+				events.MessageDelta(fragment(0, "answer", true))
+
+				Expect(sink.sent).To(HaveLen(1))
+				delta := blocks()[0].Content().(a2a.TextDeltaBlock)
+				Expect(delta.Text).To(Equal("the answer"))
+				Expect(delta.Final).To(BeTrue())
+			})
+
+			// The end of a block cannot be read off the fragments, so the mark that
+			// closes it travels even when there is nothing left to send.
+			It("Should close a block whose last fragment carries no text", func() {
+				events.MessageDelta(fragment(0, "the answer", true))
+				events.MessageDelta(llm.Delta{Kind: llm.DeltaText, Index: 1, Final: true})
+
+				sent := blocks()
+				Expect(sent).To(HaveLen(2))
+				Expect(sent[1].Content().(a2a.TextDeltaBlock).Text).To(BeEmpty())
+				Expect(sent[1].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+			})
+
+			// A caller assembling text out of fragments cannot notice a missing one, so a
+			// fragment too large for one message is split across two rather than dropped.
+			It("Should split a fragment larger than the flush cap", func() {
+				written := strings.Repeat("x", 2*maxDeltaText+7)
+				events.MessageDelta(fragment(0, written, true))
+
+				Expect(sink.sent).To(HaveLen(3))
+				for _, body := range sink.sent {
+					Expect(len(body)).To(BeNumerically("<", a2a.MaxMessageSize))
+				}
+				Expect(deltaText(0)).To(Equal(written), "nothing is lost to the split")
+				Expect(blocks()[2].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+			})
+
+			It("Should split on a rune boundary", func() {
+				written := "x" + strings.Repeat("☃", maxDeltaText)
+				events.MessageDelta(fragment(0, written, true))
+
+				Expect(deltaText(0)).To(Equal(written))
+				for _, block := range blocks() {
+					Expect(strings.ContainsRune(block.Content().(a2a.TextDeltaBlock).Text, '�')).To(BeFalse())
+				}
+			})
+
+			// Text that is not valid UTF-8 has no rune boundary to cut back to. Without a
+			// floor the cut walks to zero, the split loop re-slices by nothing and the run
+			// goroutine hangs inside the provider call, so this spec hangs the suite when
+			// the floor is gone. JSON encoding replaces the bytes on the way out, so what
+			// arrives cannot be compared with what was written.
+			It("Should move text that begins no rune rather than stalling on it", func() {
+				events.MessageDelta(fragment(0, strings.Repeat("\x80", maxDeltaText+1), true))
+
+				Expect(len(sink.sent)).To(BeNumerically(">", 1))
+				Expect(blocks()[len(sink.sent)-1].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+			})
+
+			// A caller reconciles its buffer against the whole block, so the block never
+			// arrives before the fragments it replaces.
+			It("Should send every fragment of a block before the block itself", func() {
+				events.MessageDelta(llm.Delta{Kind: llm.DeltaThinking, Index: 0, Text: "considering", Final: true})
+				events.MessageDelta(fragment(1, "the ", false))
+				events.buffered[1].since = time.Now().Add(time.Hour)
+				events.MessageDelta(fragment(1, "answer", true))
+				events.Message(llm.Response{Content: []llm.ContentBlock{
+					{Thinking: &llm.ThinkingBlock{Text: "considering"}},
+					{Text: &llm.TextBlock{Text: "the answer"}},
+				}}, true)
+
+				types := make([]a2a.BlockType, 0, len(sink.sent))
+				for _, block := range blocks() {
+					types = append(types, block.Type())
+				}
+
+				Expect(types).To(Equal([]a2a.BlockType{
+					a2a.BlockThinkingDelta,
+					a2a.BlockTextDelta,
+					a2a.BlockThinking,
+					a2a.BlockText,
+				}))
+			})
+
+			// Index restarts at 0 on every call while the status block that separates two
+			// calls arrives after the first has ended, so a caller keying on index alone
+			// would append the first block of one call to the last block of the one before.
+			It("Should say which model call a fragment came from", func() {
+				events.MessageDelta(fragment(0, "working", true))
+				events.Message(llm.Response{Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "working"}}}}, false)
+				events.MessageDelta(fragment(0, "the answer", true))
+
+				sent := blocks()
+				Expect(sent[0].Content().(a2a.TextDeltaBlock).Iteration).To(Equal(1))
+				Expect(sent[2].Content().(a2a.StatusBlock).Iteration).To(Equal(1), "the fragments and the status block count the same call")
+				Expect(sent[3].Content().(a2a.TextDeltaBlock).Iteration).To(Equal(2))
+			})
+
+			// A block left open by a call that ended without closing it would otherwise
+			// have the next call's first fragment appended to it.
+			It("Should not carry a buffer across a model call", func() {
+				events.MessageDelta(fragment(0, "half a th", false))
+				events.Message(llm.Response{Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "half a thought"}}}}, false)
+				events.MessageDelta(fragment(0, "the answer", true))
+
+				sent := blocks()
+				Expect(sent).To(HaveLen(3), "the whole block, the status block that ends the call, and the fragment after it")
+				Expect(sent[2].Content().(a2a.TextDeltaBlock).Text).To(Equal("the answer"))
+			})
+
+			// A provider bounds its own indexes, but this sink sees fragments alone.
+			It("Should buffer no more blocks than the cap", func() {
+				for index := range maxDeltaBlocks {
+					events.MessageDelta(fragment(index, "held", false))
+				}
+				Expect(sink.sent).To(BeEmpty())
+				Expect(events.buffered).To(HaveLen(maxDeltaBlocks))
+
+				for index := maxDeltaBlocks; index < maxDeltaBlocks+10; index++ {
+					events.MessageDelta(fragment(index, "invented", false))
+					events.MessageDelta(fragment(index, "invented", true))
+				}
+
+				Expect(events.buffered).To(HaveLen(maxDeltaBlocks))
+				Expect(sink.sent).To(BeEmpty(), "a fragment the sink cannot buffer sends nothing")
+			})
+
+			It("Should send a reasoning fragment as a thinking delta", func() {
+				events.MessageDelta(llm.Delta{Kind: llm.DeltaThinking, Index: 0, Text: "considering", Final: true})
+
+				delta := blocks()[0].Content().(a2a.ThinkingDeltaBlock)
+				Expect(delta.Text).To(Equal("considering"))
+				Expect(delta.Final).To(BeTrue())
+			})
+
+			It("Should send nothing for a kind it does not name", func() {
+				events.MessageDelta(llm.Delta{Kind: "images", Index: 0, Text: "...", Final: true})
+
+				Expect(sink.sent).To(BeEmpty())
+			})
+		})
 	})
 
 	// The answer travels twice, as the last text block and as the result, and only the

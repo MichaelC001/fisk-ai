@@ -29,6 +29,9 @@
     "stream": {
       "$ref": "common.json#/$defs/stream"
     },
+    "deltas": {
+      "$ref": "common.json#/$defs/deltas"
+    },
     "replay": {
       "$ref": "common.json#/$defs/replay",
       "minimum": 1,

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choria.io/schemas/io.choria.fisk-ai.v1/event.thinking_delta.json",
+  "title": "fisk-ai A2A v1 thinking delta event",
+  "description": "One fragment of a thinking block's reasoning as the model writes it. It has an id of its own on the terms the text delta event states.",
+  "allOf": [
+    {
+      "$ref": "common.json#/$defs/header"
+    }
+  ],
+  "properties": {
+    "protocol": {
+      "const": "io.choria.fisk-ai.v1.event.thinking_delta"
+    },
+    "block": {
+      "$ref": "common.json#/$defs/thinkingDeltaBlock"
+    }
+  },
+  "required": [
+    "block"
+  ]
+}

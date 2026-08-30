@@ -68,6 +68,9 @@ var protocolSchemaFile = map[string]string{
 	EventStatusProtocol:     "event.status.json",
 	EventWarningProtocol:    "event.warning.json",
 	EventPromptProtocol:     "event.prompt.json",
+
+	EventTextDeltaProtocol:     "event.text_delta.json",
+	EventThinkingDeltaProtocol: "event.thinking_delta.json",
 }
 
 // eventFallbackSchemaFile validates an event whose kind this build does not name. It

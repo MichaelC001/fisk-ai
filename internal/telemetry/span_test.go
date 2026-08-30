@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -512,6 +513,89 @@ var _ = Describe("MCP server spans", func() {
 				Expect(allowed[kv.Key]).To(BeTrue(), "%s carries the unexpected attribute %s", stub.Name, kv.Key)
 			}
 		}
+	})
+})
+
+var _ = Describe("ChatSpan streaming", func() {
+	var ctx context.Context
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	// The span's own start is fixed so the recorded value is arithmetic on two times
+	// rather than a clock read, so these can assert an exact number.
+	chatting := func(p *Provider) *ChatSpan {
+		_, chat := p.StartChat(ctx, ChatInfo{Model: "m"})
+		chat.Span.started = time.Now().Add(-2 * time.Second)
+
+		return chat
+	}
+
+	It("should record the wait for the first fragment and mark the call streamed", func() {
+		p, exp := recording()
+
+		chat := chatting(p)
+		chat.Streamed(chat.Span.started.Add(400 * time.Millisecond))
+		chat.Finish(ctx, ChatInfo{Model: "m"}, ChatOutcome{})
+
+		spans := exp.GetSpans()
+		Expect(spans).To(HaveLen(1))
+
+		v, ok := attrOf(spans[0], AttrTimeToFirstToken)
+		Expect(ok).To(BeTrue())
+		Expect(v.AsFloat64()).To(Equal(0.4))
+
+		streamed, ok := attrOf(spans[0], AttrLLMStreamed)
+		Expect(ok).To(BeTrue())
+		Expect(streamed.AsBool()).To(BeTrue())
+	})
+
+	// A batched call has no first fragment to time. Its flag is present and false rather
+	// than absent, and it says that fisk.llm.http_duration_ms on this span measured the
+	// whole call rather than the time to the response headers.
+	It("should report a batched call as not streamed and time nothing", func() {
+		p, exp := recording()
+
+		chat := chatting(p)
+		chat.Finish(ctx, ChatInfo{Model: "m"}, ChatOutcome{})
+
+		spans := exp.GetSpans()
+		Expect(spans).To(HaveLen(1))
+
+		_, ok := attrOf(spans[0], AttrTimeToFirstToken)
+		Expect(ok).To(BeFalse())
+
+		streamed, ok := attrOf(spans[0], AttrLLMStreamed)
+		Expect(ok).To(BeTrue())
+		Expect(streamed.AsBool()).To(BeFalse())
+	})
+
+	// A streamed call that failed before the model wrote anything. It streamed, so the
+	// flag holds, and there was no first token, so there is no time to it.
+	It("should mark a stream that produced no fragment streamed and time nothing", func() {
+		p, exp := recording()
+
+		chat := chatting(p)
+		chat.Streamed(time.Time{})
+		chat.Finish(ctx, ChatInfo{Model: "m"}, ChatOutcome{Failed: true, Class: ClassProvider})
+
+		spans := exp.GetSpans()
+		Expect(spans).To(HaveLen(1))
+
+		_, ok := attrOf(spans[0], AttrTimeToFirstToken)
+		Expect(ok).To(BeFalse())
+
+		streamed, ok := attrOf(spans[0], AttrLLMStreamed)
+		Expect(ok).To(BeTrue())
+		Expect(streamed.AsBool()).To(BeTrue())
+	})
+
+	It("should survive a call on a span that is recording nothing", func() {
+		var p *Provider
+
+		_, chat := p.StartChat(ctx, ChatInfo{Model: "m"})
+		Expect(func() { chat.Streamed(time.Now()) }).ToNot(Panic())
 	})
 })
 

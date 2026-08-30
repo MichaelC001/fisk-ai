@@ -23,12 +23,18 @@ const (
 	BlockStatus     BlockType = "status"
 	BlockWarning    BlockType = "warning"
 	BlockPrompt     BlockType = "prompt"
+
+	// BlockTextDelta and BlockThinkingDelta carry a fragment of a text block and of a
+	// thinking block. They take the underscore form tool_call and tool_result use,
+	// since blockTypeOf refuses a suffix carrying a dot of its own.
+	BlockTextDelta     BlockType = "text_delta"
+	BlockThinkingDelta BlockType = "thinking_delta"
 )
 
 // BlockContent is the content of a single event block. The concrete types are
 // ThinkingBlock, TextBlock, PromptBlock, WarningBlock, ToolCallBlock,
-// ToolResultBlock, AgentCallBlock, StatusBlock and UnknownBlock, which is what a kind
-// this build does not name decodes to.
+// ToolResultBlock, AgentCallBlock, StatusBlock, TextDeltaBlock, ThinkingDeltaBlock
+// and UnknownBlock, which is what a kind this build does not name decodes to.
 //
 // What kind a block is travels as the protocol id of the event carrying it and is not
 // written into the block, so the content on the wire is the variant's own fields and
@@ -44,6 +50,13 @@ type ThinkingBlock struct {
 	Text      string `json:"text"`
 	Signature string `json:"signature,omitempty"`
 	Provider  string `json:"provider,omitempty"`
+	// Index is TextBlock.Index for a reasoning block: where this block sat in the model
+	// call that produced it, pairing with the ThinkingDeltaBlock values that carried its
+	// fragments.
+	Index int `json:"index,omitempty"`
+	// Trimmed reports that Text was cut to MaxBlockText, on the terms
+	// TextBlock.Trimmed states.
+	Trimmed bool `json:"trimmed,omitempty"`
 }
 
 func (ThinkingBlock) blockType() BlockType { return BlockThinking }
@@ -56,9 +69,84 @@ type TextBlock struct {
 	// caller that renders both shows the answer twice unless it can tell them apart,
 	// and only the run knows which message was terminal.
 	Final bool `json:"final,omitempty"`
+	// Index is where this block sat in the model call that produced it, counted over
+	// every block of that call including the ones that never reach the wire. It pairs
+	// with Iteration on the TextDeltaBlock values that carried this block's fragments,
+	// so a receiver that asked for fragments knows which buffer this block replaces.
+	//
+	// A worker does not send a turn's tool_use and provider blocks, so a receiver
+	// counting the text blocks that arrive gets a different number as soon as a tool
+	// call sits between two of them.
+	//
+	// Omitting it when unset makes zero mean both the first block and a worker that
+	// predates the field, and that costs nothing: a worker too old to set it sends no
+	// fragments, so a receiver has no buffer to key on it.
+	Index int `json:"index,omitempty"`
+	// Trimmed reports that Text was cut to MaxBlockText and the rest of it is only in
+	// the serving worker's run journal.
+	//
+	// A receiver holding fragments of this block needs it: the fragments were never
+	// capped in aggregate, so for a long answer they are the more complete copy and
+	// discarding them for this block would lose text.
+	Trimmed bool `json:"trimmed,omitempty"`
 }
 
 func (TextBlock) blockType() BlockType { return BlockText }
+
+// TextDeltaBlock is one fragment of a TextBlock as the model writes it.
+//
+// A fragment is an addition to the whole block and never a replacement for it. The
+// TextBlock arrives when the model call ends, carrying the same Index, so a receiver
+// that ignores every fragment reads the conversation it reads today. A caller asks for
+// them with Request.Deltas and gets none otherwise.
+//
+// The whole block carries no Iteration. A receiver reconciling one against the
+// fragments it buffered takes the call from the StatusBlock count it has already seen,
+// since the whole blocks of a call arrive before the status block that ends it.
+type TextDeltaBlock struct {
+	// Index is the position of this fragment's block in the model call that produced
+	// it, counted over every block of that call. Fragments of different blocks may
+	// interleave, so a receiver keys its buffer on Index rather than assuming one block
+	// finishes before the next begins.
+	Index int `json:"index"`
+	// Iteration is the model call this fragment came from, 1-based, counted as
+	// StatusBlock counts it.
+	//
+	// Index restarts at 0 on every call while the status block that separates two calls
+	// arrives after the first has ended, so a receiver keying on Index alone would append
+	// the first block of one call to the last block of the one before. A worker that does
+	// not report it sends zero.
+	Iteration int `json:"iteration,omitempty"`
+	// Text is this fragment's text, to be appended to what has already arrived for the
+	// same Iteration and Index. It is empty on a Final fragment with nothing left to
+	// send.
+	Text string `json:"text,omitempty"`
+	// Final marks the last fragment of this block, so a receiver closes the buffer when
+	// the block ends rather than holding its tail until the next fragment or the end of
+	// the run. The end of a block cannot be read off the fragments themselves.
+	Final bool `json:"final,omitempty"`
+}
+
+func (TextDeltaBlock) blockType() BlockType { return BlockTextDelta }
+
+// ThinkingDeltaBlock is one fragment of a ThinkingBlock's reasoning as the model
+// writes it, on the terms TextDeltaBlock states. The signature does not stream: it
+// arrives with the whole block.
+type ThinkingDeltaBlock struct {
+	// Index is the position of this fragment's block in the model call that produced
+	// it, as TextDeltaBlock.Index is.
+	Index int `json:"index"`
+	// Iteration is the model call this fragment came from, 1-based, as
+	// TextDeltaBlock.Iteration is.
+	Iteration int `json:"iteration,omitempty"`
+	// Text is this fragment's reasoning text, to be appended to what has already
+	// arrived for the same Iteration and Index.
+	Text string `json:"text,omitempty"`
+	// Final marks the last fragment of this block, as TextDeltaBlock.Final does.
+	Final bool `json:"final,omitempty"`
+}
+
+func (ThinkingDeltaBlock) blockType() BlockType { return BlockThinkingDelta }
 
 // PromptBlock is a turn somebody asked for: the prompt a conversation opened with,
 // or one added to it later.
@@ -298,6 +386,14 @@ func (b *Block) unmarshalAs(t BlockType, data []byte) error {
 		content = v
 	case BlockPrompt:
 		var v PromptBlock
+		err = json.Unmarshal(data, &v)
+		content = v
+	case BlockTextDelta:
+		var v TextDeltaBlock
+		err = json.Unmarshal(data, &v)
+		content = v
+	case BlockThinkingDelta:
+		var v ThinkingDeltaBlock
 		err = json.Unmarshal(data, &v)
 		content = v
 	default:

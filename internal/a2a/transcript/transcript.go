@@ -258,14 +258,16 @@ func blocksOf(msg llm.Message) []a2a.Block {
 				continue
 			}
 
-			out = append(out, a2a.NewTextBlock(a2a.TrimBlockText(block.Text.Text)))
+			text, cut := a2a.TrimmedBlockText(block.Text.Text)
+			out = append(out, a2a.NewBlock(a2a.TextBlock{Text: text, Trimmed: cut}))
 
 		case block.Thinking != nil:
 			if block.Thinking.Text == "" {
 				continue
 			}
 
-			out = append(out, a2a.NewBlock(a2a.ThinkingBlock{Text: a2a.TrimBlockText(block.Thinking.Text)}))
+			text, cut := a2a.TrimmedBlockText(block.Thinking.Text)
+			out = append(out, a2a.NewBlock(a2a.ThinkingBlock{Text: text, Trimmed: cut}))
 
 		case block.ToolUse != nil:
 			out = append(out, a2a.NewToolCallBlock(block.ToolUse.ID, block.ToolUse.Name, objectInput(block.ToolUse.Input)))
