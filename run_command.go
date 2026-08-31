@@ -270,7 +270,7 @@ func loadRunConfig(remote bool) (*config.Config, error) {
 // was started.
 func clientConfig() (*config.Config, error) {
 	if runIdentity != "" && !setConfigFile {
-		return config.NewConfig(), nil
+		return config.NewConfig()
 	}
 
 	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)

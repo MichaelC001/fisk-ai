@@ -80,7 +80,7 @@ type Config struct {
 	// Identity is the name used in discovery; it doubles as a queue group so
 	// multiple agents sharing an identity share the work. Optional if MCP.
 	Identity string `json:"identity" yaml:"identity"`
-	// identityDerived records that prepare filled Identity from the application's
+	// identityDerived records that Prepare filled Identity from the application's
 	// basename or the default rather than from this field.
 	//
 	// It is kept because the two are not interchangeable wherever the identity is an
@@ -88,10 +88,16 @@ type Config struct {
 	// behavior comes from the directory it runs in gives a fleet of unrelated agents
 	// the same one, so they would register under it together.
 	//
-	// It records the deriving rather than the naming so that a Config built in code,
-	// which never passes through prepare, reads as named when it carries a name. Read
-	// it through IdentityIsNamed.
+	// It records the deriving rather than the naming, so a Config reads as named
+	// whether its Identity came from the file, from ApplyIdentity or from a caller
+	// setting the field. Read it through IdentityIsNamed.
 	identityDerived bool
+	// identityValueDerived is the value Prepare last wrote to Identity. Prepare
+	// re-derives while Identity still holds it, so an application path set after
+	// NewConfig takes effect. A caller who assigns Identity leaves the two different,
+	// which is how Prepare tells an assignment from its own earlier write and stops
+	// treating the identity as derived.
+	identityValueDerived string
 	// ApplicationPath is the app to run and introspect for tools.
 	ApplicationPath string `json:"application_path" yaml:"application_path"`
 	// NatsContext is the name of a NATS context (as managed by `nats context`
@@ -269,7 +275,7 @@ type HarnessConfig struct {
 	// is never bounded, since the bound would cancel the question rather than a
 	// runaway.
 	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
-	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
+	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by Prepare().
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 	// NoTUI disables the full-screen terminal UI for this agent, always using the
 	// line-by-line output even on an interactive terminal. It is a hard off switch
@@ -397,7 +403,7 @@ func (c *Config) ApplyStateDir(dir string) error {
 
 // ApplyIdentity folds an operator-supplied identity into a parsed config, so a name
 // typed at the command line wins over the file's. An empty name is a no-op, leaving
-// whatever the file set or prepare derived.
+// whatever the file set or Prepare derived.
 //
 // The name is validated as a NATS subject token, since the identity is the subject an
 // agent answers on, and it is recorded as chosen rather than derived, which is what
@@ -414,6 +420,7 @@ func (c *Config) ApplyIdentity(name string) error {
 
 	c.Identity = name
 	c.identityDerived = false
+	c.identityValueDerived = ""
 
 	return nil
 }
@@ -475,8 +482,8 @@ type RAGCitationRule struct {
 	// pattern captures. That is what catches $1x on a rule with one group: Go reads it
 	// as a reference to a group named "1x" and expands it to nothing, with no error.
 	Replace string `json:"replace" yaml:"replace"`
-	// PatternCompiled is the compiled form of Pattern, filled by prepare(). It is nil
-	// on a Config built as a struct literal rather than parsed, and a rule carrying no
+	// PatternCompiled is the compiled form of Pattern, filled by Prepare(). It is nil
+	// on a Config built as a struct literal until Prepare runs, and a rule carrying no
 	// compiled pattern matches nothing: the renderer skips it and tries the next rule.
 	PatternCompiled *regexp.Regexp `json:"-" yaml:"-"`
 }
@@ -886,7 +893,7 @@ type ExposedMCPConfig struct {
 	// llm.budget.call_timeout, which bounds a different unit of work. Unset uses the
 	// server default.
 	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
-	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
+	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by Prepare().
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 }
 
@@ -919,7 +926,7 @@ type ExposedA2AConfig struct {
 	// 60s). Named tool_timeout to avoid colliding with llm.budget.call_timeout. Unset
 	// uses the server default.
 	ToolTimeoutString string `json:"tool_timeout,omitempty" yaml:"tool_timeout,omitempty"`
-	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by prepare().
+	// ToolTimeoutParsed is the parsed form of ToolTimeoutString, filled by Prepare().
 	ToolTimeoutParsed time.Duration `json:"-" yaml:"-"`
 	// RequestTimeoutString bounds a request this agent sends to a peer, as a duration
 	// string (e.g. 30s), where tool_timeout bounds a call this agent answers. An agent
@@ -944,7 +951,7 @@ type ExposedA2AConfig struct {
 	// configuration here reaches.
 	RequestTimeoutString string `json:"request_timeout,omitempty" yaml:"request_timeout,omitempty"`
 	// RequestTimeoutParsed is the parsed form of RequestTimeoutString, filled by
-	// prepare(). Read it through Config.A2ARequestTimeout, which supplies the default
+	// Prepare(). Read it through Config.A2ARequestTimeout, which supplies the default
 	// for an unset key and for a configuration with no a2a block at all.
 	RequestTimeoutParsed time.Duration `json:"-" yaml:"-"`
 }
@@ -1069,9 +1076,9 @@ type ExposedSlackConfig struct {
 	// thread until it is answered or dismissed, which is the point of deferring rather
 	// than waiting.
 	AnswerGraceString string `json:"answer_grace,omitempty" yaml:"answer_grace,omitempty"`
-	// AnswerGraceParsed is the parsed form of AnswerGraceString, filled by prepare().
+	// AnswerGraceParsed is the parsed form of AnswerGraceString, filled by Prepare().
 	// Read it through Config.SlackAnswerGrace, which supplies the default for an unset
-	// key and for a configuration prepare() never ran over.
+	// key and for a configuration Prepare() never ran over.
 	AnswerGraceParsed time.Duration `json:"-" yaml:"-"`
 
 	// MaxWaiting is how many admitted turns may wait for a worker before a further
@@ -1233,7 +1240,7 @@ type MCPServer struct {
 	// call to a tool imported from this server is limited by harness.tool_timeout, like
 	// every other tool, so one number says how long any tool may take.
 	TimeoutString string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	// TimeoutParsed is the parsed form of TimeoutString, filled by prepare().
+	// TimeoutParsed is the parsed form of TimeoutString, filled by Prepare().
 	TimeoutParsed time.Duration `yaml:"-" json:"-"`
 }
 
@@ -1561,13 +1568,17 @@ const (
 	ModeServe
 )
 
-// NewConfig returns a Config with default budgets applied.
-func NewConfig() *Config {
+// NewConfig returns a Config with default budgets applied. Set fields on it and call
+// Prepare again to derive the fields that depend on them.
+func NewConfig() (*Config, error) {
 	cfg := &Config{}
 
-	cfg.prepare()
+	err := cfg.Prepare()
+	if err != nil {
+		return nil, err
+	}
 
-	return cfg
+	return cfg, nil
 }
 
 // ParseConfigFile reads the YAML config at path and parses it for agent mode.
@@ -1603,7 +1614,7 @@ func ParseConfigForMode(data []byte, mode Mode) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	if err := cfg.prepare(); err != nil {
+	if err := cfg.Prepare(); err != nil {
 		return nil, err
 	}
 
@@ -1640,7 +1651,7 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	}
 
 	// global_flags names flags on the wrapped application, so it has nothing to
-	// attach to without one. GlobalFlags is normalized by prepare, so an empty
+	// attach to without one. GlobalFlags is normalized by Prepare, so an empty
 	// slice here means no usable flag was configured.
 	if len(cfg.GlobalFlags) > 0 && cfg.ApplicationPath == "" {
 		return fmt.Errorf("global_flags is set but application_path is not: global flags are the wrapped application's own globals and have nothing to attach to without an application; remove global_flags or set application_path")
@@ -2074,7 +2085,7 @@ func (c *Config) RAGVectorEnabled() bool {
 }
 
 // RAGCitationRules returns the ordered citation rewrite rules set in
-// harness.knowledge.citations, compiled and validated by prepare. It is nil when
+// harness.knowledge.citations, compiled and validated by Prepare. It is nil when
 // none are set.
 //
 // A rule reaching here with no compiled pattern, which is what a Config assembled
@@ -2202,7 +2213,7 @@ func (c *Config) TelemetryCaptureMaxBytes() int {
 
 // ConfirmTags returns the extra confirmation gate tags configured under the
 // harness block, additive to the always-on ai:confirm tag. It is nil when none
-// are set; prepare normalizes the stored slice (trim, de-duplicate, drop empties).
+// are set; Prepare normalizes the stored slice (trim, de-duplicate, drop empties).
 func (c *Config) ConfirmTags() []string {
 	return c.Harness.ConfirmTags
 }
@@ -2370,7 +2381,7 @@ func (c *Config) MCPInstructions() string {
 }
 
 // ConfirmOverMCPMode returns the configured confirm-over-MCP policy from
-// expose.agent.mcp, defaulting to auto when no MCP block or value is set. prepare
+// expose.agent.mcp, defaulting to auto when no MCP block or value is set. Prepare
 // normalizes and validates the stored value, so this returns one of the three
 // known policies.
 func (c *Config) ConfirmOverMCPMode() string {
@@ -2382,7 +2393,7 @@ func (c *Config) ConfirmOverMCPMode() string {
 }
 
 // PIIMode returns the configured PII mode, defaulting to redact when no block or
-// value is set. prepare normalizes and validates the stored value, so this returns one
+// value is set. Prepare normalizes and validates the stored value, so this returns one
 // of the three known modes.
 func (c *Config) PIIMode() string {
 	if c.Harness.PII == nil || c.Harness.PII.Mode == "" {
@@ -2571,10 +2582,10 @@ func (c *Config) SlackProgressEnabled() bool {
 // SlackAnswerGrace returns how long a question is held while the run that asked it is
 // still loaded, from expose.agent.slack.answer_grace.
 //
-// It never returns zero, and the default lives here rather than only in prepare(),
-// which never runs for a Config an embedder built in process. A zero grace would defer
-// every question the instant it was asked, paying a resume for an answer somebody was
-// about to give.
+// It never returns zero, and the default is applied here rather than only in Prepare(),
+// which an embedder building a Config in process may not have called yet. A zero grace
+// would defer every question the instant it was asked, paying a resume for an answer
+// somebody was about to give.
 func (c *Config) SlackAnswerGrace() time.Duration {
 	if !c.SlackEnabled() || c.Expose.Agent.Slack.AnswerGraceParsed <= 0 {
 		return defaultSlackAnswerGrace
@@ -2604,7 +2615,7 @@ func (c *Config) SlackMaxCoalesced() int {
 }
 
 // MCPBuiltins returns the built-in tools opted in to MCP exposure via
-// expose.agent.mcp.builtins, normalized and validated by prepare. It is nil when
+// expose.agent.mcp.builtins, normalized and validated by Prepare. It is nil when
 // none are set.
 func (c *Config) MCPBuiltins() []string {
 	if c.Expose == nil || c.Expose.Agent == nil || c.Expose.Agent.MCP == nil {
@@ -2629,15 +2640,36 @@ func (c *Config) MCPExposesKnowledge() bool {
 	return false
 }
 
-// prepare fills in default budgets and parses all duration strings.
-func (c *Config) prepare() error {
-	if c.Identity == "" {
-		c.identityDerived = true
+// Prepare fills in default budgets, derives Identity, normalizes the tag, flag and
+// built-in lists, parses every duration string into its Parsed field and compiles
+// every citation rule's Pattern into PatternCompiled.
+//
+// ParseConfig, ParseConfigFile and their ForMode variants call it, so a config
+// loaded from YAML is already prepared. A config assembled in Go must have Prepare
+// called after the last field is set: until then a *String duration leaves its
+// *Parsed counterpart at zero and a citation rule leaves PatternCompiled nil, which
+// matches no document path.
+//
+// Calling it twice is safe. It reads each source field and overwrites the derived
+// one, and every default it applies is already set on the second pass. An Identity
+// still holding the value an earlier Prepare derived is derived again, so setting
+// ApplicationPath after NewConfig and calling Prepare gives the basename rather than
+// the default. An Identity from the file, from ApplyIdentity or assigned to the field
+// is kept, and assigning over a derived one makes IdentityIsNamed report true.
+func (c *Config) Prepare() error {
+	switch {
+	case c.Identity == "" || (c.identityDerived && c.Identity == c.identityValueDerived):
+		derived := defaultIdentity
 		if c.ApplicationPath != "" {
-			c.Identity = filepath.Base(c.ApplicationPath)
-		} else {
-			c.Identity = defaultIdentity
+			derived = filepath.Base(c.ApplicationPath)
 		}
+		c.Identity = derived
+		c.identityValueDerived = derived
+		c.identityDerived = true
+
+	case c.identityDerived:
+		c.identityDerived = false
+		c.identityValueDerived = ""
 	}
 
 	c.Harness.ConfirmTags = normalizeTags(c.Harness.ConfirmTags)
@@ -2756,7 +2788,7 @@ func (c *Config) prepare() error {
 
 // prepareRAGCitations compiles each citation rule's pattern and checks its
 // replacement against that pattern's groups, filling PatternCompiled in place. It
-// runs from prepare, whose error ParseConfigForMode surfaces, so a bad rule fails
+// runs from Prepare, whose error ParseConfigForMode surfaces, so a bad rule fails
 // the config load rather than the first citation rendered.
 //
 // Every reference the replacement makes must resolve, because Expand renders an
@@ -3029,7 +3061,7 @@ func (c *Config) AppToolFiltersConfigured() bool {
 }
 
 // GlobalFlagNames returns the configured allowlist of application global flag
-// names to expose to the model. prepare normalizes the stored slice (trim, strip
+// names to expose to the model. Prepare normalizes the stored slice (trim, strip
 // leading dashes, de-duplicate, drop empties). It is nil when none are set.
 func (c *Config) GlobalFlagNames() []string {
 	return c.GlobalFlags

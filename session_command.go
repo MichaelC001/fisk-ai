@@ -35,17 +35,17 @@ func openSessionStore() (runstate.Store, func(), error) {
 	noop := func() {}
 
 	var cfg *config.Config
+	var err error
 	if sessionConfigFile == "" {
-		cfg = config.NewConfig()
+		cfg, err = config.NewConfig()
 	} else {
-		var err error
 		cfg, err = config.ParseConfigFileForMode(sessionConfigFile, config.ModeMCP)
-		if err != nil {
-			return nil, noop, err
-		}
+	}
+	if err != nil {
+		return nil, noop, err
 	}
 
-	err := cfg.ApplyStateDir(stateDirFlag)
+	err = cfg.ApplyStateDir(stateDirFlag)
 	if err != nil {
 		return nil, noop, err
 	}

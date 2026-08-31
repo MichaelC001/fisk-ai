@@ -29,7 +29,7 @@ var _ = Describe("Remote tools and server mode", func() {
 				SystemPrompt:    "do things",
 			}
 			cfg.LLM.Model = ModelClaudeSonnet46
-			Expect(cfg.prepare()).To(Succeed())
+			Expect(cfg.Prepare()).To(Succeed())
 
 			return cfg
 		}
