@@ -67,11 +67,17 @@ type Embedder interface {
 	EmbedDocuments(ctx context.Context, docs []Document) ([][]float32, error)
 }
 
-// Document is a chunk to embed: its heading fills the document prefix's {title}
-// placeholder, and text is the chunk body.
+// Document is one chunk handed to EmbedDocuments.
 type Document struct {
+	// Title is the chunk's heading breadcrumb, which fills the {title} placeholder in
+	// the configured document prefix. It is empty for a chunk that sits under no
+	// heading, and the built-in embedder sends "none" in its place.
 	Title string
-	Text  string
+
+	// Text is the chunk body alone, carrying no heading and no prefix. It must be
+	// non-empty and valid UTF-8; the built-in embedder rejects a batch that holds
+	// anything else.
+	Text string
 }
 
 // buildEmbedder constructs the embedder for cfg, or returns nil when the vector

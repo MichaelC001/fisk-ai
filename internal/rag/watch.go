@@ -172,7 +172,7 @@ func (w *Watcher) resolveRoots() ([]string, error) {
 // initialIndex runs the startup pass: a first-build estimate when relevant, then a
 // full incremental index reconciling deletions over the configured corpus.
 func (w *Watcher) initialIndex(ctx context.Context) error {
-	store, err := OpenWriter(w.cfg, w.baseDir)
+	store, err := OpenWriter(w.cfg, w.baseDir, Options{})
 	if err != nil {
 		return err
 	}
@@ -415,7 +415,7 @@ func (w *Watcher) handleEvent(ev fsnotify.Event, pending, deletes map[string]boo
 // only for the pass. Deletions are stat-guarded so an editor's atomic save (a
 // transient rename that Index has already re-added) does not drop a live file.
 func (w *Watcher) indexOnce(ctx context.Context, delKeys []string) indexResult {
-	store, err := OpenWriter(w.cfg, w.baseDir)
+	store, err := OpenWriter(w.cfg, w.baseDir, Options{})
 	if err != nil {
 		return indexResult{err: err}
 	}

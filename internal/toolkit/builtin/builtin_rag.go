@@ -82,7 +82,7 @@ func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writ
 
 	// Served over MCP there is no per-run store base; the index resolves against the
 	// process working directory, or an absolute configured knowledge directory.
-	store, err := rag.Open(cfg, "")
+	store, err := rag.Open(cfg, "", rag.Options{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot expose knowledge over MCP: %w", err)
 	}

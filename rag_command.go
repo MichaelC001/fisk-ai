@@ -144,7 +144,7 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 		return fmt.Errorf("no paths given and knowledge.paths is empty - pass a path or set knowledge.paths")
 	}
 
-	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -271,7 +271,7 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -370,7 +370,7 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -410,7 +410,7 @@ func knowledgeRmAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -457,7 +457,7 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	// An index from another format generation cannot be opened, so its rows can be
 	// neither counted nor cleared, and discarding the file is the whole of the fix.
 	// Reset is the command that does that, so it answers for itself here rather than
@@ -526,7 +526,7 @@ func knowledgeRebuildAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -567,7 +567,7 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -668,7 +668,7 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 	// An index doctor cannot open is exactly what the operator ran doctor to learn
 	// about, so a stale format or a mismatched embedding identity is reported as a
 	// failed check carrying its own fix rather than returned as a bare error.
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		c.Item("Store readable", columns.Style(fmt.Sprintf("[%s] %v", doctorMark(rag.DoctorFail), err)))
 		return fmt.Errorf("knowledge doctor found problems that must be fixed")
@@ -726,7 +726,7 @@ func knowledgeStatsAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}

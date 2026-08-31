@@ -1089,7 +1089,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// to start. The store is opened read-only; knowledge index is the writer.
 		ragStore = opts.RAGStore
 		if ragStore == nil {
-			ragStore, err = rag.Open(cfg, opts.StoreDir)
+			ragStore, err = rag.Open(cfg, opts.StoreDir, rag.Options{})
 			if err != nil {
 				return res, err
 			}

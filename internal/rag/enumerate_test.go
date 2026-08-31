@@ -64,13 +64,13 @@ var _ = Describe("Enumerate", func() {
 	// reader indexes the fixture and returns a read-only store, which is how both
 	// the CLI and the agent reach this path.
 	reader := func() *Store {
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
 		w.Close()
 
-		r, err := Open(cfg, "")
+		r, err := Open(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(r.Close)
 
@@ -252,7 +252,7 @@ var _ = Describe("Enumerate", func() {
 
 	Describe("the states that are not failures", func() {
 		It("reports an unbuilt index rather than panicking on a nil handle", func() {
-			r, err := Open(lexicalConfig(filepath.Join(GinkgoT().TempDir(), "absent")), "")
+			r, err := Open(lexicalConfig(filepath.Join(GinkgoT().TempDir(), "absent")), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -262,11 +262,11 @@ var _ = Describe("Enumerate", func() {
 		})
 
 		It("distinguishes an empty corpus from an empty result", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			w.Close()
 
-			r, err := Open(cfg, "")
+			r, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -313,13 +313,13 @@ var _ = Describe("Related forms", func() {
 		writeDoc(docsD, "b.md", "# B\n\nThe deprecation is announced early.\n")
 		writeDoc(docsD, "c.md", "# C\n\nWe deprecate interfaces slowly.\n")
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
 		w.Close()
 
-		r, err := Open(cfg, "")
+		r, err := Open(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer r.Close()
 
@@ -339,13 +339,13 @@ var _ = Describe("Related forms", func() {
 		cfg := lexicalConfig(filepath.Join(tmp, "knowledge"))
 		writeDoc(docsD, "a.md", "# A\n\nThis interface is deprecated.\n")
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
 		w.Close()
 
-		r, err := Open(cfg, "")
+		r, err := Open(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer r.Close()
 

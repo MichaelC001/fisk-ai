@@ -308,7 +308,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(os.WriteFile(filepath.Join(docs, "shard.md"), []byte("# Sharding\n\nKeys are hashed to shards for horizontal scale.\n"), 0o644)).To(Succeed())
 			Expect(os.WriteFile(filepath.Join(docs, "retire.md"), []byte("# Retirement\n\nThe old endpoint is deprecated and will be removed.\n"), 0o644)).To(Succeed())
 
-			w, err := rag.OpenWriter(cfg, "")
+			w, err := rag.OpenWriter(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			_, err = w.Index(ctx, []string{docs}, rag.IndexOptions{Reconcile: true})
 			Expect(err).ToNot(HaveOccurred())
@@ -325,7 +325,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 				Expect(os.WriteFile(filepath.Join(docs, fmt.Sprintf("policy-%02d.md", i)), []byte(body), 0o644)).To(Succeed())
 			}
 
-			w, err := rag.OpenWriter(cfg, "")
+			w, err := rag.OpenWriter(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			_, err = w.Index(ctx, []string{docs}, rag.IndexOptions{Reconcile: true})
 			Expect(err).ToNot(HaveOccurred())
@@ -335,7 +335,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 		call := func(query string) knowledgeEnumerateOutcome {
 			GinkgoHelper()
 
-			store, err := rag.Open(cfg, "")
+			store, err := rag.Open(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(store.Close)
 			tools = RAGTools(cfg, store)
@@ -502,7 +502,7 @@ var _ = Describe("knowledge_enumerate tool", func() {
 		It("refuses a boolean query with a fix the model can act on", func() {
 			buildIndex()
 
-			store, err := rag.Open(cfg, "")
+			store, err := rag.Open(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(store.Close)
 

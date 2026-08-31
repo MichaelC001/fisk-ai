@@ -220,7 +220,7 @@ var _ = Describe("knowledge_search tool", func() {
 			Expect(os.MkdirAll(docs, 0o755)).To(Succeed())
 			Expect(os.WriteFile(filepath.Join(docs, "note.md"), []byte("# Sharding\n\nKeys are hashed to shards for horizontal scale.\n"), 0o644)).To(Succeed())
 
-			w, err := rag.OpenWriter(cfg, "")
+			w, err := rag.OpenWriter(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			_, err = w.Index(ctx, []string{docs}, rag.IndexOptions{Reconcile: true})
 			Expect(err).ToNot(HaveOccurred())
@@ -228,7 +228,7 @@ var _ = Describe("knowledge_search tool", func() {
 		}
 
 		open := func() {
-			store, err := rag.Open(cfg, "")
+			store, err := rag.Open(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(store.Close)
 			tools = RAGTools(cfg, store)

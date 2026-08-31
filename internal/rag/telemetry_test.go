@@ -143,7 +143,7 @@ var _ = Describe("Knowledge telemetry", func() {
 	})
 
 	indexLexical := func() {
-		w, err := OpenWriter(lexicalConfig(storeD), "")
+		w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer w.Close()
 		_, err = w.Index(context.Background(), []string{docsD}, IndexOptions{Reconcile: true})
@@ -158,7 +158,7 @@ var _ = Describe("Knowledge telemetry", func() {
 	}
 
 	hybridReader := func(model string, emb Embedder) *Store {
-		r, err := Open(vectorConfig(storeD, model), "")
+		r, err := Open(vectorConfig(storeD, model), "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		r.emb = emb
 
@@ -169,7 +169,7 @@ var _ = Describe("Knowledge telemetry", func() {
 		It("reports an index that was never built, with no corpus size and no tier that ran", func() {
 			ctx, exp, _ := ragRecorder()
 
-			r, err := Open(lexicalConfig(storeD), "")
+			r, err := Open(lexicalConfig(storeD), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -202,7 +202,7 @@ var _ = Describe("Knowledge telemetry", func() {
 			indexLexical()
 			ctx, exp, _ := ragRecorder()
 
-			r, err := Open(lexicalConfig(storeD), "")
+			r, err := Open(lexicalConfig(storeD), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -378,7 +378,7 @@ var _ = Describe("Knowledge telemetry", func() {
 
 	Describe("the enumerate span", func() {
 		enumerate := func(ctx context.Context, query string, opts EnumerateOptions) (*EnumerateResult, error) {
-			r, err := Open(lexicalConfig(storeD), "")
+			r, err := Open(lexicalConfig(storeD), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(r.Close)
 

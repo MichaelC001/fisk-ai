@@ -323,13 +323,13 @@ var _ = Describe("Store citation rendering", func() {
 	reader := func(readCfg *config.Config) *Store {
 		GinkgoHelper()
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
 		w.Close()
 
-		r, err := Open(readCfg, "")
+		r, err := Open(readCfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(r.Close)
 

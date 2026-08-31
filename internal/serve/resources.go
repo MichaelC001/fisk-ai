@@ -285,7 +285,7 @@ func (r *Resources) openKnowledge(cfg *config.Config, storeDir string, log *slog
 		return nil
 	}
 
-	store, err := rag.Open(cfg, storeDir)
+	store, err := rag.Open(cfg, storeDir, rag.Options{})
 	if err != nil {
 		return fmt.Errorf("opening the knowledge index: %w", err)
 	}

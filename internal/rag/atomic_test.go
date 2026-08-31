@@ -67,7 +67,7 @@ var _ = Describe("Schema changes are atomic", func() {
 		// Ctrl-C between any two of them left a schema that was neither the old one nor
 		// the new one, and every later open refused it.
 		It("leaves the index whole when its transaction rolls back", func() {
-			w, err := OpenWriter(lexicalConfig(storeD), "")
+			w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 
@@ -84,7 +84,7 @@ var _ = Describe("Schema changes are atomic", func() {
 		})
 
 		It("empties the index when its transaction commits", func() {
-			w, err := OpenWriter(lexicalConfig(storeD), "")
+			w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 
@@ -105,7 +105,7 @@ var _ = Describe("Schema changes are atomic", func() {
 
 	Describe("a canceled reset", func() {
 		It("leaves the index it was clearing", func() {
-			w, err := OpenWriter(lexicalConfig(storeD), "")
+			w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 

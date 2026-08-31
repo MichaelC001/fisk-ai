@@ -1394,7 +1394,7 @@ var _ = Describe("Agent telemetry", func() {
 		cfg := agenttest.Config(GinkgoTB(), app)
 		cfg.Harness.RAG = &config.RAGConfig{Enabled: true, Directory: filepath.Join(GinkgoT().TempDir(), "kb"), Paths: []string{corpus}}
 
-		writer, err := rag.OpenWriter(cfg, "")
+		writer, err := rag.OpenWriter(cfg, "", rag.Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = writer.Index(ctx, []string{corpus}, rag.IndexOptions{})
 		Expect(err).ToNot(HaveOccurred())

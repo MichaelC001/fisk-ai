@@ -122,7 +122,7 @@ func runKnowledgeMatch(pc *fisk.ParseContext) (int, error) {
 		return 0, err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return 0, err
 	}
