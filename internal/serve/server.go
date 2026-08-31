@@ -27,6 +27,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 const (
@@ -145,6 +146,28 @@ type Options struct {
 	// it nil builds one per run from the configuration, which is correct but gives a
 	// long-lived process no connection reuse.
 	Provider llm.Provider
+
+	// CustomTools are Go tools every run this server hosts can call, handed to each run
+	// as agent.Options.CustomTools. They are trusted in-process code with the agent's
+	// own privileges: there is no sandbox, and a panic in one aborts that run as an
+	// *agent.PanicError, which the outcome reports as a crash.
+	//
+	// Every run shares one tool, and runs execute concurrently, so a handler must be
+	// safe for concurrent use, as a Provider must. See agent.Options.CustomTools for
+	// the naming rules, the rendering, and why a tool's Definition has to be the same
+	// after a restart.
+	CustomTools []toolkit.Tool
+
+	// Hooks are Go callbacks every run this server hosts invokes at fixed points in its
+	// loop, where the calling program observes a run, denies or rewrites a single tool
+	// call, and stops a run from its own code. A nil field does not fire. A hook is
+	// trusted in-process code with the agent's own privileges, and a panic in one aborts
+	// that run as an *agent.PanicError. RunEnd is the exception: it fires once the
+	// outcome is decided, so a panic there is reported as a warning.
+	//
+	// One set serves every run, and runs execute concurrently, so a hook is called from
+	// several goroutines at once. See agent.Hooks for the full contract.
+	Hooks agent.Hooks
 
 	// Conns, RAGStore, MemoryStore, SessionStore, A2ATransport and MCPSessions are
 	// shared across every run. Each must be safe for concurrent use and is owned by the
@@ -666,6 +689,8 @@ func (s *Server) runOptions(work *Work) agent.Options {
 		SuspendRequested: work.SuspendRequested,
 		HumanPaced:       work.HumanPaced,
 		Provider:         s.opts.Provider,
+		CustomTools:      s.opts.CustomTools,
+		Hooks:            s.opts.Hooks,
 		ToolWorkDir:      s.opts.WorkDir,
 		StoreDir:         s.opts.StoreDir,
 		Conns:            s.opts.Conns,
