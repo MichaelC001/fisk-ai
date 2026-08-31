@@ -128,7 +128,7 @@ func (t *task) suspendRequested() bool { return t.stopped() || t.ch.draining() }
 // there is no reply set to end. Every refusal after it is an ack that says no followed
 // by a terminal message, because the ack does not close the set and a caller holding
 // only a refusing ack would wait for a terminal message to its own deadline.
-func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, reply a2a.Replier) {
+func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, reply a2a.Replier) {
 	req, err := c.intake(body)
 	if err != nil {
 		c.log.Warn("Refusing a prompt", "error", err, "caller", caller.Name, "caller_verified", caller.Verified)
@@ -179,7 +179,7 @@ func (c *Channel) handle(_ context.Context, caller a2a.Caller, body []byte, repl
 	// admitted against the worker count. It is what a client opens a resumed
 	// conversation with, before there is anything to send.
 	if t.reads() {
-		c.serveRead(t)
+		c.serveRead(ctx, t)
 
 		return
 	}
@@ -265,7 +265,7 @@ func (t *task) reads() bool {
 // run to do. Nothing is admitted, so a read is answered while a turn of the same
 // conversation is in flight, which is what a person opening a second terminal on a
 // conversation expects and what a client needs when its own turn is already running.
-func (c *Channel) serveRead(t *task) {
+func (c *Channel) serveRead(ctx context.Context, t *task) {
 	if c.sessions == nil {
 		t.log.Warn("Refusing to read a conversation back", "reason", "this worker holds no session store")
 		t.refuse(codeRejected, "this worker cannot read a stored conversation back")
@@ -285,7 +285,7 @@ func (c *Channel) serveRead(t *task) {
 		return
 	}
 
-	rs, err := c.sessions.Load(t.session)
+	rs, err := c.sessions.Load(ctx, t.session)
 	if err != nil {
 		if errors.Is(err, runstate.ErrNotFound) || errors.Is(err, runstate.ErrInvalidID) {
 			// The same ending a follow-up gets for the same cause, and for the same

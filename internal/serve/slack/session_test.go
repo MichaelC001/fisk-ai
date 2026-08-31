@@ -5,6 +5,7 @@
 package slack
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -59,7 +60,7 @@ var _ = Describe("held", func() {
 	})
 
 	It("Should report a thread nobody has answered as not held", func() {
-		held, err := ch.held(SessionFor("test.agent", "T1", "C1", "1700000000.000100"))
+		held, err := ch.held(context.Background(), SessionFor("test.agent", "T1", "C1", "1700000000.000100"))
 		Expect(err).ToNot(HaveOccurred())
 		Expect(held).To(BeFalse())
 	})
@@ -67,11 +68,11 @@ var _ = Describe("held", func() {
 	It("Should report a thread with a journal as held", func() {
 		id := SessionFor("test.agent", "T1", "C1", "1700000000.000100")
 
-		j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id})
+		j, err := store.Create(context.Background(), id, runstate.MetaRecord{Version: runstate.Version, RunID: id})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
-		held, err := ch.held(id)
+		held, err := ch.held(context.Background(), id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(held).To(BeTrue())
 	})
@@ -84,7 +85,7 @@ var _ = Describe("held", func() {
 
 		broken := newTestChannel(opts, newFakeAPI(), newFakeSocket())
 
-		_, err := broken.held("s-whatever")
+		_, err := broken.held(context.Background(), "s-whatever")
 		Expect(err).To(MatchError(ContainSubstring("the store is unreachable")))
 	})
 })
@@ -123,7 +124,9 @@ type failingStore struct {
 	err error
 }
 
-func (f *failingStore) Load(string) (*runstate.RunState, error) { return nil, f.err }
+func (f *failingStore) Load(context.Context, string) (*runstate.RunState, error) {
+	return nil, f.err
+}
 
 var _ = Describe("seen", func() {
 	It("Should take a message once and refuse it afterwards", func() {

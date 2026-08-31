@@ -124,7 +124,7 @@ var _ = Describe("deferred tool results", func() {
 
 		// The answer arrives from outside the run, as a ticket system or an operator
 		// would supply it.
-		Expect(runstate.SupplyToolResult(store, res1.SessionID, useID, `{"approved":true}`, false)).To(Succeed())
+		Expect(runstate.SupplyToolResult(context.Background(), store, res1.SessionID, useID, `{"approved":true}`, false)).To(Succeed())
 
 		// Run 3: the answer is folded in, the turn completes, and the tool is still not
 		// dispatched again.

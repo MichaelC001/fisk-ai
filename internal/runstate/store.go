@@ -5,6 +5,7 @@
 package runstate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,16 +57,32 @@ type RunInfo struct {
 // Journal is an append-only record log for a single run. Append is idempotent on
 // a duplicate seq so a crash-retry of the most recent event is a no-op. A Journal
 // is not safe for concurrent use; the Store guards each run with a lock.
+//
+// Cancellation contract. Every method that can block on I/O takes a context, and a
+// backend that cannot reach its storage in time fails that call. A failed call leaves
+// the journal open and its lock held, so a caller may retry with a fresh context.
+//
+// No backend writes a record in pieces, so a canceled Append cannot leave a torn record
+// behind. It can leave a complete one. The
+// JetStream backend publishes a record and waits for the acknowledgement, and a context
+// that expires between those two returns an error over a record that is already stored;
+// appending the same seq again adopts that record rather than writing a second one, and
+// LastSeq still reports the seq before it. The file backend writes and fsyncs the line
+// without consulting the context again, so an Append it starts either lands or fails on
+// its own terms.
 type Journal interface {
 	// Append writes rec at seq. A seq equal to or below the last written seq is
 	// treated as an already-recorded duplicate and ignored; a seq more than one
 	// beyond the last is an ErrSeqGap.
-	Append(seq uint64, rec Record) error
+	Append(ctx context.Context, seq uint64, rec Record) error
 	// Records returns every record in order, dropping an unparsable final line
 	// (a torn tail from a crash mid-write) but erroring on interior corruption.
-	Records() ([]Record, error)
+	Records(ctx context.Context) ([]Record, error)
 	// LastSeq returns the highest seq written, so a resuming writer continues the
 	// sequence rather than colliding with existing records.
+	//
+	// It takes no context because it reads what this journal has durably stored,
+	// which every backend advances in memory after an acknowledged write.
 	LastSeq() uint64
 	// CheckHeld reports whether this journal still holds its run, returning
 	// ErrLocked when another writer has taken it over.
@@ -77,9 +94,13 @@ type Journal interface {
 	//
 	// It is a point-in-time answer and a backend may have to ask the network for it.
 	// A nil return means no other writer had taken the run as of this call, never
-	// that none can before the next one.
-	CheckHeld() error
+	// that none can before the next one. An error that is not ErrLocked means the
+	// question could not be answered, which is not evidence that the run was lost.
+	CheckHeld(ctx context.Context) error
 	// Close releases the journal and its lock.
+	//
+	// It takes no context: a release a caller could cancel would strand the lock and
+	// whatever handle the backend holds, so Close runs to completion.
 	Close() error
 }
 
@@ -108,24 +129,43 @@ type Info struct {
 // journal, and the jetstream implementation puts each record on its own subject
 // (<prefix>.<run>.<seq>, MaxMsgsPerSubject=1 with discard-new-per-subject for an
 // unbounded dedup window).
+//
+// Cancellation contract. Every method that reaches storage takes a context, and the
+// caller's deadline governs the call: a backend applies a timeout of its own only when
+// the context carries no deadline. Load, List and Delete are all-or-nothing. A canceled
+// Load or List returns no partial result, and a canceled Delete has either removed the
+// whole run or not started.
+//
+// Create is not. It takes the id before it writes the meta record, so a cancellation
+// between those two returns an error and no journal over an id that is now taken: a
+// second Create of it returns ErrExists. What is behind that id differs by backend. The
+// file backend has created an empty journal and its lock file, which Load reports as
+// ErrEmpty and Open hands back at seq 0, so a caller resuming it writes the meta record
+// itself or calls Delete and starts again. The JetStream backend has either stored the
+// meta record, in which case the run reads and resumes like any other, or stored nothing,
+// in which case the id is free and Create succeeds. A caller that cannot tell which it
+// got calls Load.
+//
+// A canceled Open returns no journal and takes no lock, so nothing has to be released.
 type Store interface {
 	// Info describes the active store.
 	//
 	// It reports what the store resolved when it was built. It must not block, perform
-	// I/O, or fail, and it must be safe to call from any goroutine.
+	// I/O, or fail, and it must be safe to call from any goroutine, which is why it
+	// takes no context.
 	Info() Info
 	// Create starts a new run, writing meta as seq 1, and returns the locked
 	// journal. It fails with ErrExists if the id is already present.
-	Create(id string, meta MetaRecord) (Journal, error)
+	Create(ctx context.Context, id string, meta MetaRecord) (Journal, error)
 	// Open locks an existing run's journal for appending (resume). It fails with
 	// ErrNotFound if the id is unknown.
-	Open(id string) (Journal, error)
+	Open(ctx context.Context, id string) (Journal, error)
 	// Load reads and folds a run without locking it, for inspection and listing.
-	Load(id string) (*RunState, error)
+	Load(ctx context.Context, id string) (*RunState, error)
 	// List summarizes all stored runs.
-	List() ([]RunInfo, error)
+	List(ctx context.Context) ([]RunInfo, error)
 	// Delete removes a run's journal and lock.
-	Delete(id string) error
+	Delete(ctx context.Context, id string) error
 }
 
 // New builds the session store for the named backend, handing the factory the

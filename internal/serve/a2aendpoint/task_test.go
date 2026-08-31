@@ -787,15 +787,15 @@ var _ = Describe("The prompt channel", func() {
 			ch = channelOf(built)
 
 			id := SessionFor("agent1", token)
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "how many streams"})
+			j, err := store.Create(context.Background(), id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "how many streams"})
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Seq: 2, Assistant: &runstate.AssistantRecord{
+			Expect(j.Append(context.Background(), 2, runstate.Record{Protocol: runstate.AssistantProtocol, Seq: 2, Assistant: &runstate.AssistantRecord{
 				Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
 					{Text: &llm.TextBlock{Text: "there are three"}},
 				}},
 			}})).To(Succeed())
-			Expect(j.Append(3, runstate.Record{Protocol: runstate.TerminalProtocol, Seq: 3, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Append(context.Background(), 3, runstate.Record{Protocol: runstate.TerminalProtocol, Seq: 3, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
 			return store

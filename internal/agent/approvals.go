@@ -5,6 +5,8 @@
 package agent
 
 import (
+	"context"
+
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
@@ -31,7 +33,7 @@ type journalApprovals struct {
 	calls map[string]bool
 	// emit appends a record to the run's journal. The runner sets it on itself at
 	// construction, since the gate is built before the journal is opened.
-	emit func(runstate.Record) error
+	emit func(context.Context, runstate.Record) error
 }
 
 func newJournalApprovals() *journalApprovals {
@@ -57,9 +59,9 @@ func (a *journalApprovals) Grant(tool string) error {
 // flush journals the grants taken since the last call, and is called once the tool
 // call that triggered them has been answered or has deferred. Nothing is staged for
 // the common case, so calling it after every tool call costs a length check.
-func (a *journalApprovals) flush() error {
+func (a *journalApprovals) flush(ctx context.Context) error {
 	for _, tool := range a.staged {
-		err := a.emit(runstate.Record{
+		err := a.emit(ctx, runstate.Record{
 			Protocol: runstate.DecisionProtocol,
 			Optional: true,
 			Decision: &runstate.DecisionRecord{Tool: tool},

@@ -203,14 +203,14 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 
 		It("Should create, append, and fold back a run", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(j.Append(2, assistantRec(0, "tu_1"))).To(Succeed())
-			Expect(j.Append(3, toolResultRec("tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 3, toolResultRec("tu_1"))).To(Succeed())
 			Expect(j.LastSeq()).To(Equal(uint64(3)))
 			Expect(j.Close()).To(Succeed())
 
-			rs, err := store.Load(id)
+			rs, err := store.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rs.RunID).To(Equal(id))
 			Expect(rs.Messages).To(HaveLen(3))
@@ -218,61 +218,87 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
 		})
 
+		// The backend derives every JetStream call from the caller's context rather than
+		// a root of its own, so canceling the caller fails the call in flight instead of
+		// waiting out opTimeout. The run is untouched and reads back on a live context.
+		It("Should fail a load and an append when the caller's context is canceled", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			_, err = store.Load(canceled, id)
+			Expect(err).To(MatchError(context.Canceled))
+
+			Expect(j.Append(canceled, 3, toolResultRec("tu_1"))).To(MatchError(context.Canceled))
+			Expect(j.LastSeq()).To(Equal(uint64(2)), "the refused append did not advance the journal")
+
+			Expect(j.Append(ctx, 3, toolResultRec("tu_1"))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			rs, err := store.Load(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
+		})
+
 		It("Should refuse to create a run that already exists", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(j.Close()).To(Succeed())
 
-			_, err = store.Create(id, newMeta(id))
+			_, err = store.Create(ctx, id, newMeta(id))
 			Expect(err).To(MatchError(runstate.ErrExists))
 		})
 
 		It("Should return ErrNotFound for an absent run", func() {
 			id := newID()
-			_, err := store.Open(id)
+			_, err := store.Open(ctx, id)
 			Expect(err).To(MatchError(runstate.ErrNotFound))
-			_, err = store.Load(id)
+			_, err = store.Load(ctx, id)
 			Expect(err).To(MatchError(runstate.ErrNotFound))
 		})
 
 		It("Should open a meta-only run and continue its sequence", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(j.Close()).To(Succeed())
 
-			j2, err := store.Open(id)
+			j2, err := store.Open(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(j2.LastSeq()).To(Equal(uint64(1)))
-			Expect(j2.Append(2, assistantRec(0))).To(Succeed())
+			Expect(j2.Append(ctx, 2, assistantRec(0))).To(Succeed())
 			Expect(j2.Close()).To(Succeed())
 
-			rs, err := store.Load(id)
+			rs, err := store.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rs.Counters.LlmCalls).To(Equal(int64(1)))
 		})
 
 		It("Should treat a duplicate seq as an idempotent no-op and reject gaps", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			defer j.Close()
 
-			Expect(j.Append(2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
 			// Re-append the same seq (crash-retry): no error, no duplicate.
-			Expect(j.Append(2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
 			// A seq that skips ahead is a gap.
-			Expect(j.Append(5, toolResultRec("tu_1"))).To(MatchError(runstate.ErrSeqGap))
+			Expect(j.Append(ctx, 5, toolResultRec("tu_1"))).To(MatchError(runstate.ErrSeqGap))
 
-			recs, err := j.Records()
+			recs, err := j.Records(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(recs).To(HaveLen(2))
 		})
 
 		It("Should adopt its own lost-ack record instead of duplicating it", func() {
 			id := newID()
-			jr, err := store.Create(id, newMeta(id))
+			jr, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			j := jr.(*journal)
 
@@ -290,65 +316,111 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 
 			// The retry hits the fence, recognizes its own record, and adopts it: no
 			// error and no duplicate, and the sequence continues cleanly.
-			Expect(j.Append(2, rec)).To(Succeed())
+			Expect(j.Append(ctx, 2, rec)).To(Succeed())
 			Expect(j.LastSeq()).To(Equal(uint64(2)))
-			Expect(j.Append(3, toolResultRec("tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 3, toolResultRec("tu_1"))).To(Succeed())
 
-			recs, err := j.Records()
+			recs, err := j.Records(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(recs).To(HaveLen(3))
 		})
 
 		It("Should fence a second writer out with ErrLocked", func() {
 			id := newID()
-			jA, err := store.Create(id, newMeta(id))
+			jA, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(jA.Append(2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(jA.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
 
-			jB, err := store.Open(id)
+			jB, err := store.Open(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jB.LastSeq()).To(Equal(uint64(2)))
 
 			// Writer A advances the run, moving the tail under B.
-			Expect(jA.Append(3, toolResultRec("tu_1"))).To(Succeed())
+			Expect(jA.Append(ctx, 3, toolResultRec("tu_1"))).To(Succeed())
 
 			// B's next append collides with A's tail move and is safely rejected.
-			err = jB.Append(3, toolResultRec("tu_1"))
+			err = jB.Append(ctx, 3, toolResultRec("tu_1"))
 			Expect(err).To(MatchError(runstate.ErrLocked))
 		})
 
 		It("Should report a run as held until another writer takes it, then refuse it", func() {
 			id := newID()
-			jA, err := store.Create(id, newMeta(id))
+			jA, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(jA.Append(2, assistantRec(0, "tu_1"))).To(Succeed())
-			Expect(jA.CheckHeld()).To(Succeed(), "nobody else has written, so A still holds it")
+			Expect(jA.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(jA.CheckHeld(ctx)).To(Succeed(), "nobody else has written, so A still holds it")
 
 			// B takes the run the way a resume does, by writing before it does anything.
-			jB, err := store.Open(id)
+			jB, err := store.Open(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(jB.Append(3, claimRec("worker-b"))).To(Succeed())
+			Expect(jB.Append(ctx, 3, claimRec("worker-b"))).To(Succeed())
 
 			// A now finds out without having appended, which is the whole point: it can
 			// stop before its next tool rather than after it.
-			Expect(jA.CheckHeld()).To(MatchError(runstate.ErrLocked))
-			Expect(jB.CheckHeld()).To(Succeed())
+			Expect(jA.CheckHeld(ctx)).To(MatchError(runstate.ErrLocked))
+			Expect(jB.CheckHeld(ctx)).To(Succeed())
 
 			// And the fence still holds against A's own next write.
-			Expect(jA.Append(3, toolResultRec("tu_1"))).To(MatchError(runstate.ErrLocked))
+			Expect(jA.Append(ctx, 3, toolResultRec("tu_1"))).To(MatchError(runstate.ErrLocked))
+		})
+
+		// The listing consults the context when a run fails to summarize, so that a
+		// cancel is not read as a run this build cannot summarize. This pins the other
+		// side of that branch: an unsummarizable run on a live context is still left out
+		// and the runs around it are still listed.
+		It("Should leave a run of an unsupported version out of the listing and list the rest", func() {
+			good, bad := newID(), newID()
+			jg, err := store.Create(ctx, good, newMeta(good))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jg.Close()).To(Succeed())
+
+			meta := newMeta(bad)
+			meta.Version = runstate.Version + 1
+			jb, err := store.Create(ctx, bad, meta)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jb.Close()).To(Succeed())
+
+			infos, err := store.List(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].RunID).To(Equal(good))
+		})
+
+		// A canceled caller gets an error rather than a listing missing whatever it did
+		// not reach. Two runs are stored so a listing that swallowed the cancel would
+		// have something to return.
+		It("Should fail a listing when the caller's context is canceled, not return a short one", func() {
+			idA, idB := newID(), newID()
+			jA, err := store.Create(ctx, idA, newMeta(idA))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jA.Close()).To(Succeed())
+			jB, err := store.Create(ctx, idB, newMeta(idB))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jB.Close()).To(Succeed())
+
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			infos, err := store.List(canceled)
+			Expect(err).To(MatchError(context.Canceled))
+			Expect(infos).To(BeEmpty())
+
+			infos, err = store.List(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(2), "both runs are there, so the refusal was the cancel")
 		})
 
 		It("Should list runs with their metadata", func() {
 			idA, idB := newID(), newID()
-			jA, err := store.Create(idA, newMeta(idA))
+			jA, err := store.Create(ctx, idA, newMeta(idA))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jA.Close()).To(Succeed())
-			jB, err := store.Create(idB, newMeta(idB))
+			jB, err := store.Create(ctx, idB, newMeta(idB))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(jB.Append(2, assistantRec(0))).To(Succeed())
+			Expect(jB.Append(ctx, 2, assistantRec(0))).To(Succeed())
 			Expect(jB.Close()).To(Succeed())
 
-			infos, err := store.List()
+			infos, err := store.List(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(2))
 
@@ -364,13 +436,13 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 
 		It("Should report the ending off the last record", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(j.Append(2, assistantRec(0))).To(Succeed())
-			Expect(j.Append(3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+			Expect(j.Append(ctx, 3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List()
+			infos, err := store.List(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
@@ -382,23 +454,23 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 		// actually true of it now.
 		It("Should report a conversation with a turn in flight as open", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(j.Append(2, assistantRec(0))).To(Succeed())
-			Expect(j.Append(3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+			Expect(j.Append(ctx, 3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
 			// The next turn starts: a resume claims the journal before anything runs.
-			Expect(j.Append(4, claimRec("worker-a"))).To(Succeed())
-			Expect(j.Append(5, assistantRec(1))).To(Succeed())
+			Expect(j.Append(ctx, 4, claimRec("worker-a"))).To(Succeed())
+			Expect(j.Append(ctx, 5, assistantRec(1))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List()
+			infos, err := store.List(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(BeEmpty())
 
 			// The fold still carries the earlier ending, so the two differ on purpose
 			// rather than by one of them losing the record.
-			rs, err := store.Load(id)
+			rs, err := store.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rs.Terminal.Reason).To(Equal(runstate.ReasonCompleted))
 		})
@@ -408,20 +480,20 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 		// exactly as a short one does.
 		It("Should list a long conversation from its two ends", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 
 			seq := uint64(2)
 			for i := range 40 {
-				Expect(j.Append(seq, assistantRec(int64(i), "tu_x"))).To(Succeed())
+				Expect(j.Append(ctx, seq, assistantRec(int64(i), "tu_x"))).To(Succeed())
 				seq++
-				Expect(j.Append(seq, toolResultRec("tu_x"))).To(Succeed())
+				Expect(j.Append(ctx, seq, toolResultRec("tu_x"))).To(Succeed())
 				seq++
 			}
-			Expect(j.Append(seq, terminalRec(runstate.ReasonSuspended))).To(Succeed())
+			Expect(j.Append(ctx, seq, terminalRec(runstate.ReasonSuspended))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List()
+			infos, err := store.List(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].RunID).To(Equal(id))
@@ -433,17 +505,17 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 
 		It("Should delete a run idempotently", func() {
 			id := newID()
-			j, err := store.Create(id, newMeta(id))
+			j, err := store.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(j.Append(2, assistantRec(0))).To(Succeed())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			Expect(store.Delete(id)).To(Succeed())
-			_, err = store.Load(id)
+			Expect(store.Delete(ctx, id)).To(Succeed())
+			_, err = store.Load(ctx, id)
 			Expect(err).To(MatchError(runstate.ErrNotFound))
 
 			// Purging an absent run is a no-op.
-			Expect(store.Delete(id)).To(Succeed())
+			Expect(store.Delete(ctx, id)).To(Succeed())
 		})
 
 		It("Should fold identically to the file backend", func() {
@@ -458,24 +530,24 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 				{4, assistantRec(1)},
 			}
 
-			jj, err := store.Create(id, meta)
+			jj, err := store.Create(ctx, id, meta)
 			Expect(err).ToNot(HaveOccurred())
 			for _, a := range appends {
-				Expect(jj.Append(a.seq, a.rec)).To(Succeed())
+				Expect(jj.Append(ctx, a.seq, a.rec)).To(Succeed())
 			}
 			Expect(jj.Close()).To(Succeed())
-			jsRS, err := store.Load(id)
+			jsRS, err := store.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 
 			fstore, err := file.NewFileStore(GinkgoT().TempDir())
 			Expect(err).ToNot(HaveOccurred())
-			fj, err := fstore.Create(id, meta)
+			fj, err := fstore.Create(ctx, id, meta)
 			Expect(err).ToNot(HaveOccurred())
 			for _, a := range appends {
-				Expect(fj.Append(a.seq, a.rec)).To(Succeed())
+				Expect(fj.Append(ctx, a.seq, a.rec)).To(Succeed())
 			}
 			Expect(fj.Close()).To(Succeed())
-			fileRS, err := fstore.Load(id)
+			fileRS, err := fstore.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(jsRS).To(Equal(fileRS))

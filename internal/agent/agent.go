@@ -1614,7 +1614,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		sessionID             string
 		resumeAtInputBoundary bool
 		followUpAtStart       bool
-		newSession            func(prompt string) (runstate.Journal, string, error)
+		newSession            func(ctx context.Context, prompt string) (runstate.Journal, string, error)
 		store                 runstate.Store
 		rs                    *runstate.RunState
 	)
@@ -1665,7 +1665,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 
 		if resuming {
-			loaded, lerr := store.Load(sessionID)
+			loaded, lerr := store.Load(ctx, sessionID)
 			switch {
 			case errors.Is(lerr, runstate.ErrNotFound) && opts.Checkpoint.CreateIfMissing:
 				resuming = false
@@ -1817,7 +1817,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 					sessionID, strings.Join(blocking, "\n  "))
 			}
 
-			j, err := store.Open(sessionID)
+			j, err := store.Open(ctx, sessionID)
 			if err != nil {
 				return res, err
 			}
@@ -1831,7 +1831,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// caused any effect. Against this worker, seq below has to be read after the
 			// claim landed, or the runner's first record collides with the claim's seq
 			// and CheckAppend folds it away as a duplicate, silently losing it.
-			err = claimRun(j, cfg.Identity, opts.ClaimedBy)
+			err = claimRun(ctx, j, cfg.Identity, opts.ClaimedBy)
 			if err != nil {
 				return res, fmt.Errorf("cannot resume %q: %w", sessionID, err)
 			}
@@ -1844,7 +1844,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			if opts.Checkpoint.Answer != nil {
 				a := opts.Checkpoint.Answer
 
-				err = runstate.AnswerDeferredCall(j, rs, a.ToolUseID, a.Content, a.IsError)
+				err = runstate.AnswerDeferredCall(ctx, j, rs, a.ToolUseID, a.Content, a.IsError)
 				if err != nil {
 					return res, fmt.Errorf("cannot answer call %q of %q: %w", a.ToolUseID, sessionID, err)
 				}
@@ -1972,7 +1972,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				ConversationToken: opts.Checkpoint.ConversationToken,
 				Caller:            opts.Checkpoint.Caller,
 			}
-			j, err := store.Create(sessionID, meta)
+			j, err := store.Create(ctx, sessionID, meta)
 			if err != nil {
 				return res, err
 			}
@@ -1993,7 +1993,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// so this id is not that hash and no caller reaches this journal by holding one.
 		// Copying it would put two conversations in a listing claiming one token, only one
 		// of which can be continued. The caller is copied, since who asked did not change.
-		newSession = func(prompt string) (runstate.Journal, string, error) {
+		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 			id := a2a.NewID()
 			meta := runstate.MetaRecord{
 				Version:     runstate.Version,
@@ -2004,7 +2004,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Interactive: interactive,
 				Caller:      opts.Checkpoint.Caller,
 			}
-			j, err := store.Create(id, meta)
+			j, err := store.Create(ctx, id, meta)
 			if err != nil {
 				return nil, "", err
 			}
@@ -2151,12 +2151,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 // claimRun records this worker's takeover of a resumed run. Every failure is fatal to
 // the resume: a claim that is skipped when the store is briefly unreachable is not a
 // claim, and continuing would run the work with no idea whether anyone else is.
-func claimRun(j runstate.Journal, identity string, claimedBy string) error {
+func claimRun(ctx context.Context, j runstate.Journal, identity string, claimedBy string) error {
 	if claimedBy == "" {
 		claimedBy = derivedClaimant(identity)
 	}
 
-	err := j.Append(j.LastSeq()+1, runstate.Record{
+	err := j.Append(ctx, j.LastSeq()+1, runstate.Record{
 		Protocol: runstate.ClaimProtocol,
 		Claim:    &runstate.ClaimRecord{By: claimedBy, Claimed: time.Now().UTC()},
 	})
@@ -2299,7 +2299,7 @@ func LoadSession(ctx context.Context, cfg *config.Config, id string, opts Sessio
 		}
 	}
 
-	return store.Load(id)
+	return store.Load(ctx, id)
 }
 
 // dialSessionNats dials the connection a jetstream session read needs. conns.Connect

@@ -47,13 +47,15 @@ func suspendedRun(tb testing.TB, store runstate.Store, app *agenttest.FakeApp) *
 func recordsOf(tb testing.TB, store runstate.Store, id string) []runstate.Record {
 	tb.Helper()
 
-	j, err := store.Open(id)
+	ctx := context.Background()
+
+	j, err := store.Open(ctx, id)
 	Expect(err).NotTo(HaveOccurred())
 	// The journal has to close before this returns, since the next resume in the same
 	// spec claims the run.
 	defer func() { Expect(j.Close()).To(Succeed()) }()
 
-	recs, err := j.Records()
+	recs, err := j.Records(ctx)
 	Expect(err).NotTo(HaveOccurred())
 
 	return recs
@@ -64,7 +66,7 @@ func recordsOf(tb testing.TB, store runstate.Store, id string) []runstate.Record
 func currentSessionID(tb testing.TB, store *agenttest.FakeSessionStore) string {
 	tb.Helper()
 
-	runs, err := store.List()
+	runs, err := store.List(context.Background())
 	Expect(err).NotTo(HaveOccurred())
 	Expect(runs).To(HaveLen(1))
 

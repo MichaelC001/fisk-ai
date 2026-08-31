@@ -98,7 +98,7 @@ var _ = Describe("the per-kind tool accounting", func() {
 
 		// The journal carries the kind, so folding it recovers the same buckets without the
 		// run that wrote them.
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
 		Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindApplication: 1}))
@@ -194,7 +194,7 @@ var _ = Describe("the per-kind tool accounting", func() {
 
 		// The journal records each call's kind and whether it was dispatched, so folding it
 		// recovers both axes rather than reading the buckets as the totals.
-		rs, err := store.Load(res.SessionID)
+		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Counters.ToolCalls).To(Equal(int64(4)))
 		Expect(rs.Counters.MCPToolCalls).To(Equal(int64(1)))

@@ -5,6 +5,7 @@
 package runstate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -50,7 +51,11 @@ var (
 // taken over refuses this rather than racing it. Losing that race is the right
 // outcome here: the answer can be supplied again once the other worker is done,
 // while overwriting its work cannot be undone.
-func SupplyToolResult(store Store, sessionID, toolUseID, content string, isError bool) error {
+//
+// ctx governs the load, the open and the append. A cancellation before the open leaves
+// the journal untouched; one after it leaves the journal open only until the deferred
+// Close, and whether the record landed follows Journal's cancellation contract.
+func SupplyToolResult(ctx context.Context, store Store, sessionID, toolUseID, content string, isError bool) error {
 	if store == nil {
 		return fmt.Errorf("a session store is required")
 	}
@@ -68,7 +73,7 @@ func SupplyToolResult(store Store, sessionID, toolUseID, content string, isError
 	// under the open handle below is unnecessary: the append is fenced on the tail the
 	// handle itself read, so a journal that moved between these two points is refused
 	// by the append rather than accepted on a stale view.
-	state, err := store.Load(sessionID)
+	state, err := store.Load(ctx, sessionID)
 	if err != nil {
 		return err
 	}
@@ -78,13 +83,13 @@ func SupplyToolResult(store Store, sessionID, toolUseID, content string, isError
 		return err
 	}
 
-	journal, err := store.Open(sessionID)
+	journal, err := store.Open(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	defer journal.Close()
 
-	return AnswerDeferredCall(journal, state, toolUseID, content, isError)
+	return AnswerDeferredCall(ctx, journal, state, toolUseID, content, isError)
 }
 
 // AnswerDeferredCall writes the answer to a deferred call into a journal the caller
@@ -99,7 +104,7 @@ func SupplyToolResult(store Store, sessionID, toolUseID, content string, isError
 // joins the turn's results. A caller that goes on to run the loop against that state
 // therefore sees the call as answered, which is what stops the tool being dispatched a
 // second time.
-func AnswerDeferredCall(journal Journal, state *RunState, toolUseID, content string, isError bool) error {
+func AnswerDeferredCall(ctx context.Context, journal Journal, state *RunState, toolUseID, content string, isError bool) error {
 	if journal == nil {
 		return fmt.Errorf("an open journal is required")
 	}
@@ -114,7 +119,7 @@ func AnswerDeferredCall(journal Journal, state *RunState, toolUseID, content str
 
 	result := llm.ToolResultBlock{ToolUseID: toolUseID, Content: content, IsError: isError}
 
-	err = journal.Append(journal.LastSeq()+1, Record{
+	err = journal.Append(ctx, journal.LastSeq()+1, Record{
 		Protocol:   ToolResultProtocol,
 		ToolResult: &ToolResultRecord{ToolUseID: toolUseID, Result: result},
 	})

@@ -64,10 +64,12 @@ func alwaysPrompter(tb testing.TB, asked *atomic.Int64) *agenttest.ScriptedPromp
 func supplyCallApproval(tb testing.TB, store runstate.Store, id, toolUseID, toolName string) {
 	tb.Helper()
 
-	j, err := store.Open(id)
+	ctx := context.Background()
+
+	j, err := store.Open(ctx, id)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = j.Append(j.LastSeq()+1, runstate.Record{
+	err = j.Append(ctx, j.LastSeq()+1, runstate.Record{
 		Protocol:     runstate.CallApprovalProtocol,
 		Optional:     true,
 		CallApproval: &runstate.CallApprovalRecord{ToolUseID: toolUseID, ToolName: toolName},
@@ -80,10 +82,12 @@ func supplyCallApproval(tb testing.TB, store runstate.Store, id, toolUseID, tool
 func journalRecords(tb testing.TB, store runstate.Store, id string) []runstate.Record {
 	tb.Helper()
 
-	j, err := store.Open(id)
+	ctx := context.Background()
+
+	j, err := store.Open(ctx, id)
 	Expect(err).NotTo(HaveOccurred())
 
-	records, err := j.Records()
+	records, err := j.Records(ctx)
 	Expect(err).NotTo(HaveOccurred())
 
 	// Closed here rather than at cleanup: a journal left open holds the run's lock and
@@ -150,7 +154,7 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		records := journalRecords(GinkgoTB(), store, res1.SessionID)
 		Expect(recordIndex(records, runstate.DecisionProtocol)).To(BeNumerically(">", recordIndex(records, runstate.ToolResultProtocol)))
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Approvals).To(Equal([]string{"stream_rm"}))
 
@@ -217,7 +221,7 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(asked.Load()).To(Equal(int64(1)))
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Approvals).To(BeEmpty())
 
@@ -275,7 +279,7 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		Expect(ran.Load()).To(BeZero())
 
 		// Nothing about the call reached the journal, so there is no answer to replay.
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Approvals).To(BeEmpty())
 
@@ -334,7 +338,7 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		// about, which is what wakes the session.
 		supplyCallApproval(GinkgoTB(), store, res1.SessionID, "c1", "stream_rm")
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.CallApprovals).To(Equal([]runstate.CallApprovalRecord{{ToolUseID: "c1", ToolName: "stream_rm"}}))
 
@@ -587,7 +591,7 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		Expect(asked.Load()).To(Equal(int64(2)))
 
 		// The rotated-to session carries only the grant its own turn produced.
-		rs, err := store.Load(res.SessionID)
+		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Approvals).To(Equal([]string{"stream_rm"}))
 	})
@@ -627,7 +631,7 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		Expect(res.Reason).To(Equal(runstate.ReasonSuspended))
 		Expect(asked.Load()).To(Equal(int64(1)))
 
-		rs, err := store.Load(res.SessionID)
+		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Approvals).To(Equal([]string{"change_request"}))
 

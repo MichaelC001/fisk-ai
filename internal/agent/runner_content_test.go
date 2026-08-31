@@ -5,6 +5,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -19,11 +20,11 @@ import (
 // journal and closes it, so the field cannot simply be nil.
 type noopJournal struct{}
 
-func (noopJournal) Append(uint64, runstate.Record) error { return nil }
-func (noopJournal) Records() ([]runstate.Record, error)  { return nil, nil }
-func (noopJournal) LastSeq() uint64                      { return 0 }
-func (noopJournal) CheckHeld() error                     { return nil }
-func (noopJournal) Close() error                         { return nil }
+func (noopJournal) Append(context.Context, uint64, runstate.Record) error { return nil }
+func (noopJournal) Records(context.Context) ([]runstate.Record, error)    { return nil, nil }
+func (noopJournal) LastSeq() uint64                                       { return 0 }
+func (noopJournal) CheckHeld(context.Context) error                       { return nil }
+func (noopJournal) Close() error                                          { return nil }
 
 var _ runstate.Journal = noopJournal{}
 
@@ -132,12 +133,12 @@ var _ = Describe("runner content baseline", func() {
 				contentFrom: 3,
 				journal:     noopJournal{},
 				events:      nopEvents{},
-				newSession: func(string) (runstate.Journal, string, error) {
+				newSession: func(context.Context, string) (runstate.Journal, string, error) {
 					return noopJournal{}, "session-2", nil
 				},
 			}
 
-			Expect(r.rotateSession("fresh start")).To(Succeed())
+			Expect(r.rotateSession(context.Background(), "fresh start")).To(Succeed())
 
 			Expect(r.messages).To(HaveLen(1))
 			Expect(r.contentFrom).To(BeZero())
@@ -152,12 +153,12 @@ var _ = Describe("runner content baseline", func() {
 				contentFrom: 3,
 				journal:     noopJournal{},
 				events:      nopEvents{},
-				newSession: func(string) (runstate.Journal, string, error) {
+				newSession: func(context.Context, string) (runstate.Journal, string, error) {
 					return nil, "", errStoreUnavailable
 				},
 			}
 
-			Expect(r.rotateSession("fresh start")).To(MatchError(errStoreUnavailable))
+			Expect(r.rotateSession(context.Background(), "fresh start")).To(MatchError(errStoreUnavailable))
 
 			Expect(r.messages).To(HaveLen(3))
 			Expect(r.contentFrom).To(Equal(3))

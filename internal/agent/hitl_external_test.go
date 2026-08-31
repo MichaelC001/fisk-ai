@@ -60,7 +60,7 @@ var _ = Describe("the human-in-the-loop built-ins", func() {
 		Expect(err).To(MatchError(toolkit.ErrPromptAborted))
 		Expect(res1.Reason).To(Equal(runstate.ReasonSuspended))
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Pending).NotTo(BeNil(), "the call the operator did not answer is still in flight")
 		Expect(rs.Pending.Answered).To(BeEmpty())

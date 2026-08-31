@@ -149,7 +149,10 @@ func sessionLsAction(_ *fisk.ParseContext) error {
 	}
 	defer cleanup()
 
-	infos, err := store.List()
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	infos, err := store.List(ctx)
 	if err != nil {
 		return err
 	}
@@ -186,7 +189,10 @@ func sessionShowAction(_ *fisk.ParseContext) error {
 	}
 	defer cleanup()
 
-	rs, err := store.Load(sessionArgID)
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	rs, err := store.Load(ctx, sessionArgID)
 	if err != nil {
 		return err
 	}
@@ -347,7 +353,10 @@ func sessionRmAction(_ *fisk.ParseContext) error {
 	}
 	defer cleanup()
 
-	err = store.Delete(sessionArgID)
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	err = store.Delete(ctx, sessionArgID)
 	if err != nil {
 		return err
 	}

@@ -111,7 +111,7 @@ var _ = Describe("the run lifecycle hooks", func() {
 		Expect(err).To(MatchError(ContainSubstring("blocked by policy")))
 
 		// No session was created, so nothing is left to resume.
-		infos, lerr := store.List()
+		infos, lerr := store.List(context.Background())
 		Expect(lerr).NotTo(HaveOccurred())
 		Expect(infos).To(BeEmpty())
 	})
@@ -137,7 +137,7 @@ var _ = Describe("the run lifecycle hooks", func() {
 
 		Expect(err).To(MatchError(ContainSubstring("RunStart hook")))
 
-		infos, lerr := store.List()
+		infos, lerr := store.List(context.Background())
 		Expect(lerr).NotTo(HaveOccurred())
 		Expect(infos).To(BeEmpty())
 	})

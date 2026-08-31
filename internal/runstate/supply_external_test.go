@@ -5,6 +5,7 @@
 package runstate_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -22,6 +23,7 @@ var _ = Describe("SupplyToolResult", func() {
 	var (
 		store runstate.Store
 		id    string
+		ctx   = context.Background()
 	)
 
 	assistantTurn := func(ids ...string) *runstate.AssistantRecord {
@@ -41,26 +43,26 @@ var _ = Describe("SupplyToolResult", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		id = ksuid.New().String()
-		j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "raise a change"})
+		j, err := store.Create(ctx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "raise a change"})
 		Expect(err).ToNot(HaveOccurred())
 
-		Expect(j.Append(2, runstate.Record{Seq: 2, Protocol: runstate.AssistantProtocol, Assistant: assistantTurn("tu_1", "tu_2")})).To(Succeed())
-		Expect(j.Append(3, runstate.Record{Seq: 3, Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
+		Expect(j.Append(ctx, 2, runstate.Record{Seq: 2, Protocol: runstate.AssistantProtocol, Assistant: assistantTurn("tu_1", "tu_2")})).To(Succeed())
+		Expect(j.Append(ctx, 3, runstate.Record{Seq: 3, Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
 			ToolUseID: "tu_1", Result: llm.ToolResultBlock{ToolUseID: "tu_1", Content: "filed"},
 		}})).To(Succeed())
-		Expect(j.Append(4, runstate.Record{Seq: 4, Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
+		Expect(j.Append(ctx, 4, runstate.Record{Seq: 4, Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
 			ToolUseID: "tu_2", ToolName: "change_request", Note: "waiting on approval", Handle: "CHG-1",
 		}})).To(Succeed())
-		Expect(j.Append(5, runstate.Record{Seq: 5, Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}})).To(Succeed())
+		Expect(j.Append(ctx, 5, runstate.Record{Seq: 5, Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}})).To(Succeed())
 		Expect(j.Close()).To(Succeed())
 	})
 
 	// The answer completes the turn, which is what makes the next resume an ordinary
 	// resume: the loop reuses both results and dispatches neither tool again.
 	It("Should answer an outstanding deferral and complete the turn", func() {
-		Expect(runstate.SupplyToolResult(store, id, "tu_2", `{"approved":true}`, false)).To(Succeed())
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_2", `{"approved":true}`, false)).To(Succeed())
 
-		rs, err := store.Load(id)
+		rs, err := store.Load(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rs.Pending).To(BeNil())
 
@@ -73,44 +75,44 @@ var _ = Describe("SupplyToolResult", func() {
 	// than opening the store a second time, and the state it is about to run against
 	// has to agree with what was written.
 	It("Should answer through a journal the caller already holds and fold it in", func() {
-		rs, err := store.Load(id)
+		rs, err := store.Load(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rs.Pending.Answered).ToNot(HaveKey("tu_2"))
 
-		j, err := store.Open(id)
+		j, err := store.Open(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(j.Close)
 
-		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", `{"approved":true}`, false)).To(Succeed())
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", `{"approved":true}`, false)).To(Succeed())
 
 		Expect(rs.Pending.Answered).To(HaveKeyWithValue("tu_2", true), "the caller's state says the call is answered")
 		Expect(rs.Pending.Results).To(ContainElement(llm.ToolResultBlock{ToolUseID: "tu_2", Content: `{"approved":true}`}))
 
-		reloaded, err := store.Load(id)
+		reloaded, err := store.Load(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(reloaded.Pending).To(BeNil(), "and the journal says the turn is complete")
 	})
 
 	It("Should refuse through a held journal on the same terms", func() {
-		rs, err := store.Load(id)
+		rs, err := store.Load(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 
-		j, err := store.Open(id)
+		j, err := store.Open(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(j.Close)
 
-		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", strings.Repeat("a", runstate.MaxSuppliedResultBytes+1), false)).To(MatchError(runstate.ErrResultTooLarge))
-		Expect(runstate.AnswerDeferredCall(j, rs, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred), "the tool answered this one itself")
-		Expect(runstate.AnswerDeferredCall(j, rs, "tu_9", "late", false)).To(MatchError(runstate.ErrNotDeferred), "and this call is not in the turn at all")
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", strings.Repeat("a", runstate.MaxSuppliedResultBytes+1), false)).To(MatchError(runstate.ErrResultTooLarge))
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred), "the tool answered this one itself")
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_9", "late", false)).To(MatchError(runstate.ErrNotDeferred), "and this call is not in the turn at all")
 
-		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", "first", false)).To(Succeed())
-		Expect(runstate.AnswerDeferredCall(j, rs, "tu_2", "second", false)).To(MatchError(runstate.ErrAlreadyAnswered))
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", "first", false)).To(Succeed())
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", "second", false)).To(MatchError(runstate.ErrAlreadyAnswered))
 	})
 
 	It("Should mark an answer as an error when asked to", func() {
-		Expect(runstate.SupplyToolResult(store, id, "tu_2", "the request was rejected", true)).To(Succeed())
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_2", "the request was rejected", true)).To(Succeed())
 
-		rs, err := store.Load(id)
+		rs, err := store.Load(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 
 		last := rs.Messages[len(rs.Messages)-1]
@@ -118,46 +120,46 @@ var _ = Describe("SupplyToolResult", func() {
 	})
 
 	It("Should refuse a call the run never deferred", func() {
-		Expect(runstate.SupplyToolResult(store, id, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred))
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred))
 	})
 
 	It("Should refuse an id the turn does not carry at all", func() {
-		Expect(runstate.SupplyToolResult(store, id, "tu_nope", "late", false)).To(MatchError(runstate.ErrNotDeferred))
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_nope", "late", false)).To(MatchError(runstate.ErrNotDeferred))
 	})
 
 	// Answering twice would leave the turn carrying two results for one tool_use,
 	// which the model API rejects and the fold cannot repair.
 	It("Should refuse a deferral that already has an answer", func() {
-		Expect(runstate.SupplyToolResult(store, id, "tu_2", "first", false)).To(Succeed())
-		Expect(runstate.SupplyToolResult(store, id, "tu_2", "second", false)).To(MatchError(runstate.ErrAlreadyAnswered))
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_2", "first", false)).To(Succeed())
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_2", "second", false)).To(MatchError(runstate.ErrAlreadyAnswered))
 	})
 
 	It("Should refuse an answer larger than the cap", func() {
 		big := strings.Repeat("x", runstate.MaxSuppliedResultBytes+1)
-		Expect(runstate.SupplyToolResult(store, id, "tu_2", big, false)).To(MatchError(runstate.ErrResultTooLarge))
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_2", big, false)).To(MatchError(runstate.ErrResultTooLarge))
 	})
 
 	It("Should refuse a run with nothing in flight", func() {
 		other := ksuid.New().String()
-		j, err := store.Create(other, runstate.MetaRecord{Version: runstate.Version, RunID: other, Prompt: "nothing"})
+		j, err := store.Create(ctx, other, runstate.MetaRecord{Version: runstate.Version, RunID: other, Prompt: "nothing"})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
-		Expect(runstate.SupplyToolResult(store, other, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred))
+		Expect(runstate.SupplyToolResult(ctx, store, other, "tu_1", "late", false)).To(MatchError(runstate.ErrNotDeferred))
 	})
 
 	It("Should refuse an unknown session", func() {
-		Expect(runstate.SupplyToolResult(store, ksuid.New().String(), "tu_2", "late", false)).To(MatchError(runstate.ErrNotFound))
+		Expect(runstate.SupplyToolResult(ctx, store, ksuid.New().String(), "tu_2", "late", false)).To(MatchError(runstate.ErrNotFound))
 	})
 
 	// An answer arriving while another process holds the run loses rather than racing
 	// it: the answer can be supplied again once that worker is done, and overwriting
 	// its work cannot be undone.
 	It("Should refuse while another writer holds the run", func() {
-		held, err := store.Open(id)
+		held, err := store.Open(ctx, id)
 		Expect(err).ToNot(HaveOccurred())
 		defer held.Close()
 
-		Expect(runstate.SupplyToolResult(store, id, "tu_2", "late", false)).To(MatchError(runstate.ErrLocked))
+		Expect(runstate.SupplyToolResult(ctx, store, id, "tu_2", "late", false)).To(MatchError(runstate.ErrLocked))
 	})
 })

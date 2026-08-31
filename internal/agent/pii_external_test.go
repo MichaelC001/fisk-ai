@@ -100,7 +100,7 @@ var _ = Describe("harness.pii", func() {
 		Expect(sent).To(ContainSubstring("mail the report to"))
 
 		// Neither did the journal, which is also what a resume would replay.
-		rs, lerr := store.Load(res.SessionID)
+		rs, lerr := store.Load(context.Background(), res.SessionID)
 		Expect(lerr).NotTo(HaveOccurred())
 		Expect(rs.Prompt).NotTo(ContainSubstring(piiAddress))
 		Expect(rs.Prompt).To(ContainSubstring("mail the report to"))

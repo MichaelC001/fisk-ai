@@ -46,9 +46,11 @@ const (
 	// start rather than hanging.
 	bindTimeout = 10 * time.Second
 
-	// opTimeout bounds a single store or journal operation's control-plane calls
-	// (existence checks, publishes, purges, sizing), so a stalled JetStream fails the
-	// operation rather than blocking a run indefinitely.
+	// opTimeout is the deadline a single store or journal operation's control-plane
+	// calls (existence checks, publishes, purges, sizing) get when the caller supplied
+	// none, so a stalled JetStream fails the operation rather than blocking a run
+	// indefinitely. A deadline the caller set is used unchanged, whether it is shorter or
+	// longer than this.
 	opTimeout = 15 * time.Second
 
 	// fetchWait bounds one Fetch when reading a run's records. The records are already
@@ -233,9 +235,27 @@ func checkStreamConfig(cfg jetstream.StreamConfig, name string) error {
 	return nil
 }
 
+// opContext derives one operation's context from the caller's, so a canceled caller
+// cancels the JetStream calls under it and a trace in the caller's context reaches them.
+// A deadline the caller set is used unchanged, whether it is shorter or longer than
+// opTimeout; a context carrying none gets opTimeout.
+func opContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	_, ok := ctx.Deadline()
+	if ok {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, opTimeout)
+}
+
 // store is the JetStream-backed Store. It binds a pre-existing stream and never closes
 // the borrowed NATS connection behind it: the connection is owned by the caller that
 // provisioned the RuntimeEnv.
+//
+// Every method derives its JetStream calls from the caller's context through opContext,
+// so canceling the caller fails the operation in flight. The stream is bound once at
+// construction under bindTimeout, which is the one deadline this backend sets from a
+// root of its own: runstate.Factory hands it no caller context.
 type store struct {
 	js         jetstream.JetStream
 	stream     jetstream.Stream
@@ -296,16 +316,16 @@ func newNonce() (string, error) {
 }
 
 // Create implements runstate.Store.
-func (s *store) Create(id string, meta runstate.MetaRecord) (runstate.Journal, error) {
+func (s *store) Create(ctx context.Context, id string, meta runstate.MetaRecord) (runstate.Journal, error) {
 	err := runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
-	_, err = s.stream.GetLastMsgForSubject(ctx, s.metaSubject(id))
+	_, err = s.stream.GetLastMsgForSubject(opCtx, s.metaSubject(id))
 	if err == nil {
 		return nil, fmt.Errorf("%w: %q", runstate.ErrExists, id)
 	}
@@ -321,7 +341,7 @@ func (s *store) Create(id string, meta runstate.MetaRecord) (runstate.Journal, e
 
 	// The meta append is fenced on an empty run (tailStreamSeq 0), so a racing creator
 	// loses with 10071, which Append maps to ErrExists on the seq-1 subject.
-	err = j.Append(1, runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
+	err = j.Append(ctx, 1, runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
 	if err != nil {
 		return nil, err
 	}
@@ -330,20 +350,20 @@ func (s *store) Create(id string, meta runstate.MetaRecord) (runstate.Journal, e
 }
 
 // Open implements runstate.Store.
-func (s *store) Open(id string) (runstate.Journal, error) {
+func (s *store) Open(ctx context.Context, id string) (runstate.Journal, error) {
 	err := runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
 	// The last message on the run wildcard is the highest-stream-seq record, which is
 	// the last appended (records are published in seq order). Its stream sequence seeds
 	// the append fence and its subject seq seeds the journal's last seq. Its absence is
 	// a missing run.
-	last, err := s.stream.GetLastMsgForSubject(ctx, s.runWildcard(id))
+	last, err := s.stream.GetLastMsgForSubject(opCtx, s.runWildcard(id))
 	if errors.Is(err, jetstream.ErrMsgNotFound) {
 		return nil, fmt.Errorf("%w: %q", runstate.ErrNotFound, id)
 	}
@@ -365,13 +385,13 @@ func (s *store) Open(id string) (runstate.Journal, error) {
 }
 
 // Load implements runstate.Store.
-func (s *store) Load(id string) (*runstate.RunState, error) {
+func (s *store) Load(ctx context.Context, id string) (*runstate.RunState, error) {
 	err := runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
 
-	recs, err := s.records(id)
+	recs, err := s.records(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -388,14 +408,14 @@ func (s *store) Load(id string) (*runstate.RunState, error) {
 // Reading and folding every run to fill six fields made a listing cost the whole store,
 // since a fold reads every assistant turn and every tool result of every conversation to
 // reach two of them.
-func (s *store) List() ([]runstate.RunInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+func (s *store) List(ctx context.Context) ([]runstate.RunInfo, error) {
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
 	// A run id has no dots, so '<prefix>.*._meta' matches exactly the meta subject of
 	// every run and nothing else. The filtered stream info returns those subjects,
 	// which enumerate the runs without reading any record body.
-	info, err := s.stream.Info(ctx, jetstream.WithSubjectFilter(s.prefix+".*."+metaToken))
+	info, err := s.stream.Info(opCtx, jetstream.WithSubjectFilter(s.prefix+".*."+metaToken))
 	if err != nil {
 		return nil, fmt.Errorf("jetstream session: listing runs on stream %q: %w", s.streamName, err)
 	}
@@ -407,8 +427,18 @@ func (s *store) List() ([]runstate.RunInfo, error) {
 			continue
 		}
 
-		ri, err := s.summarize(ctx, id)
+		ri, err := s.summarize(opCtx, id)
 		if err != nil {
+			// A run this build cannot summarize is left out of the listing. A run it
+			// could not reach because the caller stopped is a different answer, and the
+			// context is read to tell them apart: the runs summarized so far are a
+			// prefix, and returning them would name a store holding fewer runs than it
+			// does.
+			cerr := opCtx.Err()
+			if cerr != nil {
+				return nil, cerr
+			}
+
 			continue
 		}
 
@@ -477,16 +507,16 @@ func (s *store) summarize(ctx context.Context, id string) (*runstate.RunInfo, er
 // Delete implements runstate.Store. Purging the run wildcard removes every record of
 // the run and is idempotent: purging a run with no records removes nothing and
 // succeeds.
-func (s *store) Delete(id string) error {
+func (s *store) Delete(ctx context.Context, id string) error {
 	err := runstate.ValidateID(id)
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
-	err = s.stream.Purge(ctx, jetstream.WithPurgeSubject(s.runWildcard(id)))
+	err = s.stream.Purge(opCtx, jetstream.WithPurgeSubject(s.runWildcard(id)))
 	if err != nil {
 		return fmt.Errorf("jetstream session: deleting run %q: %w", id, err)
 	}
@@ -516,11 +546,11 @@ func (s *store) runIDFromMetaSubject(subject string) (string, bool) {
 // to be present (its absence is ErrNotFound, matching the file backend before it reads
 // a journal), sizes the read from a single filtered stream-info snapshot, then reads
 // exactly that many records through an ordered consumer over the run wildcard.
-func (s *store) records(id string) ([]runstate.Record, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+func (s *store) records(ctx context.Context, id string) ([]runstate.Record, error) {
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
-	info, err := s.stream.Info(ctx, jetstream.WithSubjectFilter(s.runWildcard(id)))
+	info, err := s.stream.Info(opCtx, jetstream.WithSubjectFilter(s.runWildcard(id)))
 	if err != nil {
 		return nil, fmt.Errorf("jetstream session: reading run %q: %w", id, err)
 	}
@@ -535,7 +565,7 @@ func (s *store) records(id string) ([]runstate.Record, error) {
 		pending += n
 	}
 
-	cons, err := s.stream.OrderedConsumer(ctx, jetstream.OrderedConsumerConfig{
+	cons, err := s.stream.OrderedConsumer(opCtx, jetstream.OrderedConsumerConfig{
 		FilterSubjects: []string{s.runWildcard(id)},
 	})
 	if err != nil {
@@ -544,6 +574,13 @@ func (s *store) records(id string) ([]runstate.Record, error) {
 
 	records := make([]runstate.Record, 0, pending)
 	for uint64(len(records)) < pending {
+		// Fetch takes no context, so the read of a many-record run is stopped between
+		// batches rather than during one.
+		err = opCtx.Err()
+		if err != nil {
+			return nil, err
+		}
+
 		batch, err := cons.Fetch(int(pending)-len(records), jetstream.FetchMaxWait(fetchWait))
 		if err != nil {
 			return nil, fmt.Errorf("jetstream session: fetching records for run %q: %w", id, err)
@@ -596,7 +633,12 @@ type journal struct {
 // reading the target subject: our own record already there is a lost ack to adopt,
 // anything else is another writer holding the run (ErrLocked), or on the meta subject a
 // concurrent creator (ErrExists).
-func (j *journal) Append(seq uint64, rec runstate.Record) error {
+//
+// A context that expires between the publish and its acknowledgement fails the append
+// over a record that may already be stored. The next append of the same seq reads the
+// subject back, recognizes this open's Nats-Msg-Id, and adopts it, so the retry does not
+// write a second record and does not report the run as taken by somebody else.
+func (j *journal) Append(ctx context.Context, seq uint64, rec runstate.Record) error {
 	skip, err := runstate.CheckAppend(j.lastSeq, seq)
 	if err != nil {
 		return err
@@ -614,10 +656,10 @@ func (j *journal) Append(seq uint64, rec runstate.Record) error {
 	subject := j.store.subjectForSeq(j.id, seq)
 	msgID := fmt.Sprintf("%s-%d", j.nonce, seq)
 
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
-	ack, err := j.store.js.Publish(ctx, subject, body,
+	ack, err := j.store.js.Publish(opCtx, subject, body,
 		jetstream.WithMsgID(msgID),
 		jetstream.WithExpectLastSequenceForSubject(j.tailStreamSeq, j.store.runWildcard(j.id)))
 	if err == nil {
@@ -631,7 +673,7 @@ func (j *journal) Append(seq uint64, rec runstate.Record) error {
 
 	// The fence failed: the run's tail is not where we left it. Read the target subject
 	// to tell our own already-landed record (a lost ack) from another writer's.
-	existing, gErr := j.store.stream.GetLastMsgForSubject(ctx, subject)
+	existing, gErr := j.store.stream.GetLastMsgForSubject(opCtx, subject)
 	if gErr != nil && !errors.Is(gErr, jetstream.ErrMsgNotFound) {
 		return fmt.Errorf("jetstream session: record %d of run %q was rejected and its state could not be read back: %w", seq, j.id, gErr)
 	}
@@ -652,8 +694,8 @@ func (j *journal) Append(seq uint64, rec runstate.Record) error {
 }
 
 // Records implements runstate.Journal.
-func (j *journal) Records() ([]runstate.Record, error) {
-	return j.store.records(j.id)
+func (j *journal) Records(ctx context.Context) ([]runstate.Record, error) {
+	return j.store.records(ctx, j.id)
 }
 
 // LastSeq implements runstate.Journal.
@@ -672,11 +714,11 @@ func (j *journal) LastSeq() uint64 {
 // A tail that cannot be read is not reported as lost. An unreachable stream is a
 // reason to fail the operation, not evidence that somebody else is running this work,
 // and treating it as the latter would abandon a run on every transient outage.
-func (j *journal) CheckHeld() error {
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+func (j *journal) CheckHeld(ctx context.Context) error {
+	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
-	last, err := j.store.stream.GetLastMsgForSubject(ctx, j.store.runWildcard(j.id))
+	last, err := j.store.stream.GetLastMsgForSubject(opCtx, j.store.runWildcard(j.id))
 	if err != nil {
 		return fmt.Errorf("jetstream session: reading the tail of run %q: %w", j.id, err)
 	}

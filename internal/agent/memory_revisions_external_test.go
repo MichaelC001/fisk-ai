@@ -99,7 +99,7 @@ var _ = Describe("memory revisions across turns", func() {
 		records := journalRecords(GinkgoTB(), store, res1.SessionID)
 		Expect(recordIndex(records, runstate.MemoryRevisionsProtocol)).To(BeNumerically(">", recordIndex(records, runstate.TerminalProtocol)))
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.MemoryRevisions).To(Equal(map[string]uint64{"notes": 7}))
 
@@ -146,7 +146,7 @@ var _ = Describe("memory revisions across turns", func() {
 		records := journalRecords(GinkgoTB(), store, res.SessionID)
 		Expect(recordIndex(records, runstate.MemoryRevisionsProtocol)).To(Equal(-1))
 
-		rs, err := store.Load(res.SessionID)
+		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.MemoryRevisions).To(BeEmpty())
 	})

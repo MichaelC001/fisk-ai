@@ -230,12 +230,16 @@ type failOnUserJournal struct {
 	runstate.Journal
 }
 
-func (j failOnUserJournal) Append(seq uint64, rec runstate.Record) error {
+func (j failOnUserJournal) Append(ctx context.Context, seq uint64, rec runstate.Record) error {
 	if rec.Protocol == runstate.UserProtocol {
 		return errors.New("disk full")
 	}
-	return j.Journal.Append(seq, rec)
+	return j.Journal.Append(ctx, seq, rec)
 }
+
+// testCtx is what the specs below hand the session store. None of them tests
+// cancellation, which the store's own package covers.
+var testCtx = context.Background()
 
 var _ = Describe("runner", func() {
 	Describe("resumeHazards", func() {
@@ -274,7 +278,7 @@ var _ = Describe("runner", func() {
 
 			// Runner A: one tool-using turn, then a suspend request lands, so the
 			// loop stops at the next boundary before calling the LLM again.
-			jA, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
+			jA, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
 			Expect(err).NotTo(HaveOccurred())
 
 			var suspendNow atomic.Bool
@@ -297,14 +301,14 @@ var _ = Describe("runner", func() {
 			Expect(jA.Close()).To(Succeed())
 
 			// The suspended session is resumable, its one tool turn recorded.
-			mid, err := store.Load(id)
+			mid, err := store.Load(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mid.Completed()).To(BeFalse())
 			Expect(mid.NextIteration).To(Equal(int64(1)))
 			Expect(mid.Counters.LlmCalls).To(Equal(int64(1)))
 
 			// Runner B: a fresh runner seeded from the store finishes the run.
-			jB, err := store.Open(id)
+			jB, err := store.Open(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 
 			rB := &runner{
@@ -325,7 +329,7 @@ var _ = Describe("runner", func() {
 			Expect(reason).To(Equal(runstate.ReasonCompleted))
 			Expect(jB.Close()).To(Succeed())
 
-			done, err := store.Load(id)
+			done, err := store.Load(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(done.Completed()).To(BeTrue())
 			Expect(done.Counters.LlmCalls).To(Equal(int64(2)))
@@ -473,7 +477,7 @@ var _ = Describe("runner", func() {
 			toolMsg := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"danger","input":{}}],"usage":{"input_tokens":10,"output_tokens":5}}`
 			finalMsg := `{"id":"m2","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":2}}`
 
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
+			j, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
 			Expect(err).NotTo(HaveOccurred())
 
 			tool := &recordingTool{name: "danger", output: "should never run"}
@@ -511,7 +515,7 @@ var _ = Describe("runner", func() {
 
 			// The deny is journaled as an error result answering the exact id, so the
 			// batch stays well-formed and a resume is consistent.
-			rs, err := store.Load(id)
+			rs, err := store.Load(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 			tr := findToolResult(rs.Messages, "toolu_1")
 			Expect(tr).NotTo(BeNil())
@@ -700,17 +704,17 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			j, err := store.Create(runID, runstate.MetaRecord{Version: runstate.Version, RunID: runID, Prompt: "go"})
+			j, err := store.Create(testCtx, runID, runstate.MetaRecord{Version: runstate.Version, RunID: runID, Prompt: "go"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Iteration: 0, Message: assistant}})).To(Succeed())
-			Expect(j.Append(3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "toolu_a", Result: llm.ToolResultBlock{ToolUseID: "toolu_a", Content: "already done"}}})).To(Succeed())
+			Expect(j.Append(testCtx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Iteration: 0, Message: assistant}})).To(Succeed())
+			Expect(j.Append(testCtx, 3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "toolu_a", Result: llm.ToolResultBlock{ToolUseID: "toolu_a", Content: "already done"}}})).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			rs, err := store.Load(runID)
+			rs, err := store.Load(testCtx, runID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rs.Pending).NotTo(BeNil())
 
-			resumeJ, err := store.Open(runID)
+			resumeJ, err := store.Open(testCtx, runID)
 			Expect(err).NotTo(HaveOccurred())
 
 			tool := &recordingTool{name: "echo", output: "ran"}
@@ -1053,7 +1057,7 @@ var _ = Describe("runner", func() {
 			store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
 			Expect(err).NotTo(HaveOccurred())
 			id := ksuid.New().String()
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
+			j, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
 			Expect(err).NotTo(HaveOccurred())
 
 			ev := &captureEvents{}
@@ -1098,7 +1102,7 @@ var _ = Describe("runner", func() {
 			Expect(denied).To(BeTrue())
 
 			// The journal holds the allowed prompt but no dangling record for the denied one.
-			rs, err := store.Load(id)
+			rs, err := store.Load(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 			texts := userTexts(rs.Messages)
 			Expect(texts).To(ContainElement("allowed"))
@@ -1166,17 +1170,17 @@ var _ = Describe("runner", func() {
 				},
 			}
 
-			j, err := store.Create(runID, runstate.MetaRecord{Version: runstate.Version, RunID: runID, Prompt: "go"})
+			j, err := store.Create(testCtx, runID, runstate.MetaRecord{Version: runstate.Version, RunID: runID, Prompt: "go"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Iteration: 0, Message: assistant}})).To(Succeed())
-			Expect(j.Append(3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "toolu_a", Result: llm.ToolResultBlock{ToolUseID: "toolu_a", Content: "already done"}}})).To(Succeed())
+			Expect(j.Append(testCtx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Iteration: 0, Message: assistant}})).To(Succeed())
+			Expect(j.Append(testCtx, 3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "toolu_a", Result: llm.ToolResultBlock{ToolUseID: "toolu_a", Content: "already done"}}})).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			rs, err := store.Load(runID)
+			rs, err := store.Load(testCtx, runID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rs.Pending).NotTo(BeNil())
 
-			resumeJ, err := store.Open(runID)
+			resumeJ, err := store.Open(testCtx, runID)
 			Expect(err).NotTo(HaveOccurred())
 
 			r := &runner{
@@ -1202,7 +1206,7 @@ var _ = Describe("runner", func() {
 
 			// Re-folding shows the turn fully answered: no pending remains, and
 			// both tool results are recorded.
-			done, err := store.Load(runID)
+			done, err := store.Load(testCtx, runID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(done.Pending).To(BeNil())
 			Expect(done.Counters.ToolCalls).To(Equal(int64(2)))
@@ -1339,14 +1343,14 @@ var _ = Describe("runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			oldID := ksuid.New().String()
-			jA, err := store.Create(oldID, runstate.MetaRecord{Version: runstate.Version, RunID: oldID, Prompt: "go", Interactive: true})
+			jA, err := store.Create(testCtx, oldID, runstate.MetaRecord{Version: runstate.Version, RunID: oldID, Prompt: "go", Interactive: true})
 			Expect(err).NotTo(HaveOccurred())
 
 			var newID string
-			newSession := func(prompt string) (runstate.Journal, string, error) {
+			newSession := func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 				newID = ksuid.New().String()
 				meta := runstate.MetaRecord{Version: runstate.Version, RunID: newID, Prompt: prompt, Interactive: true}
-				j, e := store.Create(newID, meta)
+				j, e := store.Create(ctx, newID, meta)
 				if e != nil {
 					return nil, "", e
 				}
@@ -1388,14 +1392,14 @@ var _ = Describe("runner", func() {
 
 			// The previous session is finalized as suspended (never completed), so it stays
 			// resumable, with just its single pre-reset turn recorded.
-			old, err := store.Load(oldID)
+			old, err := store.Load(testCtx, oldID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(old.Completed()).To(BeFalse())
 			Expect(old.Counters.LlmCalls).To(Equal(int64(1)))
 
 			// The fresh session holds only the post-reset conversation: its "fresh" prompt (the
 			// new Meta.Prompt) and the one answer, not the pre-reset "go" turn.
-			fresh, err := store.Load(newID)
+			fresh, err := store.Load(testCtx, newID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fresh.Counters.LlmCalls).To(Equal(int64(1)))
 			Expect(fresh.Messages).To(HaveLen(2))
@@ -1407,15 +1411,15 @@ var _ = Describe("runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			oldID := ksuid.New().String()
-			jA, err := store.Create(oldID, runstate.MetaRecord{Version: runstate.Version, RunID: oldID, Prompt: "go", Interactive: true})
+			jA, err := store.Create(testCtx, oldID, runstate.MetaRecord{Version: runstate.Version, RunID: oldID, Prompt: "go", Interactive: true})
 			Expect(err).NotTo(HaveOccurred())
 
 			var newID string
 			var rotateCalls int
-			newSession := func(prompt string) (runstate.Journal, string, error) {
+			newSession := func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 				rotateCalls++
 				newID = ksuid.New().String()
-				j, e := store.Create(newID, runstate.MetaRecord{Version: runstate.Version, RunID: newID, Prompt: prompt, Interactive: true})
+				j, e := store.Create(ctx, newID, runstate.MetaRecord{Version: runstate.Version, RunID: newID, Prompt: prompt, Interactive: true})
 				if e != nil {
 					return nil, "", e
 				}
@@ -1459,7 +1463,7 @@ var _ = Describe("runner", func() {
 			Expect(r.sessionID).To(Equal(newID))
 
 			// The previous session kept just its pre-reset turn and stays resumable.
-			old, err := store.Load(oldID)
+			old, err := store.Load(testCtx, oldID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(old.Completed()).To(BeFalse())
 			Expect(old.Counters.LlmCalls).To(Equal(int64(1)))
@@ -1470,10 +1474,10 @@ var _ = Describe("runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			oldID := ksuid.New().String()
-			jA, err := store.Create(oldID, runstate.MetaRecord{Version: runstate.Version, RunID: oldID, Prompt: "go", Interactive: true})
+			jA, err := store.Create(testCtx, oldID, runstate.MetaRecord{Version: runstate.Version, RunID: oldID, Prompt: "go", Interactive: true})
 			Expect(err).NotTo(HaveOccurred())
 
-			newSession := func(string) (runstate.Journal, string, error) {
+			newSession := func(context.Context, string) (runstate.Journal, string, error) {
 				return nil, "", errors.New("store unavailable")
 			}
 
@@ -1511,7 +1515,7 @@ var _ = Describe("runner", func() {
 			Expect(we.has(WarnSessionRotate)).To(BeTrue())
 
 			// The turn ran on in the original session, which keeps both turns and stays consistent.
-			old, err := store.Load(oldID)
+			old, err := store.Load(testCtx, oldID)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(old.Completed()).To(BeFalse())
 			Expect(old.Counters.LlmCalls).To(Equal(int64(2)))
@@ -1584,7 +1588,7 @@ var _ = Describe("runner", func() {
 			store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
 			Expect(err).NotTo(HaveOccurred())
 			id := ksuid.New().String()
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
+			j, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
 			Expect(err).NotTo(HaveOccurred())
 
 			var calls, prompts int
@@ -1614,7 +1618,7 @@ var _ = Describe("runner", func() {
 			Expect(reason).To(Equal(runstate.ReasonSuspended))
 			Expect(j.Close()).To(Succeed())
 
-			rs, err := store.Load(id)
+			rs, err := store.Load(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rs.Completed()).To(BeFalse())
 			Expect(rs.Interactive).To(BeTrue())
@@ -1664,7 +1668,7 @@ var _ = Describe("runner", func() {
 			store, err := runstatefile.NewFileStore(GinkgoT().TempDir())
 			Expect(err).NotTo(HaveOccurred())
 			id := ksuid.New().String()
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
+			j, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go", Interactive: true})
 			Expect(err).NotTo(HaveOccurred())
 
 			we := &warnRecorder{}
@@ -1739,7 +1743,7 @@ var _ = Describe("runner", func() {
 			// non-zero on a turn that continues (the budget check runs before the next turn).
 			cachedTurn := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"missing","input":{}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":40}}`
 
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
+			j, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
 			Expect(err).NotTo(HaveOccurred())
 
 			r := &runner{
@@ -1767,7 +1771,7 @@ var _ = Describe("runner", func() {
 
 			// The journaled assistant record carries it, and Fold sums it into the counters
 			// that seed a resumed run, so all four stay consistent across a suspend.
-			rs, err := store.Load(id)
+			rs, err := store.Load(testCtx, id)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rs.Counters.InTokens).To(Equal(int64(10)))
 			Expect(rs.Counters.OutTokens).To(Equal(int64(5)))
@@ -2034,7 +2038,7 @@ var _ = Describe("the conversation token budget", func() {
 		Expect(err).NotTo(HaveOccurred())
 		id := ksuid.New().String()
 
-		j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
+		j, err := store.Create(testCtx, id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "go"})
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(j.Close()).To(Succeed()) })
 
@@ -2062,7 +2066,7 @@ var _ = Describe("the conversation token budget", func() {
 		Expect(r.followUpTaken).To(BeFalse())
 		Expect(r.messages).To(HaveLen(1), "the prompt was not appended to the conversation")
 
-		recs, err := j.Records()
+		recs, err := j.Records(testCtx)
 		Expect(err).NotTo(HaveOccurred())
 		for _, rec := range recs {
 			Expect(rec.Protocol).ToNot(Equal(runstate.UserProtocol), "no user record was written")

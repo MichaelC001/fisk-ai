@@ -416,7 +416,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			victim := a2aendpoint.SessionFor("worker", "3Hzmp8VqrKL42NmXcPd7bTgWfR1")
 			suspendedSession(store, victim)
 
-			before, err := store.Load(victim)
+			before, err := store.Load(context.Background(), victim)
 			Expect(err).ToNot(HaveOccurred())
 
 			startWorker(nc, workerOpts{
@@ -429,12 +429,12 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 
 			Eventually(taskState(client, victim), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
 
-			after, err := store.Load(victim)
+			after, err := store.Load(context.Background(), victim)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(after.Messages).To(Equal(before.Messages), "the conversation took no turn")
 
 			// The job ran, in a journal of its own.
-			mine, err := store.Load(SessionFor("worker", victim))
+			mine, err := store.Load(context.Background(), SessionFor("worker", victim))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(mine.Messages).ToNot(BeEmpty())
 		})
@@ -452,7 +452,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			store := agenttest.NewFakeSessionStore(GinkgoTB())
 			suspendedSession(store, session)
 
-			before, err := store.Load(session)
+			before, err := store.Load(context.Background(), session)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(before.Messages).ToNot(BeEmpty())
 
@@ -471,7 +471,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 
 			// A restart would have replaced the journal; a resume continues it, and
 			// announces itself with a claim before it does anything.
-			after, err := store.Load(session)
+			after, err := store.Load(context.Background(), session)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(len(after.Messages)).To(BeNumerically(">", len(before.Messages)))
 
@@ -543,7 +543,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			store := agenttest.NewFakeSessionStore(GinkgoTB())
 			suspendedSession(store, session)
 
-			held, err := store.Open(session)
+			held, err := store.Open(context.Background(), session)
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(held.Close)
 
@@ -701,11 +701,13 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 func openRecords(store runstate.Store, id string) []runstate.Record {
 	GinkgoHelper()
 
-	j, err := store.Open(id)
+	ctx := context.Background()
+
+	j, err := store.Open(ctx, id)
 	Expect(err).ToNot(HaveOccurred())
 	defer func() { Expect(j.Close()).To(Succeed()) }()
 
-	recs, err := j.Records()
+	recs, err := j.Records(ctx)
 	Expect(err).ToNot(HaveOccurred())
 
 	return recs

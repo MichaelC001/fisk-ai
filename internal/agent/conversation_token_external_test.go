@@ -55,7 +55,7 @@ var _ = Describe("the conversation token", func() {
 		}), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 		Expect(err).NotTo(HaveOccurred())
 
-		rs, err := store.Load(session)
+		rs, err := store.Load(context.Background(), session)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.ConversationToken).To(Equal(token))
 		Expect(rs.Caller).To(Equal("peer1"))
@@ -69,7 +69,7 @@ var _ = Describe("the conversation token", func() {
 		}), agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
 		Expect(err).NotTo(HaveOccurred())
 
-		rs, err = store.Load(session)
+		rs, err = store.Load(context.Background(), session)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.ConversationToken).To(Equal(token))
 		Expect(rs.Caller).To(Equal("peer1"))
@@ -160,7 +160,7 @@ var _ = Describe("the conversation token", func() {
 
 		// The journal the reset rotated to. Who asked did not change, so the caller is
 		// carried and the token is not.
-		rs, err := store.Load(res.SessionID)
+		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.ConversationToken).To(BeEmpty())
 		Expect(rs.Caller).To(Equal("peer1"))

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -75,7 +76,7 @@ var _ = Describe("openSessionStore", func() {
 		Expect(store).ToNot(BeNil())
 		defer cleanup()
 
-		infos, err := store.List()
+		infos, err := store.List(context.Background())
 		Expect(err).ToNot(HaveOccurred())
 		Expect(infos).To(BeEmpty())
 	})

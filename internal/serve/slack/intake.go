@@ -479,7 +479,7 @@ func (c *Channel) workFor(ctx context.Context, t *turn) (*serve.Work, error) {
 		return t.work(resumeCheckpoint(t.session, t.answer), caller), nil
 	}
 
-	held, err := c.held(t.session)
+	held, err := c.held(ctx, t.session)
 	if err != nil {
 		return nil, err
 	}
