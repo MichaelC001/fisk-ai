@@ -8,9 +8,9 @@ import "context"
 
 // Provider is one model backend. It turns a neutral Request into a neutral
 // Response, translating to and from its own wire format internally, and reports
-// the capabilities that shape how a request must be built for it. A Provider is
-// the single seam the agent loop calls: it is the only place a concrete SDK is
-// spoken on the request path.
+// the capabilities that shape how a request must be built for it. The agent loop
+// calls a Provider and nothing else on the request path, so a Provider is the only
+// place a concrete SDK is spoken.
 type Provider interface {
 	// Call issues one model request and returns the assistant turn, why it stopped,
 	// and what it cost. It owns the wire call end to end, including any per-call

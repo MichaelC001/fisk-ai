@@ -44,9 +44,11 @@ const (
 	maxEmbedResponseBytes = 64 << 20
 )
 
-// Embedder is the tier-2 seam: a source of embedding vectors for documents and
-// queries. It is an interface so unit tests mock it and never touch the network;
-// the only production implementation is the OpenAI-compatible client below. The
+// Embedder is the source of embedding vectors for documents and queries, which is
+// the tier-2 dependency a caller supplies through Options.Embedder to index and
+// search against a model this package did not build. The OpenAI-compatible client
+// below is the only implementation here, and a test supplies its own so no request
+// leaves the process. The
 // rag package L2-normalizes every returned vector itself, so an implementation
 // returns the model's raw vectors.
 type Embedder interface {

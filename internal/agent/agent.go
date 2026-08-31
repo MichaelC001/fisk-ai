@@ -383,7 +383,7 @@ type Options struct {
 	// from cfg.A2ATransport() (its NAME string, not this value) over the shared connection.
 	// It is consulted only when the config declares remote_tools; with none it is ignored,
 	// so injecting it into a run with no remote tools is a no-op. It is a client transport:
-	// Run never serves a2a (that is the `agent a2a` command's separate seam). Do not
+	// Run never serves a2a, which the `agent a2a` command does instead. Do not
 	// confuse it with config.Config.A2ATransport(), which returns the transport name string
 	// this field replaces.
 	A2ATransport a2a.Transport
@@ -1005,7 +1005,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// Closes it. Only a connection Run dials itself is owned and released here; dialing
 	// per run is the CLI path.
 	// An injected store or transport is self-contained (the caller provisioned it), so
-	// it must not force Run to dial: gate each term on its seam not being injected.
+	// it must not force Run to dial, so each term is gated on nothing being injected.
 	memNeedsNats := opts.MemoryStore == nil && memory.NeedsNats(cfg)
 	// A jetstream session store only needs NATS when the run actually journals: an
 	// un-checkpointed run stores no session, so gate the dial on checkpointing rather

@@ -17,7 +17,7 @@ type MiddlewareNext = func(*http.Request) (*http.Response, error)
 // wire client is built.
 //
 // It is deliberately http-shaped rather than tied to any SDK: every provider this
-// project targets is an HTTP backend, so the neutral seam can name the type without
+// project targets is an HTTP backend, so this package names net/http's types without
 // leaking a vendor package. Providers whose SDK expects the same func shape assign
 // these values through unchanged.
 type Middleware = func(*http.Request, MiddlewareNext) (*http.Response, error)

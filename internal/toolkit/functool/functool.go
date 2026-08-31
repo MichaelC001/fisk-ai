@@ -353,7 +353,7 @@ func (t *Tool) Execute(ctx context.Context, input json.RawMessage, deps toolkit.
 
 // TraceLine renders the one-line display of a call: the confirm summary for a
 // confirm-gated tool (shown in the approval prompt) or the call trace for a traced
-// tool (shown like a command's line, and the seam the MCP server traces through),
+// tool (shown like a command's line, and what the MCP server traces through),
 // sanitized for terminal display since its text is handler-supplied. It is "" for a
 // tool that is neither confirm-gated with a summary nor traced.
 func (t *Tool) TraceLine(input json.RawMessage) string {

@@ -2144,8 +2144,8 @@ var otlpCredentialEnvNames = []string{
 // CredentialEnvNames returns the names of the environment variables that config
 // identifies as holding a credential, so a caller can strip them from the
 // environment of a subprocess whose command line the model chooses (see
-// internal/toolkit/fisk). It is the single seam a future provider extends: any
-// operator-named secret variable belongs here, never a static denylist. Names are
+// internal/toolkit/fisk). A future provider extends this function and nothing else:
+// any operator-named secret variable belongs here, never a static denylist. Names are
 // trimmed, empties dropped, and duplicates removed.
 //
 // It is never empty: the OpenTelemetry export credentials are always included, for

@@ -51,7 +51,7 @@ const (
 // Live is a full-screen view of a live agent run: a viewport the run feeds through
 // Append while the tview loop draws it, plus a live statusbar. It owns the tcell
 // screen and restores the terminal on exit. The run goroutine and the tview loop
-// are separate; Append is the seam between them and marshals onto the loop.
+// are separate, and Append is what crosses between them, marshaling onto the loop.
 type Live struct {
 	v        *viewer
 	screen   tcell.Screen

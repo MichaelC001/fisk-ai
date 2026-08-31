@@ -22,7 +22,7 @@ import (
 // reachable. It records how many round trips it served, so a test can assert the run
 // went through the injected transport (and, since the fake never dials, that Run did
 // not dial either). It is one of the separate-package fakes proving each injectable
-// seam is implementable from outside its own package, and it is safe for the
+// interface can be implemented from outside its own package, and it is safe for the
 // concurrent use runs sharing one transport make of it.
 type FakeTransport struct {
 	mu         sync.Mutex

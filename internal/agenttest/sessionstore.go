@@ -18,8 +18,8 @@ import (
 // connection. Because the store lives only in this instance, a resume finds its
 // session only if the injected store was actually borrowed across both runs, which
 // is what the shared-session example asserts. It is one of the separate-package
-// fakes proving each injectable seam is implementable from outside its own package,
-// and it is safe for the concurrent use runs sharing one store make of it.
+// fakes proving each injectable interface can be implemented from outside its own
+// package, and it is safe for the concurrent use runs sharing one store make of it.
 type FakeSessionStore struct {
 	mu   sync.Mutex
 	runs map[string]*fakeJournal
@@ -28,8 +28,8 @@ type FakeSessionStore struct {
 
 // FakeSessionStore implements runstate.Store and fakeJournal implements
 // runstate.Journal; the assertions are the separate-package interface audit,
-// failing to compile if the seam stops being implementable from outside its own
-// package.
+// failing to compile if either interface stops being implementable from outside its
+// own package.
 var (
 	_ runstate.Store   = (*FakeSessionStore)(nil)
 	_ runstate.Journal = (*fakeJournal)(nil)

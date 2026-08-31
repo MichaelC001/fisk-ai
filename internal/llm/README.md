@@ -47,7 +47,7 @@ type Provider interface {
 
 `Call` owns the wire call end to end, including any per-call timeout: it renders the
 neutral `Request` to its wire format, issues the request, and converts the reply
-back to a neutral `Response`. It is the single seam where a concrete SDK is spoken.
+back to a neutral `Response`. It is the only place a concrete SDK is spoken.
 
 `Capabilities` returns declared capabilities. They are declared, not discovered:
 neither Anthropic nor OpenAI expose capability flags at runtime, so a provider states
