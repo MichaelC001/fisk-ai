@@ -15,6 +15,10 @@ import (
 // path, a placeholder model, and a small iteration budget so a misbehaving script
 // cannot loop indefinitely. Options tune it per feature. Each call returns a fresh
 // config, so concurrent runs never share a pointer.
+//
+// A nil app leaves ApplicationPath empty, which is the agent that wraps no
+// application and runs on built-in, remote and injected tools alone. Enable at least
+// one of those through an option, since a run offered no tools at all is refused.
 func Config(tb testing.TB, app *FakeApp, opts ...ConfigOption) *config.Config {
 	tb.Helper()
 
@@ -25,8 +29,18 @@ func Config(tb testing.TB, app *FakeApp, opts ...ConfigOption) *config.Config {
 // outside a test. It sets the fields a run needs and leaves the rest at their zero
 // values, so a caller wanting the file defaults and the derived identity starts from
 // config.NewConfig and calls Prepare instead.
+//
+// A nil app leaves ApplicationPath empty, as it does for Config.
 func BuildConfig(app *FakeApp, opts ...ConfigOption) *config.Config {
-	cfg := &config.Config{ApplicationPath: app.Path, Identity: "agent"}
+	// An app-less config is the agent built on built-ins, remote tools and whatever the
+	// caller injects, so a caller testing one passes nil here rather than standing up a
+	// FakeApp it never calls.
+	appPath := ""
+	if app != nil {
+		appPath = app.Path
+	}
+
+	cfg := &config.Config{ApplicationPath: appPath, Identity: "agent"}
 	cfg.LLM.Model = "test-model"
 	cfg.LLM.Budget.MaxIterations = 20
 	// PII scanning is on for a real run and off here unless a test asks for it with

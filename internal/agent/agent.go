@@ -470,8 +470,14 @@ type Continuation struct {
 
 // Result is the outcome of a run, for the caller to render.
 type Result struct {
-	Reason    runstate.TerminalReason
-	Stats     *RunStats
+	Reason runstate.TerminalReason
+
+	// Stats is the run's accounting, nil when the run failed before it started. Run
+	// returns a non-nil Result on those failures too, so a nil error does not promise
+	// this field: check it before reading it, as serve.Outcome.Stats requires of the
+	// same value one layer out.
+	Stats *RunStats
+
 	SessionID string
 
 	// Text is the concatenated text of the last assistant turn the run produced,
@@ -1592,7 +1598,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// depends on that connection); interactive was resolved at the top, where the root
 	// span needed it.
 	info := RunInfo{
-		Tools:           len(tools),
+		Tools:           len(toolSet.defs),
 		ThinkingEnabled: cfg.ThinkingEnabled(),
 		ConfirmTools:    confirmTools,
 		ConfirmTags:     confirmTags,
