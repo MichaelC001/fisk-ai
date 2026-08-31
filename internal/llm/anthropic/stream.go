@@ -46,7 +46,7 @@ func (p *Provider) CallStream(ctx context.Context, req llm.Request, fn func(llm.
 		return nil, err
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	callCtx, cancel := p.callContext(ctx)
 	defer cancel()
 
 	stream := p.client.Messages.NewStreaming(callCtx, params)
@@ -100,7 +100,7 @@ func (p *Provider) CallStream(ctx context.Context, req llm.Request, fn func(llm.
 
 	err = stream.Err()
 	if err != nil {
-		return nil, badRequestHint(err, req)
+		return nil, classify(badRequestHint(err, req))
 	}
 
 	if !stopped {

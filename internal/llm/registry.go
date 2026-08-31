@@ -13,15 +13,27 @@ import (
 	"time"
 )
 
+// DefaultTimeout is the limit on a single model call that NewProvider applies when
+// Config.Timeout is zero. It is the same 120s the YAML key llm.budget.call_timeout
+// defaults to, so a Go caller and an operator get the same behavior from a
+// configuration that names no timeout.
+const DefaultTimeout = 120 * time.Second
+
 // Config carries the neutral settings a Factory needs to build a Provider. APIKey
-// and BaseURL address the backend, Timeout bounds a single call, and Middlewares
-// are the cross-cutting request hooks the caller assembled (request trace, HTTP
-// debug dump). Every field is neutral, so provider resolution never forces the
-// caller to name a vendor package.
+// and BaseURL address the backend, and Middlewares are the cross-cutting request
+// hooks the caller assembled (request trace, HTTP debug dump). Every field is
+// neutral, so provider resolution never forces the caller to name a vendor package.
 type Config struct {
-	APIKey      string
-	BaseURL     string
-	Timeout     time.Duration
+	APIKey  string
+	BaseURL string
+
+	// Timeout is the limit on a single model call, which a Provider applies to the wire
+	// call it makes. Zero takes DefaultTimeout. A negative value asks the Provider to
+	// add no limit of its own; what remains is the context the caller passes to Call
+	// and whatever the backend's client enforces, which for the Anthropic SDK is a 10
+	// minute request timeout on a non-streaming call.
+	Timeout time.Duration
+
 	Middlewares []Middleware
 }
 
@@ -144,17 +156,25 @@ func mergeEnvNames(lists [][]string) []string {
 }
 
 // NewProvider resolves the named provider from the registry and constructs it from
-// cfg. It returns an error for an unknown provider (most often because its package
-// was not imported into this build; the error lists the providers that are linked
-// in) or a construction failure, so an operator's mistake surfaces up front rather
-// than on the first call.
+// cfg. A zero cfg.Timeout becomes DefaultTimeout before the factory sees it, so a
+// caller that sets no timeout gets a usable provider rather than one whose every
+// call ends on an expired deadline.
+//
+// It returns ErrUnknownProvider for a name nothing registered (most often because
+// its package was not imported into this build; the error lists the providers that
+// are linked in) or a construction failure, so an operator's mistake surfaces up
+// front rather than on the first call.
 func NewProvider(name string, cfg Config) (Provider, error) {
 	registryMu.Lock()
 	reg, ok := registry[name]
 	registryMu.Unlock()
 
 	if !ok {
-		return nil, fmt.Errorf("unknown llm provider %q: known providers are %v", name, Providers())
+		return nil, fmt.Errorf("%w %q: known providers are %v", ErrUnknownProvider, name, Providers())
+	}
+
+	if cfg.Timeout == 0 {
+		cfg.Timeout = DefaultTimeout
 	}
 
 	return reg.factory(cfg)

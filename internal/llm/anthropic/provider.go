@@ -49,15 +49,21 @@ func init() {
 	})
 }
 
-// Options configure a Provider. APIKey and BaseURL address the backend, Timeout
-// bounds a single call, and Middlewares carry the cross-cutting request hooks
-// (request trace, HTTP debug dump) the caller assembles. Middlewares is neutral
-// (llm.Middleware is http-shaped, not SDK-typed); this package converts it to the
-// SDK's request option when it builds the client, keeping the caller SDK-free.
+// Options configure a Provider. APIKey and BaseURL address the backend, and
+// Middlewares carry the cross-cutting request hooks (request trace, HTTP debug dump)
+// the caller assembles. Middlewares is neutral (llm.Middleware is http-shaped, not
+// SDK-typed); this package converts it to the SDK's request option when it builds
+// the client, keeping the caller SDK-free.
 type Options struct {
-	APIKey      string
-	BaseURL     string
-	Timeout     time.Duration
+	APIKey  string
+	BaseURL string
+
+	// Timeout is the limit on a single call, as llm.Config.Timeout defines it: zero
+	// takes llm.DefaultTimeout, and a negative value adds no limit of this provider's.
+	// A streaming call then runs until the caller's context ends it; a Call still runs
+	// under the SDK's own request timeout, which is 10 minutes.
+	Timeout time.Duration
+
 	Middlewares []llm.Middleware
 }
 
@@ -72,6 +78,8 @@ type Provider struct {
 
 // NewProvider builds a Provider from Options. The base URL is validated by the
 // caller before construction so its error can name the flag the operator set.
+// Options.Timeout is stored as the caller wrote it; callContext reads what a zero
+// and a negative value mean.
 func NewProvider(opts Options) *Provider {
 	clientOpts := []option.RequestOption{option.WithAPIKey(opts.APIKey)}
 	if opts.BaseURL != "" {
@@ -85,6 +93,27 @@ func NewProvider(opts Options) *Provider {
 		client:  sdk.NewClient(clientOpts...),
 		timeout: opts.Timeout,
 	}
+}
+
+// callContext derives the context one call runs under. A positive timeout is the
+// deadline; zero takes llm.DefaultTimeout, so a Provider built without one calls
+// under the same limit llm.NewProvider hands a factory; a negative timeout adds no
+// deadline of this provider's, leaving a streaming call to run until the caller's
+// context ends it and a Call under the SDK's own 10 minute request timeout.
+//
+// This is the one place those two values are read, so a Provider built here or by a
+// caller writing the struct literal behaves the same. The returned cancel releases
+// the call on every path out, so a caller defers it either way.
+func (p *Provider) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	switch {
+	case p.timeout < 0:
+		return context.WithCancel(ctx)
+
+	case p.timeout == 0:
+		return context.WithTimeout(ctx, llm.DefaultTimeout)
+	}
+
+	return context.WithTimeout(ctx, p.timeout)
 }
 
 // Capabilities reports what this provider supports. Anthropic offers server-side
@@ -103,18 +132,21 @@ func (p *Provider) Capabilities() llm.Caps {
 // rejects the request with a 400, it adds a hint that the model may not support
 // thinking, since that is the common cause and disabling it is not an obvious
 // remedy; the caller wraps the result with its own "llm call" context.
+//
+// An error the API reported carries the llm sentinel for its class, so a caller reads
+// a rate limit or an expired key with errors.Is. See classify.
 func (p *Provider) Call(ctx context.Context, req llm.Request) (*llm.Response, error) {
 	params, err := p.buildParams(req)
 	if err != nil {
 		return nil, err
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	callCtx, cancel := p.callContext(ctx)
 	defer cancel()
 
 	msg, err := p.client.Messages.New(callCtx, params)
 	if err != nil {
-		return nil, badRequestHint(err, req)
+		return nil, classify(badRequestHint(err, req))
 	}
 
 	resp, err := ResponseToNeutral(msg)

@@ -140,11 +140,10 @@ type Options struct {
 
 	// Provider, when non-nil, is the llm.Provider every run uses.
 	//
-	// Unlike the other shared resources here, llm.Provider states no concurrency
-	// contract of its own, so this is where the requirement is made: a Provider given
-	// to a Server must be safe for concurrent use, because every run calls it. Leaving
-	// it nil builds one per run from the configuration, which is correct but gives a
-	// long-lived process no connection reuse.
+	// Every run calls this one Provider, and llm.Provider already requires an
+	// implementation to be safe for concurrent use. Leaving it nil builds one per run
+	// from the configuration, which is correct but gives a long-lived process no
+	// connection reuse.
 	Provider llm.Provider
 
 	// CustomTools are Go tools every run this server hosts can call, handed to each run
