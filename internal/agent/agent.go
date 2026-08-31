@@ -2216,17 +2216,33 @@ func endsOnAssistant(messages []llm.Message) bool {
 	return n > 0 && messages[n-1].Role == llm.RoleAssistant
 }
 
-// SessionInteractive reports whether a stored session was started as an interactive
-// chat run, reading only its Meta record so the CLI can reopen the input bar on
-// resume without the operator re-passing the flag. It does not lock the session (the
-// subsequent resume takes the lock), so it is a cheap pre-flight read.
-func SessionInteractive(cfg *config.Config, id string) (bool, error) {
-	rs, err := LoadSession(cfg, id)
-	if err != nil {
-		return false, err
-	}
+// SessionOptions are the inputs a session read shares with a run: which journal store
+// to read, expressed the same way Run takes it.
+type SessionOptions struct {
+	// StoreDir is Options.StoreDir, the base directory a directory-backed session store
+	// resolves its relative or default path under. Empty puts the journal in the XDG
+	// state directory, the CLI's behavior.
+	StoreDir string
 
-	return rs.Interactive, nil
+	// SessionStore is Options.SessionStore, a store the caller has already opened. When
+	// set, LoadSession reads through it and consults neither StoreDir nor the configured
+	// backend, so a caller sharing one store across runs pre-flights through that store
+	// rather than opening a second connection to the same journals.
+	SessionStore runstate.Store
+
+	// Conns is Options.Conns, the shared connection a jetstream session store binds its
+	// stream over. LoadSession borrows it and never Closes it, as Run does. When nil,
+	// and only for a backend that needs a connection, LoadSession dials cfg.NatsContext
+	// and releases that connection at the end of the read. For a jetstream backend the
+	// connection decides which server and stream the journal is read from, so a caller
+	// that injected one into Run passes the same one here.
+	Conns *conns.Provider
+}
+
+// SessionOptions returns the fields a session read shares with this run, so a caller
+// pre-flighting a resume with LoadSession reads the journal this run will write.
+func (o Options) SessionOptions() SessionOptions {
+	return SessionOptions{StoreDir: o.StoreDir, SessionStore: o.SessionStore, Conns: o.Conns}
 }
 
 // LoadSession reads one stored run without holding it, for a caller deciding what to do
@@ -2236,27 +2252,78 @@ func SessionInteractive(cfg *config.Config, id string) (bool, error) {
 // It is a pre-flight read and takes no lock, so what it returns describes the journal at
 // the moment it was read and not a run in progress. Resuming is Run's business.
 //
-// A file-backed journal lives in the XDG default, so the file backend resolves with an
-// empty environment; a server resume runs through Run, which passes its own StoreDir. A
-// jetstream backend needs a connection, and a short-lived one is dialed here for the
-// read, with the resume that follows dialing its own.
-func LoadSession(cfg *config.Config, id string) (*runstate.RunState, error) {
-	env := runstate.RuntimeEnv{}
-	if runstate.NeedsNats(cfg.SessionBackend()) {
-		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
-		if err != nil {
-			return nil, fmt.Errorf("connecting to NATS for the jetstream session pre-flight read: %w", err)
-		}
-		defer p.Close()
-		env.Nats = p.Nats()
-	}
-
-	store, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), env)
+// opts names the journal, and a caller that is about to call Run passes
+// Options.SessionOptions() from the same Options so both reach the same store. An
+// injected store is read through as it stands. Without one, the store dir, the injected
+// connection and the configured backend resolve the journal on the rules Run applies to
+// the same three fields, and a jetstream backend with no injected connection gets one
+// dialed here for the read, with the resume that follows dialing its own.
+//
+// ctx limits the read: a canceled context returns before anything is dialed or read, and
+// a cancel while the dial is outstanding ends the wait, with the connection that dial
+// produces closed rather than left open.
+func LoadSession(ctx context.Context, cfg *config.Config, id string, opts SessionOptions) (*runstate.RunState, error) {
+	err := ctx.Err()
 	if err != nil {
 		return nil, err
 	}
 
+	store := opts.SessionStore
+	if store == nil {
+		env := runstate.RuntimeEnv{StoreDir: opts.StoreDir}
+		if runstate.NeedsNats(cfg.SessionBackend()) {
+			// An injected connection is borrowed: the caller established it and shares it,
+			// so the read uses it and leaves it open. Only a connection dialed here is
+			// released here.
+			natsConns := opts.Conns
+			if natsConns == nil {
+				p, derr := dialSessionNats(ctx, cfg)
+				if derr != nil {
+					return nil, fmt.Errorf("connecting to NATS for the jetstream session pre-flight read: %w", derr)
+				}
+				defer p.Close()
+				natsConns = p
+			}
+			env.Nats = natsConns.Nats()
+		}
+
+		store, err = runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), env)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return store.Load(id)
+}
+
+// dialSessionNats dials the connection a jetstream session read needs. conns.Connect
+// blocks until the dial resolves and takes no context, so it runs in a goroutine while
+// this waits on ctx as well. On a cancel this returns ctx.Err() and starts a second
+// goroutine that waits for the dial and closes the connection it produced.
+func dialSessionNats(ctx context.Context, cfg *config.Config) (*conns.Provider, error) {
+	type dial struct {
+		provider *conns.Provider
+		err      error
+	}
+
+	done := make(chan dial, 1)
+	go func() {
+		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
+		done <- dial{provider: p, err: err}
+	}()
+
+	select {
+	case d := <-done:
+		return d.provider, d.err
+
+	case <-ctx.Done():
+		go func() {
+			d := <-done
+			d.provider.Close()
+		}()
+
+		return nil, ctx.Err()
+	}
 }
 
 // resumeHazards reports the resume situation that can misbehave: a pause at a

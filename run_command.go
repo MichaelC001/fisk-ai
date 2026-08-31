@@ -16,6 +16,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/multiplex"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/tui"
@@ -153,7 +154,7 @@ func runAction(_ *fisk.ParseContext) error {
 	}
 	defer releaseSessions()
 
-	token, err := resumeToken(cfg, resumeID)
+	token, err := resumeToken(runCtx, cfg, resumeID, agent.SessionOptions{StoreDir: stateDirFlag, SessionStore: sessions})
 	if err != nil {
 		return err
 	}

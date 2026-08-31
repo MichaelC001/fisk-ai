@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,12 +26,15 @@ import (
 // A session id the store does not hold is treated as a token rather than refused: only
 // the worker can say whether a token names a conversation, and it answers
 // unknown_conversation when it does not.
-func resumeToken(cfg *config.Config, handle string) (string, error) {
+//
+// The lookup reads through the store the command has already opened, which is the store
+// the run beside it journals into.
+func resumeToken(ctx context.Context, cfg *config.Config, handle string, sessions agent.SessionOptions) (string, error) {
 	if handle == "" {
 		return "", nil
 	}
 
-	rs, err := agent.LoadSession(cfg, handle)
+	rs, err := agent.LoadSession(ctx, cfg, handle, sessions)
 	if err != nil {
 		if errors.Is(err, runstate.ErrNotFound) || errors.Is(err, runstate.ErrInvalidID) {
 			return handle, nil
