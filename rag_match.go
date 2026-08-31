@@ -14,7 +14,7 @@ import (
 	"github.com/choria-io/ui/table"
 
 	"github.com/choria-io/fisk-ai/internal/rag"
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 const (
@@ -200,7 +200,7 @@ func renderMatch(c *columns.Document, res *rag.EnumerateResult, citations bool) 
 		// Nothing was queried, so this says nothing about the index. It is an error
 		// rather than an empty answer for exactly that reason.
 		return fmt.Errorf("no searchable terms in query %q\n  terms shorter than %d characters are dropped before matching\n  nothing was queried, so this says nothing about the index",
-			util.SanitizeForTerminal(knowledgeMatchQuery, matchMaxPathRunes), rag.MinTermRunes)
+			sanitize.ForTerminal(knowledgeMatchQuery, matchMaxPathRunes), rag.MinTermRunes)
 	}
 
 	if knowledgeMatchCount {
@@ -219,7 +219,7 @@ func renderMatch(c *columns.Document, res *rag.EnumerateResult, citations bool) 
 
 	c.Print(rag.EnumerateTierLine)
 	c.Blank()
-	c.Item("Query", util.SanitizeForTerminal(knowledgeMatchQuery, matchMaxPathRunes))
+	c.Item("Query", sanitize.ForTerminal(knowledgeMatchQuery, matchMaxPathRunes))
 	c.Item("Compiled", res.Compiled)
 	c.Item("Matched", fmt.Sprintf("%d of %d indexed documents", res.Matched, res.IndexedDocuments))
 	c.Blank()
@@ -239,7 +239,7 @@ func renderMatch(c *columns.Document, res *rag.EnumerateResult, citations bool) 
 // terminalText prepares one corpus-derived value for a table cell: sanitized, and
 // cut to the width a knowledge table renders a path at.
 func terminalText(s string) string {
-	return util.TruncateLine(util.SanitizeForTerminal(s, matchMaxPathRunes), matchMaxPathRunes)
+	return truncateLine(sanitize.ForTerminal(s, matchMaxPathRunes), matchMaxPathRunes)
 }
 
 // matchTable renders the matched documents. The citation carries the path as its
@@ -305,7 +305,7 @@ func renderMatchNotes(c *columns.Document, res *rag.EnumerateResult) {
 	for _, t := range res.Terms {
 		if t.Dropped {
 			notes = append(notes, fmt.Sprintf("note: %q was not queried; terms shorter than %d characters are dropped before matching",
-				util.SanitizeForTerminal(t.Surface, matchMaxPathRunes), rag.MinTermRunes))
+				sanitize.ForTerminal(t.Surface, matchMaxPathRunes), rag.MinTermRunes))
 		}
 	}
 
@@ -359,7 +359,7 @@ func renderEmptyMatch(c *columns.Document, res *rag.EnumerateResult) {
 	// instead, which is a vocabulary question rather than a retrieval one.
 	c.Print(fmt.Sprintf("Nothing to narrow. To see what the documents do call it, run: %s", wordsSuggestion(firstAbsentSurface(res))))
 	c.Print(fmt.Sprintf("Or 'fisk knowledge search %s' to rank sections, which may use other words.",
-		util.SanitizeForTerminal(knowledgeMatchQuery, matchMaxPathRunes)))
+		sanitize.ForTerminal(knowledgeMatchQuery, matchMaxPathRunes)))
 }
 
 // firstAbsentSurface names the term the vocabulary suggestion should be built from.
@@ -390,10 +390,10 @@ func renderTermFrequency(c *columns.Document, res *rag.EnumerateResult) {
 	tbl.AddHeaders("Word", "Stem", "As written", "Any form")
 	for _, t := range res.Terms {
 		if t.Dropped {
-			tbl.AddRow(util.SanitizeForTerminal(t.Surface, matchMaxPathRunes), "not queried", "-", "-")
+			tbl.AddRow(sanitize.ForTerminal(t.Surface, matchMaxPathRunes), "not queried", "-", "-")
 			continue
 		}
-		tbl.AddRow(util.SanitizeForTerminal(t.Surface, matchMaxPathRunes), t.Stem, t.Literal, t.Docs)
+		tbl.AddRow(sanitize.ForTerminal(t.Surface, matchMaxPathRunes), t.Stem, t.Literal, t.Docs)
 	}
 
 	c.Section("Term frequency in the index", func(c *columns.Document) {
@@ -406,5 +406,5 @@ func renderTermFrequency(c *columns.Document, res *rag.EnumerateResult) {
 // It is the cheapest discovery surface the feature has.
 func matchSuggestion(query string) string {
 	return fmt.Sprintf("Nothing ranked above the cutoff, which is not the same as nothing being there. To find out whether any document contains these words, run: fisk knowledge match %q",
-		util.SanitizeForTerminal(query, matchMaxPathRunes))
+		sanitize.ForTerminal(query, matchMaxPathRunes))
 }

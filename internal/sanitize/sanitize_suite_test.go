@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package util
+package sanitize
 
 import (
 	"testing"
@@ -11,7 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestUtil(t *testing.T) {
+func TestSanitize(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Internal/Util")
+	RunSpecs(t, "Internal/Sanitize")
 }

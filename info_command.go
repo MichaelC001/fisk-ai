@@ -13,6 +13,7 @@ import (
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
@@ -25,7 +26,6 @@ import (
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	"github.com/choria-io/fisk-ai/internal/tui"
-	"github.com/choria-io/fisk-ai/internal/util"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
 )
@@ -113,7 +113,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	mcpImports := mcpclient.DiscoverForInfo(ctx, mcpclient.Options{
 		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
-		Version:            util.Version(),
+		Version:            version,
 		CredentialEnvNames: cfg.CredentialEnvNames(),
 	}, mcpclient.NewClaimedNames(taken, remoteByName))
 
@@ -150,7 +150,7 @@ func infoAction(_ *fisk.ParseContext) error {
 		if t.NeedsConfirm(cfg.ConfirmTags()) {
 			confirm = "Yes"
 		}
-		tbl.AddRow(t.Name(), "local", confirm, util.TruncateString(t.Description(), maxInfoDescriptionLen), strings.Join(t.Tags(), ", "))
+		tbl.AddRow(t.Name(), "local", confirm, truncateString(t.Description(), maxInfoDescriptionLen), strings.Join(t.Tags(), ", "))
 
 		unknown, conflicting := toolkit.TagIssues(t)
 		if len(unknown) > 0 {
@@ -164,16 +164,16 @@ func infoAction(_ *fisk.ParseContext) error {
 	// so list them too when enabled, to show the full tool set a run would expose.
 	// They carry no tags.
 	for _, b := range hitlTools {
-		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
+		tbl.AddRow(b.Name(), "local", "", truncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
 	// Built-in memory tools are likewise not introspected from the application, so
 	// list them when enabled to show the full tool set a run would expose.
 	for _, b := range memTools {
-		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
+		tbl.AddRow(b.Name(), "local", "", truncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
 	// The built-in knowledge tools, likewise, when RAG is enabled.
 	for _, b := range ragTools {
-		tbl.AddRow(b.Name(), "local", "", util.TruncateString(b.Description(), maxInfoDescriptionLen), "")
+		tbl.AddRow(b.Name(), "local", "", truncateString(b.Description(), maxInfoDescriptionLen), "")
 	}
 	// Imported remote tools are listed with the host alias as their source, so the
 	// provenance of a tool the prompt may reference is clear.
@@ -187,7 +187,7 @@ func infoAction(_ *fisk.ParseContext) error {
 			// local rows.
 			desc, tags := splitRemoteDescription(rt.Description())
 			desc = strings.ReplaceAll(desc, "\n", " ")
-			tbl.AddRow(rt.Name(), alias, "", util.TruncateString(desc, maxInfoDescriptionLen), tags)
+			tbl.AddRow(rt.Name(), alias, "", truncateString(desc, maxInfoDescriptionLen), tags)
 		}
 	}
 	addMCPToolRows(tbl, mcpImports)
@@ -507,7 +507,7 @@ func addMCPToolRows(tbl *table.Table, imports []mcpclient.ServerImport) {
 		alias := imp.Server.EffectiveAlias()
 		for _, mt := range imp.Tools {
 			desc := strings.ReplaceAll(mt.Description(), "\n", " ")
-			tbl.AddRow(mt.Name(), alias, "", util.TruncateString(desc, maxInfoDescriptionLen), "")
+			tbl.AddRow(mt.Name(), alias, "", truncateString(desc, maxInfoDescriptionLen), "")
 		}
 	}
 }
@@ -647,7 +647,7 @@ func telemetryScrubStatus(cfg *config.Config) string {
 // leave it short of what a run would send.
 func toolSearchStatus(cfg *config.Config, totalTools int) string {
 	if !cfg.ToolSearchEnabled() {
-		if totalTools >= util.ToolSearchThreshold {
+		if totalTools >= agent.ToolSearchThreshold {
 			return fmt.Sprintf("disabled (no_tool_search), %d tools are sent to the model directly and use more context on each request; unset it to defer them behind the search tool, supported on Anthropic models only", totalTools)
 		}
 		return "disabled (no_tool_search)"
@@ -661,7 +661,7 @@ func toolSearchStatus(cfg *config.Config, totalTools int) string {
 		return fmt.Sprintf("unavailable (provider %q does not support it)", cfg.LLMProvider())
 	}
 
-	return fmt.Sprintf("enabled (used when %d or more tools are available)", util.ToolSearchThreshold)
+	return fmt.Sprintf("enabled (used when %d or more tools are available)", agent.ToolSearchThreshold)
 }
 
 // splitRemoteDescription separates a remote tool's advertised description into its

@@ -11,9 +11,9 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/rag"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // knowledgeEnumerateTool answers "which documents mention this", which
@@ -84,7 +84,7 @@ func knowledgeEnumerateTrace(input json.RawMessage) string {
 		return knowledgeEnumerateName
 	}
 
-	return fmt.Sprintf("%s(%q)", knowledgeEnumerateName, util.SanitizeForTerminal(args.Query, maxIndexDescriptionRunes))
+	return fmt.Sprintf("%s(%q)", knowledgeEnumerateName, sanitize.ForTerminal(args.Query, maxIndexDescriptionRunes))
 }
 
 // knowledgeEnumerateOutcome is the JSON result. Every count the model needs to

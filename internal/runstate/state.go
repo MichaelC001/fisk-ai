@@ -34,7 +34,7 @@ var (
 // tool, while RemoteToolCalls and MCPToolCalls count the calls that actually left the
 // process that made them. A call a policy hook denied or the operator refused is in its
 // bucket and in neither counter, so a counter is a subset of the bucket of the same kind
-// and never that bucket. util.RunStats.ToolCallsByKind states the distinction in full,
+// and never that bucket. agent.RunStats.ToolCallsByKind states the distinction in full,
 // and these counters seed those.
 type Counters struct {
 	LlmCalls  int64
@@ -46,7 +46,7 @@ type Counters struct {
 	// KindMCP bucket of ToolCallsByKind rather than that bucket.
 	MCPToolCalls int64
 	// ToolCallsByKind counts each tool result by the provider that served it, keyed
-	// the way util.RunStats keys its own buckets so a resume seeds those without
+	// the way agent.RunStats keys its own buckets so a resume seeds those without
 	// re-keying. Every call ToolCalls counts is counted here too, the ones answered
 	// without running included, so the buckets partition ToolCalls. It is nil for a
 	// journal that recorded no tool result.
@@ -64,7 +64,7 @@ type Counters struct {
 
 // countKind records one tool result against the provider that served it, allocating
 // the map on first use. It leaves the two dispatch counters alone; countDispatch keeps
-// those, so the two axes are folded the way util.RunStats counts them live.
+// those, so the two axes are folded the way agent.RunStats counts them live.
 func (c *Counters) countKind(kind toolkit.Kind) {
 	if c.ToolCallsByKind == nil {
 		c.ToolCallsByKind = make(map[toolkit.Kind]int64)

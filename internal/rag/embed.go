@@ -19,8 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // maxQueryChars caps the length of a single query sent to the embeddings server. A
@@ -92,7 +92,7 @@ func buildEmbedder(cfg *config.Config) (Embedder, error) {
 		return nil, fmt.Errorf("knowledge.embeddings.model is required when the embeddings block is present")
 	}
 
-	if err := util.ValidateBaseURL("knowledge.embeddings.base_url", ec.BaseURL); err != nil {
+	if err := sanitize.BaseURL("knowledge.embeddings.base_url", ec.BaseURL); err != nil {
 		return nil, err
 	}
 

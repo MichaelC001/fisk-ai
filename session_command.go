@@ -20,8 +20,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a/transcript"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/tui"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // openSessionStore opens the session store the inspection subcommands read and
@@ -173,7 +173,7 @@ func sessionLsAction(_ *fisk.ParseContext) error {
 
 	tbl.AddHeaders("ID", "Model", "Status", "Updated", "Prompt")
 	for _, info := range infos {
-		tbl.AddRow(info.RunID, info.Model, sessionStatus(info.Terminal), info.Updated, util.TruncateString(info.Prompt, 50))
+		tbl.AddRow(info.RunID, info.Model, sessionStatus(info.Terminal), info.Updated, truncateString(info.Prompt, 50))
 	}
 
 	return nil
@@ -236,10 +236,10 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	// because the heading above shows an id that reaches nothing over the wire, and a
 	// person handing a conversation back needs to know which of the two to send.
 	if rs.Caller != "" {
-		c.Item("Caller", util.SanitizeForDisplay(rs.Caller))
+		c.Item("Caller", sanitize.ForDisplay(rs.Caller))
 	}
 	if rs.ConversationToken != "" {
-		c.Item("Conversation token", columns.Annotated(util.SanitizeForDisplay(rs.ConversationToken), "a caller sends this to continue the conversation"))
+		c.Item("Conversation token", columns.Annotated(sanitize.ForDisplay(rs.ConversationToken), "a caller sends this to continue the conversation"))
 	}
 
 	c.Item("Status", sessionStatus(terminalReason(rs)))
@@ -259,7 +259,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	if len(rs.Approvals) > 0 {
 		approved := make([]string, len(rs.Approvals))
 		for i, tool := range rs.Approvals {
-			approved[i] = util.SanitizeForDisplay(tool)
+			approved[i] = sanitize.ForDisplay(tool)
 		}
 		c.Item("Approvals", strings.Join(approved, ", "))
 	}
@@ -282,7 +282,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 
 	c.Blank()
 	c.Section("Prompt", func(c *columns.Document) {
-		c.Print(util.TruncateString(rs.Prompt, 200))
+		c.Print(truncateString(rs.Prompt, 200))
 	})
 }
 
@@ -302,12 +302,12 @@ func deferredCalls(rs *runstate.RunState) []runstate.DeferredRecord {
 func deferralSummary(d runstate.DeferredRecord) string {
 	out := d.ToolName
 
-	note := util.SanitizeForTerminal(d.Note, 200)
+	note := sanitize.ForTerminal(d.Note, 200)
 	if note != "" {
 		out += ": " + note
 	}
 
-	handle := util.SanitizeForTerminal(d.Handle, 100)
+	handle := sanitize.ForTerminal(d.Handle, 100)
 	if handle != "" {
 		out += " (" + handle + ")"
 	}
@@ -324,11 +324,11 @@ func deferralSummary(d runstate.DeferredRecord) string {
 // included and start folded, so the viewer opens on the conversation and either can
 // be expanded.
 func showTranscriptTUI(rs *runstate.RunState) (bool, error) {
-	if noTUI || !util.StdinIsTerminal() || !util.StdoutIsTerminal() {
+	if noTUI || !stdinIsTerminal() || !stdoutIsTerminal() {
 		return false, nil
 	}
 
-	meta := tui.Meta{Title: rs.RunID, Model: rs.Fingerprint.Model, Version: util.Version(), Query: rs.Prompt, InTokens: rs.Counters.InTokens, OutTokens: rs.Counters.OutTokens}
+	meta := tui.Meta{Title: rs.RunID, Model: rs.Fingerprint.Model, Version: version, Query: rs.Prompt, InTokens: rs.Counters.InTokens, OutTokens: rs.Counters.OutTokens}
 	err := tui.ShowTranscript(meta, renderBlocks(transcript.Of(rs).Blocks(), showThinking), noColor, true, true)
 	if errors.Is(err, tui.ErrNoTTY) {
 		return false, nil

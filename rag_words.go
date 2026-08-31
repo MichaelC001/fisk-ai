@@ -15,7 +15,7 @@ import (
 	"github.com/choria-io/ui/table"
 
 	"github.com/choria-io/fisk-ai/internal/rag"
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 const (
@@ -359,7 +359,7 @@ func wordsHasUnqueryable(res *rag.WordsResult) bool {
 func displayWord(word string) string {
 	// Sanitized well above the display width, so the elision below is what bounds
 	// the column and the two do not both try to shorten the same string.
-	word = util.SanitizeForTerminal(word, wordsSanitizeRunes)
+	word = sanitize.ForTerminal(word, wordsSanitizeRunes)
 	if utf8.RuneCountInString(word) <= wordsMaxRunes {
 		return word
 	}

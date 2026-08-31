@@ -8,7 +8,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
-// journalApprovals is the util.GateApprovals a run gives its confirm gate. A grant
+// journalApprovals is the GateApprovals a run gives its confirm gate. A grant
 // the operator makes is honored from the moment they give it and written to the
 // journal once the call that triggered it is answered, so a crash between the
 // approval and the tool result loses the grant and the resume asks again for a

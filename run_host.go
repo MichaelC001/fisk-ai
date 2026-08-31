@@ -73,6 +73,9 @@ type hostOptions struct {
 	APIKey     string
 	BaseURL    string
 	WorkDir    string
+	// Version is the build the hosted agent reports: on its agent card, in the trace
+	// file's session line, and as the client version it sends to an MCP server.
+	Version string
 	// Resources are the shared stores and the connection the configuration named. They
 	// are built from the operator's own nats_context and stay on it: the broker below
 	// has no JetStream and no peers, so a session store or a set of remote tools given
@@ -134,6 +137,7 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 		Logger:     opts.Logger,
 		Telemetry:  opts.Telemetry,
 		Sessions:   sessions,
+		Version:    opts.Version,
 	})
 	if err != nil {
 		broker.Close()
@@ -165,6 +169,7 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 		TraceFile:    opts.TraceFile,
 		HTTPDebugOut: opts.HTTPDebugOut,
 		Verbose:      opts.Verbose,
+		Version:      opts.Version,
 	}
 	if opts.Resources != nil {
 		opts.Resources.ApplyTo(&srvOpts)

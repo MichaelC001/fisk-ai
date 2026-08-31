@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // The built-in human-in-the-loop tool names share the ask_human_ prefix, which
@@ -211,7 +211,7 @@ func askHumanConfirm(ctx context.Context, input json.RawMessage, prompter toolki
 	}
 
 	if !prompter.CanPrompt() {
-		return outcomeJSON(askHumanConfirmName, confirmOutcome{Reason: util.NoTerminalReason})
+		return outcomeJSON(askHumanConfirmName, confirmOutcome{Reason: toolkit.NoTerminalReason})
 	}
 	if err := ctx.Err(); err != nil {
 		return "", unansweredError(err)
@@ -317,7 +317,7 @@ func askHumanSelect(ctx context.Context, input json.RawMessage, prompter toolkit
 	}
 
 	if !prompter.CanPrompt() {
-		return outcomeJSON(askHumanSelectName, selectOutcome{Reason: util.NoTerminalReason})
+		return outcomeJSON(askHumanSelectName, selectOutcome{Reason: toolkit.NoTerminalReason})
 	}
 	if err := ctx.Err(); err != nil {
 		return "", unansweredError(err)
@@ -395,7 +395,7 @@ func askHumanInput(ctx context.Context, input json.RawMessage, prompter toolkit.
 	}
 
 	if !prompter.CanPrompt() {
-		return outcomeJSON(askHumanInputName, inputOutcome{Reason: util.NoTerminalReason})
+		return outcomeJSON(askHumanInputName, inputOutcome{Reason: toolkit.NoTerminalReason})
 	}
 	if err := ctx.Err(); err != nil {
 		return "", unansweredError(err)
@@ -436,7 +436,7 @@ func outcomeJSON(tool string, v any) (string, error) {
 // sanitizePrompt makes a model-supplied question, option, or default safe to
 // print to the operator's terminal, capped at maxPromptRunes.
 func sanitizePrompt(s string) string {
-	return util.SanitizeForTerminal(s, maxPromptRunes)
+	return sanitize.ForTerminal(s, maxPromptRunes)
 }
 
 // sanitizeOptions sanitizes every option label a model offers for selection, since

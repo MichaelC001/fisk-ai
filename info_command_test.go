@@ -18,9 +18,9 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // mcpInfoServers stands a real mcp.Server up in this process for every server info
@@ -306,7 +306,7 @@ var _ = Describe("toolSearchStatus", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "claude-sonnet-5"
 		cfg.LLM.NoToolSearch = true
-		Expect(toolSearchStatus(cfg, util.ToolSearchThreshold-1)).To(Equal("disabled (no_tool_search)"))
+		Expect(toolSearchStatus(cfg, agent.ToolSearchThreshold-1)).To(Equal("disabled (no_tool_search)"))
 	})
 
 	It("Should name what the operator-disabled tool search costs once the set crosses the threshold", func() {

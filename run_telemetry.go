@@ -14,7 +14,6 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // noTelemetryFlag is the label a veto by --no-telemetry is reported as. It is stated
@@ -106,7 +105,7 @@ func setupTelemetry(cfg *config.Config, opts telemetrySetup) (*telemetry.Provide
 
 	tel, err := bootstrap.Start(context.Background(), bootstrap.Options{
 		Config:     cfg,
-		Version:    util.Version(),
+		Version:    version,
 		Env:        os.Getenv,
 		DisabledBy: noTelemetryLabel(opts.Disabled),
 	})

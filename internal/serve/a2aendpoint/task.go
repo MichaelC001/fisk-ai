@@ -905,7 +905,7 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 
 		res := a2a.NewResult(a2a.StopReasonFor(out.Reason))
 		res.Text = trimForWire(out.Text)
-		res.Usage = a2a.UsageFrom(out.Stats)
+		res.Usage = out.Stats.Usage()
 		res.TraceID = traceOf(out)
 		res.ContentExported = contentExported(out)
 
@@ -920,7 +920,7 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 	// What the run spent before it ended. A suspended one did the work of a turn and
 	// is answered here rather than with a result, so without this a caller cannot tell
 	// what it owes for the turn it is about to continue.
-	msg.Usage = a2a.UsageFrom(out.Stats)
+	msg.Usage = out.Stats.Usage()
 	// An ending that was not an answer is where a caller most wants somewhere to go
 	// and look, and the trace is the only thing this message can point at.
 	msg.TraceID = traceOf(out)

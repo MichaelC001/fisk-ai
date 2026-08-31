@@ -22,7 +22,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // The specs here drive the channel the way a server does: take the work it produced,
@@ -199,7 +198,7 @@ var _ = Describe("The prompt channel", func() {
 			report(work, serve.Outcome{
 				Reason: runstate.ReasonCompleted,
 				Text:   "did the thing",
-				Stats:  &util.RunStats{InTokens: 3, OutTokens: 4, LlmCalls: 1},
+				Stats:  &agent.RunStats{InTokens: 3, OutTokens: 4, LlmCalls: 1},
 			})
 
 			res, ok := next(stream).(*a2a.Result)

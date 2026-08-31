@@ -9,7 +9,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // ToolSet is the tools a run offers the model at one moment: the definitions a
@@ -41,7 +40,7 @@ type ToolSet struct {
 // start of a run, so a set that grows past the threshold starts deferring and one
 // that shrinks back below it stops.
 func NewToolSet(deferrable []toolkit.Tool, builtins []toolkit.Tool, toolSearchAllowed bool) *ToolSet {
-	defs, search := util.BuildToolParams(deferrable, len(builtins), toolSearchAllowed)
+	defs, search := BuildToolParams(deferrable, len(builtins), toolSearchAllowed)
 
 	set := &ToolSet{
 		defs:   defs,

@@ -6,7 +6,6 @@ package a2a
 
 import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // StopReasonFor maps a run's terminal reason onto the protocol's neutral
@@ -27,28 +26,6 @@ func StopReasonFor(reason runstate.TerminalReason) StopReason {
 		return StopSuspended
 	default:
 		return StopError
-	}
-}
-
-// UsageFrom reports what a run consumed, or nothing when it never got far enough to
-// consume anything.
-//
-// The input total is assembled rather than copied. RunStats.InTokens is the uncached
-// remainder, with the cached input counted separately, so reporting it alone would
-// hand a caller a fraction of what it was billed for and no way to tell.
-func UsageFrom(stats *util.RunStats) *Usage {
-	if stats == nil {
-		return nil
-	}
-
-	return &Usage{
-		InputTokens:       stats.InTokens + stats.CacheReadTokens + stats.CacheCreateTokens,
-		OutputTokens:      stats.OutTokens,
-		CacheReadTokens:   stats.CacheReadTokens,
-		CacheCreateTokens: stats.CacheCreateTokens,
-		ThinkingTokens:    stats.ThinkingTokens,
-		LLMCalls:          stats.LlmCalls,
-		ToolCalls:         stats.ToolCalls,
 	}
 }
 

@@ -13,9 +13,9 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/memory"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // The built-in memory tool names share the memory_ prefix, which groups them and
@@ -100,7 +100,7 @@ func MemoryIndexBlock(entries []memory.Item) string {
 		b.WriteString("(none stored yet)\n")
 	}
 	for _, e := range entries {
-		desc := util.SanitizeForTerminal(e.Description, maxIndexDescriptionRunes)
+		desc := sanitize.ForTerminal(e.Description, maxIndexDescriptionRunes)
 		b.WriteString(fmt.Sprintf("- %s: %s\n", e.Key, desc))
 	}
 	b.WriteString("</memory-index>")
@@ -138,7 +138,7 @@ func memoryKeyTrace(name string) func(json.RawMessage) string {
 			return name
 		}
 
-		key := util.SanitizeForTerminal(args.Key, maxIndexDescriptionRunes)
+		key := sanitize.ForTerminal(args.Key, maxIndexDescriptionRunes)
 		if key == "" {
 			return name
 		}

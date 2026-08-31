@@ -84,6 +84,11 @@ type Options struct {
 	// ConfigFile names the file Config was read from, for diagnostics.
 	ConfigFile string
 
+	// Version is the calling program's own build version, handed to every run as
+	// agent.Options.Version. Empty sends no version to an MCP server and omits the
+	// field from a trace file's session line.
+	Version string
+
 	// Concurrency is how many runs a channel may have executing at once; <= 0 uses
 	// the default. It is the default rather than the total: a channel that has an
 	// opinion of its own states it through ConcurrentChannel and gets that instead, so
@@ -652,6 +657,7 @@ func (s *Server) runOptions(work *Work) agent.Options {
 	opts := agent.Options{
 		Config:           s.withToolTimeout(s.clampedConfig(work.Budget)),
 		ConfigFile:       s.opts.ConfigFile,
+		Version:          s.opts.Version,
 		Prompt:           []string{work.Prompt},
 		APIKey:           s.opts.APIKey,
 		BaseURL:          s.opts.BaseURL,

@@ -15,7 +15,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -127,7 +126,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		var sent [][]string
 		calls := 0
 		r := &runner{
-			cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 			messages: []llm.Message{userMsg("go")},
 			toolSrc:  src,
 			provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
@@ -173,7 +172,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		var sent [][]string
 		calls := 0
 		r := &runner{
-			cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 5, events: ev,
+			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 5, events: ev,
 			messages: []llm.Message{userMsg("go")},
 			toolSrc:  src,
 			provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
@@ -208,7 +207,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 
 	It("re-decides tool search as the set crosses the threshold in either direction", func() {
 		small := movingTools(2)
-		big := movingTools(util.ToolSearchThreshold)
+		big := movingTools(ToolSearchThreshold)
 
 		src := NewToolSource(NewToolSet(small, nil, true))
 
@@ -216,7 +215,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		var deferred []bool
 		calls := 0
 		r := &runner{
-			cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 			messages: []llm.Message{userMsg("go")},
 			toolSrc:  src,
 			provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
@@ -251,7 +250,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		ev := &captureEvents{}
 		calls := 0
 		r := &runner{
-			cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 6, events: ev,
+			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 6, events: ev,
 			messages: []llm.Message{userMsg("go")},
 			toolSrc:  src,
 			provider: noSearchProvider(func(context.Context, llm.Request) (*llm.Response, error) {
@@ -260,12 +259,12 @@ var _ = Describe("a tool set that moves during a run", func() {
 				switch calls {
 				case 1:
 					// Over the threshold: the advisory is due at the next call.
-					src.Publish(NewToolSet(movingTools(util.ToolSearchThreshold), nil, false))
+					src.Publish(NewToolSet(movingTools(ToolSearchThreshold), nil, false))
 				case 2:
 					// Back under it, then over it again: the operator hears it once.
 					src.Publish(NewToolSet(movingTools(2), nil, false))
 				case 3:
-					src.Publish(NewToolSet(movingTools(util.ToolSearchThreshold+2), nil, false))
+					src.Publish(NewToolSet(movingTools(ToolSearchThreshold+2), nil, false))
 				default:
 					return mustResponse(toolSetFinalMsg), nil
 				}
@@ -281,15 +280,15 @@ var _ = Describe("a tool set that moves during a run", func() {
 		Expect(calls).To(Equal(4))
 		Expect(ev.warns).To(HaveLen(1))
 		Expect(ev.warns[0].Kind).To(Equal(WarnToolSearchUnsupported))
-		Expect(ev.warns[0].Count).To(Equal(util.ToolSearchThreshold))
+		Expect(ev.warns[0].Count).To(Equal(ToolSearchThreshold))
 	})
 
 	It("stays quiet about a set that already crossed the threshold before the run started", func() {
 		ev := &captureEvents{}
 		r := &runner{
-			cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 2, events: ev,
+			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 2, events: ev,
 			messages:         []llm.Message{userMsg("go")},
-			toolSrc:          NewToolSource(NewToolSet(movingTools(util.ToolSearchThreshold), nil, false)),
+			toolSrc:          NewToolSource(NewToolSet(movingTools(ToolSearchThreshold), nil, false)),
 			toolSearchWarned: true,
 			provider: noSearchProvider(func(context.Context, llm.Request) (*llm.Response, error) {
 				return mustResponse(toolSetFinalMsg), nil
@@ -342,7 +341,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 
 				calls := 0
 				r := &runner{
-					cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 8, events: nopEvents{},
+					cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 8, events: nopEvents{},
 					messages: []llm.Message{userMsg("go")},
 					toolSrc:  src,
 					provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
@@ -378,7 +377,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		var search []bool
 		calls := 0
 		r := &runner{
-			cfg: toolSetCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 			messages: []llm.Message{userMsg("go")},
 			toolSrc:  src,
 			provider: providerFunc(func(_ context.Context, req llm.Request) (*llm.Response, error) {
@@ -434,10 +433,10 @@ var _ = Describe("ToolSource", func() {
 
 var _ = Describe("NewToolSet", func() {
 	It("sends the built-in tools after the deferrable ones and never defers them", func() {
-		set := NewToolSet(movingTools(util.ToolSearchThreshold), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
+		set := NewToolSet(movingTools(ToolSearchThreshold), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
 
 		names := defNames(set.defs)
-		Expect(names).To(HaveLen(util.ToolSearchThreshold + 1))
+		Expect(names).To(HaveLen(ToolSearchThreshold + 1))
 		Expect(names[len(names)-1]).To(Equal("hitl"))
 		Expect(set.defs[0].DeferLoading).To(BeTrue())
 		Expect(set.defs[len(set.defs)-1].DeferLoading).To(BeFalse())
@@ -452,10 +451,10 @@ var _ = Describe("NewToolSet", func() {
 	})
 
 	It("counts the built-ins toward the threshold", func() {
-		set := NewToolSet(movingTools(util.ToolSearchThreshold-1), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
+		set := NewToolSet(movingTools(ToolSearchThreshold-1), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
 		Expect(set.search).To(BeTrue())
 
-		set = NewToolSet(movingTools(util.ToolSearchThreshold-1), nil, true)
+		set = NewToolSet(movingTools(ToolSearchThreshold-1), nil, true)
 		Expect(set.search).To(BeFalse())
 	})
 })

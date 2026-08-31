@@ -14,7 +14,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // A tool service answers its callers directly and produces no work.
@@ -55,7 +54,7 @@ func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 
 	svc.srv, err = a2a.NewServer(held.transport, toolkit.Tools(tools), a2a.ServerOptions{
 		Identity: cfg.Identity,
-		Version:  util.Version(),
+		Version:  opts.Version,
 		// Only where this identity answers prompts. Serving tools runs no model, so an
 		// identity that only does that would be publishing one it never calls.
 		Model:       promptModel(cfg),

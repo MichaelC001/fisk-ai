@@ -57,9 +57,9 @@ import (
 	// Link the jetstream session backend in so it registers itself; it binds a
 	// pre-existing NATS JetStream stream over the shared connection.
 	_ "github.com/choria-io/fisk-ai/internal/runstate/jetstream"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // defaultMaxOutputTokens caps the tokens generated per LLM call. It is distinct
@@ -98,7 +98,7 @@ func resolveMaxOutputTokens(cfg *config.Config, thinking bool) int64 {
 // report it back to them each time; fisk info reports the state and its cost when
 // they ask for it.
 func toolSearchDegradation(totalTools int, caps llm.Caps, operatorEnabled bool) *Warning {
-	if !operatorEnabled || caps.SupportsToolSearch || totalTools < util.ToolSearchThreshold {
+	if !operatorEnabled || caps.SupportsToolSearch || totalTools < ToolSearchThreshold {
 		return nil
 	}
 
@@ -224,6 +224,11 @@ type Options struct {
 	Config     *config.Config
 	ConfigFile string
 	Prompt     []string
+
+	// Version is the caller's own build version. It identifies this client to the
+	// MCP servers the run connects to and is written to the trace file's session
+	// line. Empty sends no version to a server and omits the field from the trace.
+	Version string
 
 	APIKey  string
 	BaseURL string
@@ -466,7 +471,7 @@ type Continuation struct {
 // Result is the outcome of a run, for the caller to render.
 type Result struct {
 	Reason    runstate.TerminalReason
-	Stats     *util.RunStats
+	Stats     *RunStats
 	SessionID string
 
 	// Text is the concatenated text of the last assistant turn the run produced,
@@ -1169,7 +1174,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			sessions, err = mcpclient.Connect(setupCtx, mcpclient.Options{
 				Servers:            cfg.MCPClients,
 				Identity:           cfg.Identity,
-				Version:            util.Version(),
+				Version:            opts.Version,
 				CredentialEnvNames: cfg.CredentialEnvNames(),
 			})
 			if err != nil {
@@ -1295,7 +1300,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// The source is built here with the gate and given its journal appender once the
 	// runner exists, which is also where a resume seeds the grants it inherited.
 	approvals := newJournalApprovals()
-	gate := util.NewConfirmGate(prompter, approvals)
+	gate := NewConfirmGate(prompter, approvals)
 	confirmTags := cfg.ConfirmTags()
 	confirmTools := 0
 	for _, t := range tools {
@@ -1355,7 +1360,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// produced. It is empty when telemetry is off, which is what keeps it off the line.
 	// ContentExported is read off the provider for the same reason and one more: it is a
 	// privacy marker, so it has to report what happened rather than what was asked for.
-	stats := &util.RunStats{
+	stats := &RunStats{
 		Start:           time.Now(),
 		Model:           cfg.LLM.Model,
 		TraceID:         runSpan.TraceID(),
@@ -1373,7 +1378,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	provider := opts.Provider
 	if provider == nil {
 		if opts.BaseURL != "" {
-			if err := util.ValidateBaseURL("--base-url / ANTHROPIC_BASE_URL", opts.BaseURL); err != nil {
+			if err := sanitize.BaseURL("--base-url / ANTHROPIC_BASE_URL", opts.BaseURL); err != nil {
 				return res, err
 			}
 		}
@@ -1383,11 +1388,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// and close are deferred against this run's stats and exit paths.
 		var middlewares []llm.Middleware
 		if opts.HTTPDebugOut != nil {
-			middlewares = append(middlewares, util.HttpDebugMiddleware(opts.HTTPDebugOut))
+			middlewares = append(middlewares, HttpDebugMiddleware(opts.HTTPDebugOut))
 		}
 
 		if opts.TraceFile != "" {
-			tracer, terr := util.NewTracer(opts.TraceFile, func(err error) {
+			tracer, terr := NewTracer(opts.TraceFile, func(err error) {
 				events.Warn(Warning{Kind: WarnTraceWrite, Err: err})
 			}, nil)
 			if terr != nil {
@@ -1402,7 +1407,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}()
 			defer tracer.RecordSummary(stats)
 
-			tracer.RecordSession(cfg.LLM.Model, opts.ConfigFile, util.Version())
+			tracer.RecordSession(cfg.LLM.Model, opts.ConfigFile, opts.Version)
 			middlewares = append(middlewares, tracer.Middleware)
 		}
 

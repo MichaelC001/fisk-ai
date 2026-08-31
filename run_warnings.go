@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // warningLead announces a warning the agent raised, naming which agent that was.
@@ -30,10 +30,10 @@ func warningLead(identity string, natsContext string) string {
 	}
 
 	if natsContext == "" {
-		return "warning from agent " + util.SanitizeForTerminal(identity, 120)
+		return "warning from agent " + sanitize.ForTerminal(identity, 120)
 	}
 
-	return "warning from remote agent " + util.SanitizeForTerminal(identity, 120)
+	return "warning from remote agent " + sanitize.ForTerminal(identity, 120)
 }
 
 // warningMessage is the operator-facing text for a Warning, without the "warning: "

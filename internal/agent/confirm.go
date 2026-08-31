@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package util
+package agent
 
 import (
 	"context"
@@ -13,22 +13,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
-
-// maxCommandLineRunes caps the length of a resolved command line shown to the
-// operator for confirmation. It is larger than maxPromptRunes because a real
-// command with several flags is legitimately longer than a one-line question,
-// and truncating it could hide the very arguments the operator is approving.
-const maxCommandLineRunes = 2000
-
-// SanitizeCommandLine makes a resolved command line safe to print to the
-// operator's terminal. The command path is fixed, but its argument values come
-// from the model, so the assembled line is untrusted display text: it is stripped
-// of terminal escape sequences and control characters so a model-supplied value
-// cannot rewrite or spoof what the operator sees, and capped at
-// maxCommandLineRunes.
-func SanitizeCommandLine(s string) string {
-	return SanitizeForTerminal(s, maxCommandLineRunes)
-}
 
 // GateApprovals holds the standing approvals a ConfirmGate honors: an approval the
 // operator granted for a whole conversation rather than for one call.
@@ -139,7 +123,7 @@ func (g *ConfirmGate) Approve(ctx context.Context, toolUseID, toolName, commandP
 	// channel that can still ask a human is honored rather than declined for lacking a
 	// TTY.
 	if !g.prompter.CanPrompt() {
-		return false, NoTerminalReason, nil
+		return false, toolkit.NoTerminalReason, nil
 	}
 
 	// A run whose context is already over is not asked, and is not answered either.

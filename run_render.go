@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/tui"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // blockRenderer turns the blocks a run produces into the lines the full-screen view
@@ -64,7 +64,7 @@ func (r *blockRenderer) Lines(block a2a.Block) []tui.Line {
 		return []tui.Line{{Kind: tui.LineToolCall, Text: line, Short: line}}
 
 	case a2a.AgentCallBlock:
-		line := fmt.Sprintf("%s (remote %s)", util.SanitizeForTerminal(b.Name, 120), util.SanitizeForTerminal(b.Task, 120))
+		line := fmt.Sprintf("%s (remote %s)", sanitize.ForTerminal(b.Name, 120), sanitize.ForTerminal(b.Task, 120))
 
 		return []tui.Line{{Kind: tui.LineToolCall, Text: line, Short: line}}
 
@@ -152,10 +152,10 @@ func printTranscript(w io.Writer, lines []tui.Line, noColor, toolOutput bool) {
 	for _, line := range lines {
 		switch line.Kind {
 		case tui.LinePrompt:
-			fmt.Fprintf(w, "\n> %s\n", util.SanitizeForDisplay(line.Text))
+			fmt.Fprintf(w, "\n> %s\n", sanitize.ForDisplay(line.Text))
 
 		case tui.LineThinking:
-			fmt.Fprintf(w, "\n[thinking]\n%s\n", util.SanitizeForDisplay(line.Text))
+			fmt.Fprintf(w, "\n[thinking]\n%s\n", sanitize.ForDisplay(line.Text))
 
 		case tui.LineToolCall:
 			fmt.Fprintf(w, "-> %s\n", line.Text)
@@ -165,18 +165,18 @@ func printTranscript(w io.Writer, lines []tui.Line, noColor, toolOutput bool) {
 				continue
 			}
 
-			fmt.Fprintf(w, "<-\n%s\n", util.SanitizeForDisplay(line.Text))
+			fmt.Fprintf(w, "<-\n%s\n", sanitize.ForDisplay(line.Text))
 
 		case tui.LineWarning:
-			fmt.Fprintf(w, "warning: %s\n", util.SanitizeForTerminal(line.Text, 400))
+			fmt.Fprintf(w, "warning: %s\n", sanitize.ForTerminal(line.Text, 400))
 
 		case tui.LineMeta:
-			fmt.Fprintf(w, "%s\n", util.SanitizeForTerminal(line.Text, 400))
+			fmt.Fprintf(w, "%s\n", sanitize.ForTerminal(line.Text, 400))
 
 		default:
 			// Sized against stdout, which is where a transcript is read, whatever writer
 			// the caller is collecting it into.
-			fmt.Fprintf(w, "\n%s\n", util.RenderMarkdownTo(line.Text, os.Stdout, noColor))
+			fmt.Fprintf(w, "\n%s\n", tui.RenderMarkdownTo(line.Text, os.Stdout, noColor))
 		}
 	}
 }
@@ -210,7 +210,7 @@ func toolResultLine(output string, isError bool) tui.Line {
 }
 
 // commandResultOutput unwraps a tool's JSON result envelope to the plain output
-// worth showing. A local command tool returns its result as a util.CommandResult
+// worth showing. A local command tool returns its result as a toolkit.CommandResult
 // JSON body (command, exit code, combined output) and a remote tool returns the
 // same shape carrying just the output, so the raw viewport line would otherwise
 // bury the actual output in envelope noise. When the body is a CommandResult it is

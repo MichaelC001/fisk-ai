@@ -7,7 +7,6 @@ package fisk
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/choria-io/fisk"
 	. "github.com/onsi/ginkgo/v2"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 var _ = Describe("FiskCommandTool.Definition", func() {
@@ -89,103 +87,9 @@ var _ = Describe("FiskCommandTool.Definition", func() {
 	})
 })
 
-// toolkitSlice adapts application tools to the toolkit.Tool interface BuildToolParams
-// takes, so the deferral logic can be exercised over a real command set.
-func toolkitSlice(tools []*FiskCommandTool) []toolkit.Tool {
-	out := make([]toolkit.Tool, len(tools))
-	for i, t := range tools {
-		out[i] = t
-	}
-	return out
-}
-
-// appWithCommands builds an application exposing n distinct tools, named cmd0..cmdN-1.
-func appWithCommands(n int) []*FiskCommandTool {
-	GinkgoHelper()
-
-	app := fisk.New("app", "an app")
-	for i := 0; i < n; i++ {
-		app.Command(fmt.Sprintf("cmd%d", i), "a command")
-	}
-
-	tools, err := ApplicationTools(introspect(app))
-	Expect(err).NotTo(HaveOccurred())
-	Expect(tools).To(HaveLen(n))
-
-	return tools
-}
-
-var _ = Describe("BuildToolParams over application tools", func() {
-	// defByName finds the tool definition for a named tool.
-	defByName := func(defs []llm.ToolDef, name string) llm.ToolDef {
-		GinkgoHelper()
-		for _, d := range defs {
-			if d.Name == name {
-				return d
-			}
-		}
-		Fail(fmt.Sprintf("tool %q not found in definitions", name))
-		return llm.ToolDef{}
-	}
-
-	It("Should send every tool directly without tool search below the threshold", func() {
-		defs, toolSearch := util.BuildToolParams(toolkitSlice(appWithCommands(util.ToolSearchThreshold-1)), 0, true)
-
-		Expect(defs).To(HaveLen(util.ToolSearchThreshold - 1))
-		Expect(toolSearch).To(BeFalse())
-		for _, d := range defs {
-			Expect(d.DeferLoading).To(BeFalse())
-		}
-	})
-
-	It("Should defer every tool and request tool search at the threshold", func() {
-		defs, toolSearch := util.BuildToolParams(toolkitSlice(appWithCommands(util.ToolSearchThreshold)), 0, true)
-
-		Expect(defs).To(HaveLen(util.ToolSearchThreshold))
-		Expect(toolSearch).To(BeTrue())
-		for _, d := range defs {
-			Expect(d.DeferLoading).To(BeTrue())
-		}
-	})
-
-	It("Should keep ai:no_defer tools loaded directly while deferring the rest", func() {
-		app := fisk.New("app", "an app")
-		// One pinned tool plus enough others to cross the defer threshold.
-		app.Command("always", "always loaded").Tag(noDeferTag)
-		for i := 0; i < util.ToolSearchThreshold; i++ {
-			app.Command(fmt.Sprintf("cmd%d", i), "a command")
-		}
-
-		tools, err := ApplicationTools(introspect(app))
-		Expect(err).NotTo(HaveOccurred())
-
-		defs, toolSearch := util.BuildToolParams(toolkitSlice(tools), 0, true)
-
-		// The pinned tool is sent directly; a deferred peer is not.
-		Expect(defByName(defs, "always").DeferLoading).To(BeFalse())
-		Expect(defByName(defs, "cmd0").DeferLoading).To(BeTrue())
-
-		// Something is still deferred, so tool search is requested.
-		Expect(toolSearch).To(BeTrue())
-	})
-
-	It("Should not request tool search when every deferred-eligible tool is pinned", func() {
-		app := fisk.New("app", "an app")
-		for i := 0; i < util.ToolSearchThreshold; i++ {
-			app.Command(fmt.Sprintf("cmd%d", i), "a command").Tag(noDeferTag)
-		}
-
-		tools, err := ApplicationTools(introspect(app))
-		Expect(err).NotTo(HaveOccurred())
-
-		defs, toolSearch := util.BuildToolParams(toolkitSlice(tools), 0, true)
-
-		// Nothing was deferred, so tool search is not requested.
-		Expect(defs).To(HaveLen(util.ToolSearchThreshold))
-		Expect(toolSearch).To(BeFalse())
-		for _, d := range defs {
-			Expect(d.DeferLoading).To(BeFalse())
-		}
+var _ = Describe("SanitizeCommandLine", func() {
+	It("Should strip terminal escape sequences from model-supplied argument values", func() {
+		Expect(SanitizeCommandLine("stream rm \x1b[31mORDERS\x1b[0m")).To(Equal("stream rm ORDERS"))
 	})
 })
 

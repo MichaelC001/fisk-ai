@@ -20,12 +20,12 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
 	ajchannel "github.com/choria-io/fisk-ai/internal/serve/asyncjobs"
 	slackchannel "github.com/choria-io/fisk-ai/internal/serve/slack"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // fiskServeCommand is the state of one `fisk serve` invocation. Its flags are
@@ -87,7 +87,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// operator set. Nothing downstream can name it: the shared provider is built from
 	// the configuration, and a provider handed to a run is used as it arrives.
 	if c.baseURL != "" {
-		err := util.ValidateBaseURL("--base-url / ANTHROPIC_BASE_URL", c.baseURL)
+		err := sanitize.BaseURL("--base-url / ANTHROPIC_BASE_URL", c.baseURL)
 		if err != nil {
 			return err
 		}
@@ -132,6 +132,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	resources, err := serve.NewResources(cfg, serve.ResourceOptions{
 		ConfigFile: c.configFile,
 		ConnName:   "serve " + cfg.Identity,
+		Version:    version,
 		APIKey:     c.apiKey,
 		BaseURL:    c.baseURL,
 		Logger:     log,
@@ -160,6 +161,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		SuspendRequested: suspend.Load,
 		Conns:            resources.Conns,
 		ConfigFile:       c.configFile,
+		Version:          version,
 		Logger:           log,
 		Telemetry:        tel,
 		Sessions:         resources.SessionStore,
@@ -175,6 +177,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Services:   services,
 		Config:     cfg,
 		ConfigFile: c.configFile,
+		Version:    version,
 		// Where the commands run, so a worker started from somewhere else (a unit file,
 		// a container) can still point them at the application's own directory. Empty
 		// leaves them in the worker's working directory.
@@ -312,7 +315,7 @@ environment, which is where its credentials come from rather than this file`,
 // directory its served calls do not use.
 func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, services []serve.Service, res *serve.Resources, tel *telemetry.Provider) *columns.Document {
 	doc := columns.New()
-	doc.Headingf("Serving {bold}%s{/bold}/{bold}%s{/bold}", cfg.Identity, util.Version())
+	doc.Headingf("Serving {bold}%s{/bold}/{bold}%s{/bold}", cfg.Identity, version)
 
 	names := make([]string, 0, len(channels)+len(services))
 	for _, ch := range channels {

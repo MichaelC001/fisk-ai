@@ -19,10 +19,9 @@ const maxDeferralNoteRunes = 500
 // tool putting a payload where an identifier belongs.
 const maxDeferralHandleRunes = 200
 
-// truncateRunes caps s at max runes. Length is bounded here because a deferral is
-// built in this package; escape stripping is not, because util.SanitizeForTerminal
-// lives in a package that imports this one. Every site that renders a deferral to a
-// terminal sanitizes it there, as it must for anything read back from a journal.
+// truncateRunes caps s at max runes. It leaves escape sequences in place: every site
+// that renders a deferral to a terminal calls sanitize.ForTerminal on it there, as it
+// must for anything read back from a journal.
 func truncateRunes(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {

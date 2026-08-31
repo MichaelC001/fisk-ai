@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package util
+package agent
 
 import (
 	"context"
@@ -18,9 +18,7 @@ import (
 // unset fails the spec, since reaching it means the caller prompted when it should
 // have resolved the outcome itself (for example when no terminal is attached).
 //
-// This is a per-package copy of the fake in internal/toolkit; it moves with
-// confirm.go and the builtin tools into their toolkit subpackages, at which point
-// this copy is removed.
+// internal/toolkit/builtin has its own copy of this fake for its specs.
 type fakePrompter struct {
 	canPrompt   bool
 	approveFn   func(toolkit.GateRequest) (toolkit.ConfirmChoice, error)

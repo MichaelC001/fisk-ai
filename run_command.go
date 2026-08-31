@@ -17,8 +17,8 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/multiplex"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/tui"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // runNatsContext names the NATS context an agent is reached on, and its presence is
@@ -189,6 +189,7 @@ func runAction(_ *fisk.ParseContext) error {
 		ConfigFile:   configFile,
 		APIKey:       apiKey,
 		BaseURL:      baseURL,
+		Version:      version,
 		Sessions:     sessions,
 		Telemetry:    tel,
 		TraceFile:    traceFile,
@@ -317,7 +318,7 @@ func modelFromCard(card *a2a.AgentCard) string {
 		return ""
 	}
 
-	return util.SanitizeForTerminal(card.Model, 48)
+	return sanitize.ForTerminal(card.Model, 48)
 }
 
 // runAgainstWorker holds a conversation with an agent somebody else is running.
@@ -496,7 +497,7 @@ func resolveHTTPDebugOut() (io.Writer, error) {
 // or the agent config's no_tui, and it cannot run without a real terminal on both
 // stdin and stdout.
 func runUsesTUI(cfg *config.Config) bool {
-	return !noTUI && !cfg.TUIDisabled() && util.StdinIsTerminal() && util.StdoutIsTerminal()
+	return !noTUI && !cfg.TUIDisabled() && stdinIsTerminal() && stdoutIsTerminal()
 }
 
 // runWithTUI holds a conversation in the full-screen view: the run's blocks draw into
@@ -523,7 +524,7 @@ func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, toke
 	}
 
 	live, err := tui.NewLive(tui.Meta{
-		Version: util.Version(),
+		Version: version,
 		Query:   strings.Join(q, " "),
 		Resume:  token != "",
 		Dir:     runDir(),
@@ -577,7 +578,7 @@ func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, toke
 	// gone, where the pane that said which agent was answering is gone with it.
 	lead := warningLead(host.identity, host.natsContext)
 	for _, w := range renderer.warnings {
-		fmt.Fprintf(os.Stderr, "%s: %s\n", lead, util.SanitizeForTerminal(w, 400))
+		fmt.Fprintf(os.Stderr, "%s: %s\n", lead, sanitize.ForTerminal(w, 400))
 	}
 	// A reset during the session left earlier conversations stored and continuable;
 	// reprint their handles so they survive the alt-screen teardown.
@@ -642,7 +643,7 @@ func validateRunFlags() error {
 	// Validate at the CLI boundary so a bad base URL fails on a normal terminal,
 	// before the http-debug file is created or the full-screen UI is launched.
 	if baseURL != "" {
-		if err := util.ValidateBaseURL("--base-url / ANTHROPIC_BASE_URL", baseURL); err != nil {
+		if err := sanitize.BaseURL("--base-url / ANTHROPIC_BASE_URL", baseURL); err != nil {
 			return err
 		}
 	}

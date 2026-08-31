@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package util
+package agent
 
 import (
 	"context"
@@ -158,7 +158,7 @@ var _ = Describe("ConfirmGate", func() {
 			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
-			Expect(reason).To(Equal(NoTerminalReason))
+			Expect(reason).To(Equal(toolkit.NoTerminalReason))
 		})
 
 		// A run whose context is over is not asked and is not answered either. It used to
@@ -249,7 +249,7 @@ var _ = Describe("ConfirmGate", func() {
 			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
-			Expect(reason).To(Equal(NoTerminalReason))
+			Expect(reason).To(Equal(toolkit.NoTerminalReason))
 		})
 
 		It("Should not honor a grant once the run is canceled", func() {
@@ -297,7 +297,7 @@ var _ = Describe("ConfirmGate", func() {
 			allowed, reason, aerr := gate.Approve(context.Background(), "use-1", "stream_rm", "stream rm", "stream rm ORDERS", "ai:confirm")
 			Expect(aerr).ToNot(HaveOccurred())
 			Expect(allowed).To(BeFalse())
-			Expect(reason).To(Equal(NoTerminalReason))
+			Expect(reason).To(Equal(toolkit.NoTerminalReason))
 			Expect(src.taken).To(BeEmpty(), "an approval nobody could act on is not spent")
 		})
 	})
@@ -312,12 +312,6 @@ var _ = Describe("ConfirmGate", func() {
 			Expect(json.Unmarshal([]byte(block.Content), &outcome)).To(Succeed())
 			Expect(outcome.Allowed).To(BeFalse())
 			Expect(outcome.Reason).To(Equal("the operator declined"))
-		})
-	})
-
-	Describe("SanitizeCommandLine", func() {
-		It("Should strip terminal escape sequences from model-supplied argument values", func() {
-			Expect(SanitizeCommandLine("stream rm \x1b[31mORDERS\x1b[0m")).To(Equal("stream rm ORDERS"))
 		})
 	})
 })

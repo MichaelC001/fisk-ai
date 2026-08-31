@@ -16,7 +16,6 @@ import (
 	// transitively through the agent package; importing it here as well keeps the
 	// session subcommands, which construct the store directly, self-sufficient.
 	_ "github.com/choria-io/fisk-ai/internal/runstate/file"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // version is the build version shown on the splash card and reported by the MCP and
@@ -60,8 +59,6 @@ func interruptContext() (context.Context, context.CancelFunc) {
 }
 
 func main() {
-	util.SetVersion(version)
-
 	cmd := fisk.New("fisk", "Fisk AI Toolkit")
 	cmd.Version(version)
 

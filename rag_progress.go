@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
-
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // indexBar draws the embedding progress of a knowledge index run as a single
@@ -35,7 +33,7 @@ type indexBar struct {
 // would be wrong: nothing to embed, or stdout is not a terminal that can carry one.
 // A nil bar leaves the command's output exactly as it was before.
 func newIndexBar(total int) *indexBar {
-	if total <= 0 || !util.StdoutIsTerminal() || os.Getenv("TERM") == "dumb" {
+	if total <= 0 || !stdoutIsTerminal() || os.Getenv("TERM") == "dumb" {
 		return nil
 	}
 

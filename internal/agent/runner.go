@@ -22,7 +22,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // runner drives the agentic loop. Its fields split cleanly into two groups: the
@@ -33,7 +32,7 @@ import (
 type runner struct {
 	cfg      *config.Config
 	provider llm.Provider
-	stats    *util.RunStats
+	stats    *RunStats
 
 	system          []string
 	thinking        llm.ThinkingMode
@@ -78,7 +77,7 @@ type runner struct {
 	// began with.
 	set         *ToolSet
 	confirmTags []string
-	gate        *util.ConfirmGate
+	gate        *ConfirmGate
 
 	// queuedWarnings holds the advisories raised away from this goroutine, which today
 	// is a configured MCP server reporting that its tool list changed. The loop drains
@@ -464,7 +463,7 @@ func chatOutcome(resp *llm.Response, err error) telemetry.ChatOutcome {
 // runStatsUsage reads the run's running token totals in the shape telemetry reports.
 // Input carries the cached tiers as the semantic conventions require, while Uncached
 // keeps the raw remainder that the run summary line prints.
-func runStatsUsage(stats *util.RunStats) telemetry.TokenUsage {
+func runStatsUsage(stats *RunStats) telemetry.TokenUsage {
 	return telemetry.TokenUsage{
 		Input:       stats.InTokens + stats.CacheReadTokens + stats.CacheCreateTokens,
 		Output:      stats.OutTokens,
@@ -1015,7 +1014,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		}
 
 		if r.verbose {
-			r.events.LLMRequest(util.LLMRequestSummary(r.messages))
+			r.events.LLMRequest(LLMRequestSummary(r.messages))
 		}
 
 		// PreModelCall observes the request about to be sent. It carries counts, not the
@@ -1080,7 +1079,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			// the sink took to render it.
 			var firstToken time.Time
 
-			resp, err = sp.CallStream(util.WithTraceIteration(callCtx, int(i)), req, func(d llm.Delta) {
+			resp, err = sp.CallStream(WithTraceIteration(callCtx, int(i)), req, func(d llm.Delta) {
 				if firstToken.IsZero() {
 					firstToken = time.Now()
 				}
@@ -1090,7 +1089,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 			chatSpan.Streamed(firstToken)
 		} else {
-			resp, err = r.provider.Call(util.WithTraceIteration(callCtx, int(i)), req)
+			resp, err = r.provider.Call(WithTraceIteration(callCtx, int(i)), req)
 		}
 
 		// Finished on both paths, from one place, so the span cannot be left open by an
@@ -1590,7 +1589,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 
 		if !allowed {
 			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
-			return util.ConfirmDeniedResult(use.ID, reason), false, effInfo.Kind, nil
+			return ConfirmDeniedResult(use.ID, reason), false, effInfo.Kind, nil
 		}
 	}
 
@@ -1603,7 +1602,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// where a call becomes one that happened and every return below reports it as
 	// dispatched. The two first-class dispatch counters are incremented here rather than
 	// beside CountToolKind, which is what makes them count calls that were made while
-	// the buckets count calls the model asked for. See util.RunStats.ToolCallsByKind.
+	// the buckets count calls the model asked for. See RunStats.ToolCallsByKind.
 	//
 	// Both are keyed on the provider kind and never on the presentation or the agent
 	// name: presentation is the visibility axis, and other providers present the same way

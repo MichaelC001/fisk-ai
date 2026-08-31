@@ -29,7 +29,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	runstatefile "github.com/choria-io/fisk-ai/internal/runstate/file"
-	"github.com/choria-io/fisk-ai/internal/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -280,7 +279,7 @@ var _ = Describe("runner", func() {
 
 			var suspendNow atomic.Bool
 			rA := &runner{
-				cfg: cfg, stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: cfg, stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:         []llm.Message{userMsg("go")},
 				journal:          jA,
 				seq:              1,
@@ -309,7 +308,7 @@ var _ = Describe("runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			rB := &runner{
-				cfg: cfg, stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: cfg, stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:  mid.Messages,
 				journal:   jB,
 				seq:       jB.LastSeq(),
@@ -337,7 +336,7 @@ var _ = Describe("runner", func() {
 		It("emits neither a call nor a result for a tool that never ran", func() {
 			ev := &captureEvents{}
 			r := &runner{
-				stats:  &util.RunStats{},
+				stats:  &RunStats{},
 				events: ev,
 				set:    toolSetOf(nil),
 			}
@@ -369,7 +368,7 @@ var _ = Describe("runner", func() {
 				}},
 			}
 			r := &runner{
-				stats:  &util.RunStats{},
+				stats:  &RunStats{},
 				events: ev,
 				set:    toolSetOf(map[string]toolkit.Tool{"do": tool}),
 			}
@@ -396,7 +395,7 @@ var _ = Describe("runner", func() {
 
 			ev := &captureEvents{}
 			tool := &fisk2.FiskCommandTool{Path: []string{"do"}, AppPath: app, Model: &fisk.CmdModel{}}
-			r := &runner{stats: &util.RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"do": tool})}
+			r := &runner{stats: &RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"do": tool})}
 
 			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
 			Expect(err).NotTo(HaveOccurred())
@@ -417,7 +416,7 @@ var _ = Describe("runner", func() {
 			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
 			Expect(err).NotTo(HaveOccurred())
 
-			r := &runner{stats: &util.RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"nats_info": rt})}
+			r := &runner{stats: &RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"nats_info": rt})}
 
 			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "nats_info"})
 			Expect(err).NotTo(HaveOccurred())
@@ -441,10 +440,10 @@ var _ = Describe("runner", func() {
 				Model:   &fisk.CmdModel{Tags: []string{"ai:confirm"}},
 			}
 			r := &runner{
-				stats:  &util.RunStats{},
+				stats:  &RunStats{},
 				events: ev,
 				set:    toolSetOf(map[string]toolkit.Tool{"stream_rm": tool}),
-				gate:   util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
+				gate:   NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 			}
 
 			// With no operator reachable (the deny prompter reports it cannot prompt)
@@ -480,7 +479,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "danger", output: "should never run"}
 			var calls int
 			r := &runner{
-				cfg: cfg, stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: cfg, stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				journal:  j,
 				seq:      1,
@@ -525,7 +524,7 @@ var _ = Describe("runner", func() {
 			safe := &recordingTool{name: "safe", output: "safe-out"}
 			ev := &captureEvents{}
 			r := &runner{
-				stats: &util.RunStats{}, events: ev,
+				stats: &RunStats{}, events: ev,
 				set: toolSetOf(map[string]toolkit.Tool{"orig": orig, "safe": safe}),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
@@ -562,9 +561,9 @@ var _ = Describe("runner", func() {
 			safe := &recordingTool{name: "safe", output: "safe-out"}
 			ev := &captureEvents{}
 			r := &runner{
-				stats: &util.RunStats{}, events: ev,
+				stats: &RunStats{}, events: ev,
 				set:  toolSetOf(map[string]toolkit.Tool{"stream_rm": orig, "safe": safe}),
-				gate: util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
+				gate: NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
 						// The original tool is confirm-gated, which the hook observes.
@@ -590,7 +589,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "leaky", output: "BEGIN PRIVATE KEY abc END PRIVATE KEY"}
 			ev := &captureEvents{}
 			r := &runner{
-				stats: &util.RunStats{}, events: ev,
+				stats: &RunStats{}, events: ev,
 				set: toolSetOf(map[string]toolkit.Tool{"leaky": tool}),
 				hooks: Hooks{
 					PostToolUse: func(_ context.Context, in PostToolUseInfo) (PostToolUseResult, error) {
@@ -614,7 +613,7 @@ var _ = Describe("runner", func() {
 		It("isolates the run from a hook that mutates the Info snapshot", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
-				stats: &util.RunStats{}, events: &captureEvents{},
+				stats: &RunStats{}, events: &captureEvents{},
 				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(_ context.Context, in PreToolUseInfo) (PreToolUseResult, error) {
@@ -636,7 +635,7 @@ var _ = Describe("runner", func() {
 		It("aborts the run when a tool hook returns an error", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
-				stats: &util.RunStats{}, events: &captureEvents{},
+				stats: &RunStats{}, events: &captureEvents{},
 				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
@@ -654,7 +653,7 @@ var _ = Describe("runner", func() {
 		It("aborts when a rewrite targets an unregistered tool", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
-				stats: &util.RunStats{}, events: &captureEvents{},
+				stats: &RunStats{}, events: &captureEvents{},
 				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
@@ -672,7 +671,7 @@ var _ = Describe("runner", func() {
 		It("aborts when a rewrite produces invalid JSON arguments", func() {
 			tool := &recordingTool{name: "do", output: "ok"}
 			r := &runner{
-				stats: &util.RunStats{}, events: &captureEvents{},
+				stats: &RunStats{}, events: &captureEvents{},
 				set: toolSetOf(map[string]toolkit.Tool{"do": tool}),
 				hooks: Hooks{
 					PreToolUse: func(context.Context, PreToolUseInfo) (PreToolUseResult, error) {
@@ -717,7 +716,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "echo", output: "ran"}
 			var preIDs, postIDs []string
 			r := &runner{
-				stats:    &util.RunStats{},
+				stats:    &RunStats{},
 				events:   nopEvents{},
 				set:      toolSetOf(map[string]toolkit.Tool{"echo": tool}),
 				messages: rs.Messages,
@@ -763,7 +762,7 @@ var _ = Describe("runner", func() {
 			var pre []PreModelCallInfo
 			var post []PostModelCallInfo
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				toolSrc: toolSrcOf(map[string]toolkit.Tool{
 					"a": &recordingTool{name: "a"},
@@ -807,7 +806,7 @@ var _ = Describe("runner", func() {
 			var post []PostModelCallInfo
 			var calls int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				toolSrc:  toolSrcOf(map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}}),
 				hooks: Hooks{
@@ -850,7 +849,7 @@ var _ = Describe("runner", func() {
 
 			var post []PostModelCallInfo
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				toolSrc:  toolSrcOf(nil),
 				hooks: Hooks{
@@ -879,7 +878,7 @@ var _ = Describe("runner", func() {
 			tool := &recordingTool{name: "echo", output: "ran"}
 			var calls int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				toolSrc:  toolSrcOf(map[string]toolkit.Tool{"echo": tool}),
 				hooks: Hooks{
@@ -941,7 +940,7 @@ var _ = Describe("runner", func() {
 		It("aborts before the call when PreModelCall returns an error, counting no LLM call", func() {
 			var calls int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				toolSrc:  toolSrcOf(nil),
 				hooks: Hooks{
@@ -965,7 +964,7 @@ var _ = Describe("runner", func() {
 
 		It("aborts the run when PostModelCall returns an error", func() {
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 5, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 5, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				toolSrc:  toolSrcOf(nil),
 				hooks: Hooks{
@@ -1011,7 +1010,7 @@ var _ = Describe("runner", func() {
 			var submits []UserPromptSubmitInfo
 			var calls int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
 				toolSrc:    toolSrcOf(map[string]toolkit.Tool{"echo": &recordingTool{name: "echo", output: "ran"}}),
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "again"}, Continuation{Continue: false}),
@@ -1060,7 +1059,7 @@ var _ = Describe("runner", func() {
 			ev := &captureEvents{}
 			var calls int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: ev,
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: ev,
 				messages:   []llm.Message{userMsg("go")},
 				journal:    j,
 				seq:        1,
@@ -1108,7 +1107,7 @@ var _ = Describe("runner", func() {
 
 		It("aborts the run when TurnEnd returns an error", func() {
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "x"}),
 				toolSrc:    toolSrcOf(nil),
@@ -1130,7 +1129,7 @@ var _ = Describe("runner", func() {
 
 		It("aborts the run when a follow-up UserPromptSubmit returns an error", func() {
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
 				nextPrompt: scriptPrompts(Continuation{Continue: true, Text: "x"}),
 				toolSrc:    toolSrcOf(nil),
@@ -1181,7 +1180,7 @@ var _ = Describe("runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			r := &runner{
-				stats:    &util.RunStats{},
+				stats:    &RunStats{},
 				events:   nopEvents{},
 				set:      toolSetOf(nil),
 				messages: rs.Messages,
@@ -1232,7 +1231,7 @@ var _ = Describe("runner", func() {
 			answers := []string{finalMsg("first"), finalMsg("second")}
 
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
 					m := answers[calls]
@@ -1268,7 +1267,7 @@ var _ = Describe("runner", func() {
 			answers := []string{finalMsg("first"), finalMsg("second")}
 
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				provider: providerFunc(func(_ context.Context, p llm.Request) (*llm.Response, error) {
 					seenLens = append(seenLens, len(p.Messages))
@@ -1303,7 +1302,7 @@ var _ = Describe("runner", func() {
 			answers := []string{finalMsg("first"), finalMsg("second")}
 
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
 					m := answers[calls]
@@ -1357,7 +1356,7 @@ var _ = Describe("runner", func() {
 			var calls, prompts int
 			rec := &rotateRecorder{}
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: rec,
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: rec,
 				messages:   []llm.Message{userMsg("go")},
 				journal:    jA,
 				seq:        1,
@@ -1425,7 +1424,7 @@ var _ = Describe("runner", func() {
 
 			var calls, prompts int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages:   []llm.Message{userMsg("go")},
 				journal:    jA,
 				seq:        1,
@@ -1481,7 +1480,7 @@ var _ = Describe("runner", func() {
 			var calls, prompts int
 			we := &warnRecorder{}
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: we,
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: we,
 				messages:   []llm.Message{userMsg("go")},
 				journal:    jA,
 				seq:        1,
@@ -1523,7 +1522,7 @@ var _ = Describe("runner", func() {
 			var prompts int
 
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 1, events: we,
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 1, events: we,
 				messages: []llm.Message{userMsg("go")},
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
 					return mustResponse(toolMsg), nil
@@ -1547,7 +1546,7 @@ var _ = Describe("runner", func() {
 			var calls, prompts int
 
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: we,
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: we,
 				messages: []llm.Message{userMsg("go")},
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
 					calls++
@@ -1591,7 +1590,7 @@ var _ = Describe("runner", func() {
 			var calls, prompts int
 			answers := []string{finalMsg("first"), finalMsg("second")}
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				journal:  j, seq: 1,
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
@@ -1628,7 +1627,7 @@ var _ = Describe("runner", func() {
 		It("resumes a chat at the input boundary without a spurious LLM call", func() {
 			var calls, prompts int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 12, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 12, events: nopEvents{},
 				startIter:             2,
 				resumeAtInputBoundary: true,
 				// The restored conversation rests on an assistant turn awaiting a follow-up.
@@ -1671,7 +1670,7 @@ var _ = Describe("runner", func() {
 			we := &warnRecorder{}
 			var prompts int
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: we,
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: we,
 				messages: []llm.Message{userMsg("go")},
 				journal:  failOnUserJournal{Journal: j}, seq: 1,
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
@@ -1698,7 +1697,7 @@ var _ = Describe("runner", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 
 			r := &runner{
-				cfg: newCfg(), stats: &util.RunStats{}, maxIter: 10, events: nopEvents{},
+				cfg: newCfg(), stats: &RunStats{}, maxIter: 10, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				provider: providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
 					return mustResponse(finalMsg("done")), nil
@@ -1744,7 +1743,7 @@ var _ = Describe("runner", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			r := &runner{
-				cfg: cfg, stats: &util.RunStats{}, maxIter: 10, maxTokens: cfg.LLM.Budget.MaxTokens, events: nopEvents{},
+				cfg: cfg, stats: &RunStats{}, maxIter: 10, maxTokens: cfg.LLM.Budget.MaxTokens, events: nopEvents{},
 				messages: []llm.Message{userMsg("go")},
 				journal:  j,
 				seq:      1,
@@ -1958,22 +1957,22 @@ var _ = Describe("toolSearchDegradation", func() {
 	noSupport := llm.Caps{SupportsToolSearch: false}
 
 	It("Should not warn when the provider supports tool search", func() {
-		Expect(toolSearchDegradation(util.ToolSearchThreshold, supports, true)).To(BeNil())
+		Expect(toolSearchDegradation(ToolSearchThreshold, supports, true)).To(BeNil())
 	})
 
 	It("Should not warn when the set is below the threshold", func() {
-		Expect(toolSearchDegradation(util.ToolSearchThreshold-1, noSupport, true)).To(BeNil())
+		Expect(toolSearchDegradation(ToolSearchThreshold-1, noSupport, true)).To(BeNil())
 	})
 
 	It("Should not warn when the operator disabled tool search", func() {
-		Expect(toolSearchDegradation(util.ToolSearchThreshold, noSupport, false)).To(BeNil())
+		Expect(toolSearchDegradation(ToolSearchThreshold, noSupport, false)).To(BeNil())
 	})
 
 	It("Should report the provider-unsupported cause when the provider cannot do tool search", func() {
-		w := toolSearchDegradation(util.ToolSearchThreshold, noSupport, true)
+		w := toolSearchDegradation(ToolSearchThreshold, noSupport, true)
 		Expect(w).NotTo(BeNil())
 		Expect(w.Kind).To(Equal(WarnToolSearchUnsupported))
-		Expect(w.Count).To(Equal(util.ToolSearchThreshold))
+		Expect(w.Count).To(Equal(ToolSearchThreshold))
 	})
 })
 
@@ -1981,7 +1980,7 @@ var _ = Describe("the conversation token budget", func() {
 	// Thinking is documented as a subset of the output rather than an addition to it, so
 	// a cap that added it would stop a reasoning model at roughly half its allowance.
 	It("Should count the four throughput fields and not thinking", func() {
-		r := &runner{maxTokens: 100, stats: &util.RunStats{
+		r := &runner{maxTokens: 100, stats: &RunStats{
 			InTokens: 10, OutTokens: 5, CacheReadTokens: 20, CacheCreateTokens: 4, ThinkingTokens: 1000,
 		}}
 
@@ -1990,7 +1989,7 @@ var _ = Describe("the conversation token budget", func() {
 	})
 
 	It("Should treat a cap of zero or less as no bound", func() {
-		r := &runner{maxTokens: 0, stats: &util.RunStats{InTokens: 1e9}}
+		r := &runner{maxTokens: 0, stats: &RunStats{InTokens: 1e9}}
 		Expect(r.overBudget()).To(BeFalse())
 
 		r.maxTokens = -1
@@ -1998,7 +1997,7 @@ var _ = Describe("the conversation token budget", func() {
 	})
 
 	It("Should be over its budget at the cap rather than past it", func() {
-		r := &runner{maxTokens: 40, stats: &util.RunStats{
+		r := &runner{maxTokens: 40, stats: &RunStats{
 			InTokens: 10, OutTokens: 5, CacheReadTokens: 20, CacheCreateTokens: 4,
 		}}
 
@@ -2012,7 +2011,7 @@ var _ = Describe("the conversation token budget", func() {
 	// its own. The stats keep climbing to report the whole sitting, so the base is what
 	// separates the two.
 	It("Should measure the current conversation rather than the sitting", func() {
-		r := &runner{maxTokens: 100, budgetBase: 500, stats: &util.RunStats{
+		r := &runner{maxTokens: 100, budgetBase: 500, stats: &RunStats{
 			InTokens: 500, OutTokens: 20,
 		}}
 
@@ -2021,7 +2020,7 @@ var _ = Describe("the conversation token budget", func() {
 	})
 
 	It("Should name both numbers and the key that raises it", func() {
-		r := &runner{maxTokens: 100, stats: &util.RunStats{InTokens: 150}}
+		r := &runner{maxTokens: 100, stats: &RunStats{InTokens: 150}}
 
 		Expect(r.budgetError()).To(MatchError(ContainSubstring("processed 150 of its 100 token budget")))
 		Expect(r.budgetError()).To(MatchError(ContainSubstring("llm.budget.max_tokens")))
@@ -2044,7 +2043,7 @@ var _ = Describe("the conversation token budget", func() {
 
 		r := &runner{
 			cfg: cfg, maxTokens: 100, events: nopEvents{}, journal: j, seq: 1,
-			stats:    &util.RunStats{InTokens: 200},
+			stats:    &RunStats{InTokens: 200},
 			followUp: "and what about the second one",
 			messages: []llm.Message{userMsg("go")},
 			toolSrc:  toolSrcOf(nil),
@@ -2096,7 +2095,7 @@ var _ = Describe("HumanPaced", func() {
 
 		var seen []bool
 		r := &runner{
-			cfg: cfg, stats: &util.RunStats{}, maxIter: 2, events: nopEvents{},
+			cfg: cfg, stats: &RunStats{}, maxIter: 2, events: nopEvents{},
 			humanPaced: true,
 			messages:   []llm.Message{userMsg("go")},
 			toolSrc:    toolSrcOf(nil),

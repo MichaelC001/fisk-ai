@@ -18,7 +18,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // ResourceOptions are what building the shared resources needs that no configuration
@@ -31,6 +30,10 @@ type ResourceOptions struct {
 	// ConnName labels this process's NATS connection on the server, so an operator
 	// looking at connections can tell one worker from another. Empty uses the identity.
 	ConnName string
+
+	// Version is the calling program's own build version, sent to the MCP servers
+	// this process connects to. Empty sends no version.
+	Version string
 
 	// APIKey and BaseURL address the model provider, as they do on agent.Options. The
 	// caller validates BaseURL before calling: the error wants to name the flag or
@@ -200,7 +203,7 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 	// Last, because it is the only resource here that starts other people's programs. A
 	// store that cannot be built therefore fails before a child is running rather than
 	// after, and the defer above closes the children when something later fails.
-	err = r.connectMCP(cfg, opts.Logger)
+	err = r.connectMCP(cfg, opts.Version, opts.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +222,7 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 // NewResources takes none and a worker's shared resources outlive any one request.
 // Each entry's timeout bounds its own connect, so a server that never answers fails
 // this naming it instead of holding startup open.
-func (r *Resources) connectMCP(cfg *config.Config, log *slog.Logger) error {
+func (r *Resources) connectMCP(cfg *config.Config, version string, log *slog.Logger) error {
 	if len(cfg.MCPClients) == 0 {
 		return nil
 	}
@@ -227,7 +230,7 @@ func (r *Resources) connectMCP(cfg *config.Config, log *slog.Logger) error {
 	sessions, err := mcpclient.Connect(context.Background(), mcpclient.Options{
 		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
-		Version:            util.Version(),
+		Version:            version,
 		CredentialEnvNames: cfg.CredentialEnvNames(),
 	})
 	if err != nil {

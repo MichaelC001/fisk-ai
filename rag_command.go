@@ -20,7 +20,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 var (
@@ -227,7 +227,7 @@ func estimateEmbeddings(ctx context.Context, store *rag.Store, roots []string, o
 	}
 
 	firstBuild := st.Documents == 0 || opts.Reindex
-	if !firstBuild && !util.StdoutIsTerminal() {
+	if !firstBuild && !stdoutIsTerminal() {
 		return 0, nil
 	}
 
@@ -341,7 +341,7 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 			if full {
 				c.Item("Chunk", h.Content)
 			} else {
-				c.Item("Chunk", util.TruncateLine(h.Content, 100))
+				c.Item("Chunk", truncateLine(h.Content, 100))
 			}
 		})
 	}
@@ -353,7 +353,7 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 // a token that lost its tail. terminalText truncates, since a table cell has a
 // width.
 func terminalToken(s string) string {
-	return util.SanitizeForTerminal(s, utf8.RuneCountInString(s))
+	return sanitize.ForTerminal(s, utf8.RuneCountInString(s))
 }
 
 func knowledgeShowAction(_ *fisk.ParseContext) error {

@@ -14,14 +14,13 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // These tests pin the two axes the runner counts a tool call on. Every call, including
 // the ones answered before the tool runs, is counted against the provider that supplied
 // the tool, so on a fresh run the per-kind buckets partition tool_calls exactly. The
 // remote and MCP totals count only the calls that were dispatched, so a denied call is
-// in its bucket and in neither total. See util.RunStats.ToolCallsByKind.
+// in its bucket and in neither total. See RunStats.ToolCallsByKind.
 var _ = Describe("runner tool accounting", func() {
 	const objSchema = `{"type":"object"}`
 
@@ -49,11 +48,11 @@ var _ = Describe("runner tool accounting", func() {
 	// without an operator.
 	newRunner := func(tools map[string]toolkit.Tool) *runner {
 		return &runner{
-			stats:       &util.RunStats{},
+			stats:       &RunStats{},
 			events:      &captureEvents{},
 			set:         toolSetOf(tools),
 			prompter:    toolkit.DefaultDenyPrompter(),
-			gate:        util.NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
+			gate:        NewConfirmGate(toolkit.DefaultDenyPrompter(), nil),
 			toolWorkDir: "/run/work",
 		}
 	}

@@ -27,7 +27,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // accountingTool is a custom tool that answers immediately, so a run can make a call
@@ -49,7 +48,7 @@ func accountingTool(tb testing.TB, name string) toolkit.Tool {
 }
 
 // summedByKind adds up the per-kind buckets, which must equal tool_calls.
-func summedByKind(stats *util.RunStats) int64 {
+func summedByKind(stats *agent.RunStats) int64 {
 	var n int64
 	for _, v := range stats.ToolCallsByKind {
 		n += v

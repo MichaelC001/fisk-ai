@@ -61,7 +61,7 @@ import (
 const scopeName = "github.com/choria-io/fisk-ai"
 
 // Provider is the handle a run uses to record telemetry. Every method is safe to
-// call on a nil Provider and returns a no-op, in the manner of util.Tracer, so the
+// call on a nil Provider and returns a no-op, in the manner of agent.Tracer, so the
 // run path wires it up without asking whether telemetry is on. That is what keeps
 // enable and disable branches out of the call sites, and it means the instrumented
 // and uninstrumented paths cannot diverge.

@@ -14,9 +14,9 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // knowledgeSearchName is the built-in ranked retrieval tool over the local
@@ -223,7 +223,7 @@ func knowledgeSearchTrace(input json.RawMessage) string {
 		return knowledgeSearchName
 	}
 
-	query := util.SanitizeForTerminal(args.Query, maxIndexDescriptionRunes)
+	query := sanitize.ForTerminal(args.Query, maxIndexDescriptionRunes)
 	if args.TopK > 0 {
 		return fmt.Sprintf("%s(%q, top_k=%d)", knowledgeSearchName, query, args.TopK)
 	}

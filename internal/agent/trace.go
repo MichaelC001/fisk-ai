@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package util
+package agent
 
 import (
 	"bytes"
@@ -48,9 +48,9 @@ type Tracer struct {
 	id     int
 	closed bool
 	warned bool
-	// warn reports the first trace write failure. It exists because the tracer cannot
-	// reach the run's event sink (util is a dependency of the agent, not the other way
-	// around), so the caller injects a func that routes to it; nil falls back to log.
+	// warn reports the first trace write failure. A Tracer runs as an HTTP middleware
+	// and holds no handle on the run, so the caller injects a func that routes to the
+	// run's event sink; nil falls back to log.
 	warn func(error)
 	// log receives the first trace write failure when warn is nil. A nil log is
 	// replaced by a text logger on os.Stderr at the point it is used, so a Tracer
