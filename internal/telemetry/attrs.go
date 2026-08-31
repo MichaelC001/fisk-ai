@@ -555,9 +555,8 @@ const MetricKnowledgeDegradedSearches = "fisk.knowledge.degraded_searches"
 // near-identical entries, bury the dozen spans that carry meaning in every flame graph,
 // and cost more to record than the work it measures on the default backend, where an
 // append is a local write. A uniform, high-frequency operation is what a histogram is
-// for. It is also what makes this cheap to collect at all: recording it needs no context
-// threaded through runstate.Store and Journal, because the caller already holds both the
-// clock and the provider.
+// for. Recording it costs a clock read and a histogram record in the caller, which holds
+// both.
 //
 // What it answers is the one operational question the spans were wanted for: whether
 // journaling is costing a run real time, and on which backend. The jetstream backend

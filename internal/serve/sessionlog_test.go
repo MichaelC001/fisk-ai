@@ -6,6 +6,7 @@ package serve
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 
@@ -28,13 +29,15 @@ type stubStore struct {
 
 func (s *stubStore) Info() runstate.Info { return runstate.Info{Backend: s.backend} }
 
-func (s *stubStore) Create(string, runstate.MetaRecord) (runstate.Journal, error) {
+func (s *stubStore) Create(context.Context, string, runstate.MetaRecord) (runstate.Journal, error) {
 	return s.journal, s.err
 }
 
-func (s *stubStore) Open(string) (runstate.Journal, error) { return s.journal, s.err }
+func (s *stubStore) Open(context.Context, string) (runstate.Journal, error) {
+	return s.journal, s.err
+}
 
-func (s *stubStore) Load(string) (*runstate.RunState, error) {
+func (s *stubStore) Load(context.Context, string) (*runstate.RunState, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -42,9 +45,9 @@ func (s *stubStore) Load(string) (*runstate.RunState, error) {
 	return s.state, nil
 }
 
-func (s *stubStore) List() ([]runstate.RunInfo, error) { return nil, s.err }
+func (s *stubStore) List(context.Context) ([]runstate.RunInfo, error) { return nil, s.err }
 
-func (s *stubStore) Delete(string) error { return s.err }
+func (s *stubStore) Delete(context.Context, string) error { return s.err }
 
 // stubJournal is a journal that records nothing and can be told to fail its release.
 type stubJournal struct {
@@ -52,11 +55,11 @@ type stubJournal struct {
 	closed   bool
 }
 
-func (j *stubJournal) Append(uint64, runstate.Record) error { return nil }
-func (j *stubJournal) Records() ([]runstate.Record, error)  { return nil, nil }
-func (j *stubJournal) LastSeq() uint64                      { return 0 }
-func (j *stubJournal) CheckHeld() error                     { return nil }
-func (j *stubJournal) Close() error                         { j.closed = true; return j.closeErr }
+func (j *stubJournal) Append(context.Context, uint64, runstate.Record) error { return nil }
+func (j *stubJournal) Records(context.Context) ([]runstate.Record, error)    { return nil, nil }
+func (j *stubJournal) LastSeq() uint64                                       { return 0 }
+func (j *stubJournal) CheckHeld(context.Context) error                       { return nil }
+func (j *stubJournal) Close() error                                          { j.closed = true; return j.closeErr }
 
 var _ = Describe("withStoreLogging", func() {
 	var (
@@ -64,6 +67,7 @@ var _ = Describe("withStoreLogging", func() {
 		log     *slog.Logger
 		store   *stubStore
 		journal *stubJournal
+		ctx     = context.Background()
 	)
 
 	BeforeEach(func() {
@@ -86,7 +90,7 @@ var _ = Describe("withStoreLogging", func() {
 	// The point of the line: a worker keeps no conversation in memory, so this is the
 	// network round trip and the fold that every turn pays before the model is called.
 	It("Should report a conversation read from the store", func() {
-		rs, err := withStoreLogging(store, log).Load("t-abc")
+		rs, err := withStoreLogging(store, log).Load(ctx, "t-abc")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rs).To(Equal(store.state))
 
@@ -99,7 +103,7 @@ var _ = Describe("withStoreLogging", func() {
 	})
 
 	It("Should report the journal a resume opens", func() {
-		_, err := withStoreLogging(store, log).Open("t-abc")
+		_, err := withStoreLogging(store, log).Open(ctx, "t-abc")
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(out.String()).To(ContainSubstring(`"msg":"Opened a conversation journal"`))
@@ -111,7 +115,7 @@ var _ = Describe("withStoreLogging", func() {
 	// conversation, and closing it is the point after which the next turn reads the
 	// store again.
 	It("Should report a conversation released back to the store", func() {
-		j, err := withStoreLogging(store, log).Open("t-abc")
+		j, err := withStoreLogging(store, log).Open(ctx, "t-abc")
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(j.Close()).To(Succeed())
@@ -125,7 +129,7 @@ var _ = Describe("withStoreLogging", func() {
 	// A conversation that did not exist yet is held the same way, so its acquisition is
 	// reported too rather than leaving a release with nothing in front of it.
 	It("Should report a conversation created and then released", func() {
-		j, err := withStoreLogging(store, log).Create("t-new", runstate.MetaRecord{})
+		j, err := withStoreLogging(store, log).Create(ctx, "t-new", runstate.MetaRecord{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
@@ -136,7 +140,7 @@ var _ = Describe("withStoreLogging", func() {
 	It("Should report a failed release as a warning and pass the error on", func() {
 		journal.closeErr = errors.New("lock already taken")
 
-		j, err := withStoreLogging(store, log).Open("t-abc")
+		j, err := withStoreLogging(store, log).Open(ctx, "t-abc")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(j.Close()).To(MatchError(ContainSubstring("lock already taken")))
 
@@ -149,7 +153,7 @@ var _ = Describe("withStoreLogging", func() {
 	It("Should report a failed read as a warning and pass the error on", func() {
 		store.err = errors.New("stream not found")
 
-		_, err := withStoreLogging(store, log).Load("t-abc")
+		_, err := withStoreLogging(store, log).Load(ctx, "t-abc")
 		Expect(err).To(MatchError(ContainSubstring("stream not found")))
 
 		Expect(out.String()).To(ContainSubstring(`"msg":"Reading a conversation failed"`))
@@ -160,7 +164,7 @@ var _ = Describe("withStoreLogging", func() {
 	It("Should report a failed open as a warning and pass the error on", func() {
 		store.err = errors.New("already locked")
 
-		_, err := withStoreLogging(store, log).Open("t-abc")
+		_, err := withStoreLogging(store, log).Open(ctx, "t-abc")
 		Expect(err).To(MatchError(ContainSubstring("already locked")))
 
 		Expect(out.String()).To(ContainSubstring(`"msg":"Opening a conversation journal failed"`))

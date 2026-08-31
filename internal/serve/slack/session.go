@@ -5,6 +5,7 @@
 package slack
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -48,8 +49,8 @@ func SessionFor(identity, teamID, channelID, threadTS string) string {
 // an opening turn resumes without FollowUp, which replaces the conversation with the
 // journaled one and discards the prompt, so the person's message would vanish. A map
 // would give that wrong answer after every restart.
-func (c *Channel) held(sessionID string) (bool, error) {
-	_, err := c.sessions.Load(sessionID)
+func (c *Channel) held(ctx context.Context, sessionID string) (bool, error) {
+	_, err := c.sessions.Load(ctx, sessionID)
 	switch {
 	case err == nil:
 		return true, nil

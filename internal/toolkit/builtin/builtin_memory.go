@@ -13,19 +13,21 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/memory"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // The built-in memory tool names share the memory_ prefix, which groups them and
 // keeps them clear of a typical fisk command path so they do not collide with an
 // introspected application tool.
+// They are aliases of the config constants, which is where an operator's allowlist and
+// an embedder's provider script read them from.
 const (
-	memoryListName   = "memory_list"
-	memoryReadName   = "memory_read"
-	memoryWriteName  = "memory_write"
-	memoryDeleteName = "memory_delete"
+	memoryListName   = config.MemoryListToolName
+	memoryReadName   = config.MemoryReadToolName
+	memoryWriteName  = config.MemoryWriteToolName
+	memoryDeleteName = config.MemoryDeleteToolName
 )
 
 // maxIndexDescriptionRunes caps how much of each description the injected index
@@ -100,7 +102,7 @@ func MemoryIndexBlock(entries []memory.Item) string {
 		b.WriteString("(none stored yet)\n")
 	}
 	for _, e := range entries {
-		desc := util.SanitizeForTerminal(e.Description, maxIndexDescriptionRunes)
+		desc := sanitize.ForTerminal(e.Description, maxIndexDescriptionRunes)
 		b.WriteString(fmt.Sprintf("- %s: %s\n", e.Key, desc))
 	}
 	b.WriteString("</memory-index>")
@@ -138,7 +140,7 @@ func memoryKeyTrace(name string) func(json.RawMessage) string {
 			return name
 		}
 
-		key := util.SanitizeForTerminal(args.Key, maxIndexDescriptionRunes)
+		key := sanitize.ForTerminal(args.Key, maxIndexDescriptionRunes)
 		if key == "" {
 			return name
 		}

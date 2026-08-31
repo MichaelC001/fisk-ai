@@ -47,13 +47,25 @@ type ScriptedChannel struct {
 func NewScriptedChannel(tb testing.TB, name string, work ...*serve.Work) *ScriptedChannel {
 	tb.Helper()
 
+	c, err := BuildScriptedChannel(name, work...)
+	if err != nil {
+		tb.Fatalf("%v", err)
+	}
+
+	return c
+}
+
+// BuildScriptedChannel is NewScriptedChannel without a testing.TB, for a func Example or
+// any other caller outside a test. It returns an error naming the position of the first
+// nil work.
+func BuildScriptedChannel(name string, work ...*serve.Work) (*ScriptedChannel, error) {
 	for i, w := range work {
 		if w == nil {
-			tb.Fatalf("agenttest: NewScriptedChannel work %d is nil", i)
+			return nil, fmt.Errorf("agenttest: scripted work %d is nil", i)
 		}
 	}
 
-	return &ScriptedChannel{name: name, work: work}
+	return &ScriptedChannel{name: name, work: work}, nil
 }
 
 // Name identifies the channel.
@@ -116,7 +128,17 @@ type Queue struct {
 func NewQueue(tb testing.TB, name string) *Queue {
 	tb.Helper()
 
-	return &Queue{tb: tb, name: name, wake: make(chan struct{})}
+	q := BuildQueue(name)
+	q.tb = tb
+
+	return q
+}
+
+// BuildQueue is NewQueue without a testing.TB, for a func Example or any other caller
+// outside a test. Close ends the queue, and a caller that serves one calls it where a
+// test would have let the server's drain do it.
+func BuildQueue(name string) *Queue {
+	return &Queue{name: name, wake: make(chan struct{})}
 }
 
 // Name identifies the channel.
@@ -132,7 +154,9 @@ func (q *Queue) Name() string { return q.name }
 // Submitting to a closed queue is allowed and the work is never delivered, which is
 // what a queue a worker has drained away from looks like. Pending reports what is left.
 func (q *Queue) Submit(work ...*serve.Work) error {
-	q.tb.Helper()
+	if q.tb != nil {
+		q.tb.Helper()
+	}
 
 	q.mu.Lock()
 	defer q.mu.Unlock()

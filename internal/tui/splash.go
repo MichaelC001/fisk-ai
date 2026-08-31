@@ -12,7 +12,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // splashName is the Pages name the startup card occupies while a live run waits for
@@ -299,7 +299,7 @@ func splashCaptionText(spin string) string {
 // escapes are stripped and any literal "[" is escaped so a path or model id containing
 // one cannot open a color tag.
 func escapeSplash(s string) string {
-	return tview.Escape(util.SanitizeForDisplay(s))
+	return tview.Escape(sanitize.ForDisplay(s))
 }
 
 // elideLeft shortens s to at most max runes by dropping from the front and prefixing

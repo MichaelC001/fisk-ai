@@ -14,9 +14,9 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // knowledgeSearchName is the built-in ranked retrieval tool over the local
@@ -82,7 +82,7 @@ func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writ
 
 	// Served over MCP there is no per-run store base; the index resolves against the
 	// process working directory, or an absolute configured knowledge directory.
-	store, err := rag.Open(cfg, "")
+	store, err := rag.Open(cfg, "", rag.Options{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot expose knowledge over MCP: %w", err)
 	}
@@ -223,7 +223,7 @@ func knowledgeSearchTrace(input json.RawMessage) string {
 		return knowledgeSearchName
 	}
 
-	query := util.SanitizeForTerminal(args.Query, maxIndexDescriptionRunes)
+	query := sanitize.ForTerminal(args.Query, maxIndexDescriptionRunes)
 	if args.TopK > 0 {
 		return fmt.Sprintf("%s(%q, top_k=%d)", knowledgeSearchName, query, args.TopK)
 	}

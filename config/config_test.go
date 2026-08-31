@@ -39,7 +39,8 @@ llm:
 var _ = Describe("Config", func() {
 	Describe("NewConfig", func() {
 		It("Should apply LLM budget defaults", func() {
-			cfg := NewConfig()
+			cfg, err := NewConfig()
+			Expect(err).ToNot(HaveOccurred())
 			Expect(cfg).NotTo(BeNil())
 			Expect(cfg.LLM.Budget.MaxTokens).To(Equal(int64(defaultLLMMaxTokens)))
 			Expect(cfg.LLM.Budget.MaxIterations).To(Equal(int64(defaultLLMMaxIterations)))
@@ -1315,7 +1316,7 @@ application_path: /usr/bin/nats
 					LLM:             LLMConfig{Model: "m"},
 					Expose:          expose,
 				}
-				Expect(derived.prepare()).To(Succeed())
+				Expect(derived.Prepare()).To(Succeed())
 				Expect(derived.Identity).To(Equal("abt"), "the basename is still what it runs as")
 				Expect(derived.IdentityIsNamed()).To(BeFalse())
 

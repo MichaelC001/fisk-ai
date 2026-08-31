@@ -14,7 +14,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	_ "github.com/choria-io/fisk-ai/internal/a2a/nats"
 	"github.com/choria-io/fisk-ai/internal/conns"
-	"github.com/choria-io/fisk-ai/internal/util"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
 )
@@ -98,7 +97,7 @@ func discoverAction(_ *fisk.ParseContext) error {
 
 	tbl.AddHeaders("Tool", "Description")
 	for _, t := range card.Tools {
-		tbl.AddRow(t.Name, util.TruncateString(t.Description, maxDiscoverDescriptionLen))
+		tbl.AddRow(t.Name, truncateString(t.Description, maxDiscoverDescriptionLen))
 	}
 
 	return nil

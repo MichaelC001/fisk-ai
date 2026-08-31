@@ -247,21 +247,48 @@ func resolvedMaxInjectedTokens(cfg *config.RAGConfig) int {
 	return cfg.MaxInjectedTokens
 }
 
-// newStore builds every part of a Store that comes from the config alone: the
-// embedder, the resolved directory, the index file path, the retrieval limits and
-// the citation renderer. Open and OpenWriter both build their store through it, so
-// a value derived from the config cannot reach one path and be missing from the
-// other, and a reader and a writer opened from one config always agree on it.
+// Options carries what a caller supplies to Open and OpenWriter alongside the
+// configuration and the store directory. Options{} opens the store the
+// configuration alone describes.
+type Options struct {
+	// Embedder is the source of embedding vectors for this store, so a caller can
+	// index and search against Ollama, Bedrock, a local model, or a test double
+	// instead of the OpenAI-compatible client this package builds over net/http.
+	//
+	// A nil Embedder builds the one knowledge.embeddings configures, which is what
+	// every fisk-ai command does, and leaves the vector tier off when that block is
+	// absent. A supplied Embedder turns the vector tier on whatever the configuration
+	// says, and the embeddings block goes unread, so a malformed one passes here and
+	// fails when a nil Embedder next opens the store.
+	//
+	// Its Model, QueryPrefix and DocumentPrefix are pinned in the index at build time.
+	// A later open that configures the vector tier checks them against the manifest and
+	// is refused with ErrMetaMismatch when they differ. A later open with no embedder
+	// at all searches the index lexically and reports itself undegraded, so an index
+	// built with a supplied Embedder needs one on every open that expects vectors.
+	Embedder Embedder
+}
+
+// newStore builds every part of a Store that comes from the config and the
+// options: the embedder, the resolved directory, the index file path, the
+// retrieval limits and the citation renderer. Open and OpenWriter both build their
+// store through it, so a value derived from the config cannot reach one path and be
+// missing from the other, and a reader and a writer opened from one config always
+// agree on it.
 //
 // The returned store has no db and no lock. Those belong to the constructors: Open
 // attaches a read-only handle once it has seen the file exists, and OpenWriter
 // attaches the write handle along with the advisory lock it took. buildEmbedder is
 // the only call here that can fail, and it holds no directory, lock or file, so a
 // caller that gets an error has nothing to release.
-func newStore(cfg *config.Config, storeDir string, readOnly bool) (*Store, error) {
-	emb, err := buildEmbedder(cfg)
-	if err != nil {
-		return nil, err
+func newStore(cfg *config.Config, storeDir string, readOnly bool, opts Options) (*Store, error) {
+	emb := opts.Embedder
+	if emb == nil {
+		var err error
+		emb, err = buildEmbedder(cfg)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	dir := resolveDir(cfg, storeDir)
@@ -278,14 +305,16 @@ func newStore(cfg *config.Config, storeDir string, readOnly bool) (*Store, error
 }
 
 // Open opens the index for reading, the path the agent and the inspection CLI
-// commands use. It validates the config (a malformed embeddings block fails here,
-// before the agent loop) and builds the embedder when the vector tier is on, but a
-// missing index file is not an error: it returns a Store whose reads report
-// ErrIndexNotBuilt, so a first run never fails to start. When the file exists it
-// validates the pinned embedding identity against the configured embedder and
-// refuses a stale or too-new index rather than returning garbage rankings.
-func Open(cfg *config.Config, storeDir string) (*Store, error) {
-	s, err := newStore(cfg, storeDir, true)
+// commands use. With a nil opts.Embedder it validates the config and builds the
+// configured embedder when the vector tier is on, so a malformed embeddings block
+// fails here rather than in the agent loop; an opts.Embedder is taken as given and
+// leaves that block unread. A missing index file is not an error: Open returns a
+// Store whose reads report ErrIndexNotBuilt, so a first run never fails to start.
+// When the file exists it validates the pinned embedding identity against the
+// store's embedder and refuses a stale or too-new index rather than returning
+// garbage rankings.
+func Open(cfg *config.Config, storeDir string, opts Options) (*Store, error) {
+	s, err := newStore(cfg, storeDir, true, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -330,13 +359,13 @@ func Open(cfg *config.Config, storeDir string) (*Store, error) {
 // OpenWriter opens the index for writing, the path knowledge index uses. It takes
 // the cross-process advisory lock (failing fast with ErrLocked if another writer
 // holds it), creates the store directory and file with private permissions, sets
-// WAL, ensures the base schema and triggers, and validates the config the same way
-// Open does. The vector table and its dimension are created later, during ingest,
-// once the live model's dimension is known (see index.go), so this never contacts
-// the embeddings server. Close releases the lock. An index from another format
-// generation is refused here, before the schema statements run.
-func OpenWriter(cfg *config.Config, storeDir string) (*Store, error) {
-	s, err := newStore(cfg, storeDir, false)
+// WAL, ensures the base schema and triggers, and resolves the embedder the same way
+// Open does from the same opts. The vector table and its dimension are created
+// later, during ingest, once the live model's dimension is known (see index.go), so
+// this never contacts the embeddings server. Close releases the lock. An index from
+// another format generation is refused here, before the schema statements run.
+func OpenWriter(cfg *config.Config, storeDir string, opts Options) (*Store, error) {
+	s, err := newStore(cfg, storeDir, false, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -66,13 +66,13 @@ var _ = Describe("Words", func() {
 	})
 
 	reader := func() *Store {
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(w.Close()).To(Succeed())
 
-		s, err := Open(cfg, "")
+		s, err := Open(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(s.Close)
 
@@ -329,7 +329,7 @@ var _ = Describe("Words", func() {
 
 	Describe("index states", func() {
 		It("reports an index that was never built", func() {
-			s, err := Open(cfg, "")
+			s, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(s.Close)
 
@@ -340,11 +340,11 @@ var _ = Describe("Words", func() {
 		})
 
 		It("reports an index holding no documents", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(w.Close()).To(Succeed())
 
-			s, err := Open(cfg, "")
+			s, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(s.Close)
 

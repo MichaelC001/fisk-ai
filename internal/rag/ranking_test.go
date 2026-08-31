@@ -89,7 +89,7 @@ var _ = Describe("Lexical ranking", func() {
 			writeDoc(docsD, rel, body)
 		}
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer w.Close()
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
@@ -97,7 +97,7 @@ var _ = Describe("Lexical ranking", func() {
 	})
 
 	It("matches the ranking recorded before the heading was unfolded", func() {
-		r, err := Open(cfg, "")
+		r, err := Open(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer r.Close()
 

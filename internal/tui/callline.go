@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // maxCallValue bounds one rendered argument value. A call line is one line: an
@@ -52,10 +52,10 @@ var callArgs = map[string][]string{
 func CallLine(name string, input json.RawMessage) string {
 	rendered := callArguments(name, input)
 	if len(rendered) == 0 {
-		return util.SanitizeForTerminal(name, maxCallValue) + "()"
+		return sanitize.ForTerminal(name, maxCallValue) + "()"
 	}
 
-	return fmt.Sprintf("%s(%s)", util.SanitizeForTerminal(name, maxCallValue), strings.Join(rendered, ", "))
+	return fmt.Sprintf("%s(%s)", sanitize.ForTerminal(name, maxCallValue), strings.Join(rendered, ", "))
 }
 
 // callArguments renders the arguments of one call, in name order, keeping the ones
@@ -81,7 +81,7 @@ func callArguments(name string, input json.RawMessage) []string {
 
 	out := make([]string, 0, len(names))
 	for _, arg := range names {
-		out = append(out, fmt.Sprintf("%s:%s", util.SanitizeForTerminal(arg, maxCallValue), callValue(args[arg])))
+		out = append(out, fmt.Sprintf("%s:%s", sanitize.ForTerminal(arg, maxCallValue), callValue(args[arg])))
 	}
 
 	return out
@@ -95,8 +95,8 @@ func callValue(raw json.RawMessage) string {
 
 	err := json.Unmarshal(raw, &text)
 	if err != nil {
-		return util.SanitizeForTerminal(string(raw), maxCallValue)
+		return sanitize.ForTerminal(string(raw), maxCallValue)
 	}
 
-	return `"` + util.SanitizeForTerminal(text, maxCallValue) + `"`
+	return `"` + sanitize.ForTerminal(text, maxCallValue) + `"`
 }

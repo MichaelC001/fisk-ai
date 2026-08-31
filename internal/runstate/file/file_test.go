@@ -6,6 +6,7 @@ package file
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -40,8 +41,30 @@ func toolResult(id string) *runstate.ToolResultRecord {
 	return &runstate.ToolResultRecord{ToolUseID: id, Result: llm.ToolResultBlock{ToolUseID: id, Content: "ok"}}
 }
 
+// liveForReads answers Err with nil for the first reads calls and context.Canceled after,
+// which puts a cancel at a chosen point inside a loop that reads the context once per
+// item. Racing a real cancel against the filesystem lands somewhere different each run.
+type liveForReads struct {
+	context.Context
+
+	reads int
+	seen  int
+}
+
+func (c *liveForReads) Err() error {
+	c.seen++
+	if c.seen <= c.reads {
+		return nil
+	}
+
+	return context.Canceled
+}
+
 var _ = Describe("FileStore", func() {
-	var store *FileStore
+	var (
+		store *FileStore
+		ctx   = context.Background()
+	)
 
 	BeforeEach(func() {
 		s, err := NewFileStore(GinkgoT().TempDir())
@@ -55,13 +78,13 @@ var _ = Describe("FileStore", func() {
 
 	It("creates, appends, and folds back a run", func() {
 		id := newID()
-		j, err := store.Create(id, newMeta(id))
+		j, err := store.Create(ctx, id, newMeta(id))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
-		Expect(j.Append(3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")})).To(Succeed())
+		Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+		Expect(j.Append(ctx, 3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")})).To(Succeed())
 		Expect(j.Close()).To(Succeed())
 
-		rs, err := store.Load(id)
+		rs, err := store.Load(ctx, id)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.RunID).To(Equal(id))
 		Expect(rs.Messages).To(HaveLen(3))
@@ -70,35 +93,35 @@ var _ = Describe("FileStore", func() {
 
 	It("refuses to create a run that already exists", func() {
 		id := newID()
-		j, err := store.Create(id, newMeta(id))
+		j, err := store.Create(ctx, id, newMeta(id))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
-		_, err = store.Create(id, newMeta(id))
+		_, err = store.Create(ctx, id, newMeta(id))
 		Expect(err).To(MatchError(runstate.ErrExists))
 	})
 
 	It("treats a duplicate seq as an idempotent no-op and rejects gaps", func() {
 		id := newID()
-		j, err := store.Create(id, newMeta(id))
+		j, err := store.Create(ctx, id, newMeta(id))
 		Expect(err).NotTo(HaveOccurred())
 		defer j.Close()
 
-		Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+		Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
 		// Re-append the same seq (crash-retry): no error, no duplicate line.
-		Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
-		recs, err := j.Records()
+		Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+		recs, err := j.Records(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(recs).To(HaveLen(2))
 		// A seq that skips ahead is a gap.
-		Expect(j.Append(5, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")})).To(MatchError(runstate.ErrSeqGap))
+		Expect(j.Append(ctx, 5, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")})).To(MatchError(runstate.ErrSeqGap))
 	})
 
 	It("drops a torn final line but keeps complete records", func() {
 		id := newID()
-		j, err := store.Create(id, newMeta(id))
+		j, err := store.Create(ctx, id, newMeta(id))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+		Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
 		Expect(j.Close()).To(Succeed())
 
 		// Simulate a crash mid-write: append a truncated, unterminated line.
@@ -108,14 +131,14 @@ var _ = Describe("FileStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.Close()).To(Succeed())
 
-		rs, err := store.Load(id)
+		rs, err := store.Load(ctx, id)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Counters.LlmCalls).To(Equal(int64(1)))
 	})
 
 	It("errors on interior corruption", func() {
 		id := newID()
-		j, err := store.Create(id, newMeta(id))
+		j, err := store.Create(ctx, id, newMeta(id))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
@@ -125,39 +148,115 @@ var _ = Describe("FileStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.Close()).To(Succeed())
 
-		_, err = store.Load(id)
+		_, err = store.Load(ctx, id)
 		Expect(err).To(MatchError(runstate.ErrCorrupt))
 	})
 
 	It("rejects unsafe run ids (path traversal)", func() {
-		_, err := store.Load("../../etc/passwd")
+		_, err := store.Load(ctx, "../../etc/passwd")
 		Expect(err).To(MatchError(runstate.ErrInvalidID))
-		_, err = store.Create("../evil", newMeta("../evil"))
+		_, err = store.Create(ctx, "../evil", newMeta("../evil"))
 		Expect(err).To(MatchError(runstate.ErrInvalidID))
 	})
 
 	It("lists and deletes runs", func() {
 		id := newID()
-		j, err := store.Create(id, newMeta(id))
+		j, err := store.Create(ctx, id, newMeta(id))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
-		infos, err := store.List()
+		infos, err := store.List(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(infos).To(HaveLen(1))
 		Expect(infos[0].RunID).To(Equal(id))
 		Expect(infos[0].Model).To(Equal("claude-opus-4-8"))
 
-		Expect(store.Delete(id)).To(Succeed())
-		_, err = store.Load(id)
+		Expect(store.Delete(ctx, id)).To(Succeed())
+		_, err = store.Load(ctx, id)
 		Expect(err).To(MatchError(runstate.ErrNotFound))
+	})
+
+	It("refuses a listing on a context canceled before the call", func() {
+		id := newID()
+		j, err := store.Create(ctx, id, newMeta(id))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		infos, err := store.List(canceled)
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(infos).To(BeEmpty())
+	})
+
+	// The listing reads one journal per run, so it reads the context once per run too.
+	// A cancel that lands after the first of them has to fail the call: the runs read so
+	// far are a prefix, and returning them names a store holding fewer than it does.
+	It("fails a listing canceled part way through rather than returning the runs it reached", func() {
+		for range 3 {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		// Live for the check at the start and for the first run, canceled from the
+		// second on. A real cancel here would race the filesystem and pass whether or
+		// not the per-run check exists.
+		partway := &liveForReads{Context: ctx, reads: 2}
+
+		infos, err := store.List(partway)
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(infos).To(BeEmpty())
+	})
+
+	// A canceled caller is refused before the store touches the filesystem, and the
+	// refusal is the context's own error so a caller can tell it from a store failure.
+	It("refuses a load on a canceled context and leaves the run readable", func() {
+		id := newID()
+		j, err := store.Create(ctx, id, newMeta(id))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err = store.Load(canceled, id)
+		Expect(err).To(MatchError(context.Canceled))
+
+		rs, err := store.Load(ctx, id)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rs.RunID).To(Equal(id))
+	})
+
+	// The refused append writes no line at all, so the journal is where it was and the
+	// same seq is still the next one to write.
+	It("refuses an append on a canceled context and writes nothing", func() {
+		id := newID()
+		j, err := store.Create(ctx, id, newMeta(id))
+		Expect(err).NotTo(HaveOccurred())
+		defer j.Close()
+
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		rec := runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}
+		Expect(j.Append(canceled, 2, rec)).To(MatchError(context.Canceled))
+		Expect(j.LastSeq()).To(Equal(uint64(1)))
+
+		recs, err := j.Records(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(recs).To(HaveLen(1), "the meta record and nothing else")
+
+		Expect(j.Append(ctx, 2, rec)).To(Succeed(), "the seq the canceled call refused is still the next one")
 	})
 
 	It("does not leak a sensitive prompt into the fingerprint on disk", func() {
 		id := newID()
 		meta := newMeta(id)
 		meta.Fingerprint.SystemHash = runstate.HashHex([]byte("TOP-SECRET-INSTRUCTIONS"))
-		j, err := store.Create(id, meta)
+		j, err := store.Create(ctx, id, meta)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 

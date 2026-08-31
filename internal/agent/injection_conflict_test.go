@@ -3,15 +3,15 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 // These live in the external agent_test package alongside the examples: they drive
-// only agent's exported API, asserting the precedence rule for the injectable memory
-// and session seams. An injected store is the store the configuration asks for or it is
+// only agent's exported API, asserting the precedence rule for an injected memory or
+// session store. An injected store is the store the configuration asks for or it is
 // refused, and a configuration that asks for nothing takes whatever it is given.
 //
 // The refusing cases name a jetstream backend and run with no broker reachable, so the
 // failure each catches is the conflict error rather than "connecting to NATS". Because
 // the dial gating runs before the conflict checks and skips dialing for an injected
-// seam, that they fail on the conflict rather than the dial is also the memory and
-// session skip-dial proof.
+// store, failing on the conflict rather than on the dial also proves the memory and
+// session paths skip the dial.
 package agent_test
 
 import (
@@ -91,7 +91,7 @@ var _ = Describe("injected store precedence", func() {
 		Expect(err.Error()).NotTo(ContainSubstring("connecting to NATS"))
 	})
 
-	// The accepting case for the session seam, which is what lets a worker share one
+	// The accepting case for an injected session store, which lets a worker share one
 	// store across every job it runs.
 	It("Should accept a session store the configuration asked for", func() {
 		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())

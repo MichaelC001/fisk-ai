@@ -22,7 +22,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // runner drives the agentic loop. Its fields split cleanly into two groups: the
@@ -33,7 +32,7 @@ import (
 type runner struct {
 	cfg      *config.Config
 	provider llm.Provider
-	stats    *util.RunStats
+	stats    *RunStats
 
 	system          []string
 	thinking        llm.ThinkingMode
@@ -78,7 +77,7 @@ type runner struct {
 	// began with.
 	set         *ToolSet
 	confirmTags []string
-	gate        *util.ConfirmGate
+	gate        *ConfirmGate
 
 	// queuedWarnings holds the advisories raised away from this goroutine, which today
 	// is a configured MCP server reporting that its tool list changed. The loop drains
@@ -234,7 +233,7 @@ type runner struct {
 	// newSession starts a fresh checkpoint session with the given first prompt, returning
 	// its journal and id. It carries the store, fingerprint and meta the runner does not
 	// otherwise hold, and is nil for a non-checkpointed run (which resets in memory only).
-	newSession func(prompt string) (runstate.Journal, string, error)
+	newSession func(ctx context.Context, prompt string) (runstate.Journal, string, error)
 	// resetPending marks a deferred context reset for a checkpointed run: a bare /clear
 	// clears nothing until the operator supplies a prompt, so the fresh session is created
 	// with a real first prompt rather than an empty one (which would fail to resume).
@@ -261,22 +260,37 @@ type runner struct {
 // emit appends a record to the journal, advancing the seq. It is a no-op when
 // snapshotting is disabled.
 //
-// It times the append and records the duration metric. That is measured from out here
-// rather than inside the store because it needs no interface change to be correct:
-// runstate.Journal takes no context, and threading one through Store, Journal and both
-// backends to open a span per append would buy a hundred near-identical spans per run
-// for something that is a local write on the default backend. The metric answers the
-// question those spans were wanted for. See telemetry.MetricSessionAppendDuration.
-func (r *runner) emit(rec runstate.Record) error {
+// It times the append and records the duration metric out here rather than opening a
+// span per append inside the store: a run makes a hundred near-identical appends, which
+// on the default backend are local writes, and the metric answers the question those
+// spans were wanted for. See telemetry.MetricSessionAppendDuration.
+//
+// The append runs on ctx stripped of its cancellation and deadline, so it carries the
+// caller's trace and nothing else. A record reaching here is one of two things, and an
+// interrupt may drop neither.
+//
+// Most describe work that has already happened: a turn the model answered and was billed
+// for, a tool that ran, a tool that took the work and deferred, a grant the operator gave,
+// the reason the run ended. Dropping one of those leaves a resume re-doing work whose
+// effects already landed, and paying for it again.
+//
+// The rest are input the caller already supplied: the prompt an operator typed, which is
+// journaled before the model is called so a resume answers the words they gave rather
+// than a conversation missing its last turn. Dropping one of those loses the input.
+//
+// So an interrupt stops the next step and the store applies its own timeout to the write.
+func (r *runner) emit(ctx context.Context, rec runstate.Record) error {
 	if r.journal == nil {
 		return nil
 	}
 
 	r.seq++
 
+	appendCtx := context.WithoutCancel(ctx)
+
 	start := time.Now()
-	err := r.journal.Append(r.seq, rec)
-	r.recordAppend(start, err)
+	err := r.journal.Append(appendCtx, r.seq, rec)
+	r.recordAppend(appendCtx, start, err)
 
 	if err != nil {
 		return fmt.Errorf("journaling run: %w", err)
@@ -293,12 +307,12 @@ func (r *runner) emit(rec runstate.Record) error {
 //
 // A runner assembled without an approval source journals nothing, which is the shape
 // the package's own tests build.
-func (r *runner) journalGrants() error {
+func (r *runner) journalGrants(ctx context.Context) error {
 	if r.approvals == nil {
 		return nil
 	}
 
-	return r.approvals.flush()
+	return r.approvals.flush(ctx)
 }
 
 // journalMemoryRevisions records the memory revisions this run read, so the next turn
@@ -309,13 +323,13 @@ func (r *runner) journalGrants() error {
 // A run that read no memory writes nothing, and a failed append warns rather than
 // ending anything: the run is over, and the next turn reads the value again as every
 // turn does today.
-func (r *runner) journalMemoryRevisions() {
+func (r *runner) journalMemoryRevisions(ctx context.Context) {
 	revs := r.memScope.Snapshot()
 	if len(revs) == 0 {
 		return
 	}
 
-	jerr := r.emit(runstate.Record{
+	jerr := r.emit(ctx, runstate.Record{
 		Protocol:        runstate.MemoryRevisionsProtocol,
 		Optional:        true,
 		MemoryRevisions: &runstate.MemoryRevisionsRecord{Revisions: revs},
@@ -333,12 +347,9 @@ func (r *runner) journalMemoryRevisions() {
 // be reported as a broken session store, sending an operator to look at JetStream when
 // what happened is that someone pressed Ctrl-C.
 //
-// The context is a background one because no context reaches emit: one of its call sites
-// is appendUserPrompt, which has none, and threading one there for this would cascade
-// through callers that have no other use for it. Nothing on this instrument is derived
-// from a context; the cost is that a metric exemplar cannot link back to the active span,
-// which this build does not enable exemplars for anyway.
-func (r *runner) recordAppend(start time.Time, err error) {
+// ctx is the one the append ran on, so a metric exemplar could link back to the active
+// span. This build does not enable exemplars.
+func (r *runner) recordAppend(ctx context.Context, start time.Time, err error) {
 	var class telemetry.ErrorClass
 
 	if err != nil {
@@ -349,7 +360,7 @@ func (r *runner) recordAppend(start time.Time, err error) {
 		}
 	}
 
-	r.telemetry.RecordSessionAppend(context.Background(), r.sessionBackend, time.Since(start), class)
+	r.telemetry.RecordSessionAppend(ctx, r.sessionBackend, time.Since(start), class)
 }
 
 // runTurn drives one turn and records it.
@@ -464,7 +475,7 @@ func chatOutcome(resp *llm.Response, err error) telemetry.ChatOutcome {
 // runStatsUsage reads the run's running token totals in the shape telemetry reports.
 // Input carries the cached tiers as the semantic conventions require, while Uncached
 // keeps the raw remainder that the run summary line prints.
-func runStatsUsage(stats *util.RunStats) telemetry.TokenUsage {
+func runStatsUsage(stats *RunStats) telemetry.TokenUsage {
 	return telemetry.TokenUsage{
 		Input:       stats.InTokens + stats.CacheReadTokens + stats.CacheCreateTokens,
 		Output:      stats.OutTokens,
@@ -631,7 +642,7 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 		rotated := false
 		if r.resetPending {
 			r.resetPending = false
-			rerr := r.rotateSession(cont.Text)
+			rerr := r.rotateSession(ctx, cont.Text)
 			if rerr != nil {
 				r.events.Warn(Warning{Kind: WarnSessionRotate, Err: rerr})
 			} else {
@@ -649,7 +660,7 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 		if !rotated {
 			r.appendUserPrompt(cont.Text)
 
-			jerr := r.emit(runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{
+			jerr := r.emit(ctx, runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{
 				Message: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: cont.Text}}}},
 			}})
 			if jerr != nil {
@@ -668,12 +679,12 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 		if err != nil {
 			tr.Message = err.Error()
 		}
-		jerr := r.emit(runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: tr})
+		jerr := r.emit(ctx, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: tr})
 		if jerr != nil {
 			r.events.Warn(Warning{Kind: WarnJournalTerminal, Err: jerr})
 		}
 
-		r.journalMemoryRevisions()
+		r.journalMemoryRevisions(ctx)
 	}
 
 	return reason, err
@@ -722,7 +733,7 @@ func (r *runner) followUpTurn(ctx context.Context) (runstate.TerminalReason, err
 
 	r.appendUserPrompt(text)
 
-	jerr := r.emit(runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{
+	jerr := r.emit(ctx, runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{
 		Message: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: text}}}},
 	}})
 	if jerr != nil {
@@ -825,8 +836,8 @@ func (r *runner) resetContext() {
 // counters (seq, iteration, budget) reset for the new journal, while the run's cumulative
 // stats keep climbing so the live totals reflect the whole sitting; the new session's own
 // counters are derived from its journal on any later resume.
-func (r *runner) rotateSession(prompt string) error {
-	newJournal, newID, err := r.newSession(prompt)
+func (r *runner) rotateSession(ctx context.Context, prompt string) error {
+	newJournal, newID, err := r.newSession(ctx, prompt)
 	if err != nil {
 		return err
 	}
@@ -836,7 +847,7 @@ func (r *runner) rotateSession(prompt string) error {
 	// Finalize the outgoing session on its own journal before swapping. A failed terminal
 	// write is not fatal: the journal still ends on an assistant turn, so the session stays
 	// resumable, only unmarked; warn and proceed with the swap.
-	terr := r.emit(runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}})
+	terr := r.emit(ctx, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}})
 	if terr != nil {
 		r.events.Warn(Warning{Kind: WarnJournalTerminal, Err: terr})
 	}
@@ -1015,7 +1026,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		}
 
 		if r.verbose {
-			r.events.LLMRequest(util.LLMRequestSummary(r.messages))
+			r.events.LLMRequest(LLMRequestSummary(r.messages))
 		}
 
 		// PreModelCall observes the request about to be sent. It carries counts, not the
@@ -1080,7 +1091,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 			// the sink took to render it.
 			var firstToken time.Time
 
-			resp, err = sp.CallStream(util.WithTraceIteration(callCtx, int(i)), req, func(d llm.Delta) {
+			resp, err = sp.CallStream(WithTraceIteration(callCtx, int(i)), req, func(d llm.Delta) {
 				if firstToken.IsZero() {
 					firstToken = time.Now()
 				}
@@ -1090,7 +1101,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 			chatSpan.Streamed(firstToken)
 		} else {
-			resp, err = r.provider.Call(util.WithTraceIteration(callCtx, int(i)), req)
+			resp, err = r.provider.Call(WithTraceIteration(callCtx, int(i)), req)
 		}
 
 		// Finished on both paths, from one place, so the span cannot be left open by an
@@ -1113,7 +1124,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 		// Journal the assistant turn before executing any tools, so a crash mid
 		// batch resumes without re-paying for this LLM call.
-		err = r.emit(runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{
+		err = r.emit(ctx, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{
 			Iteration:         i,
 			Message:           asst,
 			StopReason:        string(resp.StopReason),
@@ -1201,7 +1212,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 					// A tool answering later is not a failure. The rest of the batch still
 					// runs, because those results are journaled and then never re-run, so
 					// running them now costs nothing a resume would not cost anyway.
-					was, jerr := r.journalDeferral(use, herr)
+					was, jerr := r.journalDeferral(ctx, use, herr)
 					if jerr != nil {
 						return runstate.ReasonError, jerr
 					}
@@ -1212,11 +1223,11 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 
 					return terminalFor(herr), herr
 				}
-				err = r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResultRecord(use.ID, result, kind, dispatched)})
+				err = r.emit(ctx, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResultRecord(use.ID, result, kind, dispatched)})
 				if err != nil {
 					return runstate.ReasonError, err
 				}
-				err = r.journalGrants()
+				err = r.journalGrants(ctx)
 				if err != nil {
 					return runstate.ReasonError, err
 				}
@@ -1299,7 +1310,7 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 
 		result, dispatched, kind, herr := r.executeTool(ctx, *block.ToolUse)
 		if herr != nil {
-			was, jerr := r.journalDeferral(*block.ToolUse, herr)
+			was, jerr := r.journalDeferral(ctx, *block.ToolUse, herr)
 			if jerr != nil {
 				return false, jerr
 			}
@@ -1310,11 +1321,11 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 
 			return false, herr
 		}
-		err := r.emit(runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResultRecord(id, result, kind, dispatched)})
+		err := r.emit(ctx, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResultRecord(id, result, kind, dispatched)})
 		if err != nil {
 			return false, err
 		}
-		err = r.journalGrants()
+		err = r.journalGrants(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -1336,7 +1347,7 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 // The record is what a resume reads to leave the call alone: without it a tool_use
 // with no result is indistinguishable from one a crash interrupted, and the tool
 // would be dispatched again for work it has already started.
-func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) {
+func (r *runner) journalDeferral(ctx context.Context, use llm.ToolUseBlock, err error) (bool, error) {
 	d, ok := toolkit.IsDeferred(err)
 	if !ok {
 		return false, nil
@@ -1349,7 +1360,7 @@ func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) 
 		Handle:    d.Handle,
 	})
 
-	jerr := r.emit(runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
+	jerr := r.emit(ctx, runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
 		ToolUseID: use.ID,
 		ToolName:  use.Name,
 		Note:      d.Note,
@@ -1362,7 +1373,7 @@ func (r *runner) journalDeferral(use llm.ToolUseBlock, err error) (bool, error) 
 	// A deferred call is answered as far as an approval is concerned: the tool took the
 	// work, and the resume never dispatches it again, so a grant held for a result that
 	// is not coming would be lost with nobody left to re-ask.
-	jerr = r.journalGrants()
+	jerr = r.journalGrants(ctx)
 	if jerr != nil {
 		return true, jerr
 	}
@@ -1590,7 +1601,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 
 		if !allowed {
 			outcome.Outcome = telemetry.ToolOutcomeConfirmDenied
-			return util.ConfirmDeniedResult(use.ID, reason), false, effInfo.Kind, nil
+			return ConfirmDeniedResult(use.ID, reason), false, effInfo.Kind, nil
 		}
 	}
 
@@ -1603,7 +1614,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// where a call becomes one that happened and every return below reports it as
 	// dispatched. The two first-class dispatch counters are incremented here rather than
 	// beside CountToolKind, which is what makes them count calls that were made while
-	// the buckets count calls the model asked for. See util.RunStats.ToolCallsByKind.
+	// the buckets count calls the model asked for. See RunStats.ToolCallsByKind.
 	//
 	// Both are keyed on the provider kind and never on the presentation or the agent
 	// name: presentation is the visibility axis, and other providers present the same way
@@ -1637,7 +1648,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// so comes after the tool has already run. Asking here moves that discovery in
 	// front of the effect. It does not cover the tool already in flight when a takeover
 	// happens, which is the residue this cannot reach.
-	heldErr := r.checkStillHeld()
+	heldErr := r.checkStillHeld(ctx)
 	if heldErr != nil {
 		return llm.ToolResultBlock{}, dispatched, effInfo.Kind, heldErr
 	}
@@ -1726,12 +1737,12 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 // journaled one asks the journal, and an error of any kind ends the run: losing the
 // run and being unable to tell are different facts, but neither is a state in which to
 // keep running work whose results may have nowhere to go.
-func (r *runner) checkStillHeld() error {
+func (r *runner) checkStillHeld(ctx context.Context) error {
 	if r.journal == nil {
 		return nil
 	}
 
-	err := r.journal.CheckHeld()
+	err := r.journal.CheckHeld(ctx)
 	if err != nil {
 		return fmt.Errorf("this run is no longer safe to continue: %w", err)
 	}

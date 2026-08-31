@@ -20,7 +20,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 var (
@@ -144,7 +144,7 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 		return fmt.Errorf("no paths given and knowledge.paths is empty - pass a path or set knowledge.paths")
 	}
 
-	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -227,7 +227,7 @@ func estimateEmbeddings(ctx context.Context, store *rag.Store, roots []string, o
 	}
 
 	firstBuild := st.Documents == 0 || opts.Reindex
-	if !firstBuild && !util.StdoutIsTerminal() {
+	if !firstBuild && !stdoutIsTerminal() {
 		return 0, nil
 	}
 
@@ -271,7 +271,7 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -341,7 +341,7 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 			if full {
 				c.Item("Chunk", h.Content)
 			} else {
-				c.Item("Chunk", util.TruncateLine(h.Content, 100))
+				c.Item("Chunk", truncateLine(h.Content, 100))
 			}
 		})
 	}
@@ -353,7 +353,7 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 // a token that lost its tail. terminalText truncates, since a table cell has a
 // width.
 func terminalToken(s string) string {
-	return util.SanitizeForTerminal(s, utf8.RuneCountInString(s))
+	return sanitize.ForTerminal(s, utf8.RuneCountInString(s))
 }
 
 func knowledgeShowAction(_ *fisk.ParseContext) error {
@@ -370,7 +370,7 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -410,7 +410,7 @@ func knowledgeRmAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -457,7 +457,7 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	store, err := rag.OpenWriter(cfg, knowledgeStoreDir)
+	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	// An index from another format generation cannot be opened, so its rows can be
 	// neither counted nor cleared, and discarding the file is the whole of the fix.
 	// Reset is the command that does that, so it answers for itself here rather than
@@ -526,7 +526,7 @@ func knowledgeRebuildAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -567,7 +567,7 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}
@@ -668,7 +668,7 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 	// An index doctor cannot open is exactly what the operator ran doctor to learn
 	// about, so a stale format or a mismatched embedding identity is reported as a
 	// failed check carrying its own fix rather than returned as a bare error.
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		c.Item("Store readable", columns.Style(fmt.Sprintf("[%s] %v", doctorMark(rag.DoctorFail), err)))
 		return fmt.Errorf("knowledge doctor found problems that must be fixed")
@@ -726,7 +726,7 @@ func knowledgeStatsAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir)
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
 		return err
 	}

@@ -27,7 +27,7 @@ var _ = Describe("MCP clients", func() {
 
 	prepared := func(servers ...MCPServer) *Config {
 		cfg := base(servers...)
-		Expect(cfg.prepare()).To(Succeed())
+		Expect(cfg.Prepare()).To(Succeed())
 
 		return cfg
 	}
@@ -56,17 +56,17 @@ var _ = Describe("MCP clients", func() {
 
 		It("Should reject an unparseable timeout", func() {
 			cfg := base(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "soon"})
-			Expect(cfg.prepare()).To(MatchError(ContainSubstring("invalid mcp_clients timeout \"soon\" on server \"filesystem\"")))
+			Expect(cfg.Prepare()).To(MatchError(ContainSubstring("invalid mcp_clients timeout \"soon\" on server \"filesystem\"")))
 		})
 
 		It("Should reject a zero timeout, which would leave the startup unlimited", func() {
 			cfg := base(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "0s"})
-			Expect(cfg.prepare()).To(MatchError(ContainSubstring("must be greater than zero")))
+			Expect(cfg.Prepare()).To(MatchError(ContainSubstring("must be greater than zero")))
 		})
 
 		It("Should reject a negative timeout", func() {
 			cfg := base(MCPServer{Name: "filesystem", Command: "npx", TimeoutString: "-1s"})
-			Expect(cfg.prepare()).To(MatchError(ContainSubstring("must be greater than zero")))
+			Expect(cfg.Prepare()).To(MatchError(ContainSubstring("must be greater than zero")))
 		})
 	})
 

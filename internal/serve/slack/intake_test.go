@@ -163,7 +163,7 @@ var _ = Describe("Intake", func() {
 			// The conversation the run would have written, so the follow-up is asked to
 			// continue it rather than to create it.
 			id := SessionFor(opts.Identity, "T1", "C1", "1700000000.000100")
-			j, err := opts.Sessions.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id})
+			j, err := opts.Sessions.Create(context.Background(), id, runstate.MetaRecord{Version: runstate.Version, RunID: id})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(j.Close()).To(Succeed())
 

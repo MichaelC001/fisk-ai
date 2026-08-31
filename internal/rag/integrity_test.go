@@ -36,7 +36,7 @@ var _ = Describe("FTS integrity", func() {
 	build := func() {
 		GinkgoHelper()
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
@@ -46,7 +46,7 @@ var _ = Describe("FTS integrity", func() {
 	reader := func() *Store {
 		GinkgoHelper()
 
-		s, err := Open(cfg, "")
+		s, err := Open(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(s.Close)
 
@@ -59,7 +59,7 @@ var _ = Describe("FTS integrity", func() {
 	desync := func() {
 		GinkgoHelper()
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() {})
 
@@ -137,7 +137,7 @@ var _ = Describe("FTS integrity", func() {
 	It("reports a concurrent writer rather than blocking", func() {
 		build()
 
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer w.Close()
 
@@ -199,7 +199,7 @@ var _ = Describe("FTS integrity", func() {
 		It("skips rather than fails when another writer holds the lock", func() {
 			build()
 
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 

@@ -47,7 +47,10 @@ type Provider interface {
 
 `Call` owns the wire call end to end, including any per-call timeout: it renders the
 neutral `Request` to its wire format, issues the request, and converts the reply
-back to a neutral `Response`. It is the single seam where a concrete SDK is spoken.
+back to a neutral `Response`. It is the only place a concrete SDK is spoken.
+
+An implementation must be safe for concurrent use: a program that runs several agents
+at once gives them one `Provider` so they share its connections.
 
 `Capabilities` returns declared capabilities. They are declared, not discovered:
 neither Anthropic nor OpenAI expose capability flags at runtime, so a provider states
@@ -67,8 +70,8 @@ llm.Register(ProviderName, factory, credentialEnvNames)
   is a REQUIRED positional argument, not an omittable field, so a provider cannot be
   built without declaring its secrets (see "Credential handling" below).
 - `NewProvider(name, cfg)` resolves a provider by name and constructs it. An unknown
-  name (usually a provider whose package was not linked in) returns an error that
-  lists the linked-in providers.
+  name (usually a provider whose package was not linked in) returns `ErrUnknownProvider`
+  wrapped in an error that lists the linked-in providers.
 - `Providers()` lists the linked-in provider names.
 - `CredentialEnvNames()` is the union of every linked provider's credential env var
   names.
@@ -114,9 +117,23 @@ linked in by adding a second blank import there.
   every tool directly and raise a degradation warning.
 - Truncation. Map an output-cap stop to `StopMaxTokens`; a truncated turn's trailing
   `tool_use` is not safe to execute.
-- Per-call timeout. `Call` owns `Config.Timeout` and must bound the wire call with it.
+- Per-call timeout. `Call` owns `Config.Timeout` and must limit the wire call with it.
   Nothing outside the provider enforces this, so a provider that ignores it silently
   drops the `llm.budget.call_timeout` guarantee with no test catching the loss.
+  `NewProvider` turns a zero `Config.Timeout` into `DefaultTimeout` before the factory
+  runs; a negative value asks the provider to add no limit of its own, which leaves the
+  caller's context and whatever the backend's client enforces. For the Anthropic SDK
+  that is a 10 minute request timeout on a non-streaming call, and a refusal to send at
+  all once `MaxOutputTokens` implies a longer run than that.
+- Error classification. Map the backend's failures onto the sentinels in `errors.go`
+  (`ErrRateLimited`, `ErrOverloaded`, `ErrAuthentication`, `ErrContextLengthExceeded`,
+  `ErrInvalidRequest`, `ErrModelNotFound`, `ErrRequestTooLarge`, `ErrBackendFailure`)
+  and wrap with `%w`, so a caller backs off, re-authenticates or trims its history
+  through `errors.Is` without importing the SDK. A class earns a sentinel by what a
+  caller does differently on it: the Anthropic permission, billing and gateway-timeout
+  errors have none of their own because the action duplicates a class that exists. A
+  failure in no named class is returned unchanged. `internal/llm/anthropic/errors.go`
+  is the reference.
 - Prompt cache stays out of the fingerprint, so toggling it never refuses a resume.
 
 ## Credential handling (security boundary)

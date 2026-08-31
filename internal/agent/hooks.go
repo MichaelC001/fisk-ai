@@ -13,7 +13,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // Hooks are the AGENT-SIDE hooks: they run wherever the agent loop runs, which is inside
@@ -218,7 +217,7 @@ type RunEndInfo struct {
 	// Err is the error the run ended with, if any.
 	Err error
 	// Stats is a snapshot of the run's counters, by value.
-	Stats util.RunStats
+	Stats RunStats
 }
 
 // UserPromptSubmitResult carries a UserPromptSubmit decision. The zero value changes

@@ -5,6 +5,7 @@
 package serve
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -48,10 +49,10 @@ func withStoreLogging(store runstate.Store, log *slog.Logger) runstate.Store {
 // The message count is the fold's own size rather than the store's: it is what the next
 // model call re-sends, so a conversation whose reads are getting slower says so here
 // before it says it in the bill.
-func (s *loggedStore) Load(id string) (*runstate.RunState, error) {
+func (s *loggedStore) Load(ctx context.Context, id string) (*runstate.RunState, error) {
 	started := time.Now()
 
-	rs, err := s.Store.Load(id)
+	rs, err := s.Store.Load(ctx, id)
 	if err != nil {
 		s.log.Warn("Reading a conversation failed", "session", id, "backend", s.backend, "duration", time.Since(started), "error", err)
 
@@ -65,10 +66,10 @@ func (s *loggedStore) Load(id string) (*runstate.RunState, error) {
 
 // Open implements runstate.Store, reporting the journal lock a resume takes before
 // anything runs.
-func (s *loggedStore) Open(id string) (runstate.Journal, error) {
+func (s *loggedStore) Open(ctx context.Context, id string) (runstate.Journal, error) {
 	started := time.Now()
 
-	j, err := s.Store.Open(id)
+	j, err := s.Store.Open(ctx, id)
 	if err != nil {
 		s.log.Warn("Opening a conversation journal failed", "session", id, "backend", s.backend, "duration", time.Since(started), "error", err)
 
@@ -84,10 +85,10 @@ func (s *loggedStore) Open(id string) (runstate.Journal, error) {
 //
 // It is reported so that every hold this logs has the release below to close it. A
 // conversation created here is held for its first turn exactly as a resumed one is.
-func (s *loggedStore) Create(id string, meta runstate.MetaRecord) (runstate.Journal, error) {
+func (s *loggedStore) Create(ctx context.Context, id string, meta runstate.MetaRecord) (runstate.Journal, error) {
 	started := time.Now()
 
-	j, err := s.Store.Create(id, meta)
+	j, err := s.Store.Create(ctx, id, meta)
 	if err != nil {
 		s.log.Warn("Creating a conversation journal failed", "session", id, "backend", s.backend, "duration", time.Since(started), "error", err)
 

@@ -187,13 +187,13 @@ var _ = Describe("the agent example compositions", func() {
 		cfg := agenttest.Config(GinkgoTB(), app)
 		cfg.Harness.RAG = &config.RAGConfig{Enabled: true, Directory: filepath.Join(GinkgoT().TempDir(), "kb"), Paths: []string{corpus}}
 
-		writer, err := rag.OpenWriter(cfg, "")
+		writer, err := rag.OpenWriter(cfg, "", rag.Options{})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = writer.Index(ctx, []string{corpus}, rag.IndexOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(writer.Close()).To(Succeed())
 
-		store, err := rag.Open(cfg, "")
+		store, err := rag.Open(cfg, "", rag.Options{})
 		Expect(err).NotTo(HaveOccurred())
 		defer store.Close()
 		Expect(store.Built()).To(BeTrue())
@@ -587,9 +587,9 @@ var _ = Describe("the agent example compositions", func() {
 
 	// Injects a caller-built tool through Options.CustomTools: the model calls it, the
 	// handler runs in-process and returns its result with functool.Result, and the
-	// result feeds back keyed to the tool_use id. It is the load-bearing example of the
-	// injection seam, showing functool.New, functool.Result, a hand-written schema, and
-	// a Trace renderer that makes the call visible in the run.
+	// result feeds back keyed to the tool_use id. It covers functool.New,
+	// functool.Result, a hand-written schema, and a Trace renderer that makes the call
+	// visible in the run.
 	It("Should complete a custom tool round trip", func() {
 		// A function tool needs only a name, description, schema and handler. The handler
 		// ignores its CallContext here (it neither prompts an operator nor touches the
@@ -954,8 +954,8 @@ var _ = Describe("the agent example compositions", func() {
 	// Configures a remote_tools host and injects a fake a2a.Transport, with no broker
 	// reachable, proving Run borrows the transport: the remote tool is discovered and
 	// invoked through the fake, Run never dials, and it never closes the borrowed
-	// transport. The a2a seam has no conflict error, so this is the one place the
-	// skip-dial gating is directly observable end to end.
+	// transport. Injecting a transport reports no conflict error, so this is the one
+	// place the skip-dial gating is directly observable end to end.
 	It("Should borrow an injected A2A transport", func() {
 		ctx := context.Background()
 
@@ -1006,10 +1006,10 @@ var _ = Describe("the agent example compositions", func() {
 
 	// Shows a custom tool consulting the operator: its handler calls
 	// tc.Prompter().Confirm, which routes to the run's prompter, and the operator's
-	// answer flows back to the model. It is the discoverability example for the
-	// otherwise-invisible CallContext.Prompter() seam every custom-tool example
-	// previously discarded; a run with no operator would fail this same call closed (the
-	// functool package's fail-closed spec asserts that half).
+	// answer flows back to the model. Every other custom-tool example here discards its
+	// CallContext, so this is where CallContext.Prompter() is shown at all. A run with
+	// no operator fails this same call closed, which the functool package's fail-closed
+	// spec asserts.
 	It("Should let a custom tool elicit an answer from the operator", func() {
 		tool, err := functool.New(functool.Spec{
 			Name:        "escalate_ticket",

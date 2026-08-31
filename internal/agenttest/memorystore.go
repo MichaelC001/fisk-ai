@@ -16,9 +16,9 @@ import (
 // FakeMemoryStore is an in-memory memory.Store for tests: it holds each memory in a
 // map guarded by a mutex, so a run can be handed a store through
 // agent.Options.MemoryStore without a file backend or a NATS connection. It is one
-// of the separate-package fakes that prove each injectable seam is implementable
-// from outside its own package using only exported identifiers, and it is safe for
-// the concurrent use runs sharing one store make of it.
+// of the separate-package fakes that prove each injectable interface can be
+// implemented from outside its own package using only exported identifiers, and it
+// is safe for the concurrent use runs sharing one store make of it.
 type FakeMemoryStore struct {
 	mu      sync.Mutex
 	items   map[string]fakeMemory
@@ -33,13 +33,19 @@ type fakeMemory struct {
 }
 
 // FakeMemoryStore implements memory.Store; the assertion is the separate-package
-// interface audit, failing to compile if the seam stops being implementable from
-// outside its own package.
+// interface audit, failing to compile if memory.Store stops being implementable
+// from outside its own package.
 var _ memory.Store = (*FakeMemoryStore)(nil)
 
 // NewFakeMemoryStore returns an empty in-memory store.
 func NewFakeMemoryStore(tb testing.TB) *FakeMemoryStore {
 	tb.Helper()
+	return BuildFakeMemoryStore()
+}
+
+// BuildFakeMemoryStore is NewFakeMemoryStore without a testing.TB, for a func Example or
+// any other caller outside a test.
+func BuildFakeMemoryStore() *FakeMemoryStore {
 	return &FakeMemoryStore{items: map[string]fakeMemory{}, info: memory.Info{Backend: "fake"}}
 }
 

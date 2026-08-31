@@ -256,7 +256,7 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 		// died on its token budget, or part way through an expensive turn, is where an
 		// operator most wants the number, and it is the one case that used to store
 		// none.
-		msg.Usage = a2a.UsageFrom(out.Stats)
+		msg.Usage = out.Stats.Usage()
 		a2a.StampReply(&msg.Header, &req.Header, c.identity)
 
 		return msg, nil
@@ -266,7 +266,7 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 
 	msg := a2a.NewResult(reason)
 	msg.Text = out.Text
-	msg.Usage = a2a.UsageFrom(out.Stats)
+	msg.Usage = out.Stats.Usage()
 	a2a.StampReply(&msg.Header, &req.Header, c.identity)
 
 	return msg, nil

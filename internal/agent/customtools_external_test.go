@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-// These specs exercise the Options.CustomTools injection seam through the exported
+// These specs exercise Options.CustomTools through the exported
 // agent.Run API, alongside the living-doc examples in example_external_test.go. They
 // assert the registration guards, the no-tools gate, the deferral threshold and the
 // resume fingerprint, which are wiring properties rather than usage documentation.

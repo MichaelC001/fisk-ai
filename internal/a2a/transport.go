@@ -10,8 +10,8 @@ import "context"
 // belongs to, so it can route it (e.g. a NATS transport picks the subject). It is
 // ROUTING ONLY: the meaning of a message is always dispatched from its
 // Header.Protocol id by the engine, never inferred from this hint. A transport may
-// use it to keep the paths on separate channels as a permission seam, but must not
-// treat it as the message's type.
+// put the paths on separate channels so each carries its own permissions, but must
+// not treat it as the message's type.
 type RouteHint int
 
 const (

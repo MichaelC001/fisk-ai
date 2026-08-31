@@ -142,7 +142,7 @@ var _ = Describe("Work", func() {
 			Expect(out.Err).ToNot(HaveOccurred())
 			Expect(out.SessionID).To(Equal("session-1"))
 
-			state, err := store.Load("session-1")
+			state, err := store.Load(context.Background(), "session-1")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(state).ToNot(BeNil())
 		})
@@ -204,11 +204,11 @@ var _ = Describe("Work", func() {
 			})
 			Expect(out.Err).ToNot(HaveOccurred())
 
-			journal, err := store.Open("session-1")
+			journal, err := store.Open(context.Background(), "session-1")
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(journal.Close)
 
-			records, err := journal.Records()
+			records, err := journal.Records(context.Background())
 			Expect(err).ToNot(HaveOccurred())
 
 			var claims []string

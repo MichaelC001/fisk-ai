@@ -14,7 +14,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // promptPage is the Pages name the prompt overlays occupy. onKey lets the focused
@@ -38,7 +38,7 @@ func aborted(ctx context.Context) error {
 // their behalf and be delivered to the run later.
 var errPromptLeft = fmt.Errorf("%w: the operator left with the prompt on screen", toolkit.ErrPromptAborted)
 
-// tcellPrompter implements util.Prompter with native tview widgets, driven from the
+// tcellPrompter implements toolkit.Prompter with native tview widgets, driven from the
 // run goroutine. Each method marshals its widget onto the tview loop and blocks
 // until the operator answers or ctx is canceled; the caller (the confirm gate and
 // the human-in-the-loop builtins) treats an answer of no, and any error other than
@@ -111,7 +111,7 @@ func (p *tcellPrompter) ApproveCommand(ctx context.Context, req toolkit.GateRequ
 	// is escaped to keep a literal "[" in the model-supplied command from opening a
 	// color tag; the fixed wording carries no brackets, so escaping it is harmless.
 	body := tview.Escape(fmt.Sprintf("Run this command?\n\n%s\n\n%q carries tag %q",
-		util.SanitizeForDisplay(req.Display), req.Command, req.Tag))
+		sanitize.ForDisplay(req.Display), req.Command, req.Tag))
 
 	p.modal(body, []string{"No", "Once", "Always"}, func(idx int) {
 		switch idx {
@@ -146,7 +146,7 @@ func (p *tcellPrompter) Confirm(ctx context.Context, question string) (bool, err
 
 	result := make(chan bool, 1)
 
-	p.modal(tview.Escape(util.SanitizeForDisplay(question)), []string{"No", "Yes"}, func(idx int) {
+	p.modal(tview.Escape(sanitize.ForDisplay(question)), []string{"No", "Yes"}, func(idx int) {
 		result <- idx == 1
 	})
 
@@ -182,7 +182,7 @@ func (p *tcellPrompter) Select(ctx context.Context, question string, options []s
 		for i, opt := range options {
 			idx := i
 			// List escapes item text itself, so it is only sanitized here.
-			list.AddItem(util.SanitizeForDisplay(opt), "", 0, func() {
+			list.AddItem(sanitize.ForDisplay(opt), "", 0, func() {
 				finish()
 				result <- res{idx: idx}
 			})
@@ -222,7 +222,7 @@ func (p *tcellPrompter) Input(ctx context.Context, question, def string) (string
 	result := make(chan res, 1)
 
 	p.present(func(finish func()) (tview.Primitive, tview.Primitive) {
-		input := tview.NewInputField().SetText(util.SanitizeForDisplay(def))
+		input := tview.NewInputField().SetText(sanitize.ForDisplay(def))
 		input.SetBorder(true).SetTitle(promptTitle(question))
 		input.SetDoneFunc(func(key tcell.Key) {
 			finish()
@@ -299,7 +299,7 @@ func (p *tcellPrompter) dismiss() {
 // promptTitle builds a border title from a model-supplied question, escaped since a
 // Box title is drawn through tview's tag-aware printer.
 func promptTitle(q string) string {
-	return " " + tview.Escape(util.SanitizeForDisplay(q)) + " "
+	return " " + tview.Escape(sanitize.ForDisplay(q)) + " "
 }
 
 // clamp bounds v to [lo, hi].

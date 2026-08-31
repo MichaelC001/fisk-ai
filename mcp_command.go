@@ -18,7 +18,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // defaultMCPPort is the TCP port the MCP server listens on when neither the
@@ -139,7 +138,7 @@ func mcpAction(_ *fisk.ParseContext) error {
 
 	return mcpserver.Serve(ctx, served, mcpserver.Options{
 		Name:         cfg.Identity,
-		Version:      util.Version(),
+		Version:      version,
 		Addr:         net.JoinHostPort(address, strconv.Itoa(port)),
 		Instructions: cfg.MCPInstructions(),
 		ConfirmTags:  cfg.ConfirmTags(),

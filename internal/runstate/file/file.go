@@ -11,6 +11,7 @@ package file
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,6 +86,11 @@ func decodeOptions(raw json.RawMessage) (options, error) {
 // FileStore stores each run as a JSON-lines journal (<id>.json) under a directory,
 // guarded by a per-run lock file (<id>.lock). Conversation and tool IO are
 // sensitive, so the directory is 0700 and journals are 0600.
+//
+// Every method that reaches the filesystem returns the context's error before it opens
+// anything, and List checks again before each run it reads, since a large store reads
+// one journal per run. The individual syscalls behind a single record are not
+// cancellable, so a call that has started its write finishes it.
 type FileStore struct {
 	dir string
 }
@@ -124,8 +130,18 @@ func (s *FileStore) Info() runstate.Info {
 }
 
 // Create implements runstate.Store.
-func (s *FileStore) Create(id string, meta runstate.MetaRecord) (runstate.Journal, error) {
-	err := runstate.ValidateID(id)
+//
+// A meta record that fails to write, the canceled context among its causes, leaves the
+// journal file and the lock file this made to hold the id. That is what runstate.Store
+// documents: Create is not all-or-nothing, a second Create of the id returns ErrExists,
+// and Load reports the empty journal as runstate.ErrEmpty.
+func (s *FileStore) Create(ctx context.Context, id string, meta runstate.MetaRecord) (runstate.Journal, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +162,7 @@ func (s *FileStore) Create(id string, meta runstate.MetaRecord) (runstate.Journa
 		return nil, err
 	}
 
-	err = j.Append(1, runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
+	err = j.Append(ctx, 1, runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
 	if err != nil {
 		j.Close()
 		return nil, err
@@ -156,8 +172,13 @@ func (s *FileStore) Create(id string, meta runstate.MetaRecord) (runstate.Journa
 }
 
 // Open implements runstate.Store.
-func (s *FileStore) Open(id string) (runstate.Journal, error) {
-	err := runstate.ValidateID(id)
+func (s *FileStore) Open(ctx context.Context, id string) (runstate.Journal, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -210,8 +231,13 @@ func (s *FileStore) openJournal(id string, created bool) (*fileJournal, error) {
 }
 
 // Load implements runstate.Store.
-func (s *FileStore) Load(id string) (*runstate.RunState, error) {
-	err := runstate.ValidateID(id)
+func (s *FileStore) Load(ctx context.Context, id string) (*runstate.RunState, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -227,8 +253,14 @@ func (s *FileStore) Load(id string) (*runstate.RunState, error) {
 	return runstate.Fold(recs)
 }
 
-// List implements runstate.Store.
-func (s *FileStore) List() ([]runstate.RunInfo, error) {
+// List implements runstate.Store. It reads and folds one journal per run, so it checks
+// the context before each of them as well as at the start.
+func (s *FileStore) List(ctx context.Context) ([]runstate.RunInfo, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, err
@@ -236,6 +268,11 @@ func (s *FileStore) List() ([]runstate.RunInfo, error) {
 
 	var out []runstate.RunInfo
 	for _, e := range entries {
+		err = ctx.Err()
+		if err != nil {
+			return nil, err
+		}
+
 		name := e.Name()
 		if e.IsDir() || filepath.Ext(name) != ".json" {
 			continue
@@ -267,9 +304,15 @@ func (s *FileStore) List() ([]runstate.RunInfo, error) {
 	return out, nil
 }
 
-// Delete implements runstate.Store.
-func (s *FileStore) Delete(id string) error {
-	err := runstate.ValidateID(id)
+// Delete implements runstate.Store. The context is read once, before the first removal,
+// so the journal and its lock file go together.
+func (s *FileStore) Delete(ctx context.Context, id string) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return err
 	}
@@ -301,7 +344,16 @@ type fileJournal struct {
 // stay here because they are file-specific and ordering-load-bearing: lastSeq is
 // advanced only after a successful Sync, so a torn or failed write re-appends the
 // same seq on retry rather than losing it.
-func (j *fileJournal) Append(seq uint64, rec runstate.Record) error {
+//
+// The context is read once, before the record is marshaled. Past that point the write
+// and its fsync run to completion, so a caller that cancels mid-append gets a record
+// that landed rather than a half-written line.
+func (j *fileJournal) Append(ctx context.Context, seq uint64, rec runstate.Record) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
 	skip, err := runstate.CheckAppend(j.lastSeq, seq)
 	if err != nil {
 		return err
@@ -342,7 +394,12 @@ func (j *fileJournal) Append(seq uint64, rec runstate.Record) error {
 }
 
 // Records implements runstate.Journal.
-func (j *fileJournal) Records() ([]runstate.Record, error) {
+func (j *fileJournal) Records(ctx context.Context) ([]runstate.Record, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	return readRecords(j.path)
 }
 
@@ -356,8 +413,11 @@ func (j *fileJournal) LastSeq() uint64 {
 // is open no other process opened it, and the answer needs no I/O. On a platform
 // without flock the lock excludes nobody, and this reports held anyway rather than
 // inventing a guarantee the platform does not offer.
-func (j *fileJournal) CheckHeld() error {
-	return nil
+//
+// The context is still read, so a caller stepping through work on a canceled context
+// is stopped here rather than at the append after it.
+func (j *fileJournal) CheckHeld(ctx context.Context) error {
+	return ctx.Err()
 }
 
 // Close implements runstate.Journal.

@@ -29,7 +29,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // Builder describes these endpoints to serve.Endpoints, so a program that wants to
@@ -43,6 +42,7 @@ func Builder() serve.EndpointBuilder {
 			return NewFromConfig(cfg, ConfigOptions{
 				Conns:      opts.Conns,
 				ConfigFile: opts.ConfigFile,
+				Version:    opts.Version,
 				Logger:     opts.Logger,
 				Telemetry:  opts.Telemetry,
 				Sessions:   opts.Sessions,
@@ -61,6 +61,10 @@ type ConfigOptions struct {
 	// ConfigFile names the file the configuration was read from, so a refusal can name
 	// the file to edit.
 	ConfigFile string
+
+	// Version is the calling program's own build version, published on the agent card
+	// this identity answers discovery with. An empty one publishes the card as "dev".
+	Version string
 
 	// Logger receives the endpoints' progress, which is a line per served call and per
 	// prompt. Nil leaves it to each server's own default.
@@ -158,7 +162,7 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 func serveCard(cfg *config.Config, held *sharedTransport, opts ConfigOptions) error {
 	_, err := a2a.NewServer(held.transport, nil, a2a.ServerOptions{
 		Identity: cfg.Identity,
-		Version:  util.Version(),
+		Version:  opts.Version,
 		// Unconditional here: this path is taken when tools are not served, and a
 		// configuration enabling neither endpoint is refused above, so prompts are on.
 		Model:         cfg.LLM.Model,

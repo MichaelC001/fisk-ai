@@ -16,9 +16,9 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 var _ = Describe("Built-in tools", func() {
@@ -388,21 +388,21 @@ var _ = Describe("Built-in tools", func() {
 
 	Describe("SanitizeForDisplay", func() {
 		It("Should strip escape sequences and other control characters", func() {
-			Expect(util.SanitizeForDisplay("a\x1b[31mb\x1b[0mc")).To(Equal("abc"))
-			Expect(util.SanitizeForDisplay("a\x07b")).To(Equal("a b"))
+			Expect(sanitize.ForDisplay("a\x1b[31mb\x1b[0mc")).To(Equal("abc"))
+			Expect(sanitize.ForDisplay("a\x07b")).To(Equal("a b"))
 		})
 
 		It("Should preserve newlines and tabs so multi-line content keeps its structure", func() {
-			Expect(util.SanitizeForDisplay("line one\nline\ttwo")).To(Equal("line one\nline\ttwo"))
+			Expect(sanitize.ForDisplay("line one\nline\ttwo")).To(Equal("line one\nline\ttwo"))
 		})
 
 		It("Should neither collapse whitespace nor cap the length", func() {
 			long := strings.Repeat("word ", maxPromptRunes)
-			Expect(util.SanitizeForDisplay(long)).To(Equal(long))
+			Expect(sanitize.ForDisplay(long)).To(Equal(long))
 		})
 
 		It("Should keep plain text and UTF-8 intact", func() {
-			Expect(util.SanitizeForDisplay("Delete café data?")).To(Equal("Delete café data?"))
+			Expect(sanitize.ForDisplay("Delete café data?")).To(Equal("Delete café data?"))
 		})
 	})
 })

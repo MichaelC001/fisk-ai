@@ -104,6 +104,11 @@ type Prompter interface {
 // no operator on this path to answer.
 var errNoOperator = errors.New("no operator is available to answer on this path")
 
+// NoTerminalReason is the reason a human-in-the-loop tool or the confirm gate
+// reports to the model when it is reached with no interactive terminal attached to
+// ask an operator.
+const NoTerminalReason = "no interactive terminal is attached, so no operator could be asked"
+
 // ErrPromptAborted reports that a question reached an operator who never answered
 // it: they interrupted, closed the input, or the context ended while the prompt was
 // up. It is not a decline, and a caller that records decisions must not record one.

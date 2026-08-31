@@ -20,7 +20,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // describelessTool is a model-facing Tool that does not implement toolkit.Describer,
@@ -64,7 +63,7 @@ var _ = Describe("runner.traceCall parity", func() {
 
 	newRunner := func(ev *captureEvents, tools map[string]toolkit.Tool) *runner {
 		return &runner{
-			stats:       &util.RunStats{},
+			stats:       &RunStats{},
 			events:      ev,
 			set:         toolSetOf(tools),
 			prompter:    toolkit.DefaultDenyPrompter(),

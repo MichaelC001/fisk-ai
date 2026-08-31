@@ -22,7 +22,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // The specs here drive the channel the way a server does: take the work it produced,
@@ -199,7 +198,7 @@ var _ = Describe("The prompt channel", func() {
 			report(work, serve.Outcome{
 				Reason: runstate.ReasonCompleted,
 				Text:   "did the thing",
-				Stats:  &util.RunStats{InTokens: 3, OutTokens: 4, LlmCalls: 1},
+				Stats:  &agent.RunStats{InTokens: 3, OutTokens: 4, LlmCalls: 1},
 			})
 
 			res, ok := next(stream).(*a2a.Result)
@@ -788,15 +787,15 @@ var _ = Describe("The prompt channel", func() {
 			ch = channelOf(built)
 
 			id := SessionFor("agent1", token)
-			j, err := store.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "how many streams"})
+			j, err := store.Create(context.Background(), id, runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "how many streams"})
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(j.Append(2, runstate.Record{Protocol: runstate.AssistantProtocol, Seq: 2, Assistant: &runstate.AssistantRecord{
+			Expect(j.Append(context.Background(), 2, runstate.Record{Protocol: runstate.AssistantProtocol, Seq: 2, Assistant: &runstate.AssistantRecord{
 				Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
 					{Text: &llm.TextBlock{Text: "there are three"}},
 				}},
 			}})).To(Succeed())
-			Expect(j.Append(3, runstate.Record{Protocol: runstate.TerminalProtocol, Seq: 3, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Append(context.Background(), 3, runstate.Record{Protocol: runstate.TerminalProtocol, Seq: 3, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
 			return store

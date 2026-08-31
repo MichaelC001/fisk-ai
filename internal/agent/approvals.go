@@ -5,10 +5,12 @@
 package agent
 
 import (
+	"context"
+
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
-// journalApprovals is the util.GateApprovals a run gives its confirm gate. A grant
+// journalApprovals is the GateApprovals a run gives its confirm gate. A grant
 // the operator makes is honored from the moment they give it and written to the
 // journal once the call that triggered it is answered, so a crash between the
 // approval and the tool result loses the grant and the resume asks again for a
@@ -31,7 +33,7 @@ type journalApprovals struct {
 	calls map[string]bool
 	// emit appends a record to the run's journal. The runner sets it on itself at
 	// construction, since the gate is built before the journal is opened.
-	emit func(runstate.Record) error
+	emit func(context.Context, runstate.Record) error
 }
 
 func newJournalApprovals() *journalApprovals {
@@ -57,9 +59,9 @@ func (a *journalApprovals) Grant(tool string) error {
 // flush journals the grants taken since the last call, and is called once the tool
 // call that triggered them has been answered or has deferred. Nothing is staged for
 // the common case, so calling it after every tool call costs a length check.
-func (a *journalApprovals) flush() error {
+func (a *journalApprovals) flush(ctx context.Context) error {
 	for _, tool := range a.staged {
-		err := a.emit(runstate.Record{
+		err := a.emit(ctx, runstate.Record{
 			Protocol: runstate.DecisionProtocol,
 			Optional: true,
 			Decision: &runstate.DecisionRecord{Tool: tool},

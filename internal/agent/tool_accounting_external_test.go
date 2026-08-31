@@ -27,7 +27,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // accountingTool is a custom tool that answers immediately, so a run can make a call
@@ -49,7 +48,7 @@ func accountingTool(tb testing.TB, name string) toolkit.Tool {
 }
 
 // summedByKind adds up the per-kind buckets, which must equal tool_calls.
-func summedByKind(stats *util.RunStats) int64 {
+func summedByKind(stats *agent.RunStats) int64 {
 	var n int64
 	for _, v := range stats.ToolCallsByKind {
 		n += v
@@ -99,7 +98,7 @@ var _ = Describe("the per-kind tool accounting", func() {
 
 		// The journal carries the kind, so folding it recovers the same buckets without the
 		// run that wrote them.
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
 		Expect(rs.Counters.ToolCallsByKind).To(Equal(map[toolkit.Kind]int64{toolkit.KindApplication: 1}))
@@ -195,7 +194,7 @@ var _ = Describe("the per-kind tool accounting", func() {
 
 		// The journal records each call's kind and whether it was dispatched, so folding it
 		// recovers both axes rather than reading the buckets as the totals.
-		rs, err := store.Load(res.SessionID)
+		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Counters.ToolCalls).To(Equal(int64(4)))
 		Expect(rs.Counters.MCPToolCalls).To(Equal(int64(1)))

@@ -587,7 +587,7 @@ func validateProtocol(env func(string) string) error {
 }
 
 // validateEndpoint checks the endpoint the exporters will use. The loopback rule is
-// the same one util.ValidateBaseURL applies to --base-url, restated here rather than
+// the same one sanitize.BaseURL applies to --base-url, restated here rather than
 // imported because this package stays a leaf; the wording is kept close so an
 // operator meets one rule, not two.
 func validateEndpoint(r Resolved) error {
@@ -632,7 +632,7 @@ func validateEndpoint(r Resolved) error {
 }
 
 // isLoopbackHost reports whether host is a loopback address or the localhost name.
-// Like util.ValidateBaseURL's own check it does not resolve names, so a hostname that
+// Like sanitize.BaseURL's own check it does not resolve names, so a hostname that
 // happens to resolve to a loopback address is not treated as loopback.
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {

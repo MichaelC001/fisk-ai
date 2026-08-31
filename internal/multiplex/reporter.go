@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // state is what a pane is shown as.
@@ -84,7 +84,7 @@ func (r *reporter) Working()     { r.post(report{state: stateWorking}) }
 func (r *reporter) Idle()        { r.post(report{state: stateIdle}) }
 
 func (r *reporter) Blocked(reason string) {
-	r.post(report{state: stateBlocked, message: util.SanitizeForTerminal(reason, reasonRunes)})
+	r.post(report{state: stateBlocked, message: sanitize.ForTerminal(reason, reasonRunes)})
 }
 
 // Close stops reporting and gives up the pane.

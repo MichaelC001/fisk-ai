@@ -19,8 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // maxQueryChars caps the length of a single query sent to the embeddings server. A
@@ -44,9 +44,11 @@ const (
 	maxEmbedResponseBytes = 64 << 20
 )
 
-// Embedder is the tier-2 seam: a source of embedding vectors for documents and
-// queries. It is an interface so unit tests mock it and never touch the network;
-// the only production implementation is the OpenAI-compatible client below. The
+// Embedder is the source of embedding vectors for documents and queries, which is
+// the tier-2 dependency a caller supplies through Options.Embedder to index and
+// search against a model this package did not build. The OpenAI-compatible client
+// below is the only implementation here, and a test supplies its own so no request
+// leaves the process. The
 // rag package L2-normalizes every returned vector itself, so an implementation
 // returns the model's raw vectors.
 type Embedder interface {
@@ -67,11 +69,17 @@ type Embedder interface {
 	EmbedDocuments(ctx context.Context, docs []Document) ([][]float32, error)
 }
 
-// Document is a chunk to embed: its heading fills the document prefix's {title}
-// placeholder, and text is the chunk body.
+// Document is one chunk handed to EmbedDocuments.
 type Document struct {
+	// Title is the chunk's heading breadcrumb, which fills the {title} placeholder in
+	// the configured document prefix. It is empty for a chunk that sits under no
+	// heading, and the built-in embedder sends "none" in its place.
 	Title string
-	Text  string
+
+	// Text is the chunk body alone, carrying no heading and no prefix. It must be
+	// non-empty and valid UTF-8; the built-in embedder rejects a batch that holds
+	// anything else.
+	Text string
 }
 
 // buildEmbedder constructs the embedder for cfg, or returns nil when the vector
@@ -92,7 +100,7 @@ func buildEmbedder(cfg *config.Config) (Embedder, error) {
 		return nil, fmt.Errorf("knowledge.embeddings.model is required when the embeddings block is present")
 	}
 
-	if err := util.ValidateBaseURL("knowledge.embeddings.base_url", ec.BaseURL); err != nil {
+	if err := sanitize.BaseURL("knowledge.embeddings.base_url", ec.BaseURL); err != nil {
 		return nil, err
 	}
 

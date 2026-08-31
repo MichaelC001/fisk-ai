@@ -426,6 +426,11 @@ type Warning struct {
 
 // RunInfo reports the resolved parameters of a run for the caller to display.
 type RunInfo struct {
+	// Tools is how many tools the model is offered: the wrapped application's
+	// commands, the enabled built-ins, any remote or MCP tools imported, and any the
+	// caller injected through Options.CustomTools. It counts the whole set whether or
+	// not tool search defers part of it, so a run with no application still reports
+	// what it can call.
 	Tools           int
 	ThinkingEnabled bool
 	ConfirmTools    int

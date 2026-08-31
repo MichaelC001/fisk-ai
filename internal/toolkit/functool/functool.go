@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // maxTraceRunes caps a tool's one-line call trace or confirm summary before it is
@@ -353,15 +353,15 @@ func (t *Tool) Execute(ctx context.Context, input json.RawMessage, deps toolkit.
 
 // TraceLine renders the one-line display of a call: the confirm summary for a
 // confirm-gated tool (shown in the approval prompt) or the call trace for a traced
-// tool (shown like a command's line, and the seam the MCP server traces through),
+// tool (shown like a command's line, and what the MCP server traces through),
 // sanitized for terminal display since its text is handler-supplied. It is "" for a
 // tool that is neither confirm-gated with a summary nor traced.
 func (t *Tool) TraceLine(input json.RawMessage) string {
 	switch {
 	case t.confirm != nil && t.confirm.Summary != nil:
-		return util.SanitizeForTerminal(t.confirm.Summary(input), maxTraceRunes)
+		return sanitize.ForTerminal(t.confirm.Summary(input), maxTraceRunes)
 	case t.trace != nil:
-		return util.SanitizeForTerminal(t.trace(input), maxTraceRunes)
+		return sanitize.ForTerminal(t.trace(input), maxTraceRunes)
 	default:
 		return ""
 	}
@@ -402,7 +402,7 @@ func (t *Tool) Describe(input json.RawMessage) toolkit.CallInfo {
 	}
 	if t.trace != nil {
 		info.Present = toolkit.PresentTraced
-		info.Display = util.SanitizeForTerminal(t.trace(input), maxTraceRunes)
+		info.Display = sanitize.ForTerminal(t.trace(input), maxTraceRunes)
 	}
 
 	return info

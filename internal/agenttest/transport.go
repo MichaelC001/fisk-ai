@@ -22,7 +22,7 @@ import (
 // reachable. It records how many round trips it served, so a test can assert the run
 // went through the injected transport (and, since the fake never dials, that Run did
 // not dial either). It is one of the separate-package fakes proving each injectable
-// seam is implementable from outside its own package, and it is safe for the
+// interface can be implemented from outside its own package, and it is safe for the
 // concurrent use runs sharing one transport make of it.
 type FakeTransport struct {
 	mu         sync.Mutex
@@ -44,6 +44,13 @@ var _ a2a.ReplySetTransport = (*FakeTransport)(nil)
 // answer with a success reply carrying "ok"; use SetToolReply to change it.
 func NewFakeTransport(tb testing.TB, card a2a.AgentCard) *FakeTransport {
 	tb.Helper()
+	return BuildFakeTransport(card)
+}
+
+// BuildFakeTransport is NewFakeTransport without a testing.TB, for a func Example or any
+// other caller outside a test. The transport answers from the card it was given and
+// dials nothing, so Close is there to satisfy the interface.
+func BuildFakeTransport(card a2a.AgentCard) *FakeTransport {
 	return &FakeTransport{card: card, toolOutput: "ok"}
 }
 

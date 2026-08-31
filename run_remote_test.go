@@ -359,7 +359,7 @@ var _ = Describe("An answer that arrived too late", func() {
 		// The conversation is no longer waiting on that call: the answer is in the
 		// journal as the call's result, so nothing is left to supply.
 		Eventually(func() bool {
-			rs, lerr := store.Load(a2aendpoint.SessionFor(host.identity, token))
+			rs, lerr := store.Load(context.Background(), a2aendpoint.SessionFor(host.identity, token))
 			if lerr != nil {
 				return false
 			}

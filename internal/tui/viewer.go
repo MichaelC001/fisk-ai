@@ -23,7 +23,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/choria-io/fisk-ai/internal/util"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // noticeTTL is how long a transient statusbar notice stays up before it clears
@@ -329,7 +329,7 @@ func newViewer(meta Meta, lines []Line, noColor, follow bool) *viewer {
 
 	v.plain = make([]string, len(lines))
 	for i, l := range lines {
-		v.plain[i] = util.SanitizeForDisplay(l.Text)
+		v.plain[i] = sanitize.ForDisplay(l.Text)
 	}
 
 	// The statusbar is a filled bar so it reads as a distinct band separate from the
@@ -472,7 +472,7 @@ func (v *viewer) renderAll(width int) {
 // draw reads. Tail-tracking, if on, keeps the new line in view.
 func (v *viewer) appendLine(l Line) {
 	v.lines = append(v.lines, l)
-	v.plain = append(v.plain, util.SanitizeForDisplay(l.Text))
+	v.plain = append(v.plain, sanitize.ForDisplay(l.Text))
 
 	if v.width == 0 {
 		// Not drawn yet; the first BeforeDraw will render everything at the real width.
@@ -699,7 +699,7 @@ func (v *viewer) revealForMatch(i int) {
 func (v *viewer) markup(l Line, width int) string {
 	switch l.Kind {
 	case LineNarration:
-		md := util.RenderMarkdownWidth(util.SanitizeForDisplay(l.Text), width, v.noColor)
+		md := RenderMarkdownWidth(sanitize.ForDisplay(l.Text), width, v.noColor)
 		return tview.TranslateANSI(tview.Escape(md))
 	case LineToolCall:
 		// A tool-call line keeps its full command when it fits the row and falls back to
@@ -740,7 +740,7 @@ func ToolCallText(display, short string, width int) string {
 	}
 
 	avail := width - toolCallPrefixWidth - toolCallFitMargin
-	if avail > 0 && utf8.RuneCountInString(util.SanitizeForDisplay(display)) <= avail {
+	if avail > 0 && utf8.RuneCountInString(sanitize.ForDisplay(display)) <= avail {
 		return display
 	}
 
@@ -1582,7 +1582,7 @@ func (v *viewer) search(term string) {
 // so model text cannot open a color or region tag, and only then are the trusted
 // per-kind tags wrapped around it.
 func renderLine(l Line) string {
-	return styleLine(l.Kind, tview.Escape(util.SanitizeForDisplay(l.Text)))
+	return styleLine(l.Kind, tview.Escape(sanitize.ForDisplay(l.Text)))
 }
 
 // styleLine wraps already-escaped content in the trusted color tags for its kind,

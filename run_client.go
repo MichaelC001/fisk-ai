@@ -18,9 +18,9 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/tui"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // lineClient renders a run for the line UI and answers what it asks.
@@ -53,19 +53,19 @@ func (c *lineClient) Block(block a2a.Block) {
 
 	case a2a.ThinkingBlock:
 		if c.showThinking && b.Text != "" {
-			fmt.Fprintf(os.Stderr, "\n[thinking]\n%s\n", util.SanitizeForDisplay(b.Text))
+			fmt.Fprintf(os.Stderr, "\n[thinking]\n%s\n", sanitize.ForDisplay(b.Text))
 		}
 
 	case a2a.PromptBlock:
 		// Only a replayed conversation carries these: the caller wrote the prompt it
 		// sent itself.
-		fmt.Fprintf(os.Stderr, "\n> %s\n", util.SanitizeForDisplay(b.Text))
+		fmt.Fprintf(os.Stderr, "\n> %s\n", sanitize.ForDisplay(b.Text))
 
 	case a2a.ToolCallBlock:
 		fmt.Fprintf(os.Stderr, "-> %s\n", tui.CallLine(b.Name, b.Input))
 
 	case a2a.AgentCallBlock:
-		fmt.Fprintf(os.Stderr, "-> %s (remote %s)\n", util.SanitizeForTerminal(b.Name, 120), util.SanitizeForTerminal(b.Task, 120))
+		fmt.Fprintf(os.Stderr, "-> %s (remote %s)\n", sanitize.ForTerminal(b.Name, 120), sanitize.ForTerminal(b.Task, 120))
 
 	case a2a.ToolResultBlock:
 		if !c.showToolOutput {
@@ -93,7 +93,7 @@ func (c *lineClient) text(b a2a.TextBlock) {
 	}
 
 	if !b.Final {
-		fmt.Fprintln(os.Stderr, util.RenderMarkdownTo(b.Text, os.Stderr, c.noColor))
+		fmt.Fprintln(os.Stderr, tui.RenderMarkdownTo(b.Text, os.Stderr, c.noColor))
 
 		return
 	}
@@ -462,14 +462,14 @@ func (c *lineClient) report(out *a2a.TaskOutcome) error {
 		return nil
 	}
 
-	return fmt.Errorf("%s", util.SanitizeForTerminal(out.Error.Err, 400))
+	return fmt.Errorf("%s", sanitize.ForTerminal(out.Error.Err, 400))
 }
 
 // endingMessage says what happened and, where there is one, what to do about it. The
 // worker's own message is included because it carries the detail: which tool is
 // waiting, which call was refused, what the model provider said.
 func endingMessage(msg *a2a.ErrorMessage) string {
-	detail := util.SanitizeForTerminal(msg.Err, 400)
+	detail := sanitize.ForTerminal(msg.Err, 400)
 
 	switch msg.Code {
 	case a2a.CodeSuspended:
@@ -582,16 +582,16 @@ func blockWarningMessage(b a2a.WarningBlock) string {
 
 // unknownWarningMessage renders a warning from its fields alone.
 func unknownWarningMessage(b a2a.WarningBlock) string {
-	parts := []string{util.SanitizeForTerminal(b.Kind, 120)}
+	parts := []string{sanitize.ForTerminal(b.Kind, 120)}
 
 	if b.Name != "" {
-		parts = append(parts, util.SanitizeForTerminal(b.Name, 120))
+		parts = append(parts, sanitize.ForTerminal(b.Name, 120))
 	}
 	if len(b.Params) > 0 {
-		parts = append(parts, util.SanitizeForTerminal(strings.Join(b.Params, ", "), 200))
+		parts = append(parts, sanitize.ForTerminal(strings.Join(b.Params, ", "), 200))
 	}
 	if b.Error != "" {
-		parts = append(parts, util.SanitizeForTerminal(b.Error, 200))
+		parts = append(parts, sanitize.ForTerminal(b.Error, 200))
 	}
 
 	return strings.Join(parts, ": ")

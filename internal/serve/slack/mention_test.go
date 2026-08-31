@@ -5,6 +5,7 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -197,13 +198,13 @@ var _ = Describe("A thread's turns", func() {
 
 		id := SessionFor(opts.Identity, m.TeamID, m.ChannelID, m.ThreadTS)
 
-		held, err := ch.held(id)
+		held, err := ch.held(context.Background(), id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(held).To(BeFalse())
 		Expect(checkpointFor(id, held).CreateIfMissing).To(BeTrue())
 
 		// The run would have created it; the spec stands in for the run.
-		j, err := opts.Sessions.Create(id, runstate.MetaRecord{Version: runstate.Version, RunID: id})
+		j, err := opts.Sessions.Create(context.Background(), id, runstate.MetaRecord{Version: runstate.Version, RunID: id})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
@@ -218,7 +219,7 @@ var _ = Describe("A thread's turns", func() {
 
 		Expect(SessionFor(opts.Identity, m2.TeamID, m2.ChannelID, m2.ThreadTS)).To(Equal(id), "the same thread is the same conversation")
 
-		held, err = ch.held(id)
+		held, err = ch.held(context.Background(), id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(held).To(BeTrue())
 

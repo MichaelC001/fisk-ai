@@ -62,13 +62,13 @@ var _ = Describe("knowledge citation rendering", func() {
 		writeDoc("published/guide.md", "# Guide\n\n## Backpressure\n\nThe queue applies backpressure when the buffer is full so producers slow down.\n")
 		writeDoc("private/notes.md", "# Notes\n\nThe rollout notes mention backpressure once, in passing.\n")
 
-		w, err := rag.OpenWriter(cfg, "")
+		w, err := rag.OpenWriter(cfg, "", rag.Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = w.Index(ctx, []string{docsD}, rag.IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(w.Close()).To(Succeed())
 
-		store, err = rag.Open(cfg, "")
+		store, err = rag.Open(cfg, "", rag.Options{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(store.Close)
 	})
@@ -106,7 +106,7 @@ var _ = Describe("knowledge citation rendering", func() {
 			plain, err := rag.Open(&config.Config{
 				Identity: "test",
 				Harness:  config.HarnessConfig{RAG: &config.RAGConfig{Enabled: true, Directory: cfg.Harness.RAG.Directory}},
-			}, "")
+			}, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(plain.Close)
 

@@ -5,6 +5,7 @@
 package agenttest
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -18,8 +19,12 @@ import (
 // connection. Because the store lives only in this instance, a resume finds its
 // session only if the injected store was actually borrowed across both runs, which
 // is what the shared-session example asserts. It is one of the separate-package
-// fakes proving each injectable seam is implementable from outside its own package,
-// and it is safe for the concurrent use runs sharing one store make of it.
+// fakes proving each injectable interface can be implemented from outside its own
+// package, and it is safe for the concurrent use runs sharing one store make of it.
+//
+// It honors the cancellation contract on runstate.Store and runstate.Journal: every
+// method that takes a context returns that context's error before it touches the map,
+// so a test can cancel a caller and see the store refuse.
 type FakeSessionStore struct {
 	mu   sync.Mutex
 	runs map[string]*fakeJournal
@@ -28,8 +33,8 @@ type FakeSessionStore struct {
 
 // FakeSessionStore implements runstate.Store and fakeJournal implements
 // runstate.Journal; the assertions are the separate-package interface audit,
-// failing to compile if the seam stops being implementable from outside its own
-// package.
+// failing to compile if either interface stops being implementable from outside its
+// own package.
 var (
 	_ runstate.Store   = (*FakeSessionStore)(nil)
 	_ runstate.Journal = (*fakeJournal)(nil)
@@ -38,6 +43,12 @@ var (
 // NewFakeSessionStore returns an empty in-memory session store.
 func NewFakeSessionStore(tb testing.TB) *FakeSessionStore {
 	tb.Helper()
+	return BuildFakeSessionStore()
+}
+
+// BuildFakeSessionStore is NewFakeSessionStore without a testing.TB, for a func Example
+// or any other caller outside a test.
+func BuildFakeSessionStore() *FakeSessionStore {
 	return &FakeSessionStore{runs: map[string]*fakeJournal{}, info: runstate.Info{Backend: "fake"}}
 }
 
@@ -63,8 +74,13 @@ func (s *FakeSessionStore) Info() runstate.Info {
 }
 
 // Create implements runstate.Store.
-func (s *FakeSessionStore) Create(id string, meta runstate.MetaRecord) (runstate.Journal, error) {
-	err := runstate.ValidateID(id)
+func (s *FakeSessionStore) Create(ctx context.Context, id string, meta runstate.MetaRecord) (runstate.Journal, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -88,8 +104,13 @@ func (s *FakeSessionStore) Create(id string, meta runstate.MetaRecord) (runstate
 }
 
 // Open implements runstate.Store.
-func (s *FakeSessionStore) Open(id string) (runstate.Journal, error) {
-	err := runstate.ValidateID(id)
+func (s *FakeSessionStore) Open(ctx context.Context, id string) (runstate.Journal, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -123,8 +144,13 @@ func (s *FakeSessionStore) Evict(id string) {
 }
 
 // Load implements runstate.Store.
-func (s *FakeSessionStore) Load(id string) (*runstate.RunState, error) {
-	err := runstate.ValidateID(id)
+func (s *FakeSessionStore) Load(ctx context.Context, id string) (*runstate.RunState, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +166,12 @@ func (s *FakeSessionStore) Load(id string) (*runstate.RunState, error) {
 }
 
 // List implements runstate.Store.
-func (s *FakeSessionStore) List() ([]runstate.RunInfo, error) {
+func (s *FakeSessionStore) List(ctx context.Context) ([]runstate.RunInfo, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -161,7 +192,12 @@ func (s *FakeSessionStore) List() ([]runstate.RunInfo, error) {
 }
 
 // Delete implements runstate.Store.
-func (s *FakeSessionStore) Delete(id string) error {
+func (s *FakeSessionStore) Delete(ctx context.Context, id string) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.runs, id)
@@ -194,7 +230,12 @@ func (j *fakeJournal) acquire() bool {
 // Append implements runstate.Journal. An evicted journal is refused here as well as in
 // CheckHeld, since a store that let a taken-over writer keep appending would model no
 // real backend.
-func (j *fakeJournal) Append(seq uint64, rec runstate.Record) error {
+func (j *fakeJournal) Append(ctx context.Context, seq uint64, rec runstate.Record) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
@@ -225,7 +266,12 @@ func (j *fakeJournal) append(seq uint64, rec runstate.Record) error {
 }
 
 // Records implements runstate.Journal.
-func (j *fakeJournal) Records() ([]runstate.Record, error) {
+func (j *fakeJournal) Records(ctx context.Context) ([]runstate.Record, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	return j.snapshot(), nil
 }
 
@@ -240,7 +286,12 @@ func (j *fakeJournal) LastSeq() uint64 {
 // CheckHeld implements runstate.Journal. The fake excludes a second opener the way the
 // file backend does, so an open journal holds its run unless a test has taken it away
 // with Evict.
-func (j *fakeJournal) CheckHeld() error {
+func (j *fakeJournal) CheckHeld(ctx context.Context) error {
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
 	j.mu.Lock()
 	defer j.mu.Unlock()
 

@@ -84,7 +84,7 @@ var _ = Describe("Schema and triggers", func() {
 
 	Describe("the stored columns", func() {
 		It("keeps the breadcrumb out of the body and answers each column separately", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			index(w)
@@ -104,7 +104,7 @@ var _ = Describe("Schema and triggers", func() {
 		It("does not match a phrase spanning the heading and the body", func() {
 			writeDoc(docsD, "retention.md", "# Retention Policy\n\nchanges are announced a release ahead.\n")
 
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			index(w)
@@ -114,12 +114,12 @@ var _ = Describe("Schema and triggers", func() {
 		})
 
 		It("returns the body alone to every reader, so no surface renders the breadcrumb twice", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			index(w)
 			w.Close()
 
-			r, err := Open(cfg, "")
+			r, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -148,7 +148,7 @@ var _ = Describe("Schema and triggers", func() {
 		It("is the breadcrumb folded into the body, unchanged by the column split", func() {
 			emb := &recordingEmbedder{fakeEmbedder: fakeEmbedder{model: "m1", dim: 32}}
 
-			w, err := OpenWriter(vectorConfig(storeD, "m1"), "")
+			w, err := OpenWriter(vectorConfig(storeD, "m1"), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			w.emb = emb
@@ -171,7 +171,7 @@ var _ = Describe("Schema and triggers", func() {
 			writeDoc(docsD, "plain.txt", "just a paragraph with no headings at all\n")
 
 			emb := &recordingEmbedder{fakeEmbedder: fakeEmbedder{model: "m1", dim: 32}}
-			w, err := OpenWriter(vectorConfig(storeD, "m1"), "")
+			w, err := OpenWriter(vectorConfig(storeD, "m1"), "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			w.emb = emb
@@ -193,7 +193,7 @@ var _ = Describe("Schema and triggers", func() {
 		})
 
 		withIndex := func(fn func(w *Store)) {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			index(w)
@@ -272,7 +272,7 @@ var _ = Describe("Schema and triggers", func() {
 		It("keeps the vocabulary readable through a read-only handle", func() {
 			withIndex(func(w *Store) {})
 
-			r, err := Open(cfg, "")
+			r, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -287,7 +287,7 @@ var _ = Describe("Schema and triggers", func() {
 		// while it cleared rows: the cascade fires the delete trigger into the broken
 		// index and fails before any rebuild statement can run.
 		It("drops and recreates rather than failing on the corruption", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			index(w)
@@ -319,7 +319,7 @@ var _ = Describe("Schema and triggers", func() {
 		// integrity-check and then wedge every later write, so the rank form runs
 		// after each of the three operations rather than only at the end.
 		It("keeps the index consistent with its content table across insert, update and delete", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 
@@ -341,7 +341,7 @@ var _ = Describe("Schema and triggers", func() {
 		// against a rowid that no longer exists. Search hides it, because hydration
 		// drops rows it cannot join, so this asks the index directly.
 		It("leaves no terms behind for a deleted chunk, in either column", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 			index(w)

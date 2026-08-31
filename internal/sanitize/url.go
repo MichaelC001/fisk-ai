@@ -2,22 +2,22 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package util
+package sanitize
 
 import (
 	"fmt"
 	"net/url"
 )
 
-// ValidateBaseURL requires raw to be a well-formed http or https URL with no
-// embedded userinfo. label names the setting so callers get an error that points
-// at the knob they set.
+// BaseURL requires raw to be a well-formed http or https URL with no embedded
+// userinfo. label names the setting so callers get an error that points at the
+// knob they set.
 //
 // The scheme is not otherwise constrained. Plain http reaches a local model
 // runner, an embeddings server on a host gateway, or a service on a private
 // network, all of which are ordinary deployments. An operator who sets a base URL
 // has chosen their own trust boundary, and this check does not stand in for it.
-func ValidateBaseURL(label, raw string) error {
+func BaseURL(label, raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid %s %q: %w", label, raw, err)

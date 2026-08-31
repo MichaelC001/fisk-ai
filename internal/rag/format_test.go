@@ -79,7 +79,7 @@ var _ = Describe("Index format gate", func() {
 	// buildIndex writes a current-format index and returns how many documents it
 	// added.
 	buildIndex := func() int {
-		w, err := OpenWriter(cfg, "")
+		w, err := OpenWriter(cfg, "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		defer w.Close()
 
@@ -96,7 +96,7 @@ var _ = Describe("Index format gate", func() {
 		})
 
 		It("is refused by a reader, which names the discard and the rebuild", func() {
-			_, err := Open(cfg, "")
+			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
 			Expect(err.Error()).To(ContainSubstring(storeD))
 			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
@@ -104,7 +104,7 @@ var _ = Describe("Index format gate", func() {
 		})
 
 		It("is refused by a writer before the schema can half-migrate", func() {
-			_, err := OpenWriter(cfg, "")
+			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
 			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
 		})
@@ -125,7 +125,7 @@ var _ = Describe("Index format gate", func() {
 
 			Expect(buildIndex()).To(Equal(2))
 
-			r, err := Open(cfg, "")
+			r, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -142,7 +142,7 @@ var _ = Describe("Index format gate", func() {
 		})
 
 		It("is refused by a reader, naming both column sets", func() {
-			_, err := Open(cfg, "")
+			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
 
 			// The shape found on disk, then the shape this build needs. The fixture's
@@ -154,7 +154,7 @@ var _ = Describe("Index format gate", func() {
 		// The format check waves this state through: there is no pinned format to
 		// compare, and an unpinned manifest is also what a freshly created schema has.
 		It("is refused by a writer", func() {
-			_, err := OpenWriter(cfg, "")
+			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
 		})
 	})
@@ -179,7 +179,7 @@ var _ = Describe("Index format gate", func() {
 		})
 
 		It("is refused by a reader, naming what is missing", func() {
-			_, err := Open(cfg, "")
+			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
 			Expect(err.Error()).To(ContainSubstring("chunks_fts_exact"))
 			Expect(err.Error()).To(ContainSubstring("chunks_vocab"))
@@ -188,7 +188,7 @@ var _ = Describe("Index format gate", func() {
 		// A writer could create the missing table, but the rows already in chunks would
 		// not be in it, so it would answer with silent partial coverage.
 		It("is refused by a writer rather than repaired underneath the existing rows", func() {
-			_, err := OpenWriter(cfg, "")
+			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
 		})
 	})
@@ -200,7 +200,7 @@ var _ = Describe("Index format gate", func() {
 		})
 
 		It("is refused by a reader, naming the upgrade rather than a rebuild", func() {
-			_, err := Open(cfg, "")
+			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
 			Expect(err.Error()).To(ContainSubstring("upgrade fisk-ai"))
 		})
@@ -208,7 +208,7 @@ var _ = Describe("Index format gate", func() {
 		// The writer read the manifest nowhere at all before the gate, so an older
 		// binary would happily index into a layout it does not understand.
 		It("is refused by a writer", func() {
-			_, err := OpenWriter(cfg, "")
+			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
 		})
 	})
@@ -217,11 +217,11 @@ var _ = Describe("Index format gate", func() {
 		It("opens on both paths and pins the current format", func() {
 			Expect(buildIndex()).To(Equal(2))
 
-			r, err := Open(cfg, "")
+			r, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			r.Close()
 
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 
@@ -236,12 +236,12 @@ var _ = Describe("Index format gate", func() {
 		It("is not refused after a reset has cleared the manifest", func() {
 			buildIndex()
 
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(w.Reset(ctx)).To(Succeed())
 			w.Close()
 
-			r, err := Open(cfg, "")
+			r, err := Open(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer r.Close()
 
@@ -256,7 +256,7 @@ var _ = Describe("Index format gate", func() {
 		// evidence of an index and the shape check has to tolerate a database with no
 		// tables at all.
 		It("is not mistaken for an index from another format", func() {
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 
@@ -307,7 +307,7 @@ var _ = Describe("Index format gate", func() {
 		It("cannot run while a writer holds the advisory lock", func() {
 			buildIndex()
 
-			w, err := OpenWriter(cfg, "")
+			w, err := OpenWriter(cfg, "", Options{})
 			Expect(err).ToNot(HaveOccurred())
 			defer w.Close()
 

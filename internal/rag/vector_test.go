@@ -78,7 +78,7 @@ func vectorConfig(dir, model string) *config.Config {
 				Enabled:   true,
 				Directory: dir,
 				Embeddings: &config.RAGEmbeddingsConfig{
-					BaseURL:       "http://127.0.0.1:1/v1", // never contacted; the mock replaces the client
+					BaseURL:       "http://127.0.0.1:1/v1", // nothing listens here, so an open that builds the configured embedder fails its first probe
 					Model:         model,
 					TimeoutParsed: time.Second,
 				},
@@ -87,12 +87,11 @@ func vectorConfig(dir, model string) *config.Config {
 	}
 }
 
-// openWriterMock opens a writer and swaps in the mock embedder so no network is
-// touched, mirroring how a real writer holds an Embedder.
+// openWriterMock opens a writer against the mock embedder so no network is
+// touched.
 func openWriterMock(cfg *config.Config, emb Embedder) *Store {
-	w, err := OpenWriter(cfg, "")
+	w, err := OpenWriter(cfg, "", Options{Embedder: emb})
 	Expect(err).ToNot(HaveOccurred())
-	w.emb = emb
 
 	return w
 }
@@ -132,10 +131,9 @@ var _ = Describe("Store (vector tier)", func() {
 		Expect(st.Meta.Dimension).To(Equal(32))
 		Expect(st.Meta.Normalized).To(BeTrue())
 
-		r, err := Open(vectorConfig(storeD, "m1"), "")
+		r, err := Open(vectorConfig(storeD, "m1"), "", Options{Embedder: &fakeEmbedder{model: "m1", dim: 32}})
 		Expect(err).ToNot(HaveOccurred())
 		defer r.Close()
-		r.emb = &fakeEmbedder{model: "m1", dim: 32}
 
 		res, err := r.Search(ctx, "backpressure buffer full", 5)
 		Expect(err).ToNot(HaveOccurred())
@@ -190,13 +188,13 @@ var _ = Describe("Store (vector tier)", func() {
 	It("refuses on the read path when the configured model differs from the manifest", func() {
 		indexVector("m1", 32)
 
-		_, err := Open(vectorConfig(storeD, "m2"), "")
+		_, err := Open(vectorConfig(storeD, "m2"), "", Options{})
 		Expect(err).To(MatchError(ErrMetaMismatch))
 	})
 
 	It("refuses to add the vector tier to a lexical-only index without a reindex", func() {
 		// Build lexical first.
-		lw, err := OpenWriter(lexicalConfig(storeD), "")
+		lw, err := OpenWriter(lexicalConfig(storeD), "", Options{})
 		Expect(err).ToNot(HaveOccurred())
 		_, err = lw.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
 		Expect(err).ToNot(HaveOccurred())
@@ -211,10 +209,9 @@ var _ = Describe("Store (vector tier)", func() {
 	It("degrades to lexical when the embeddings server is unreachable at query time", func() {
 		indexVector("m1", 32)
 
-		r, err := Open(vectorConfig(storeD, "m1"), "")
+		r, err := Open(vectorConfig(storeD, "m1"), "", Options{Embedder: &fakeEmbedder{model: "m1", dim: 32, failQuery: true}})
 		Expect(err).ToNot(HaveOccurred())
 		defer r.Close()
-		r.emb = &fakeEmbedder{model: "m1", dim: 32, failQuery: true}
 
 		res, err := r.Search(ctx, "backpressure buffer", 5)
 		Expect(err).ToNot(HaveOccurred())
@@ -289,10 +286,10 @@ var _ = Describe("Store (vector tier)", func() {
 		// is a config disagreement like a dimension mismatch, not a transient outage.
 		indexVector("m1", 32)
 
-		r, err := Open(vectorConfig(storeD, "m1"), "")
+		emb := &fakeEmbedder{model: "m1", dim: 32, queryErr: fmt.Errorf("%w: served %q", ErrModelMismatch, "m2")}
+		r, err := Open(vectorConfig(storeD, "m1"), "", Options{Embedder: emb})
 		Expect(err).ToNot(HaveOccurred())
 		defer r.Close()
-		r.emb = &fakeEmbedder{model: "m1", dim: 32, queryErr: fmt.Errorf("%w: served %q", ErrModelMismatch, "m2")}
 
 		_, err = r.Search(ctx, "backpressure buffer", 5)
 		Expect(err).To(MatchError(ErrModelMismatch))

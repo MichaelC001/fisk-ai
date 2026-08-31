@@ -6,12 +6,10 @@ package tui
 
 import (
 	"os"
-
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
-// RenderAnswer formats markdown for display on stdout. See util.RenderMarkdownTo for
+// RenderAnswer formats markdown for display on stdout. See RenderMarkdownTo for
 // the rendering rules.
 func RenderAnswer(md string, noColor bool) string {
-	return util.RenderMarkdownTo(md, os.Stdout, noColor)
+	return RenderMarkdownTo(md, os.Stdout, noColor)
 }

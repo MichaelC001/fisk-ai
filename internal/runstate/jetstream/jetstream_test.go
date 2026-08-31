@@ -5,6 +5,9 @@
 package jetstream
 
 import (
+	"context"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -35,6 +38,58 @@ var _ = Describe("newStore construction", func() {
 
 	It("Should declare that it needs a NATS connection", func() {
 		Expect(runstate.NeedsNats(runstate.BackendJetStream)).To(BeTrue())
+	})
+})
+
+// opContext is what stands between a caller's context and the JetStream calls, and it
+// needs no server to settle: these specs pin which deadline governs an operation.
+var _ = Describe("opContext", func() {
+	It("Should give a context with no deadline opTimeout", func() {
+		ctx, cancel := opContext(context.Background())
+		defer cancel()
+
+		deadline, ok := ctx.Deadline()
+		Expect(ok).To(BeTrue())
+		Expect(deadline).To(BeTemporally("~", time.Now().Add(opTimeout), time.Second))
+	})
+
+	It("Should keep a caller's deadline shorter than opTimeout", func() {
+		short := time.Now().Add(time.Second)
+		parent, cancelParent := context.WithDeadline(context.Background(), short)
+		defer cancelParent()
+
+		ctx, cancel := opContext(parent)
+		defer cancel()
+
+		deadline, ok := ctx.Deadline()
+		Expect(ok).To(BeTrue())
+		Expect(deadline).To(Equal(short))
+	})
+
+	// The caller is the one that knows how long its work may take, so a deadline beyond
+	// opTimeout is honored rather than cut back to it.
+	It("Should keep a caller's deadline longer than opTimeout", func() {
+		long := time.Now().Add(opTimeout * 4)
+		parent, cancelParent := context.WithDeadline(context.Background(), long)
+		defer cancelParent()
+
+		ctx, cancel := opContext(parent)
+		defer cancel()
+
+		deadline, ok := ctx.Deadline()
+		Expect(ok).To(BeTrue())
+		Expect(deadline).To(Equal(long))
+	})
+
+	It("Should cancel with the caller, so an operation stops when the run does", func() {
+		parent, cancelParent := context.WithCancel(context.Background())
+
+		ctx, cancel := opContext(parent)
+		defer cancel()
+
+		cancelParent()
+		Eventually(ctx.Done()).Should(BeClosed())
+		Expect(ctx.Err()).To(MatchError(context.Canceled))
 	})
 })
 

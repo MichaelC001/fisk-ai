@@ -36,6 +36,13 @@ type Service struct {
 func NewService(tb testing.TB, name string) *Service {
 	tb.Helper()
 
+	return BuildService(name)
+}
+
+// BuildService is NewService without a testing.TB, for a func Example or any other
+// caller outside a test. Close records that it was called, which is what a spec asserts
+// against; it frees no resource.
+func BuildService(name string) *Service {
 	return &Service{name: name, faults: make(chan error, 1)}
 }
 

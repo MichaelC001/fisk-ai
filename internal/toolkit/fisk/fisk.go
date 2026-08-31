@@ -20,7 +20,6 @@ import (
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 
 	"github.com/choria-io/fisk-ai/config"
 )
@@ -509,7 +508,7 @@ func (t *FiskCommandTool) TraceLine(args json.RawMessage) string {
 		cmdline = t.Command()
 	}
 
-	return util.SanitizeCommandLine(cmdline)
+	return SanitizeCommandLine(cmdline)
 }
 
 // TraceLineShort renders the trace line like TraceLine but elides the middle of
@@ -521,7 +520,7 @@ func (t *FiskCommandTool) TraceLine(args json.RawMessage) string {
 func (t *FiskCommandTool) TraceLineShort(args json.RawMessage) string {
 	argv, err := t.argv(args)
 	if err != nil {
-		return util.SanitizeCommandLine(t.Command())
+		return SanitizeCommandLine(t.Command())
 	}
 
 	// The command path is the first len(t.Path) tokens; everything after a lone "--"
@@ -537,14 +536,14 @@ func (t *FiskCommandTool) TraceLineShort(args json.RawMessage) string {
 			positional = true
 		case !positional && strings.HasPrefix(tok, "-"):
 			if name, value, ok := strings.Cut(tok, "="); ok {
-				argv[i] = name + "=" + util.ElideMiddle(value)
+				argv[i] = name + "=" + ElideMiddle(value)
 			}
 		default:
-			argv[i] = util.ElideMiddle(tok)
+			argv[i] = ElideMiddle(tok)
 		}
 	}
 
-	return util.SanitizeCommandLine(strings.Join(argv, " "))
+	return SanitizeCommandLine(strings.Join(argv, " "))
 }
 
 // RunCommand runs the command for a tool call. The model's JSON arguments are

@@ -77,6 +77,10 @@ type BuildOptions struct {
 	// refuses can name the file to edit. Diagnostics only.
 	ConfigFile string
 
+	// Version is the calling program's own build version, which an endpoint that
+	// publishes an agent card puts on it. An empty one publishes the card as "dev".
+	Version string
+
 	// Logger receives each endpoint's progress. Nil leaves each to its own default.
 	Logger *slog.Logger
 

@@ -92,7 +92,7 @@ var _ = Describe("a follow-up turn", func() {
 		Expect(carriesUserText(second.Requests()[0].Messages, "what is the first one called")).To(BeTrue())
 
 		// One conversation, both turns, in the order they were asked.
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Messages).To(HaveLen(4))
 		Expect(rs.Messages[0].Role).To(Equal(llm.RoleUser))
@@ -162,7 +162,7 @@ var _ = Describe("a follow-up turn", func() {
 		Expect(res1.Reason).To(Equal(runstate.ReasonError))
 		Expect(calls.Load()).To(Equal(int64(1)))
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Pending).To(BeNil())
 		Expect(rs.Messages[len(rs.Messages)-1].Role).To(Equal(llm.RoleUser))
@@ -278,7 +278,7 @@ var _ = Describe("a follow-up turn", func() {
 		Expect(res2.FollowUpTaken).To(BeFalse())
 		Expect(second.Requests()).To(BeEmpty())
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(carriesUserText(rs.Messages, "make it urgent")).To(BeFalse())
 	})
@@ -372,7 +372,7 @@ var _ = Describe("a follow-up turn", func() {
 		third := turn("three", agent.Checkpoint{ResumeID: first.SessionID, FollowUp: true})
 		Expect(third.FollowUpTaken).To(BeTrue())
 
-		rs, err := store.Load(first.SessionID)
+		rs, err := store.Load(context.Background(), first.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Messages).To(HaveLen(6))
 		Expect(rs.NextIteration).To(Equal(int64(3)))
@@ -425,7 +425,7 @@ var _ = Describe("a follow-up turn", func() {
 		Expect(seen[0].Initial).To(BeFalse())
 		Expect(seen[0].Text).To(Equal("delete them all"))
 
-		rs, err := store.Load(res1.SessionID)
+		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(carriesUserText(rs.Messages, "delete them all")).To(BeFalse())
 	})

@@ -57,9 +57,9 @@ import (
 	// Link the jetstream session backend in so it registers itself; it binds a
 	// pre-existing NATS JetStream stream over the shared connection.
 	_ "github.com/choria-io/fisk-ai/internal/runstate/jetstream"
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // defaultMaxOutputTokens caps the tokens generated per LLM call. It is distinct
@@ -98,7 +98,7 @@ func resolveMaxOutputTokens(cfg *config.Config, thinking bool) int64 {
 // report it back to them each time; fisk info reports the state and its cost when
 // they ask for it.
 func toolSearchDegradation(totalTools int, caps llm.Caps, operatorEnabled bool) *Warning {
-	if !operatorEnabled || caps.SupportsToolSearch || totalTools < util.ToolSearchThreshold {
+	if !operatorEnabled || caps.SupportsToolSearch || totalTools < ToolSearchThreshold {
 		return nil
 	}
 
@@ -224,6 +224,11 @@ type Options struct {
 	Config     *config.Config
 	ConfigFile string
 	Prompt     []string
+
+	// Version is the caller's own build version. It identifies this client to the
+	// MCP servers the run connects to and is written to the trace file's session
+	// line. Empty sends no version to a server and omits the field from the trace.
+	Version string
 
 	APIKey  string
 	BaseURL string
@@ -378,7 +383,7 @@ type Options struct {
 	// from cfg.A2ATransport() (its NAME string, not this value) over the shared connection.
 	// It is consulted only when the config declares remote_tools; with none it is ignored,
 	// so injecting it into a run with no remote tools is a no-op. It is a client transport:
-	// Run never serves a2a (that is the `agent a2a` command's separate seam). Do not
+	// Run never serves a2a, which the `agent a2a` command does instead. Do not
 	// confuse it with config.Config.A2ATransport(), which returns the transport name string
 	// this field replaces.
 	A2ATransport a2a.Transport
@@ -465,8 +470,14 @@ type Continuation struct {
 
 // Result is the outcome of a run, for the caller to render.
 type Result struct {
-	Reason    runstate.TerminalReason
-	Stats     *util.RunStats
+	Reason runstate.TerminalReason
+
+	// Stats is the run's accounting, nil when the run failed before it started. Run
+	// returns a non-nil Result on those failures too, so a nil error does not promise
+	// this field: check it before reading it, as serve.Outcome.Stats requires of the
+	// same value one layer out.
+	Stats *RunStats
+
 	SessionID string
 
 	// Text is the concatenated text of the last assistant turn the run produced,
@@ -1000,7 +1011,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// Closes it. Only a connection Run dials itself is owned and released here; dialing
 	// per run is the CLI path.
 	// An injected store or transport is self-contained (the caller provisioned it), so
-	// it must not force Run to dial: gate each term on its seam not being injected.
+	// it must not force Run to dial, so each term is gated on nothing being injected.
 	memNeedsNats := opts.MemoryStore == nil && memory.NeedsNats(cfg)
 	// A jetstream session store only needs NATS when the run actually journals: an
 	// un-checkpointed run stores no session, so gate the dial on checkpointing rather
@@ -1084,7 +1095,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// to start. The store is opened read-only; knowledge index is the writer.
 		ragStore = opts.RAGStore
 		if ragStore == nil {
-			ragStore, err = rag.Open(cfg, opts.StoreDir)
+			ragStore, err = rag.Open(cfg, opts.StoreDir, rag.Options{})
 			if err != nil {
 				return res, err
 			}
@@ -1169,7 +1180,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			sessions, err = mcpclient.Connect(setupCtx, mcpclient.Options{
 				Servers:            cfg.MCPClients,
 				Identity:           cfg.Identity,
-				Version:            util.Version(),
+				Version:            opts.Version,
 				CredentialEnvNames: cfg.CredentialEnvNames(),
 			})
 			if err != nil {
@@ -1295,7 +1306,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// The source is built here with the gate and given its journal appender once the
 	// runner exists, which is also where a resume seeds the grants it inherited.
 	approvals := newJournalApprovals()
-	gate := util.NewConfirmGate(prompter, approvals)
+	gate := NewConfirmGate(prompter, approvals)
 	confirmTags := cfg.ConfirmTags()
 	confirmTools := 0
 	for _, t := range tools {
@@ -1355,7 +1366,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// produced. It is empty when telemetry is off, which is what keeps it off the line.
 	// ContentExported is read off the provider for the same reason and one more: it is a
 	// privacy marker, so it has to report what happened rather than what was asked for.
-	stats := &util.RunStats{
+	stats := &RunStats{
 		Start:           time.Now(),
 		Model:           cfg.LLM.Model,
 		TraceID:         runSpan.TraceID(),
@@ -1373,7 +1384,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	provider := opts.Provider
 	if provider == nil {
 		if opts.BaseURL != "" {
-			if err := util.ValidateBaseURL("--base-url / ANTHROPIC_BASE_URL", opts.BaseURL); err != nil {
+			if err := sanitize.BaseURL("--base-url / ANTHROPIC_BASE_URL", opts.BaseURL); err != nil {
 				return res, err
 			}
 		}
@@ -1383,11 +1394,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// and close are deferred against this run's stats and exit paths.
 		var middlewares []llm.Middleware
 		if opts.HTTPDebugOut != nil {
-			middlewares = append(middlewares, util.HttpDebugMiddleware(opts.HTTPDebugOut))
+			middlewares = append(middlewares, HttpDebugMiddleware(opts.HTTPDebugOut))
 		}
 
 		if opts.TraceFile != "" {
-			tracer, terr := util.NewTracer(opts.TraceFile, func(err error) {
+			tracer, terr := NewTracer(opts.TraceFile, func(err error) {
 				events.Warn(Warning{Kind: WarnTraceWrite, Err: err})
 			}, nil)
 			if terr != nil {
@@ -1402,7 +1413,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}()
 			defer tracer.RecordSummary(stats)
 
-			tracer.RecordSession(cfg.LLM.Model, opts.ConfigFile, util.Version())
+			tracer.RecordSession(cfg.LLM.Model, opts.ConfigFile, opts.Version)
 			middlewares = append(middlewares, tracer.Middleware)
 		}
 
@@ -1587,7 +1598,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// depends on that connection); interactive was resolved at the top, where the root
 	// span needed it.
 	info := RunInfo{
-		Tools:           len(tools),
+		Tools:           len(toolSet.defs),
 		ThinkingEnabled: cfg.ThinkingEnabled(),
 		ConfirmTools:    confirmTools,
 		ConfirmTags:     confirmTags,
@@ -1603,7 +1614,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		sessionID             string
 		resumeAtInputBoundary bool
 		followUpAtStart       bool
-		newSession            func(prompt string) (runstate.Journal, string, error)
+		newSession            func(ctx context.Context, prompt string) (runstate.Journal, string, error)
 		store                 runstate.Store
 		rs                    *runstate.RunState
 	)
@@ -1654,7 +1665,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 
 		if resuming {
-			loaded, lerr := store.Load(sessionID)
+			loaded, lerr := store.Load(ctx, sessionID)
 			switch {
 			case errors.Is(lerr, runstate.ErrNotFound) && opts.Checkpoint.CreateIfMissing:
 				resuming = false
@@ -1806,7 +1817,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 					sessionID, strings.Join(blocking, "\n  "))
 			}
 
-			j, err := store.Open(sessionID)
+			j, err := store.Open(ctx, sessionID)
 			if err != nil {
 				return res, err
 			}
@@ -1820,7 +1831,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// caused any effect. Against this worker, seq below has to be read after the
 			// claim landed, or the runner's first record collides with the claim's seq
 			// and CheckAppend folds it away as a duplicate, silently losing it.
-			err = claimRun(j, cfg.Identity, opts.ClaimedBy)
+			err = claimRun(ctx, j, cfg.Identity, opts.ClaimedBy)
 			if err != nil {
 				return res, fmt.Errorf("cannot resume %q: %w", sessionID, err)
 			}
@@ -1833,7 +1844,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			if opts.Checkpoint.Answer != nil {
 				a := opts.Checkpoint.Answer
 
-				err = runstate.AnswerDeferredCall(j, rs, a.ToolUseID, a.Content, a.IsError)
+				err = runstate.AnswerDeferredCall(ctx, j, rs, a.ToolUseID, a.Content, a.IsError)
 				if err != nil {
 					return res, fmt.Errorf("cannot answer call %q of %q: %w", a.ToolUseID, sessionID, err)
 				}
@@ -1961,7 +1972,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				ConversationToken: opts.Checkpoint.ConversationToken,
 				Caller:            opts.Checkpoint.Caller,
 			}
-			j, err := store.Create(sessionID, meta)
+			j, err := store.Create(ctx, sessionID, meta)
 			if err != nil {
 				return res, err
 			}
@@ -1982,7 +1993,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// so this id is not that hash and no caller reaches this journal by holding one.
 		// Copying it would put two conversations in a listing claiming one token, only one
 		// of which can be continued. The caller is copied, since who asked did not change.
-		newSession = func(prompt string) (runstate.Journal, string, error) {
+		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 			id := a2a.NewID()
 			meta := runstate.MetaRecord{
 				Version:     runstate.Version,
@@ -1993,7 +2004,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Interactive: interactive,
 				Caller:      opts.Checkpoint.Caller,
 			}
-			j, err := store.Create(id, meta)
+			j, err := store.Create(ctx, id, meta)
 			if err != nil {
 				return nil, "", err
 			}
@@ -2140,12 +2151,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 // claimRun records this worker's takeover of a resumed run. Every failure is fatal to
 // the resume: a claim that is skipped when the store is briefly unreachable is not a
 // claim, and continuing would run the work with no idea whether anyone else is.
-func claimRun(j runstate.Journal, identity string, claimedBy string) error {
+func claimRun(ctx context.Context, j runstate.Journal, identity string, claimedBy string) error {
 	if claimedBy == "" {
 		claimedBy = derivedClaimant(identity)
 	}
 
-	err := j.Append(j.LastSeq()+1, runstate.Record{
+	err := j.Append(ctx, j.LastSeq()+1, runstate.Record{
 		Protocol: runstate.ClaimProtocol,
 		Claim:    &runstate.ClaimRecord{By: claimedBy, Claimed: time.Now().UTC()},
 	})
@@ -2211,17 +2222,33 @@ func endsOnAssistant(messages []llm.Message) bool {
 	return n > 0 && messages[n-1].Role == llm.RoleAssistant
 }
 
-// SessionInteractive reports whether a stored session was started as an interactive
-// chat run, reading only its Meta record so the CLI can reopen the input bar on
-// resume without the operator re-passing the flag. It does not lock the session (the
-// subsequent resume takes the lock), so it is a cheap pre-flight read.
-func SessionInteractive(cfg *config.Config, id string) (bool, error) {
-	rs, err := LoadSession(cfg, id)
-	if err != nil {
-		return false, err
-	}
+// SessionOptions are the inputs a session read shares with a run: which journal store
+// to read, expressed the same way Run takes it.
+type SessionOptions struct {
+	// StoreDir is Options.StoreDir, the base directory a directory-backed session store
+	// resolves its relative or default path under. Empty puts the journal in the XDG
+	// state directory, the CLI's behavior.
+	StoreDir string
 
-	return rs.Interactive, nil
+	// SessionStore is Options.SessionStore, a store the caller has already opened. When
+	// set, LoadSession reads through it and consults neither StoreDir nor the configured
+	// backend, so a caller sharing one store across runs pre-flights through that store
+	// rather than opening a second connection to the same journals.
+	SessionStore runstate.Store
+
+	// Conns is Options.Conns, the shared connection a jetstream session store binds its
+	// stream over. LoadSession borrows it and never Closes it, as Run does. When nil,
+	// and only for a backend that needs a connection, LoadSession dials cfg.NatsContext
+	// and releases that connection at the end of the read. For a jetstream backend the
+	// connection decides which server and stream the journal is read from, so a caller
+	// that injected one into Run passes the same one here.
+	Conns *conns.Provider
+}
+
+// SessionOptions returns the fields a session read shares with this run, so a caller
+// pre-flighting a resume with LoadSession reads the journal this run will write.
+func (o Options) SessionOptions() SessionOptions {
+	return SessionOptions{StoreDir: o.StoreDir, SessionStore: o.SessionStore, Conns: o.Conns}
 }
 
 // LoadSession reads one stored run without holding it, for a caller deciding what to do
@@ -2231,27 +2258,78 @@ func SessionInteractive(cfg *config.Config, id string) (bool, error) {
 // It is a pre-flight read and takes no lock, so what it returns describes the journal at
 // the moment it was read and not a run in progress. Resuming is Run's business.
 //
-// A file-backed journal lives in the XDG default, so the file backend resolves with an
-// empty environment; a server resume runs through Run, which passes its own StoreDir. A
-// jetstream backend needs a connection, and a short-lived one is dialed here for the
-// read, with the resume that follows dialing its own.
-func LoadSession(cfg *config.Config, id string) (*runstate.RunState, error) {
-	env := runstate.RuntimeEnv{}
-	if runstate.NeedsNats(cfg.SessionBackend()) {
-		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
-		if err != nil {
-			return nil, fmt.Errorf("connecting to NATS for the jetstream session pre-flight read: %w", err)
-		}
-		defer p.Close()
-		env.Nats = p.Nats()
-	}
-
-	store, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), env)
+// opts names the journal, and a caller that is about to call Run passes
+// Options.SessionOptions() from the same Options so both reach the same store. An
+// injected store is read through as it stands. Without one, the store dir, the injected
+// connection and the configured backend resolve the journal on the rules Run applies to
+// the same three fields, and a jetstream backend with no injected connection gets one
+// dialed here for the read, with the resume that follows dialing its own.
+//
+// ctx limits the read: a canceled context returns before anything is dialed or read, and
+// a cancel while the dial is outstanding ends the wait, with the connection that dial
+// produces closed rather than left open.
+func LoadSession(ctx context.Context, cfg *config.Config, id string, opts SessionOptions) (*runstate.RunState, error) {
+	err := ctx.Err()
 	if err != nil {
 		return nil, err
 	}
 
-	return store.Load(id)
+	store := opts.SessionStore
+	if store == nil {
+		env := runstate.RuntimeEnv{StoreDir: opts.StoreDir}
+		if runstate.NeedsNats(cfg.SessionBackend()) {
+			// An injected connection is borrowed: the caller established it and shares it,
+			// so the read uses it and leaves it open. Only a connection dialed here is
+			// released here.
+			natsConns := opts.Conns
+			if natsConns == nil {
+				p, derr := dialSessionNats(ctx, cfg)
+				if derr != nil {
+					return nil, fmt.Errorf("connecting to NATS for the jetstream session pre-flight read: %w", derr)
+				}
+				defer p.Close()
+				natsConns = p
+			}
+			env.Nats = natsConns.Nats()
+		}
+
+		store, err = runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), env)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return store.Load(ctx, id)
+}
+
+// dialSessionNats dials the connection a jetstream session read needs. conns.Connect
+// blocks until the dial resolves and takes no context, so it runs in a goroutine while
+// this waits on ctx as well. On a cancel this returns ctx.Err() and starts a second
+// goroutine that waits for the dial and closes the connection it produced.
+func dialSessionNats(ctx context.Context, cfg *config.Config) (*conns.Provider, error) {
+	type dial struct {
+		provider *conns.Provider
+		err      error
+	}
+
+	done := make(chan dial, 1)
+	go func() {
+		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
+		done <- dial{provider: p, err: err}
+	}()
+
+	select {
+	case d := <-done:
+		return d.provider, d.err
+
+	case <-ctx.Done():
+		go func() {
+			d := <-done
+			d.provider.Close()
+		}()
+
+		return nil, ctx.Err()
+	}
 }
 
 // resumeHazards reports the resume situation that can misbehave: a pause at a

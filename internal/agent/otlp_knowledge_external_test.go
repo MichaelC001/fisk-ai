@@ -34,7 +34,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // embedModel is the model the fixture's index is pinned to. It has to match between the
@@ -130,7 +129,7 @@ func knowledgeFixture(emb *fakeEmbeddings) string {
 		[]byte("# Authentication\n\nTokens are validated against the issuer before any request proceeds.\n"),
 		0o644)).To(Succeed())
 
-	w, err := rag.OpenWriter(knowledgeConfig(storeDir, emb.URL()), "")
+	w, err := rag.OpenWriter(knowledgeConfig(storeDir, emb.URL()), "", rag.Options{})
 	Expect(err).ToNot(HaveOccurred())
 	defer w.Close()
 
@@ -173,7 +172,7 @@ func exportKnowledgeRun(rx *agenttest.OTLPReceiver, storeDir string, baseURL str
 
 	tel, err := bootstrap.Start(context.Background(), bootstrap.Options{
 		Config:  cfg,
-		Version: util.Version(),
+		Version: "test",
 	})
 	Expect(err).ToNot(HaveOccurred())
 

@@ -79,7 +79,7 @@ var _ = Describe("Checkpoint.CreateIfMissing", func() {
 		Expect(start.Resumed).To(BeFalse(), "nothing was there to resume")
 		Expect(submits).To(Equal(1), "the prompt is new on a first delivery")
 
-		state, err := store.Load("job-1")
+		state, err := store.Load(context.Background(), "job-1")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(state.Completed()).To(BeTrue())
 	})

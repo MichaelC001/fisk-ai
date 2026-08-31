@@ -32,7 +32,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // sdkDefaultBuckets is the SDK's default histogram layout, which tops out at 10000 and
@@ -69,7 +68,7 @@ func exportRun(rx *agenttest.OTLPReceiver, capture config.TelemetryCaptureConfig
 
 	tel, err := bootstrap.Start(context.Background(), bootstrap.Options{
 		Config:  cfg,
-		Version: util.Version(),
+		Version: "test",
 	})
 	Expect(err).ToNot(HaveOccurred())
 
@@ -322,7 +321,7 @@ var _ = Describe("OTLP export", func() {
 			c.Telemetry.Endpoint = rx.Endpoint()
 		})
 
-		tel, err := bootstrap.Start(context.Background(), bootstrap.Options{Config: cfg, Version: util.Version()})
+		tel, err := bootstrap.Start(context.Background(), bootstrap.Options{Config: cfg, Version: "test"})
 		Expect(err).ToNot(HaveOccurred())
 
 		_, err = agent.Run(context.Background(), agent.Options{

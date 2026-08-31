@@ -26,7 +26,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 // ErrChannelDone reports that a channel has no more work and never will. A server
@@ -312,7 +311,7 @@ type Outcome struct {
 	Reason runstate.TerminalReason
 
 	// Stats is the run's accounting, nil when the run failed before it started.
-	Stats *util.RunStats
+	Stats *agent.RunStats
 
 	// Err is the failure, nil on success. Note that a run stopped by its budget or its
 	// iteration cap reports both a reason and an error.

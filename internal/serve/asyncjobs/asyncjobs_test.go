@@ -23,7 +23,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
-	"github.com/choria-io/fisk-ai/internal/util"
 )
 
 func TestAsyncJobs(t *testing.T) {
@@ -207,7 +206,7 @@ var _ = Describe("Dispositions", func() {
 			SessionID: "job1",
 			Text:      "the answer",
 			Reason:    runstate.ReasonCompleted,
-			Stats:     &util.RunStats{InTokens: 11, OutTokens: 22},
+			Stats:     &agent.RunStats{InTokens: 11, OutTokens: 22},
 		}, ch.log)
 
 		Expect(err).ToNot(HaveOccurred())
@@ -233,7 +232,7 @@ var _ = Describe("Dispositions", func() {
 		payload, err := ch.disposition(req, serve.Outcome{
 			SessionID: "job1",
 			Reason:    runstate.ReasonMaxIterations,
-			Stats:     &util.RunStats{InTokens: 33, OutTokens: 44},
+			Stats:     &agent.RunStats{InTokens: 33, OutTokens: 44},
 			Err:       fmt.Errorf("ran out of iterations"),
 		}, ch.log)
 
