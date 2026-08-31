@@ -127,10 +127,13 @@ linked in by adding a second blank import there.
   all once `MaxOutputTokens` implies a longer run than that.
 - Error classification. Map the backend's failures onto the sentinels in `errors.go`
   (`ErrRateLimited`, `ErrOverloaded`, `ErrAuthentication`, `ErrContextLengthExceeded`,
-  `ErrInvalidRequest`) and wrap with `%w`, so a caller backs off, re-authenticates or
-  trims its history through `errors.Is` without importing the SDK. A failure in no
-  named class is returned unchanged. `internal/llm/anthropic/errors.go` is the
-  reference.
+  `ErrInvalidRequest`, `ErrModelNotFound`, `ErrRequestTooLarge`, `ErrBackendFailure`)
+  and wrap with `%w`, so a caller backs off, re-authenticates or trims its history
+  through `errors.Is` without importing the SDK. A class earns a sentinel by what a
+  caller does differently on it: the Anthropic permission, billing and gateway-timeout
+  errors have none of their own because the action duplicates a class that exists. A
+  failure in no named class is returned unchanged. `internal/llm/anthropic/errors.go`
+  is the reference.
 - Prompt cache stays out of the fingerprint, so toggling it never refuses a resume.
 
 ## Credential handling (security boundary)

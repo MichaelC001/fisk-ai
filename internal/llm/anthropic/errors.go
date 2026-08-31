@@ -32,8 +32,8 @@ var contextLengthMessages = []string{"prompt is too long", "exceed context limit
 // caller reads the class with errors.Is and never has to import the SDK to find out
 // what failed. The wrapping is %w, so a caller that does import the SDK still reaches
 // the *sdk.Error with errors.As. An error the SDK did not build from an API response,
-// and a class llm does not name (a permission error, a billing error, a 404, a 5xx
-// other than overloaded), is returned as it came.
+// and a class llm does not name (a permission error, a billing error), is returned as
+// it came.
 //
 // The class comes from the error type in the response body, which the SDK parses out
 // of the {"error":{"type":...}} envelope. A gateway in front of the API answers some
@@ -55,6 +55,13 @@ func classify(err error) error {
 
 // sentinelFor returns the llm sentinel for an API error, or nil for a class llm does
 // not name.
+//
+// permission_error and billing_error are left unmapped: a caller stops and reports
+// them to an operator, which is the branch it already writes for llm.ErrAuthentication,
+// and the API's message carries the remedy that separates them. Neither is an
+// authentication failure, so neither is mapped onto that sentinel either.
+// timeout_error is mapped, since a gateway timeout is retried the way an internal
+// error is.
 func sentinelFor(apiErr *sdk.Error) error {
 	switch apiErr.Type() {
 	case sdk.ErrorTypeRateLimitError:
@@ -68,20 +75,45 @@ func sentinelFor(apiErr *sdk.Error) error {
 
 	case sdk.ErrorTypeInvalidRequestError:
 		return invalidRequestSentinel(apiErr)
+
+	// An error event on an opened stream carries this one, where the response status is
+	// the 200 the stream opened with.
+	case sdk.ErrorTypeAPIError:
+		return llm.ErrBackendFailure
 	}
 
-	switch apiErr.StatusCode {
-	case http.StatusTooManyRequests:
+	// not_found_error arrives only with a 404 and request_too_large is not among the
+	// error types the SDK names, so the status is what places those two.
+	status := apiErr.StatusCode
+
+	switch {
+	case status == http.StatusTooManyRequests:
 		return llm.ErrRateLimited
 
-	case statusOverloaded:
+	// Ahead of the server-error range, which would otherwise take it: this status is
+	// the backend stating it has no capacity, and a caller waits it out rather than
+	// retrying on a backoff of its own.
+	case status == statusOverloaded:
 		return llm.ErrOverloaded
 
-	case http.StatusUnauthorized:
+	case status == http.StatusUnauthorized:
 		return llm.ErrAuthentication
 
-	case http.StatusBadRequest:
+	case status == http.StatusBadRequest:
 		return invalidRequestSentinel(apiErr)
+
+	case status == http.StatusNotFound:
+		return llm.ErrModelNotFound
+
+	case status == http.StatusRequestEntityTooLarge:
+		return llm.ErrRequestTooLarge
+
+	// The whole server-error range: a caller retries any of them on a backoff it
+	// chooses, none of them carries a Retry-After, and the range covers whatever a load
+	// balancer, a corporate proxy or a gateway in front of the API answers, including
+	// codes Anthropic does not send itself.
+	case status >= 500 && status <= 599:
+		return llm.ErrBackendFailure
 	}
 
 	return nil

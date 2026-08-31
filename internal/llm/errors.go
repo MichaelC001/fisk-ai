@@ -40,6 +40,29 @@ var (
 	// fails the same way.
 	ErrInvalidRequest = errors.New("invalid request")
 
+	// ErrModelNotFound is the backend having no model with the id the request named,
+	// which a mistyped or retired model in the configuration produces. A caller stops
+	// instead of retrying and an operator corrects the id. A base URL that addresses
+	// something other than the API answers this way too, so the remedy is the model
+	// name or the endpoint.
+	ErrModelNotFound = errors.New("model not found")
+
+	// ErrRequestTooLarge is the request body being over the size the endpoint accepts,
+	// counted in bytes rather than in tokens. A caller sends smaller tool results,
+	// images and attachments, where ErrContextLengthExceeded asks it for fewer turns of
+	// history.
+	ErrRequestTooLarge = errors.New("request too large")
+
+	// ErrBackendFailure is the backend failing to produce an answer rather than
+	// refusing the request. A caller retries on a backoff it chooses itself, since
+	// nothing in the answer says when to come back, and gives up after a few attempts
+	// rather than waiting out a queue as it does for ErrOverloaded.
+	//
+	// A provider maps its whole server-error range here, so this covers what a load
+	// balancer, a corporate proxy or a gateway in front of the backend answers as well
+	// as what the API itself sends.
+	ErrBackendFailure = errors.New("backend failure")
+
 	// ErrUnknownProvider is NewProvider given a name no provider registered under, most
 	// often a provider whose package this build never imported. A caller adds the
 	// import or selects a name from Providers().

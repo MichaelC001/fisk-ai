@@ -112,6 +112,14 @@ var _ = Describe("Error classification", func() {
 		Expect(errors.Is(err, llm.ErrRateLimited)).To(BeFalse())
 	})
 
+	// 529 sits inside the server-error range, so a body with no error type leaves the
+	// order of the status cases as the only thing keeping the two classes apart.
+	It("Should keep an untyped 529 out of the server-error range", func() {
+		err := callAgainst(apiServer(529, "<html>overloaded</html>"))
+		Expect(errors.Is(err, llm.ErrOverloaded)).To(BeTrue())
+		Expect(errors.Is(err, llm.ErrBackendFailure)).To(BeFalse())
+	})
+
 	It("Should report a rejected credential", func() {
 		err := callAgainst(apiServer(http.StatusUnauthorized, errorBody("authentication_error", "invalid x-api-key")))
 		Expect(errors.Is(err, llm.ErrAuthentication)).To(BeTrue())
@@ -134,6 +142,36 @@ var _ = Describe("Error classification", func() {
 		err := callAgainst(apiServer(http.StatusBadRequest, errorBody("invalid_request_error", "max_tokens: Field required")))
 		Expect(errors.Is(err, llm.ErrInvalidRequest)).To(BeTrue())
 		Expect(errors.Is(err, llm.ErrContextLengthExceeded)).To(BeFalse())
+	})
+
+	It("Should report a model the backend does not have", func() {
+		err := callAgainst(apiServer(http.StatusNotFound, errorBody("not_found_error", "model: claude-not-a-model")))
+		Expect(errors.Is(err, llm.ErrModelNotFound)).To(BeTrue())
+	})
+
+	// A body over the size limit is a different remedy from a context window over the
+	// token limit, so the two classes stay apart.
+	It("Should report a body over the size limit", func() {
+		err := callAgainst(apiServer(http.StatusRequestEntityTooLarge, errorBody("request_too_large", "Request body exceeds the maximum allowed size")))
+		Expect(errors.Is(err, llm.ErrRequestTooLarge)).To(BeTrue())
+		Expect(errors.Is(err, llm.ErrContextLengthExceeded)).To(BeFalse())
+	})
+
+	It("Should report a backend that failed rather than refused", func() {
+		err := callAgainst(apiServer(http.StatusInternalServerError, "<html>internal server error</html>"))
+		Expect(errors.Is(err, llm.ErrBackendFailure)).To(BeTrue())
+	})
+
+	It("Should report a gateway that gave up waiting as the same failure", func() {
+		err := callAgainst(apiServer(http.StatusGatewayTimeout, errorBody("timeout_error", "Request timed out")))
+		Expect(errors.Is(err, llm.ErrBackendFailure)).To(BeTrue())
+	})
+
+	// A proxy in front of the API answers with a code the API never sends and a body
+	// that carries no error type, so the server-error range is what places it.
+	It("Should report a proxy's own server error as a backend failure", func() {
+		err := callAgainst(apiServer(http.StatusServiceUnavailable, "<html>503 Service Unavailable</html>"))
+		Expect(errors.Is(err, llm.ErrBackendFailure)).To(BeTrue())
 	})
 
 	// A gateway in front of the API answers with a status and no error envelope, so
@@ -166,6 +204,15 @@ var _ = Describe("Error classification", func() {
 
 		_, err := streamAgainst(srv)
 		Expect(errors.Is(err, llm.ErrOverloaded)).To(BeTrue())
+	})
+
+	// The other type an error event carries mid-stream, where the 500 that would place
+	// it on the non-streaming path never arrives.
+	It("Should classify an api_error event on an opened stream as a backend failure", func() {
+		srv := streamServer("event: error\ndata: " + errorBody("api_error", "Internal server error") + "\n\n")
+
+		_, err := streamAgainst(srv)
+		Expect(errors.Is(err, llm.ErrBackendFailure)).To(BeTrue())
 	})
 })
 
