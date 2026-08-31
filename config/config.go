@@ -617,15 +617,61 @@ type PIIConfig struct {
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
 }
 
-// KnowledgeSearchToolName is the name of the read-only knowledge_search built-in
-// tool. It is defined here, the lowest layer, so config can validate the
-// expose.agent.mcp.builtins allowlist without importing the util package that
-// implements the tool; util references this same constant so the two never drift.
-const KnowledgeSearchToolName = "knowledge_search"
+// The built-in tools, by the names the model calls them by. An operator writes these
+// into harness.allow, harness.deny and expose.agent.mcp.builtins, a run's transcript
+// names them, and a program scripting a model provider in a test sends them, so each
+// name and its argument keys are a contract.
+//
+// They are defined here, the lowest layer, so config validates an allowlist without
+// importing the package implementing the tools, which references these same constants
+// so the two never drift.
+//
+// Each doc comment gives the argument keys the tool accepts. Every argument is a
+// top-level key of the tool_use input object, and the tools take no nested objects.
+// Which tools a run offers depends on the configuration: the ask_human tools need
+// harness.human_in_the_loop, the memory tools need harness.memory, and the knowledge
+// tools need harness.knowledge.
+const (
+	// AskHumanConfirmToolName puts a yes or no question to the operator. Its argument
+	// is question. It answers {"confirmed": bool} and a reason when the operator
+	// declined or could not be reached.
+	AskHumanConfirmToolName = "ask_human_confirm"
 
-// KnowledgeEnumerateToolName is the name of the read-only knowledge_enumerate
-// built-in tool, on the same terms as KnowledgeSearchToolName.
-const KnowledgeEnumerateToolName = "knowledge_enumerate"
+	// AskHumanSelectToolName asks the operator to pick one of a list. Its arguments
+	// are question and options. It answers {"selected": string|null}.
+	AskHumanSelectToolName = "ask_human_select"
+
+	// AskHumanInputToolName asks the operator to type a value. Its arguments are
+	// question and default. It answers {"value": string|null}.
+	AskHumanInputToolName = "ask_human_input"
+
+	// MemoryListToolName lists the stored memories. It takes no arguments and answers
+	// {"memories": [{"key", "description"}]}.
+	MemoryListToolName = "memory_list"
+
+	// MemoryReadToolName reads one memory. Its argument is key. It answers
+	// {"found": bool} with key, description and content when the memory exists.
+	MemoryReadToolName = "memory_read"
+
+	// MemoryWriteToolName stores a memory. Its arguments are key, description,
+	// content and overwrite. It answers {"written": bool} and a reason when a key
+	// already exists and overwrite was not set.
+	MemoryWriteToolName = "memory_write"
+
+	// MemoryDeleteToolName removes a memory. Its argument is key. It answers
+	// {"deleted": bool}.
+	MemoryDeleteToolName = "memory_delete"
+
+	// KnowledgeSearchToolName searches the local knowledge index and returns ranked
+	// passages. Its arguments are query and top_k. It answers a tier, a status and
+	// results, each carrying a citation, an index_ref and content.
+	KnowledgeSearchToolName = "knowledge_search"
+
+	// KnowledgeEnumerateToolName answers which indexed documents contain a term,
+	// without returning their text. Its argument is query. It answers a matched
+	// count, documents and the terms it actually queried.
+	KnowledgeEnumerateToolName = "knowledge_enumerate"
+)
 
 // mcpExposableBuiltins are the built-in tools an operator may name in
 // expose.agent.mcp.builtins. Both are read-only knowledge tools that need no

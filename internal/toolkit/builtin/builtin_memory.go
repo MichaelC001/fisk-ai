@@ -21,11 +21,13 @@ import (
 // The built-in memory tool names share the memory_ prefix, which groups them and
 // keeps them clear of a typical fisk command path so they do not collide with an
 // introspected application tool.
+// They are aliases of the config constants, which is where an operator's allowlist and
+// an embedder's provider script read them from.
 const (
-	memoryListName   = "memory_list"
-	memoryReadName   = "memory_read"
-	memoryWriteName  = "memory_write"
-	memoryDeleteName = "memory_delete"
+	memoryListName   = config.MemoryListToolName
+	memoryReadName   = config.MemoryReadToolName
+	memoryWriteName  = config.MemoryWriteToolName
+	memoryDeleteName = config.MemoryDeleteToolName
 )
 
 // maxIndexDescriptionRunes caps how much of each description the injected index

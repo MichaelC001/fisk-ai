@@ -19,11 +19,13 @@ import (
 
 // The built-in human-in-the-loop tool names share the ask_human_ prefix, which
 // groups them and keeps them clear of a typical fisk command path so they do not
-// collide with an introspected application tool.
+// collide with an introspected application tool. They are aliases of the config
+// constants, which is where an operator's allowlist and an embedder's provider script
+// read them from.
 const (
-	askHumanConfirmName = "ask_human_confirm"
-	askHumanSelectName  = "ask_human_select"
-	askHumanInputName   = "ask_human_input"
+	askHumanConfirmName = config.AskHumanConfirmToolName
+	askHumanSelectName  = config.AskHumanSelectToolName
+	askHumanInputName   = config.AskHumanInputToolName
 )
 
 // maxPromptRunes caps the length of a model-supplied string shown to the operator
