@@ -38,6 +38,12 @@ var (
 // NewFakeSessionStore returns an empty in-memory session store.
 func NewFakeSessionStore(tb testing.TB) *FakeSessionStore {
 	tb.Helper()
+	return BuildFakeSessionStore()
+}
+
+// BuildFakeSessionStore is NewFakeSessionStore without a testing.TB, for a func Example
+// or any other caller outside a test.
+func BuildFakeSessionStore() *FakeSessionStore {
 	return &FakeSessionStore{runs: map[string]*fakeJournal{}, info: runstate.Info{Backend: "fake"}}
 }
 

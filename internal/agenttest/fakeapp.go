@@ -8,10 +8,14 @@
 // scripted toolkit.Prompter, and config builders) so a caller can stand up a run
 // without reaching into internals.
 //
-// Every constructor takes a testing.TB. The package is a normal, linkable package
-// rather than a _test.go file, so the job system can reuse the harness from its own
-// package later; the testing.TB argument keeps it useless outside a test and
-// documents that intent at every signature.
+// Constructors come in two forms. A New form takes a testing.TB and calls Fatalf where
+// construction can fail; NewOTLPReceiver also registers the Close its listener needs. A
+// Build form takes no testing.TB and returns an error instead, leaving the caller to call
+// Close on the one fake that holds a resource. A func Example is handed no testing.TB, so
+// it reaches the harness through the Build form.
+//
+// The package imports testing and net/http/httptest, so a production binary that links it
+// links both.
 package agenttest
 
 import (
@@ -49,14 +53,32 @@ type FakeApp struct {
 func NewFakeApp(tb testing.TB, app *fisk.Application) *FakeApp {
 	tb.Helper()
 
-	model := introspectJSON(tb, app)
-
-	appPath, err := fakeAppExecutable(model)
+	fake, err := BuildFakeApp(app)
 	if err != nil {
 		tb.Fatalf("agenttest: %v", err)
 	}
 
-	return &FakeApp{Path: appPath}
+	return fake
+}
+
+// BuildFakeApp is NewFakeApp without a testing.TB, for a func Example or any other
+// caller outside a test. It returns an error where NewFakeApp fails the test: app
+// could not be introspected, or the executable could not be written.
+//
+// Every call producing the same command model shares one executable, kept for the life of
+// the process.
+func BuildFakeApp(app *fisk.Application) (*FakeApp, error) {
+	model, err := introspectJSON(app)
+	if err != nil {
+		return nil, err
+	}
+
+	appPath, err := fakeAppExecutable(model)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FakeApp{Path: appPath}, nil
 }
 
 var (
@@ -130,15 +152,13 @@ func fakeAppExecutable(model []byte) (string, error) {
 // the JSON it writes, the same document the agent would read over the process
 // boundary, so the captured schemas are precomputed exactly as production sees them.
 // It redirects os.Stdout for the duration of the parse, so it must run serially.
-func introspectJSON(tb testing.TB, app *fisk.Application) []byte {
-	tb.Helper()
-
+func introspectJSON(app *fisk.Application) ([]byte, error) {
 	// --fisk-introspect terminates the process; make that a no-op so the parse returns.
 	app.Terminate(func(int) {})
 
 	r, w, err := os.Pipe()
 	if err != nil {
-		tb.Fatalf("agenttest: creating introspect pipe: %v", err)
+		return nil, fmt.Errorf("creating introspect pipe: %w", err)
 	}
 
 	saved := os.Stdout
@@ -152,14 +172,24 @@ func introspectJSON(tb testing.TB, app *fisk.Application) []byte {
 		captured <- data
 	}()
 
-	_, err = app.Parse([]string{"--fisk-introspect"})
-	if err != nil {
-		tb.Fatalf("agenttest: introspecting fake application: %v", err)
+	// Closing the write end is what ends the reader goroutine, so every path below
+	// closes it and drains the channel. An error return that skipped either would
+	// leave the goroutine parked on a pipe nothing writes to and both descriptors
+	// open, once per call, in a caller that carries on rather than failing a test.
+	defer func() {
+		r.Close()
+	}()
+
+	_, parseErr := app.Parse([]string{"--fisk-introspect"})
+	closeErr := w.Close()
+	data := <-captured
+
+	if parseErr != nil {
+		return nil, fmt.Errorf("introspecting fake application: %w", parseErr)
 	}
-	err = w.Close()
-	if err != nil {
-		tb.Fatalf("agenttest: closing introspect pipe: %v", err)
+	if closeErr != nil {
+		return nil, fmt.Errorf("closing introspect pipe: %w", closeErr)
 	}
 
-	return <-captured
+	return data, nil
 }

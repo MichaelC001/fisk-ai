@@ -3,8 +3,8 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 // This example embeds the agent in a Go program: it builds a configuration in code,
-// supplies its own model provider, tool, memory store, session store and knowledge
-// index, runs one agent turn and prints what came back.
+// supplies its own tool, memory store, session store and knowledge index, scripts the
+// model from the agenttest harness, runs one agent turn and prints what came back.
 //
 // It lives in an external test package on purpose, so it reaches only exported API
 // and is the shortest path an embedder has from an empty program to a completed run.
@@ -23,6 +23,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	memoryfile "github.com/choria-io/fisk-ai/internal/memory/file"
 	"github.com/choria-io/fisk-ai/internal/rag"
@@ -40,7 +41,7 @@ const providerName = "example-scripted"
 // provider package puts it.
 func init() {
 	llm.Register(providerName, func(llm.Config) (llm.Provider, error) {
-		return newScriptedProvider(), nil
+		return scriptedProvider()
 	}, nil)
 }
 
@@ -117,6 +118,12 @@ func runAgent() error {
 		return err
 	}
 
+	// agent.Events is how a run reports what it is doing. This recorder comes from the
+	// agenttest harness and records every event for the program to read once the run
+	// ends; a program wanting a log as the run goes hands agent.NewSlogEvents a logger,
+	// and one wanting its own rendering implements the interface itself.
+	events := agenttest.NewRecordingEvents()
+
 	// The stores are supplied rather than built from the configuration, which is what
 	// a process hosting many runs does: it opens each one once and hands the same
 	// handle to every run. Run borrows them and closes none of them.
@@ -130,10 +137,12 @@ func runAgent() error {
 		MemoryStore:  memories,
 		SessionStore: journal,
 		CustomTools:  []toolkit.Tool{tool},
-	}, &reportingEvents{}, toolkit.DefaultDenyPrompter())
+	}, events, toolkit.DefaultDenyPrompter())
 	if err != nil {
 		return err
 	}
+
+	narrate(events)
 
 	fmt.Println("answer:", res.Text)
 	fmt.Println("outcome:", res.Reason)
@@ -263,118 +272,76 @@ func ticketTool() (*functool.Tool, error) {
 // which is what makes the example deterministic and keeps it off the network. A real
 // provider renders the request to its backend's wire format and converts the reply
 // back.
-type scriptedProvider struct {
-	responses []*llm.Response
-	idx       int
-}
-
-func newScriptedProvider() *scriptedProvider {
+//
+// A func Example is handed no testing.TB, so it calls agenttest.BuildScriptedProvider
+// rather than NewScriptedProvider.
+func scriptedProvider() (llm.Provider, error) {
 	search := json.RawMessage(`{"query":"who owns the widget inventory"}`)
 	ticket := json.RawMessage(`{"id":"T-42"}`)
 	write := json.RawMessage(`{"key":"widget.inventory","description":"who owns the widget inventory","content":"The supply team owns it and reconciles it every Monday."}`)
 
-	return &scriptedProvider{responses: []*llm.Response{
-		toolUse("call-1", "knowledge_search", search),
-		toolUse("call-2", "lookup_ticket", ticket),
-		toolUse("call-3", "memory_write", write),
-		text("Ticket T-42 is open and the supply team owns the widget inventory."),
-	}}
-}
-
-// Call returns the next scripted response. The loop calls it from one goroutine per
-// run, so this holds no lock; a provider shared between runs must be safe for
-// concurrent use.
-func (p *scriptedProvider) Call(context.Context, llm.Request) (*llm.Response, error) {
-	if p.idx >= len(p.responses) {
-		return nil, fmt.Errorf("the script has %d responses and the loop asked for %d", len(p.responses), p.idx+1)
-	}
-
-	resp := p.responses[p.idx]
-	p.idx++
-
-	return resp, nil
-}
-
-// Capabilities are declared rather than discovered. Provider is the id a checkpoint
-// pins, so a resume against a different provider is refused.
-func (p *scriptedProvider) Capabilities() llm.Caps {
-	return llm.Caps{Provider: providerName, SemconvProvider: providerName}
-}
-
-func text(s string) *llm.Response {
-	return &llm.Response{
-		StopReason: llm.StopEndTurn,
-		Content:    []llm.ContentBlock{{Text: &llm.TextBlock{Text: s}}},
-	}
-}
-
-func toolUse(id, name string, input json.RawMessage) *llm.Response {
-	return &llm.Response{
-		StopReason: llm.StopToolUse,
-		Content:    []llm.ContentBlock{{ToolUse: &llm.ToolUseBlock{ID: id, Name: name, Input: input}}},
-	}
-}
-
-// reportingEvents narrates the run. agent.Events is how a run reports what it is
-// doing; a program wanting a log rather than its own rendering hands
-// agent.NewSlogEvents a logger instead of implementing this.
-//
-// It pairs each result with the call it answers through the tool_use id, since a
-// turn may carry several calls and a call may produce no result at all.
-type reportingEvents struct {
-	names map[string]string
-}
-
-func (e *reportingEvents) Warn(w agent.Warning) {
-	fmt.Println("warning:", w.Kind)
-}
-
-func (e *reportingEvents) Starting(agent.RunInfo) {}
-
-func (e *reportingEvents) LLMRequest(string) {}
-
-func (e *reportingEvents) ToolCall(t agent.ToolTrace) {
-	if e.names == nil {
-		e.names = map[string]string{}
-	}
-	e.names[t.ID] = t.Name
-}
-
-// ToolResult prints what each tool answered. The knowledge result carries the
-// absolute path of the document it cites, so this reports how many results came back
-// rather than the result itself.
-func (e *reportingEvents) ToolResult(t agent.ToolResultTrace) {
-	name := e.names[t.CallID]
-
-	if name != "knowledge_search" {
-		fmt.Printf("%s returned %s\n", name, t.Output)
-
-		return
-	}
-
-	var hits struct {
-		Results []json.RawMessage `json:"results"`
-	}
-
-	err := json.Unmarshal([]byte(t.Output), &hits)
+	p, err := agenttest.BuildScriptedProvider(
+		agenttest.ToolUseResponse("call-1", "knowledge_search", search),
+		agenttest.ToolUseResponse("call-2", "lookup_ticket", ticket),
+		agenttest.ToolUseResponse("call-3", "memory_write", write),
+		agenttest.TextResponse("Ticket T-42 is open and the supply team owns the widget inventory."),
+	)
 	if err != nil {
-		fmt.Println("knowledge_search returned unreadable output:", err)
-
-		return
+		return nil, err
 	}
 
-	fmt.Printf("knowledge_search results: %d\n", len(hits.Results))
+	// Capabilities are declared rather than discovered. Provider is the id a checkpoint
+	// pins, so a resume against a different provider is refused.
+	p.SetCapabilities(llm.Caps{Provider: providerName, SemconvProvider: providerName})
+
+	return p, nil
 }
 
-func (e *reportingEvents) Message(llm.Response, bool) {}
+// narrate prints what the run reported once it has ended: the warnings it raised, any
+// crash it recovered from, and what each tool answered.
+//
+// It pairs each result with the call it answers through the tool_use id, since a turn
+// may carry several calls and a call may produce no result at all.
+func narrate(events *agenttest.RecordingEvents) {
+	for _, w := range events.Warnings() {
+		fmt.Println("warning:", w.Kind)
+	}
 
-func (e *reportingEvents) SessionRotated(string) {}
+	// The stack a crash carries holds absolute paths and frame arguments, so this
+	// prints the recovered value and leaves the stack where it was captured.
+	for _, p := range events.Panics() {
+		fmt.Println("the run crashed:", p.Value)
+	}
 
-// Panicked runs while the crashed goroutine unwinds, so it must not block or panic.
-// The stack carries absolute paths and frame arguments, so a sink forwarding to a
-// remote peer keeps the stack local and sends the peer the error alone.
-func (e *reportingEvents) Panicked(value any, _ []byte) {
-	fmt.Println("the run crashed:", value)
+	names := make(map[string]string)
+	for _, c := range events.ToolCalls() {
+		names[c.ID] = c.Name
+	}
+
+	for _, t := range events.ToolResults() {
+		name := names[t.CallID]
+
+		// The knowledge result carries the absolute path of the document it cites, so
+		// this prints how many results came back rather than the result itself.
+		if name != "knowledge_search" {
+			fmt.Printf("%s returned %s\n", name, t.Output)
+
+			continue
+		}
+
+		var hits struct {
+			Results []json.RawMessage `json:"results"`
+		}
+
+		err := json.Unmarshal([]byte(t.Output), &hits)
+		if err != nil {
+			fmt.Println("knowledge_search returned unreadable output:", err)
+
+			continue
+		}
+
+		fmt.Printf("knowledge_search results: %d\n", len(hits.Results))
+	}
 }
 
 // hashEmbedder embeds text by hashing its words into a fixed number of dimensions,

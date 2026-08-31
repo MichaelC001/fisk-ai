@@ -18,6 +18,14 @@ import (
 func Config(tb testing.TB, app *FakeApp, opts ...ConfigOption) *config.Config {
 	tb.Helper()
 
+	return BuildConfig(app, opts...)
+}
+
+// BuildConfig is Config without a testing.TB, for a func Example or any other caller
+// outside a test. It sets the fields a run needs and leaves the rest at their zero
+// values, so a caller wanting the file defaults and the derived identity starts from
+// config.NewConfig and calls Prepare instead.
+func BuildConfig(app *FakeApp, opts ...ConfigOption) *config.Config {
 	cfg := &config.Config{ApplicationPath: app.Path, Identity: "agent"}
 	cfg.LLM.Model = "test-model"
 	cfg.LLM.Budget.MaxIterations = 20

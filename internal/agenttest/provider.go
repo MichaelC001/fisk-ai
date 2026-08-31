@@ -36,16 +36,28 @@ type ScriptedProvider struct {
 func NewScriptedProvider(tb testing.TB, responses ...*llm.Response) *ScriptedProvider {
 	tb.Helper()
 
+	p, err := BuildScriptedProvider(responses...)
+	if err != nil {
+		tb.Fatalf("%v", err)
+	}
+
+	return p
+}
+
+// BuildScriptedProvider is NewScriptedProvider without a testing.TB, for a func Example
+// or any other caller outside a test. It returns an error naming the position of the
+// first nil response.
+func BuildScriptedProvider(responses ...*llm.Response) (*ScriptedProvider, error) {
 	for i, r := range responses {
 		if r == nil {
-			tb.Fatalf("agenttest: NewScriptedProvider response %d is nil", i)
+			return nil, fmt.Errorf("agenttest: scripted response %d is nil", i)
 		}
 	}
 
 	return &ScriptedProvider{
 		caps:      llm.Caps{Provider: "anthropic", SupportsToolSearch: true},
 		responses: responses,
-	}
+	}, nil
 }
 
 // SetCapabilities overrides the capabilities the provider declares, for a spec that

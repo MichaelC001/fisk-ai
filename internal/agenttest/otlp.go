@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -109,6 +110,16 @@ type OTLPRequest struct {
 func NewOTLPReceiver(tb testing.TB) *OTLPReceiver {
 	tb.Helper()
 
+	r := BuildOTLPReceiver()
+	tb.Cleanup(r.Close)
+
+	return r
+}
+
+// BuildOTLPReceiver is NewOTLPReceiver without a testing.TB, for a func Example or any
+// other caller outside a test. The caller calls Close where NewOTLPReceiver registers it
+// as the test's cleanup.
+func BuildOTLPReceiver() *OTLPReceiver {
 	r := &OTLPReceiver{}
 
 	mux := http.NewServeMux()
@@ -116,9 +127,13 @@ func NewOTLPReceiver(tb testing.TB) *OTLPReceiver {
 	mux.HandleFunc("/v1/metrics", r.handleMetrics)
 
 	r.server = httptest.NewServer(mux)
-	tb.Cleanup(r.server.Close)
 
 	return r
+}
+
+// Close stops the receiver's server and waits for the requests it is still serving.
+func (r *OTLPReceiver) Close() {
+	r.server.Close()
 }
 
 // Endpoint is the base URL to configure as telemetry.endpoint.
@@ -141,6 +156,17 @@ func (r *OTLPReceiver) Spans() []OTLPSpan {
 func (r *OTLPReceiver) Span(tb testing.TB, prefix string) OTLPSpan {
 	tb.Helper()
 
+	span, err := r.FindSpan(prefix)
+	if err != nil {
+		tb.Fatalf("%v", err)
+	}
+
+	return span
+}
+
+// FindSpan is Span without a testing.TB, for a func Example or any other caller outside
+// a test. No span matching the prefix is an error listing the spans that did arrive.
+func (r *OTLPReceiver) FindSpan(prefix string) (OTLPSpan, error) {
 	var found []OTLPSpan
 	var names []string
 	for _, s := range r.Spans() {
@@ -151,10 +177,10 @@ func (r *OTLPReceiver) Span(tb testing.TB, prefix string) OTLPSpan {
 	}
 
 	if len(found) != 1 {
-		tb.Fatalf("expected exactly one %q span, got %d, received: %v", prefix, len(found), names)
+		return OTLPSpan{}, fmt.Errorf("expected exactly one %q span, got %d, received: %v", prefix, len(found), names)
 	}
 
-	return found[0]
+	return found[0], nil
 }
 
 // SpansNamed returns every span whose name starts with prefix, in arrival order.
@@ -181,17 +207,27 @@ func (r *OTLPReceiver) Metrics() []OTLPMetric {
 func (r *OTLPReceiver) Metric(tb testing.TB, name string) OTLPMetric {
 	tb.Helper()
 
+	metric, err := r.FindMetric(name)
+	if err != nil {
+		tb.Fatalf("%v", err)
+	}
+
+	return metric
+}
+
+// FindMetric is Metric without a testing.TB, for a func Example or any other caller
+// outside a test. No instrument of that name is an error listing the instruments that did
+// arrive.
+func (r *OTLPReceiver) FindMetric(name string) (OTLPMetric, error) {
 	var names []string
 	for _, m := range r.Metrics() {
 		names = append(names, m.Name)
 		if m.Name == name {
-			return m
+			return m, nil
 		}
 	}
 
-	tb.Fatalf("no %q instrument arrived, received: %v", name, names)
-
-	return OTLPMetric{}
+	return OTLPMetric{}, fmt.Errorf("no %q instrument arrived, received: %v", name, names)
 }
 
 // Requests returns the shape of each export request.

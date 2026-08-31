@@ -44,6 +44,13 @@ var _ a2a.ReplySetTransport = (*FakeTransport)(nil)
 // answer with a success reply carrying "ok"; use SetToolReply to change it.
 func NewFakeTransport(tb testing.TB, card a2a.AgentCard) *FakeTransport {
 	tb.Helper()
+	return BuildFakeTransport(card)
+}
+
+// BuildFakeTransport is NewFakeTransport without a testing.TB, for a func Example or any
+// other caller outside a test. The transport answers from the card it was given and
+// dials nothing, so Close is there to satisfy the interface.
+func BuildFakeTransport(card a2a.AgentCard) *FakeTransport {
 	return &FakeTransport{card: card, toolOutput: "ok"}
 }
 

@@ -40,6 +40,12 @@ var _ memory.Store = (*FakeMemoryStore)(nil)
 // NewFakeMemoryStore returns an empty in-memory store.
 func NewFakeMemoryStore(tb testing.TB) *FakeMemoryStore {
 	tb.Helper()
+	return BuildFakeMemoryStore()
+}
+
+// BuildFakeMemoryStore is NewFakeMemoryStore without a testing.TB, for a func Example or
+// any other caller outside a test.
+func BuildFakeMemoryStore() *FakeMemoryStore {
 	return &FakeMemoryStore{items: map[string]fakeMemory{}, info: memory.Info{Backend: "fake"}}
 }
 

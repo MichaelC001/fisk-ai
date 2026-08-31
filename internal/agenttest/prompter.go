@@ -47,7 +47,18 @@ type ScriptedPrompter struct {
 // reporting true; set the fields for the interactions the spec drives.
 func NewScriptedPrompter(tb testing.TB) *ScriptedPrompter {
 	tb.Helper()
-	return &ScriptedPrompter{tb: tb, canPrompt: true}
+
+	p := BuildScriptedPrompter()
+	p.tb = tb
+
+	return p
+}
+
+// BuildScriptedPrompter is NewScriptedPrompter without a testing.TB, for a func Example
+// or any other caller outside a test. Either constructor produces a prompter that reports
+// an unscripted call the same way, through the returned error and ScriptingFaults.
+func BuildScriptedPrompter() *ScriptedPrompter {
+	return &ScriptedPrompter{canPrompt: true}
 }
 
 // CanPrompt reports whether an operator is reachable; true unless NoOperator was set.
