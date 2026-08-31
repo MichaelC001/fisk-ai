@@ -389,6 +389,14 @@ func validateRunTarget(cfg *config.Config, remote bool) error {
 			return fmt.Errorf("--api-key is required to run an agent in this process; set it, export ANTHROPIC_API_KEY, or pass --nats-context to talk to an agent that already has one")
 		}
 
+		// This command injects no tools of its own, so the configuration is the whole
+		// answer and the refusal can come before telemetry, the stores and the debug
+		// files are opened. A Go program embedding the agent may inject its own, which
+		// is why config validation stays quiet about this and the caller asks.
+		if !cfg.SuppliesTools() {
+			return fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients in %q", configFile)
+		}
+
 		return nil
 	}
 

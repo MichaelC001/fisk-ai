@@ -153,7 +153,10 @@ var _ = Describe("validateRunTarget", func() {
 	var cfg *config.Config
 
 	BeforeEach(func() {
-		cfg = &config.Config{Identity: "worker1"}
+		// An application path so the config supplies a tool. These specs are about the
+		// credential and identity rules, and a config with nothing to call is refused
+		// before either is reached.
+		cfg = &config.Config{Identity: "worker1", ApplicationPath: "/usr/bin/abt"}
 		apiKey = ""
 		setAPIKey = false
 		setBaseURL = false
@@ -179,11 +182,25 @@ var _ = Describe("validateRunTarget", func() {
 			Expect(validateRunTarget(cfg, false)).To(Succeed())
 		})
 
+		// This command injects no tools, so a config naming none is refused here rather
+		// than after the stores and the debug files have been opened.
+		It("Should refuse a config that supplies no tools", func() {
+			apiKey = "sk-test"
+			cfg.ApplicationPath = ""
+
+			err := validateRunTarget(cfg, false)
+			Expect(err).To(MatchError(ContainSubstring("no tools available")))
+			Expect(err).To(MatchError(ContainSubstring("harness.memory")))
+
+			cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
+			Expect(validateRunTarget(cfg, false)).To(Succeed())
+		})
+
 		// A local run opens no bus, so the identity is only part of what names its
 		// journals and a derived one costs nothing.
 		It("Should not ask for a named identity", func() {
 			apiKey = "sk-test"
-			derived := &config.Config{}
+			derived := &config.Config{ApplicationPath: "/usr/bin/abt"}
 
 			Expect(derived.IdentityIsNamed()).To(BeFalse())
 			Expect(validateRunTarget(derived, false)).To(Succeed())

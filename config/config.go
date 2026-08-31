@@ -98,7 +98,11 @@ type Config struct {
 	// which is how Prepare tells an assignment from its own earlier write and stops
 	// treating the identity as derived.
 	identityValueDerived string
-	// ApplicationPath is the app to run and introspect for tools.
+	// ApplicationPath is the app to run and introspect for tools. It is optional only
+	// when something else gives the agent a tool to call: a built-in enabled under
+	// harness, a remote agent's tools, an MCP server, or tools a Go caller injects
+	// through agent.Options.CustomTools. SuppliesTools answers for everything but the
+	// last, which no configuration describes.
 	ApplicationPath string `json:"application_path" yaml:"application_path"`
 	// NatsContext is the name of a NATS context (as managed by `nats context`
 	// and resolved by jsm.go/natscontext) used to connect to NATS for importing
@@ -1993,6 +1997,29 @@ func (c *Config) HumanInTheLoopEnabled() bool {
 // human-in-the-loop tools they are only ever active in agent mode.
 func (c *Config) MemoryEnabled() bool {
 	return c.Harness.Memory != nil && c.Harness.Memory.Enabled
+}
+
+// SuppliesTools reports whether this configuration alone gives the agent something to
+// call: a wrapped application, any of the built-in human-in-the-loop, memory or
+// knowledge tools, remote tools imported from a peer, or an MCP server.
+//
+// A run needs one callable tool and refuses to start without any. It counts tools the
+// caller injected through agent.Options.CustomTools as well, which no configuration
+// describes, so a program building its own tools in Go runs on a config this reports
+// false for. Validation stays silent about it for that reason, and a caller that
+// injects nothing, such as the fisk-ai commands, asks this before starting a run so the
+// refusal arrives before anything is opened.
+//
+// It answers for the tools a run is offered, not for whether the run can proceed:
+// include and exclude filters can empty a wrapped application's command list, which
+// only the run discovers.
+func (c *Config) SuppliesTools() bool {
+	return c.ApplicationPath != "" ||
+		c.HumanInTheLoopEnabled() ||
+		c.MemoryEnabled() ||
+		c.RAGEnabled() ||
+		len(c.RemoteTools) > 0 ||
+		len(c.MCPClients) > 0
 }
 
 // MemoryIndexEnabled reports whether the list of stored memories should be
