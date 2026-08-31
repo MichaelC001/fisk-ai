@@ -69,9 +69,22 @@ func Example() {
 func runAgent() error {
 	ctx := context.Background()
 
-	// One temp directory holds the corpus, the knowledge index, the memories and the
-	// run journal, so the example leaves nothing behind.
-	root, err := os.MkdirTemp("", "runagent")
+	// One directory holds the corpus, the knowledge index, the memories and the run
+	// journal, so the example leaves nothing behind.
+	//
+	// The name is fixed rather than drawn by os.MkdirTemp, because a knowledge result
+	// carries the path of the file it came from and harness.pii defaults to redact, so the
+	// scanner reads this path on every run. A random suffix makes the scan's answer
+	// random: nine or ten bare digits match the SSN and NPI rules, and a seventeen
+	// character run of letters and digits matches the VIN rule, so "runagent" plus
+	// MkdirTemp's number redacted the path on about one run in twenty and printed a
+	// warning the Output above does not carry. These four words match nothing.
+	root := filepath.Join(os.TempDir(), "fisk-ai-runagent-example")
+	err := os.RemoveAll(root)
+	if err != nil {
+		return err
+	}
+	err = os.MkdirAll(root, 0o700)
 	if err != nil {
 		return err
 	}
