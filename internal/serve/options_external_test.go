@@ -149,6 +149,42 @@ var _ = Describe("Options", func() {
 		})
 	})
 
+	Describe("ResourceOptions.Provider", func() {
+		It("Should have the runs share a provider the caller supplied", func() {
+			cfg := servedConfig()
+			provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("from the caller's provider"))
+
+			// A configuration naming a provider nobody registered: NewResources returning
+			// this provider is what proves it never consulted llm_provider.
+			cfg.LLM.Provider = "no-such-provider"
+
+			res, err := serve.NewResources(cfg, serve.ResourceOptions{
+				Provider: provider,
+				Logger:   quietLogger(),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(res.Close)
+
+			Expect(res.Provider).To(BeIdenticalTo(llm.Provider(provider)))
+
+			opts := serve.Options{Config: cfg, Logger: quietLogger()}
+			res.ApplyTo(&opts)
+
+			out := runWork(&serve.Work{ID: "job-1", Prompt: "who answered"}, opts)
+			Expect(out.Err).ToNot(HaveOccurred())
+			Expect(out.Reason).To(Equal(runstate.ReasonCompleted))
+			Expect(out.Text).To(Equal("from the caller's provider"))
+		})
+
+		It("Should build the configured provider when the caller supplies none", func() {
+			cfg := servedConfig()
+			cfg.LLM.Provider = "no-such-provider"
+
+			_, err := serve.NewResources(cfg, serve.ResourceOptions{Logger: quietLogger()})
+			Expect(err).To(MatchError(ContainSubstring("no-such-provider")))
+		})
+	})
+
 	Describe("Hooks", func() {
 		It("Should let a PreToolUse hook deny a call in a hosted run", func() {
 			var seen []string

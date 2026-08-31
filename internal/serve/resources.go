@@ -42,6 +42,30 @@ type ResourceOptions struct {
 	APIKey  string
 	BaseURL string
 
+	// Provider, when non-nil, is the model provider the runs share, and APIKey and
+	// BaseURL are then unread. Nil builds the one llm_provider names, which is what
+	// every fisk-ai command does.
+	//
+	// A caller supplies one to wrap another with retries or accounting, to script the
+	// model in a test, or to reach an endpoint no configuration describes. The
+	// alternative is llm.Register, which panics on a duplicate name and is documented
+	// for init, so two servers in one process could not each have their own.
+	//
+	// It arrives with whatever middlewares it was built with. The configured path adds
+	// telemetry.HTTPMiddleware for the per-call HTTP spans, and a supplied provider
+	// that wants those adds it itself.
+	Provider llm.Provider
+
+	// RAG is passed to rag.Open when the knowledge index is opened. Its Embedder is the
+	// one thing a knowledge store cannot take from a configuration, so a worker indexing
+	// or searching against Ollama, Bedrock, a local model or a test double supplies it
+	// here. The zero value opens the store the configuration alone describes.
+	//
+	// A supplied Embedder turns the vector tier on whatever knowledge.embeddings says,
+	// and the identity it pins is checked against the index on every later open, so a
+	// worker and whatever wrote the index have to agree on it. See rag.Options.
+	RAG rag.Options
+
 	// StoreDir is the base directory the persistent stores resolve relative paths
 	// under. Empty keeps each store's own default, which resolves against the process
 	// working directory. It must be the same value given to Options.StoreDir, or the
@@ -180,7 +204,7 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 		r.ownsConns = true
 	}
 
-	err = r.openKnowledge(cfg, opts.StoreDir, opts.Logger)
+	err = r.openKnowledge(cfg, opts.StoreDir, opts.RAG, opts.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -246,19 +270,25 @@ func (r *Resources) connectMCP(cfg *config.Config, version string, log *slog.Log
 	return nil
 }
 
-// newProvider builds the model provider the runs share.
+// newProvider returns the model provider the runs share: the one the caller supplied, or
+// one built from the configuration.
 //
-// It carries the telemetry hook and nothing else. agent.Run assembles that hook only on
-// the path where it builds a provider itself, so a provider handed to it arrives with
-// whatever hooks it was built with and no others: leaving this out would turn sharing a
-// provider into silently dropping every per-call HTTP span. The hook holds no state of
-// its own, reading the span it annotates off the request's context, so one instance
-// serves concurrent runs correctly.
+// The built one carries the telemetry hook and nothing else. agent.Run assembles that hook
+// only on the path where it builds a provider itself, so a provider handed to it arrives
+// with whatever hooks it was built with and no others: leaving this out would turn sharing
+// a provider into silently dropping every per-call HTTP span. The hook holds no state of
+// its own, reading the span it annotates off the request's context, so one instance serves
+// concurrent runs correctly. A supplied provider is taken as the caller built it, hook
+// included or not.
 //
 // The debug dump and the request tracer are not here, and that is not an oversight:
 // both write a per-run file, which a process serving many runs at once has nowhere to
 // put.
 func newProvider(cfg *config.Config, opts ResourceOptions) (llm.Provider, error) {
+	if opts.Provider != nil {
+		return opts.Provider, nil
+	}
+
 	provider, err := llm.NewProvider(cfg.LLMProvider(), llm.Config{
 		APIKey:      opts.APIKey,
 		BaseURL:     opts.BaseURL,
@@ -280,12 +310,12 @@ func newProvider(cfg *config.Config, opts ResourceOptions) (llm.Provider, error)
 // released here and left to the runs, which open one each and see it the moment it
 // exists. An index that is there is shared, since a reindex writes the same file and a
 // reader sees the committed result.
-func (r *Resources) openKnowledge(cfg *config.Config, storeDir string, log *slog.Logger) error {
+func (r *Resources) openKnowledge(cfg *config.Config, storeDir string, ragOpts rag.Options, log *slog.Logger) error {
 	if !cfg.RAGEnabled() {
 		return nil
 	}
 
-	store, err := rag.Open(cfg, storeDir, rag.Options{})
+	store, err := rag.Open(cfg, storeDir, ragOpts)
 	if err != nil {
 		return fmt.Errorf("opening the knowledge index: %w", err)
 	}
