@@ -10,6 +10,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -105,9 +106,9 @@ var _ = Describe("LoadSession", func() {
 })
 
 // sessionJetStream starts an embedded JetStream NATS server, creates the stream the
-// jetstream session backend binds, and returns a client connection. Both the server and
-// the connection are torn down when the spec ends.
-func sessionJetStream(stream string) *nats.Conn {
+// jetstream session backend binds, and returns the server together with a client
+// connection. Both are torn down when the spec ends.
+func sessionJetStream(stream string) (*natsd.Server, *nats.Conn) {
 	GinkgoHelper()
 
 	ns, err := natsd.NewServer(&natsd.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: GinkgoT().TempDir()})
@@ -117,7 +118,7 @@ func sessionJetStream(stream string) *nats.Conn {
 	Expect(ns.ReadyForConnections(10 * time.Second)).To(BeTrue())
 	DeferCleanup(ns.Shutdown)
 
-	nc, err := nats.Connect(ns.ClientURL())
+	nc, err := nats.Connect(ns.ClientURL(), nats.Name("spec setup"))
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(nc.Close)
 
@@ -133,8 +134,73 @@ func sessionJetStream(stream string) *nats.Conn {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	return nc
+	return ns, nc
 }
+
+// natsContextFor writes a NATS context pointing at ns where natscontext.Connect looks
+// and returns its name, so a spec can have a library dial for itself rather than hand
+// it a connection.
+func natsContextFor(ns *natsd.Server) string {
+	GinkgoHelper()
+
+	home := GinkgoT().TempDir()
+	GinkgoT().Setenv("XDG_CONFIG_HOME", home)
+
+	dir := filepath.Join(home, "nats", "context")
+	Expect(os.MkdirAll(dir, 0o700)).To(Succeed())
+
+	body, err := json.Marshal(map[string]string{"url": ns.ClientURL()})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(os.WriteFile(filepath.Join(dir, "spectest.json"), body, 0o600)).To(Succeed())
+
+	return "spectest"
+}
+
+// announcedNames are the connection names ns has been given, open and closed alike. A
+// pre-flight read dials, reads and releases, so by the time it returns its connection
+// is among the closed ones.
+func announcedNames(ns *natsd.Server) []string {
+	GinkgoHelper()
+
+	connz, err := ns.Connz(&natsd.ConnzOptions{State: natsd.ConnAll})
+	Expect(err).NotTo(HaveOccurred())
+
+	var out []string
+	for _, c := range connz.Conns {
+		out = append(out, c.Name)
+	}
+
+	return out
+}
+
+var _ = Describe("Integration: LoadSession dialing for itself", Label("integration"), func() {
+	// A read with no injected connection dials from the configuration, so the product
+	// there is what an operator sees for the pre-flight as well as for the run. Each
+	// case dials a real server and asks it what name it got.
+	DescribeTable("Should announce the product the configuration names",
+		func(product string, productVersion string, want string) {
+			ns, _ := sessionJetStream("FISK_SESSIONS")
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+			cfg.Identity = "worker-3"
+			cfg.NatsContext = natsContextFor(ns)
+			cfg.Product = product
+			cfg.ProductVersion = productVersion
+			cfg.Harness.Sessions = &config.SessionConfig{
+				Backend: runstate.BackendJetStream,
+				Options: json.RawMessage(`{"stream":"FISK_SESSIONS"}`),
+			}
+
+			_, err := agent.LoadSession(context.Background(), cfg, "no-such-run", agent.SessionOptions{})
+			Expect(err).To(MatchError(runstate.ErrNotFound))
+
+			Expect(announcedNames(ns)).To(ContainElement(want))
+		},
+		Entry("unset", "", "", "fisk-ai worker-3"),
+		Entry("product and version", "acme-agent", "4.5", "acme-agent/4.5 worker-3"),
+		Entry("product alone", "acme-agent", "", "acme-agent worker-3"),
+	)
+})
 
 var _ = Describe("Integration: LoadSession over a jetstream store", Label("integration"), func() {
 	// A jetstream backend reads the journal off whichever server the connection reaches,
@@ -142,7 +208,7 @@ var _ = Describe("Integration: LoadSession over a jetstream store", Label("integ
 	// configured NATS context does not exist, so a dial fails and only the injected
 	// connection can reach the stream the run wrote to.
 	It("Should borrow the injected connection", func() {
-		nc := sessionJetStream("FISK_SESSIONS")
+		_, nc := sessionJetStream("FISK_SESSIONS")
 
 		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
 		cfg := agenttest.Config(GinkgoTB(), app)

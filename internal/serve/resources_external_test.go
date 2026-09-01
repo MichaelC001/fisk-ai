@@ -6,8 +6,12 @@ package serve_test
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"time"
 
+	natsd "github.com/nats-io/nats-server/v2/server"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -16,6 +20,50 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
+
+// dialableContext starts an in-process NATS server and writes a context pointing at it
+// where natscontext.Connect looks, returning the server and the context name to
+// configure. Both the server and the context go away with the spec.
+func dialableContext() (*natsd.Server, string) {
+	GinkgoHelper()
+
+	ns, err := natsd.NewServer(&natsd.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true})
+	Expect(err).ToNot(HaveOccurred())
+
+	go ns.Start()
+	Expect(ns.ReadyForConnections(10 * time.Second)).To(BeTrue())
+	DeferCleanup(ns.Shutdown)
+
+	home := GinkgoT().TempDir()
+	GinkgoT().Setenv("XDG_CONFIG_HOME", home)
+
+	dir := filepath.Join(home, "nats", "context")
+	Expect(os.MkdirAll(dir, 0o700)).To(Succeed())
+
+	body, err := json.Marshal(map[string]string{"url": ns.ClientURL()})
+	Expect(err).ToNot(HaveOccurred())
+	Expect(os.WriteFile(filepath.Join(dir, "spectest.json"), body, 0o600)).To(Succeed())
+
+	return ns, "spectest"
+}
+
+// announcedNames are the connection names ns has been given, open and closed alike, so
+// a spec reads what the server saw rather than what the client asked for. Closed ones
+// are included because a caller that dials, reads and releases has nothing open left to
+// look at by the time it returns.
+func announcedNames(ns *natsd.Server) []string {
+	GinkgoHelper()
+
+	connz, err := ns.Connz(&natsd.ConnzOptions{State: natsd.ConnAll})
+	Expect(err).ToNot(HaveOccurred())
+
+	var out []string
+	for _, c := range connz.Conns {
+		out = append(out, c.Name)
+	}
+
+	return out
+}
 
 var _ = Describe("NewResources", func() {
 	var cfg *config.Config
@@ -117,6 +165,30 @@ var _ = Describe("NewResources", func() {
 		Expect(res.Close()).To(Succeed())
 		Expect(res.Conns).To(BeIdenticalTo(supplied))
 	})
+
+	// The product is the first half of what an operator reads in nats server report
+	// connections, so a program embedding this library announces its own name there.
+	// Each of these dials for real and asks the server what name it was given.
+	DescribeTable("Should announce the product the configuration names",
+		func(product string, productVersion string, want string) {
+			ns, ctxName := dialableContext()
+
+			cfg.NatsContext = ctxName
+			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
+			cfg.Identity = "worker-3"
+			cfg.Product = product
+			cfg.ProductVersion = productVersion
+
+			res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
+
+			Expect(announcedNames(ns)).To(ContainElement(want))
+		},
+		Entry("unset", "", "", "fisk-ai worker-3"),
+		Entry("product and version", "acme-agent", "4.5", "acme-agent/4.5 worker-3"),
+		Entry("product alone", "acme-agent", "", "acme-agent worker-3"),
+	)
 
 	It("Should be safe to Close twice", func() {
 		res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{})

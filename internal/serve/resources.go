@@ -20,11 +20,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
-// productName is what a connection NewResources dials for itself calls itself to a
-// NATS server. It dials only when ResourceOptions.Conns is nil, so an embedder that
-// cares what its connections are called supplies its own Provider.
-const productName = "fisk-ai"
-
 // ResourceOptions are what building the shared resources needs that no configuration
 // can state: what the process was told on its command line, and what it already holds.
 type ResourceOptions struct {
@@ -202,7 +197,7 @@ func NewResources(ctx context.Context, cfg *config.Config, opts ResourceOptions)
 			connName = cfg.Identity
 		}
 
-		r.Conns, err = conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: productName, Name: connName})
+		r.Conns, err = conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: connName})
 		if err != nil {
 			return nil, fmt.Errorf("connecting to NATS: %w", err)
 		}

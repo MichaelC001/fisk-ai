@@ -62,12 +62,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry/genai"
 )
 
-// productName is what a connection Run dials for itself calls itself to a NATS
-// server. Run dials only when Options.Conns is nil, and an embedder that cares what
-// its connections are called supplies its own Provider, so this names the CLI's own
-// fallback rather than deciding for a caller.
-const productName = "fisk-ai"
-
 // defaultMaxOutputTokens caps the tokens generated per LLM call. It is distinct
 // from the cumulative llm.budget.max_tokens spend cap: this bounds a single
 // response and must stay within every supported model's per-response limit,
@@ -1028,7 +1022,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	if opts.Conns != nil {
 		natsConns = opts.Conns
 	} else if memNeedsNats || sessionNeedsNats || transportNeedsNats {
-		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: productName, Name: cfg.Identity})
+		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 		if err != nil {
 			return res, fmt.Errorf("connecting to NATS: %w", err)
 		}
@@ -2306,9 +2300,11 @@ func LoadSession(ctx context.Context, cfg *config.Config, id string, opts Sessio
 	return store.Load(ctx, id)
 }
 
-// dialSessionNats dials the connection a jetstream session read needs.
+// dialSessionNats dials the connection a jetstream session read needs, announcing it
+// under the configuration's product so the pre-flight read and the run that follows
+// appear on the server under one name.
 func dialSessionNats(ctx context.Context, cfg *config.Config) (*conns.Provider, error) {
-	return conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: productName, Name: cfg.Identity})
+	return conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 }
 
 // resumeHazards reports the resume situation that can misbehave: a pause at a

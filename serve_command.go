@@ -93,7 +93,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		}
 	}
 
-	cfg, err := config.ParseConfigFileForMode(c.configFile, config.ModeServe)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(c.configFile, config.ModeServe))
 	if err != nil {
 		return err
 	}

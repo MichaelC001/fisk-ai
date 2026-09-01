@@ -25,12 +25,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
-// productName is what a connection this package dials calls itself to a NATS server.
-// It is a literal because this package is the CLI's run-path helper rather than a
-// library an embedder drives: one that dials its own connection hands it in through
-// conns and never reaches here.
-const productName = "fisk-ai"
-
 // remoteToolNamePattern is the character set an imported tool's local name must
 // match to be usable as a model tool name; it mirrors the server and MCP rule. A
 // name outside it (after the alias prefix) is skipped rather than silently broken.
@@ -96,7 +90,7 @@ func DiscoverForInfo(ctx context.Context, cfg *config.Config, taken map[string]b
 		return nil, nil
 	}
 
-	provider, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: productName, Name: cfg.Identity})
+	provider, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 	if err != nil {
 		return nil, err
 	}

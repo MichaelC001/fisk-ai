@@ -12,6 +12,8 @@ import (
 
 	"github.com/choria-io/fisk"
 
+	"github.com/choria-io/fisk-ai/config"
+
 	// Link the file session backend in so it registers itself. The run path links it
 	// transitively through the agent package; importing it here as well keeps the
 	// session subcommands, which construct the store directly, self-sufficient.
@@ -23,10 +25,20 @@ import (
 // default build ldflags set -X main.version=<tag>, so no extra config is needed.
 var version = "devel"
 
-// productName is what this program calls itself to a NATS server, the first half of
-// the name an operator reads in nats server report connections. The libraries take it
-// as a parameter, so an embedder announces its own name rather than ours.
-const productName = "fisk-ai"
+// versionedConfig records this program's build version on a configuration as it is
+// loaded, so every connection dialed from it announces "fisk-ai/<version>" to a NATS
+// server. Product is left empty, which announces "fisk-ai". Wrapping the load is what
+// covers every command: a configuration that reaches a dial without going through here
+// would announce the product with no version.
+func versionedConfig(cfg *config.Config, err error) (*config.Config, error) {
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.ProductVersion = version
+
+	return cfg, nil
+}
 
 var (
 	configFile  string

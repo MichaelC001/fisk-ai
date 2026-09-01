@@ -38,9 +38,9 @@ func openSessionStore(ctx context.Context) (runstate.Store, func(), error) {
 	var cfg *config.Config
 	var err error
 	if sessionConfigFile == "" {
-		cfg, err = config.NewConfig()
+		cfg, err = versionedConfig(config.NewConfig())
 	} else {
-		cfg, err = config.ParseConfigFileForMode(sessionConfigFile, config.ModeMCP)
+		cfg, err = versionedConfig(config.ParseConfigFileForMode(sessionConfigFile, config.ModeMCP))
 	}
 	if err != nil {
 		return nil, noop, err
@@ -72,7 +72,7 @@ func sessionStoreFor(ctx context.Context, cfg *config.Config) (runstate.Store, f
 	env := runstate.RuntimeEnv{}
 	cleanup := noop
 	if runstate.NeedsNats(backend) {
-		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: productName, Name: cfg.Identity})
+		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 		if err != nil {
 			// conns already names the NATS context; add the stream so an
 			// unreachable jetstream backend names both. The stream is decoded

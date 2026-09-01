@@ -241,7 +241,7 @@ func runAction(_ *fisk.ParseContext) error {
 // the name, is not required at all.
 func loadRunConfig(remote bool) (*config.Config, error) {
 	if !remote {
-		return config.ParseConfigFile(configFile)
+		return versionedConfig(config.ParseConfigFile(configFile))
 	}
 
 	cfg, err := clientConfig()
@@ -272,10 +272,10 @@ func loadRunConfig(remote bool) (*config.Config, error) {
 // was started.
 func clientConfig() (*config.Config, error) {
 	if runIdentity != "" && !setConfigFile {
-		return config.NewConfig()
+		return versionedConfig(config.NewConfig())
 	}
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	// The file was the default rather than a path somebody chose, and all this run wanted
 	// from it was a name, so say how to give one instead. A file a person named is their
 	// path to correct.

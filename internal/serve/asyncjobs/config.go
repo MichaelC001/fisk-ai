@@ -16,11 +16,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-// productName is what the connection this channel dials calls itself to a NATS
-// server. The work queue engine needs nats.UseOldRequestStyle, so this channel dials
-// its own rather than sharing the process's, which is why it names one at all.
-const productName = "fisk-ai"
-
 // Builder describes this channel to serve.Endpoints, so a program that wants the
 // queued-jobs endpoint links it in and a program that does not never references this
 // package at all.
@@ -87,7 +82,7 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 	}
 
 	provider, err := conns.ConnectNatsContext(ctx, natsContext, conns.Config{
-		Product: productName,
+		Product: cfg.ProductName(),
 		Name:    "jobs " + cfg.Identity,
 		Options: []nats.Option{nats.UseOldRequestStyle()},
 	})

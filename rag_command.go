@@ -98,7 +98,7 @@ func knowledgeConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("--store-dir must be an absolute path, got %q", knowledgeStoreDir)
 	}
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	if err != nil {
 		return nil, err
 	}
