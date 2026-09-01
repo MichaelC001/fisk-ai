@@ -29,6 +29,31 @@ var _ = Describe("ValidateID", func() {
 	})
 })
 
+var _ = Describe("PrepareMeta", func() {
+	It("Should stamp a meta record the caller left unversioned", func() {
+		meta := MetaRecord{RunID: "my-run_1"}
+		Expect(PrepareMeta(&meta)).To(Succeed())
+		Expect(meta.Version).To(Equal(Version))
+	})
+
+	It("Should leave a record already carrying this version alone", func() {
+		meta := MetaRecord{RunID: "my-run_1", Version: Version}
+		Expect(PrepareMeta(&meta)).To(Succeed())
+		Expect(meta.Version).To(Equal(Version))
+	})
+
+	// Zero is the stamp-me case rather than a rejection, so the rejected values are
+	// the ones above this build's own.
+	It("Should reject a version this build does not write", func() {
+		for _, v := range []int{Version + 1, Version + 2} {
+			meta := MetaRecord{RunID: "my-run_1", Version: v}
+			err := PrepareMeta(&meta)
+			Expect(err).To(MatchError(ErrVersion), "version %d must be rejected", v)
+			Expect(meta.Version).To(Equal(v), "a rejected record is not restamped")
+		}
+	})
+})
+
 var _ = Describe("CheckAppend", func() {
 	It("Should report the next seq as neither a skip nor a gap", func() {
 		skip, err := CheckAppend(4, 5)

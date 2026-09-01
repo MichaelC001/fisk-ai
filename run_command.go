@@ -148,7 +148,7 @@ func runAction(_ *fisk.ParseContext) error {
 	// The store the hosted agent journals into and the channel reads a conversation back
 	// from. It is opened here so both are given the same one: two stores would have the
 	// channel reading a conversation the run beside it is not writing.
-	sessions, releaseSessions, err := sessionStoreFor(cfg)
+	sessions, releaseSessions, err := sessionStoreFor(runCtx, cfg)
 	if err != nil {
 		return err
 	}
@@ -241,7 +241,7 @@ func runAction(_ *fisk.ParseContext) error {
 // the name, is not required at all.
 func loadRunConfig(remote bool) (*config.Config, error) {
 	if !remote {
-		return config.ParseConfigFile(configFile)
+		return versionedConfig(config.ParseConfigFile(configFile))
 	}
 
 	cfg, err := clientConfig()
@@ -272,10 +272,10 @@ func loadRunConfig(remote bool) (*config.Config, error) {
 // was started.
 func clientConfig() (*config.Config, error) {
 	if runIdentity != "" && !setConfigFile {
-		return config.NewConfig()
+		return versionedConfig(config.NewConfig())
 	}
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	// The file was the default rather than a path somebody chose, and all this run wanted
 	// from it was a name, so say how to give one instead. A file a person named is their
 	// path to correct.
@@ -345,7 +345,7 @@ func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.
 		reporter = multiplex.Detect(os.Getenv, cfg.Identity)
 	}
 
-	host, err := dialAgent(cfg, runNatsContext, clientWorkerLogger(usesTUI), wire, reporter)
+	host, err := dialAgent(ctx, cfg, runNatsContext, clientWorkerLogger(usesTUI), wire, reporter)
 	if err != nil {
 		return err
 	}

@@ -13,7 +13,6 @@
     },
     "tool_result": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "tool_use_id",
         "result"

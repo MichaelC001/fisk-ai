@@ -91,7 +91,14 @@ func newFakeAPI() *fakeAPI {
 	}
 }
 
-func (f *fakeAPI) authTest(context.Context) (workspace, error) {
+// authTest answers the identity check, refusing a context that has ended the way the HTTP
+// call behind the real one does.
+func (f *fakeAPI) authTest(ctx context.Context) (workspace, error) {
+	err := ctx.Err()
+	if err != nil {
+		return workspace{}, err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

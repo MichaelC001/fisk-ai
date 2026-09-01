@@ -147,7 +147,7 @@ func Tools[T Tool](in []T) []Tool {
 // a result built here would be journaled and replayed on every later resume as the
 // answer the operator did not give. Every other failure is reported as an error result
 // with a nil error, because the model is what should reason about it.
-func ExecuteUse(t Tool, ctx context.Context, use llm.ToolUseBlock, deps ExecDeps) (llm.ToolResultBlock, *CommandExec, error) {
+func ExecuteUse(ctx context.Context, t Tool, use llm.ToolUseBlock, deps ExecDeps) (llm.ToolResultBlock, *CommandExec, error) {
 	out, err := t.Execute(ContextWithToolUseID(ctx, use.ID), use.Input, deps)
 	if err != nil {
 		if _, deferred := IsDeferred(err); deferred {

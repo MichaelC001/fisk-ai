@@ -14,7 +14,7 @@ import (
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -30,7 +30,7 @@ func discardLogger() *slog.Logger {
 func toolsFor(app *fisk.Application) []toolkit.Tool {
 	GinkgoHelper()
 
-	tools, err := fisk2.ApplicationTools(introspect(app))
+	tools, err := fisktool.ApplicationTools(introspect(app))
 	Expect(err).NotTo(HaveOccurred())
 
 	return toolkit.Tools(tools)
@@ -39,7 +39,7 @@ func toolsFor(app *fisk.Application) []toolkit.Tool {
 var _ = Describe("ExpectProtocol", func() {
 	It("Should return the decoded message when the protocol matches", func() {
 		req := NewToolRequest("ping", nil)
-		stampRequest(context.Background(), &req.Header, "me", "you")
+		StampRequest(context.Background(), &req.Header, "me", "you")
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -50,7 +50,7 @@ var _ = Describe("ExpectProtocol", func() {
 
 	It("Should reject a message whose protocol is not the one the path carries", func() {
 		req := NewDiscoveryRequest()
-		stampRequest(context.Background(), &req.Header, "me", "you")
+		StampRequest(context.Background(), &req.Header, "me", "you")
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 

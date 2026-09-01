@@ -19,6 +19,7 @@
 package a2aendpoint
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -38,7 +39,9 @@ func Builder() serve.EndpointBuilder {
 	return serve.EndpointBuilder{
 		Name:    "a2a",
 		Enabled: func(cfg *config.Config) bool { return cfg.A2AEnabled() },
-		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
+		// No context: these endpoints take the process's connection from opts and dial
+		// nothing of their own, so there is no construction I/O for one to govern.
+		Build: func(_ context.Context, cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 			return NewFromConfig(cfg, ConfigOptions{
 				Conns:      opts.Conns,
 				ConfigFile: opts.ConfigFile,

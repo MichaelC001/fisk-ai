@@ -72,9 +72,37 @@ var _ = Describe("FileStore", func() {
 		store = s
 	})
 
+	// No Version: Create stamps it, so every test here folds a journal whose version
+	// the store put there.
 	newMeta := func(id string) runstate.MetaRecord {
-		return runstate.MetaRecord{Version: runstate.Version, RunID: id, Prompt: "hello", Fingerprint: runstate.Fingerprint{Model: "claude-opus-4-8"}}
+		return runstate.MetaRecord{RunID: id, Prompt: "hello", Fingerprint: runstate.Fingerprint{Model: "claude-opus-4-8"}}
 	}
+
+	It("stamps the record version and leaves the caller's meta record alone", func() {
+		id := newID()
+		meta := newMeta(id)
+
+		j, err := store.Create(ctx, id, meta)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+		Expect(meta.Version).To(BeZero())
+
+		rs, err := store.Load(ctx, id)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rs.Version).To(Equal(runstate.Version))
+	})
+
+	It("refuses a meta record carrying a version it does not write", func() {
+		id := newID()
+		meta := newMeta(id)
+		meta.Version = runstate.Version + 1
+
+		_, err := store.Create(ctx, id, meta)
+		Expect(err).To(MatchError(runstate.ErrVersion))
+
+		_, err = store.Load(ctx, id)
+		Expect(err).To(MatchError(runstate.ErrNotFound))
+	})
 
 	It("creates, appends, and folds back a run", func() {
 		id := newID()

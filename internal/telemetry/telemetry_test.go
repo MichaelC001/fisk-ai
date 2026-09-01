@@ -16,6 +16,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var _ = Describe("Provider", func() {
@@ -312,6 +315,124 @@ func setupAgainst(ctx context.Context, srv *httptest.Server, noMetrics bool) *Pr
 
 	return p
 }
+
+// resourceFor resolves against env, starts a Provider through Setup and returns the
+// resource its spans carry.
+//
+// The resource is read off a recorded span because a TracerProvider exposes no getter
+// for it, and a collector sees the resource on a span. A second processor is
+// registered on the provider Setup built, so what is inspected is the resource Setup
+// itself assembled rather than one the spec rebuilt.
+func resourceFor(ctx context.Context, env func(string) string) *resource.Resource {
+	GinkgoHelper()
+
+	srv := collector(http.StatusOK)
+	DeferCleanup(srv.Close)
+
+	r, err := Resolve(Settings{Enabled: true, Endpoint: srv.URL, NoMetrics: true}, env)
+	Expect(err).ToNot(HaveOccurred())
+
+	p, err := Setup(ctx, r, "1.2.3")
+	Expect(err).ToNot(HaveOccurred())
+
+	DeferCleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		p.Shutdown(shutdownCtx)
+	})
+
+	exp := tracetest.NewInMemoryExporter()
+	p.tp.RegisterSpanProcessor(sdktrace.NewSimpleSpanProcessor(exp))
+
+	_, span := p.tracer.Start(ctx, "probe")
+	span.End()
+
+	spans := exp.GetSpans()
+	Expect(spans).To(HaveLen(1))
+
+	return spans[0].Resource
+}
+
+// resourceAttr returns one resource attribute's value, or "" when the resource has no
+// such key.
+func resourceAttr(res *resource.Resource, key string) string {
+	for _, kv := range res.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.AsString()
+		}
+	}
+
+	return ""
+}
+
+// Resolve takes an injected env so a caller can decide what the process's own
+// environment contributes. resource.WithFromEnv ignored it: it reads
+// OTEL_RESOURCE_ATTRIBUTES from the real process environment whatever was injected.
+// Resolve reads the variable through the injected function and Setup applies what it
+// found.
+var _ = Describe("the exported resource", func() {
+	var ctx context.Context
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	// What Setup assembles, before the providers see it, which is as far as dropping
+	// resource.WithFromEnv reaches: sdktrace.WithResource and sdkmetric.WithResource each
+	// merge resource.Environment() under the resource they are handed, which reads the
+	// real variable, so a key the shell set and the injected env did not still reaches a
+	// span and no option this package can pass stops it.
+	It("should build without reading the process environment", func() {
+		GinkgoT().Setenv(EnvResourceAttributes, "deployment.environment=production,team=platform")
+
+		r, err := Resolve(Settings{Enabled: true}, envFrom(nil))
+		Expect(err).ToNot(HaveOccurred())
+
+		res, err := buildResource(ctx, r, "1.2.3")
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(resourceAttr(res, "deployment.environment")).To(BeEmpty())
+		Expect(resourceAttr(res, "team")).To(BeEmpty())
+		Expect(resourceAttr(res, "service.name")).To(Equal(defaultServiceName))
+		Expect(resourceAttr(res, "service.version")).To(Equal("1.2.3"))
+	})
+
+	// Every key the injected env names is decided by it on the spans a real Setup
+	// records, including one the shell gave a different value.
+	It("should carry the attributes the injected env supplied", func() {
+		GinkgoT().Setenv(EnvResourceAttributes, "deployment.environment=production")
+
+		res := resourceFor(ctx, envFrom(map[string]string{
+			EnvResourceAttributes: "deployment.environment=staging,team=platform",
+		}))
+
+		Expect(resourceAttr(res, "deployment.environment")).To(Equal("staging"))
+		Expect(resourceAttr(res, "team")).To(Equal("platform"))
+	})
+
+	// The resolved service name is applied after the variable's entries and duplicate
+	// keys resolve to the last value, so a service.name written into the variable does
+	// not displace the one resolveServiceName picked at its own precedence.
+	It("should keep the resolved service name over one in the variable", func() {
+		res := resourceFor(ctx, envFrom(map[string]string{
+			EnvResourceAttributes: "service.name=from_the_variable",
+		}))
+
+		Expect(resourceAttr(res, "service.name")).To(Equal(defaultServiceName))
+	})
+
+	It("should report a pipeline that could not be built", func() {
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		r, err := Resolve(Settings{Enabled: true}, envFrom(nil))
+		Expect(err).ToNot(HaveOccurred())
+
+		p, err := Setup(canceled, r, "1.2.3")
+		Expect(p).To(BeNil())
+		Expect(err).To(MatchError(ErrPipeline))
+	})
+})
 
 // Export errors reach a handler that belongs to one Provider.
 //

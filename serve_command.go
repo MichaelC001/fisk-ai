@@ -19,7 +19,6 @@ import (
 	"github.com/choria-io/ui/columns"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
@@ -93,7 +92,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		}
 	}
 
-	cfg, err := config.ParseConfigFileForMode(c.configFile, config.ModeServe)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(c.configFile, config.ModeServe))
 	if err != nil {
 		return err
 	}
@@ -108,6 +107,14 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	}
 
 	log := c.logger()
+
+	// Startup has a context of its own, separate from the one Serve runs on. It governs
+	// the dialing and binding below, so an interrupt while a broker is unreachable ends
+	// the command instead of waiting the dial out. Nothing reads it once the endpoints
+	// are built: an interrupt during a run means drain, which is a different answer and
+	// is what onInterrupt arranges.
+	startCtx, cancelStart := interruptContext()
+	defer cancelStart()
 
 	// Resolved before anything is opened, so a bad endpoint or sample ratio fails here
 	// rather than after the stores are bound. Its report is deferred first, which makes
@@ -129,7 +136,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// different thing from the queue's: the jobs channel dials its own from
 	// expose.agent.jobs, so a deployment can keep its work queue on one cluster and its
 	// session and memory stores on another.
-	resources, err := serve.NewResources(cfg, serve.ResourceOptions{
+	resources, err := serve.NewResources(startCtx, cfg, serve.ResourceOptions{
 		ConfigFile: c.configFile,
 		ConnName:   "serve " + cfg.Identity,
 		Version:    version,
@@ -156,7 +163,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// An idle worker therefore exits on the first interrupt, having nothing to wait for.
 	var suspend atomic.Bool
 
-	channels, services, err := serve.Endpoints(cfg, serve.BuildOptions{
+	channels, services, err := serve.Endpoints(startCtx, cfg, serve.BuildOptions{
 		Workers:          c.workerOverride(),
 		SuspendRequested: suspend.Load,
 		Conns:            resources.Conns,
@@ -368,70 +375,59 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 		doc.Item("Queue Workers", c.workersDescription(cfg))
 	}
 
-	c.describeEndpoints(doc, cfg, channels, services)
+	c.describeEndpoints(doc, channels, services)
 
 	return doc
 }
 
+// toolServer is an endpoint that serves tools to peers. A serve.DescLine holds one
+// label and one value, where each of these is many values under one label, so the
+// banner asks for them separately and prints them inside the endpoint's own section.
+type toolServer interface {
+	ExposedTools() []string
+	WithheldBuiltins() []string
+}
+
 // describeEndpoints adds a section per endpoint that has something to say about itself.
 //
-// Each a2a endpoint bounds and paces its work with numbers of its own, against the
-// loop's five minutes and the queue's worker count, so they are printed under the
-// endpoint they belong to rather than beside the loop's where an operator would read one
-// pair as the other.
-func (c *fiskServeCommand) describeEndpoints(doc *columns.Document, cfg *config.Config, channels []serve.Channel, services []serve.Service) {
-	for _, ch := range channels {
-		prompts, ok := ch.(*a2aendpoint.Channel)
+// Each endpoint supplies its own heading and lines, so an endpoint this program was not
+// written against still reaches the banner. An endpoint that paces and limits its work
+// with numbers of its own prints them here, under itself, rather than beside the loop's
+// five minutes and the queue's worker count where an operator would read one pair as the
+// other.
+func (c *fiskServeCommand) describeEndpoints(doc *columns.Document, channels []serve.Channel, services []serve.Service) {
+	describe := func(e serve.Endpoint) {
+		described, ok := e.(serve.DescribedEndpoint)
 		if !ok {
-			continue
+			return
 		}
 
-		doc.Section("Answering prompts over a2a", func(d *columns.Document) {
-			for _, line := range prompts.Describe() {
+		doc.Section(described.Heading(), func(d *columns.Document) {
+			for _, line := range described.Describe() {
 				d.Item(line.Label, line.Value)
 			}
 
-			d.Item("Workers", fmt.Sprintf("%d", cfg.A2APromptsWorkers()))
-		})
-	}
-
-	// The Slack channel supplies its own worker count, unlike the a2a one above: it sizes
-	// its own concurrency from expose.agent.slack rather than from the number the queue
-	// intake uses.
-	for _, ch := range channels {
-		bot, ok := ch.(*slackchannel.Channel)
-		if !ok {
-			continue
-		}
-
-		doc.Section("Answering in Slack", func(d *columns.Document) {
-			for _, line := range bot.Describe() {
-				d.Item(line.Label, line.Value)
-			}
-		})
-	}
-
-	for _, svc := range services {
-		a2aSvc, ok := svc.(*a2aendpoint.Service)
-		if !ok {
-			continue
-		}
-
-		doc.Section("Serving tools over a2a", func(d *columns.Document) {
-			for _, line := range a2aSvc.Describe() {
-				d.Item(line.Label, line.Value)
+			tools, ok := e.(toolServer)
+			if !ok {
+				return
 			}
 
-			d.Item("Concurrency", c.a2aConcurrency(cfg))
-			d.Item("Tool Timeout", c.a2aToolTimeout(cfg).String())
-			d.Values("Exposed", a2aSvc.ExposedTools())
+			d.Values("Exposed", tools.ExposedTools())
 
-			withheld := a2aSvc.WithheldBuiltins()
+			withheld := tools.WithheldBuiltins()
 			if len(withheld) > 0 {
 				d.Values("Withheld", withheld)
 				d.Printf("Withheld built-in tools are enabled by this configuration but declare no a2a exposure.")
 			}
 		})
+	}
+
+	for _, ch := range channels {
+		describe(ch)
+	}
+
+	for _, svc := range services {
+		describe(svc)
 	}
 }
 
@@ -527,26 +523,6 @@ func (c *fiskServeCommand) toolTimeout(cfg *config.Config) time.Duration {
 	}
 
 	return serve.DefaultToolTimeout
-}
-
-// a2aToolTimeout is the bound a served call will actually get, and a2aConcurrency how
-// many of them may run at once. Both report the a2a server's own default when the
-// configuration sets neither, since a banner saying a bound is zero when it is thirty
-// seconds is worse than saying nothing.
-func (c *fiskServeCommand) a2aToolTimeout(cfg *config.Config) time.Duration {
-	if cfg.A2AToolTimeout() > 0 {
-		return cfg.A2AToolTimeout()
-	}
-
-	return a2a.DefaultCallTimeout
-}
-
-func (c *fiskServeCommand) a2aConcurrency(cfg *config.Config) int {
-	if cfg.A2AMaxConcurrentTools() > 0 {
-		return cfg.A2AMaxConcurrentTools()
-	}
-
-	return a2a.DefaultConcurrency()
 }
 
 // workersDescription reports the effective worker count and where it came from, since

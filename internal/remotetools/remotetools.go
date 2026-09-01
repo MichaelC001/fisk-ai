@@ -85,12 +85,12 @@ func ImportForRun(ctx context.Context, client *a2a.Client, cfg *config.Config, t
 // can warn and still show the local tools. A collision is not fatal here; the
 // colliding tools are recorded as skipped for the caller to render. The tools are
 // built with no invoker, since info never calls them.
-func DiscoverForInfo(cfg *config.Config, taken map[string]bool) ([]HostImport, error) {
+func DiscoverForInfo(ctx context.Context, cfg *config.Config, taken map[string]bool) ([]HostImport, error) {
 	if len(cfg.RemoteTools) == 0 {
 		return nil, nil
 	}
 
-	provider, err := conns.Connect(cfg.NatsContext, cfg.Identity)
+	provider, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 	if err != nil {
 		return nil, err
 	}

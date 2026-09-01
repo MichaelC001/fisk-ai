@@ -156,6 +156,10 @@ type Store interface {
 	Info() Info
 	// Create starts a new run, writing meta as seq 1, and returns the locked
 	// journal. It fails with ErrExists if the id is already present.
+	//
+	// It stamps meta.Version, so a caller leaves that field zero; a meta record
+	// carrying a version this build does not write fails with ErrVersion. An
+	// implementation gets both from PrepareMeta, which it calls before the append.
 	Create(ctx context.Context, id string, meta MetaRecord) (Journal, error)
 	// Open locks an existing run's journal for appending (resume). It fails with
 	// ErrNotFound if the id is unknown.

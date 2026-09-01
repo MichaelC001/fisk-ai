@@ -268,7 +268,7 @@ func (c *Client) Task(ctx context.Context, agent string, req *Request) (*TaskStr
 		return nil, fmt.Errorf("%w: a task needs a streaming transport", ErrStreamUnsupported)
 	}
 
-	stampRequest(ctx, &req.Header, c.sender, agent)
+	StampRequest(ctx, &req.Header, c.sender, agent)
 
 	data, err := c.marshalValid(req)
 	if err != nil {
@@ -305,7 +305,7 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 
 	msg := NewCancel()
 	msg.Reason = reason
-	stampRequest(ctx, &msg.Header, c.sender, agent)
+	StampRequest(ctx, &msg.Header, c.sender, agent)
 
 	// A cancel correlates to the task it stops rather than to itself, which is what
 	// stamping a standalone request gives it, so the tag is set to the task's after.

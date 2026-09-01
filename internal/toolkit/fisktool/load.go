@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package fisk
+package fisktool
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 // applying the configured include and exclude filters. The unconditional first
 // pass is what enforces ai:deny even when neither filter is set. ctx bounds the
 // introspection subprocess (see FetchFiskAppModel).
-func LoadTools(ctx context.Context, cfg *config.Config) ([]*FiskCommandTool, error) {
+func LoadTools(ctx context.Context, cfg *config.Config) ([]*CommandTool, error) {
 	// With no wrapped application there is nothing to introspect; the agent runs on
 	// its built-in and remote tools alone.
 	if cfg.ApplicationPath == "" {
@@ -54,7 +54,7 @@ func LoadTools(ctx context.Context, cfg *config.Config) ([]*FiskCommandTool, err
 // selection can only remove tools the agent already has; when it is absent the
 // whole loaded set is served, so enabling a transport with no selection serves
 // the agent's focused toolset as-is.
-func ServedTools(ctx context.Context, cfg *config.Config) ([]*FiskCommandTool, error) {
+func ServedTools(ctx context.Context, cfg *config.Config) ([]*CommandTool, error) {
 	tools, err := LoadTools(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -71,7 +71,7 @@ func ServedTools(ctx context.Context, cfg *config.Config) ([]*FiskCommandTool, e
 // include then its exclude, each honored only when it carries patterns or tags,
 // mirroring the top-level filtering in LoadTools. A nil selection serves the set
 // unchanged.
-func filterExposed(tools []*FiskCommandTool, sel *config.ExposedToolSelection) ([]*FiskCommandTool, error) {
+func filterExposed(tools []*CommandTool, sel *config.ExposedToolSelection) ([]*CommandTool, error) {
 	if sel == nil {
 		return tools, nil
 	}

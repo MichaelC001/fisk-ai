@@ -322,6 +322,12 @@ func (s *store) Create(ctx context.Context, id string, meta runstate.MetaRecord)
 		return nil, err
 	}
 
+	// meta is this store's copy, so stamping the version leaves the caller's struct alone.
+	err = runstate.PrepareMeta(&meta)
+	if err != nil {
+		return nil, err
+	}
+
 	opCtx, cancel := opContext(ctx)
 	defer cancel()
 

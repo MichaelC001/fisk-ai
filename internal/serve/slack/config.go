@@ -5,6 +5,7 @@
 package slack
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,8 +21,11 @@ func Builder() serve.EndpointBuilder {
 	return serve.EndpointBuilder{
 		Name:    channelName,
 		Enabled: func(cfg *config.Config) bool { return cfg.SlackEnabled() },
-		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
-			ch, err := NewFromConfig(cfg, ConfigOptions{
+		// The context limits the identity check this channel makes against Slack while it
+		// is built. The socket it opens on the first Next is rooted at context.Background,
+		// so a deadline on this call never reaches the connection.
+		Build: func(ctx context.Context, cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
+			ch, err := NewFromConfig(ctx, cfg, ConfigOptions{
 				Sessions:         opts.Sessions,
 				SuspendRequested: opts.SuspendRequested,
 				Logger:           opts.Logger,
@@ -60,7 +64,9 @@ type ConfigOptions struct {
 //
 // The --workers flag does not reach this. It sizes the queue intake, and one flag setting
 // two numbers could not be reported honestly on a startup banner.
-func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
+//
+// The context limits the identity check New makes against Slack and nothing else.
+func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 	if !cfg.SlackEnabled() {
 		return nil, fmt.Errorf("expose.agent.slack is not configured")
 	}
@@ -79,7 +85,7 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 		return nil, fmt.Errorf("expose.agent.slack needs a session store: a thread is a conversation, so a worker with nowhere to journal one would answer a first mention and nothing after it")
 	}
 
-	return New(Options{
+	return New(ctx, Options{
 		AppToken:         appToken,
 		BotToken:         botToken,
 		Identity:         cfg.Identity,

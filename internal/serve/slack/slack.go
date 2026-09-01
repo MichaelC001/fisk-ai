@@ -64,14 +64,16 @@ const (
 	botTokenVar = "SLACK_BOT_TOKEN"
 )
 
-// This channel is all three of the optional shapes a channel can have: it sizes its own
-// concurrency, it holds a socket connection to release, and its credential can be revoked
-// while it runs. Declaring them makes a change to any of those contracts a compile error
-// here rather than a channel the server silently stops asking.
+// This channel is every one of the optional shapes a channel can have: it sizes its own
+// concurrency, it holds a socket connection to release, its credential can be revoked
+// while it runs, and it names the workspace it joined on a startup banner. Declaring them
+// makes a change to any of those contracts a compile error here rather than a channel the
+// server silently stops asking.
 var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
 	_ serve.FaultingEndpoint  = (*Channel)(nil)
+	_ serve.DescribedEndpoint = (*Channel)(nil)
 )
 
 // Options configures a Channel.
@@ -91,7 +93,9 @@ type Options struct {
 	// allow through Concurrency. Required to be greater than zero.
 	Workers int
 
-	// ContextLines bounds how much surrounding conversation a turn reads.
+	// ContextLines is how many messages of surrounding conversation a turn reads. Zero is
+	// unset and takes a default of 20, matching config.DefaultSlackContextLines. A
+	// negative value reads none, so a turn sees only the mention it answers.
 	ContextLines int
 
 	// Progress says whether a turn posts the status message it edits while it runs. The
@@ -124,10 +128,10 @@ type Options struct {
 
 func (o *Options) validate() error {
 	if o.AppToken == "" {
-		return fmt.Errorf("an app-level token is required: set %s", appTokenVar)
+		return fmt.Errorf("AppToken is required: it opens the socket mode connection")
 	}
 	if o.BotToken == "" {
-		return fmt.Errorf("a bot token is required: set %s", botTokenVar)
+		return fmt.Errorf("BotToken is required: every Web API call is made with it")
 	}
 	if o.Identity == "" {
 		return fmt.Errorf("an identity is required: it names the journals this bot's threads run in")
@@ -250,11 +254,12 @@ type Channel struct {
 
 // New builds a Channel and identifies the credential it was given, which reaches the
 // network: a revoked or mistyped token fails here rather than on the first mention, and
-// the same call supplies the workspace this bot answers in.
+// the same call supplies the workspace this bot answers in. The context limits that
+// identity check and nothing else.
 //
 // It starts nothing. The socket opens on the first call to Next, so a channel that is
 // built and never served holds no connection.
-func New(opts Options) (*Channel, error) {
+func New(ctx context.Context, opts Options) (*Channel, error) {
 	err := opts.validate()
 	if err != nil {
 		return nil, err
@@ -268,7 +273,7 @@ func New(opts Options) (*Channel, error) {
 
 	client := slackgo.New(opts.BotToken, slackgo.OptionAppLevelToken(opts.AppToken))
 
-	c, err := newChannel(opts, &clientAPI{client: client}, &clientSocket{
+	c, err := newChannel(ctx, opts, &clientAPI{client: client}, &clientSocket{
 		client: socketmode.New(client),
 		out:    make(chan envelope),
 		fail:   make(chan error, 1),
@@ -290,9 +295,13 @@ func New(opts Options) (*Channel, error) {
 }
 
 // newChannel assembles a Channel over an already-built API and socket, so a spec drives
-// every decision this package makes without reaching Slack.
-func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+// every decision this package makes without reaching Slack. The context limits the
+// identity check and nothing else.
+func newChannel(ctx context.Context, opts Options, a api, s socket, log *slog.Logger) (*Channel, error) {
+	// The socket is rooted at Background rather than at the caller's context, because the
+	// connection outlives construction: a caller building under a deadline would otherwise
+	// have its bot cut off when that deadline passes.
+	socketCtx, socketOff := context.WithCancel(context.Background())
 
 	c := &Channel{
 		identity:  opts.Identity,
@@ -318,8 +327,8 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		wake:      make(chan struct{}, 1),
 		faults:    make(chan error, 1),
 		shutdown:  make(chan struct{}),
-		socketCtx: ctx,
-		socketOff: cancel,
+		socketCtx: socketCtx,
+		socketOff: socketOff,
 		socketEnd: make(chan struct{}),
 		intakeEnd: make(chan struct{}),
 	}
@@ -338,11 +347,20 @@ func newChannel(opts Options, a api, s socket, log *slog.Logger) (*Channel, erro
 		c.grace = defaultAnswerGrace
 	}
 
-	// The identity check is the last thing that can fail, so the cancel above is
-	// released here rather than left to a caller who never received a Channel.
+	// A negative ContextLines is the caller asking for no surrounding conversation: preload
+	// and gap read nothing, and Describe reports 0.
+	switch {
+	case c.lines == 0:
+		c.lines = defaultContextLines
+	case c.lines < 0:
+		c.lines = 0
+	}
+
+	// The identity check is the last thing that can fail, so newChannel cancels the socket
+	// here rather than leaving it to a caller who never received a Channel.
 	ws, err := a.authTest(ctx)
 	if err != nil {
-		cancel()
+		socketOff()
 		return nil, fmt.Errorf("%s does not authenticate: %w", botTokenVar, err)
 	}
 	c.workspace = ws
@@ -550,12 +568,8 @@ func (c *Channel) fault(err error) {
 	c.faultOnce.Do(func() { c.faults <- err })
 }
 
-// DescLine is one label and value describing this channel, for a caller printing a
-// startup banner.
-type DescLine struct {
-	Label string
-	Value string
-}
+// Heading names this endpoint on a startup banner.
+func (c *Channel) Heading() string { return "Answering in Slack" }
 
 // Describe names the workspace this bot joined, the identity it joined as and the limits
 // it answers under, for the banner a worker prints before its log takes over.
@@ -564,13 +578,13 @@ type DescLine struct {
 // configuration, since neither is written there: an operator holding two bot tokens has no
 // other way to see which one this process is using. Both are named with their id, which is
 // what a Slack admin page and an audit log are searched by.
-func (c *Channel) Describe() []DescLine {
+func (c *Channel) Describe() []serve.DescLine {
 	progress := "on"
 	if !c.progress {
 		progress = "off"
 	}
 
-	return []DescLine{
+	return []serve.DescLine{
 		{Label: "Workspace", Value: fmt.Sprintf("%s (%s)", c.workspace.Team, c.workspace.TeamID)},
 		{Label: "Bot", Value: fmt.Sprintf("%s (%s)", c.workspace.User, c.workspace.UserID)},
 		{Label: "Workers", Value: strconv.Itoa(c.workers)},

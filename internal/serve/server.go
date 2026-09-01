@@ -39,9 +39,10 @@ const (
 	// unexpected error, so an unreachable queue does not become a hot loop.
 	channelRetryDelay = 5 * time.Second
 
-	// doneTimeout bounds reporting one outcome. A channel that cannot reach its store
-	// must not hold up a shutdown indefinitely.
-	doneTimeout = 30 * time.Second
+	// defaultDoneTimeout limits reporting one outcome when Options.DoneTimeout sets
+	// nothing. A channel that cannot reach its store must not hold up a shutdown
+	// indefinitely.
+	defaultDoneTimeout = 30 * time.Second
 )
 
 // DefaultToolTimeout bounds one tool call for a run this server hosts, when the
@@ -60,6 +61,11 @@ const DefaultToolTimeout = 5 * time.Minute
 // The shared resources are the ones agent.Options already defines for running many
 // agents in one process. They are passed to every run rather than rebuilt per run,
 // and their contracts are the ones documented there.
+//
+// New copies the struct, so a field assigned afterwards is never read. Channels and
+// Services are copied as slice headers, which leaves the server and the caller pointing
+// at one backing array: replacing an element after New changes what the server hosts,
+// and appending to the caller's slice does not.
 type Options struct {
 	// Channels supply the work. Each gets its own puller. At least one channel or one
 	// service is required.
@@ -114,6 +120,12 @@ type Options struct {
 	// values agree, so which one a run gets is not something an operator can observe.
 	// See config.Config.ToolTimeout for what the bound can and cannot stop.
 	ToolTimeout time.Duration
+
+	// DoneTimeout limits one call to Work.Done; <= 0 uses thirty seconds. The run has
+	// already ended by then, so this covers writing the outcome down: raise it where a
+	// channel records an outcome somewhere slow, and a channel that cannot reach its
+	// store at all is cut off here rather than holding a shutdown open.
+	DoneTimeout time.Duration
 
 	// WorkDir is the directory command tools run in. It must be an absolute path that
 	// already exists. Empty inherits the process working directory, which is what a
@@ -218,6 +230,9 @@ func (o *Options) applyDefaults() {
 	if o.ToolTimeout <= 0 {
 		o.ToolTimeout = DefaultToolTimeout
 	}
+	if o.DoneTimeout <= 0 {
+		o.DoneTimeout = defaultDoneTimeout
+	}
 	if o.LogOutput == nil {
 		o.LogOutput = os.Stderr
 	}
@@ -228,40 +243,40 @@ func (o *Options) applyDefaults() {
 
 func (o *Options) validate() error {
 	if len(o.Channels) == 0 && len(o.Services) == 0 {
-		return fmt.Errorf("at least one channel or service is required")
+		return fmt.Errorf("%w: at least one channel or service is required", ErrInvalidOptions)
 	}
 	if o.Config == nil {
-		return fmt.Errorf("a configuration is required")
+		return ErrConfigRequired
 	}
 
 	for i, ch := range o.Channels {
 		if ch == nil {
-			return fmt.Errorf("channel %d is nil", i)
+			return fmt.Errorf("%w: channel %d is nil", ErrInvalidOptions, i)
 		}
 		if ch.Name() == "" {
-			return fmt.Errorf("channel %d has no name", i)
+			return fmt.Errorf("%w: channel %d has no name", ErrInvalidOptions, i)
 		}
 	}
 
 	for i, svc := range o.Services {
 		if svc == nil {
-			return fmt.Errorf("service %d is nil", i)
+			return fmt.Errorf("%w: service %d is nil", ErrInvalidOptions, i)
 		}
 		if svc.Name() == "" {
-			return fmt.Errorf("service %d has no name", i)
+			return fmt.Errorf("%w: service %d has no name", ErrInvalidOptions, i)
 		}
 	}
 
 	if o.WorkDir != "" {
 		if !filepath.IsAbs(o.WorkDir) {
-			return fmt.Errorf("work directory %q is not an absolute path", o.WorkDir)
+			return fmt.Errorf("%w: work directory %q is not an absolute path", ErrInvalidOptions, o.WorkDir)
 		}
 		st, err := os.Stat(o.WorkDir)
 		if err != nil {
-			return fmt.Errorf("work directory %q: %w", o.WorkDir, err)
+			return fmt.Errorf("%w: work directory %q: %w", ErrInvalidOptions, o.WorkDir, err)
 		}
 		if !st.IsDir() {
-			return fmt.Errorf("work directory %q is not a directory", o.WorkDir)
+			return fmt.Errorf("%w: work directory %q is not a directory", ErrInvalidOptions, o.WorkDir)
 		}
 	}
 
@@ -338,6 +353,13 @@ func (s *Server) concurrencyFor(ch Channel) int {
 // including one that ends because whatever produces its work failed, ends Serve and
 // leaves the program to report it, which is what lets a supervisor restart a worker
 // whose queue died rather than leaving it alive and taking nothing.
+//
+// Call it once. What a second call does depends on how the first one ended: after Drain
+// or Stop the endpoints are released and it returns having taken no work, while after a
+// context cancellation the endpoints are still open and it takes and runs work again on
+// the context it is given. An endpoint's fault reaches whichever call was running when
+// it arrived, Faults yielding one value. Two calls at the same time would call Next from
+// two goroutines, which Channel forbids.
 func (s *Server) Serve(ctx context.Context) error {
 	var wg sync.WaitGroup
 
@@ -380,7 +402,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.log.Info("Serving channel", "channel", ch.Name(), "concurrency", concurrency)
 
 		wg.Go(func() {
-			s.pull(ctx, &wg, ch, sem)
+			s.pull(ctx, &wg, ch, sem, faulted)
 		})
 	}
 
@@ -443,16 +465,31 @@ func (s *Server) watchFaults(ctx context.Context, faulted chan<- error, done <-c
 	select {
 	case err := <-first:
 		s.log.Error("A endpoint stopped working; draining", "error", err)
-		faulted <- err
-
-		derr := s.Drain()
-		if derr != nil {
-			s.log.Error("Draining after an endpoint fault failed", "error", derr)
-		}
+		s.fault(faulted, err)
 
 	case <-ctx.Done():
 	case <-s.released:
 	case <-done:
+	}
+}
+
+// fault ends the server on the first thing that went wrong, whether an endpoint reported
+// it or a channel panicked, and drains what is in flight. Serve reads the fault back and
+// returns it, so the program exits non-zero.
+//
+// The send is non-blocking over a buffer of one. A fault that finds the buffer full is
+// dropped: Serve returns one error, the first fault already started the drain, and
+// dropping the second stops it draining twice.
+func (s *Server) fault(faulted chan<- error, err error) {
+	select {
+	case faulted <- err:
+	default:
+		return
+	}
+
+	derr := s.Drain()
+	if derr != nil {
+		s.log.Error("Draining after a fault failed", "error", derr)
 	}
 }
 
@@ -539,7 +576,7 @@ func (s *Server) Stop() error {
 // claimed while it waits for a slot, so a channel whose work carries a lease must
 // tolerate that wait; sizing the slots per channel is what keeps that wait bounded by
 // the channel's own load rather than by its neighbours'.
-func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel, sem chan struct{}) {
+func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel, sem chan struct{}, faulted chan<- error) {
 	log := s.log.With("channel", ch.Name())
 
 	for {
@@ -547,10 +584,15 @@ func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel, sem c
 			return
 		}
 
-		work, err := ch.Next(ctx)
+		work, err := nextWork(ctx, ch)
 		switch {
 		case errors.Is(err, ErrChannelDone):
 			log.Info("Channel has no more work")
+			return
+		case errors.Is(err, ErrChannelPanic):
+			log.Error("Channel panicked taking work; draining", "error", err)
+			s.fault(faulted, err)
+
 			return
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return
@@ -591,6 +633,29 @@ func (s *Server) pull(ctx context.Context, wg *sync.WaitGroup, ch Channel, sem c
 			s.execute(ctx, work, log)
 		})
 	}
+}
+
+// nextWork takes one item from a channel, returning a panic in the implementation as an
+// error wrapping ErrChannelPanic.
+//
+// The puller ends on it rather than waiting channelRetryDelay and asking again. A retry
+// is for a queue this worker could not reach; a panic is a bug in the channel, and
+// calling the same code against the same state raises it again, so retrying would turn
+// one bug into a log line every five seconds for as long as the worker lives.
+//
+// It faults the server as well, which is what an endpoint reporting that it has stopped
+// working already does: the runs in flight finish, the other endpoints are released, and
+// Serve returns the error. Ending the puller alone would leave a worker with one channel
+// exiting zero with its queue served by nobody.
+func nextWork(ctx context.Context, ch Channel) (work *Work, err error) {
+	defer func() {
+		r := recover()
+		if r != nil {
+			err = fmt.Errorf("%w: %v", ErrChannelPanic, r)
+		}
+	}()
+
+	return ch.Next(ctx)
 }
 
 // execute runs one piece of work and reports its outcome exactly once.
@@ -763,12 +828,34 @@ func (s *Server) withToolTimeout(cfg *config.Config) *config.Config {
 // report hands an outcome back to its channel on a context of its own, so a run that
 // was canceled or timed out still records what happened. There is nowhere to take a
 // failure here beyond the log: the channel is the thing that would have recorded it.
+//
+// A channel that panics in Done loses this one outcome and nothing else. The run has
+// already ended, so the slot it held is released as it would have been, the puller takes
+// further work from the same channel, and Serve returns when its channels do.
 func (s *Server) report(work *Work, out Outcome, log *slog.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), doneTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.opts.DoneTimeout)
 	defer cancel()
 
-	err := work.Done(ctx, out)
+	err := reportOutcome(ctx, work, out)
 	if err != nil {
 		log.Error("Reporting an outcome failed", "work", out.ID, "error", err)
 	}
+}
+
+// reportOutcome calls a channel's Done, returning a panic in the implementation as an
+// error wrapping ErrChannelPanic.
+//
+// execute calls it from inside its own deferred recover, after that recover has already
+// run, so a panic in Done propagates out of the worker goroutine rather than being
+// caught there. pull calls it on the puller goroutine for work it took and never
+// started. Either one would end the process.
+func reportOutcome(ctx context.Context, work *Work, out Outcome) (err error) {
+	defer func() {
+		r := recover()
+		if r != nil {
+			err = fmt.Errorf("%w: %v", ErrChannelPanic, r)
+		}
+	}()
+
+	return work.Done(ctx, out)
 }

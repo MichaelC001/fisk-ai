@@ -19,7 +19,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/segmentio/ksuid"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -29,6 +29,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	runstatefile "github.com/choria-io/fisk-ai/internal/runstate/file"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -66,16 +67,16 @@ func toolSrcOf(tools map[string]toolkit.Tool) *ToolSource {
 // its rendering.
 type nopEvents struct{}
 
-func (nopEvents) Warn(Warning)                                                           {}
-func (nopEvents) Starting(RunInfo)                                                       {}
-func (nopEvents) RemoteHostNotes([]remotetools.HostImport)                               {}
-func (nopEvents) ResumeTranscript(*runstate.RunState, map[string]*fisk2.FiskCommandTool) {}
-func (nopEvents) LLMRequest(string)                                                      {}
-func (nopEvents) ToolCall(ToolTrace)                                                     {}
-func (nopEvents) ToolResult(ToolResultTrace)                                             {}
-func (nopEvents) Message(llm.Response, bool)                                             {}
-func (nopEvents) SessionRotated(string)                                                  {}
-func (nopEvents) Panicked(any, []byte)                                                   {}
+func (nopEvents) Warn(Warning)                                                          {}
+func (nopEvents) Starting(RunInfo)                                                      {}
+func (nopEvents) RemoteHostNotes([]remotetools.HostImport)                              {}
+func (nopEvents) ResumeTranscript(*runstate.RunState, map[string]*fisktool.CommandTool) {}
+func (nopEvents) LLMRequest(string)                                                     {}
+func (nopEvents) ToolCall(ToolTrace)                                                    {}
+func (nopEvents) ToolResult(ToolResultTrace)                                            {}
+func (nopEvents) Message(llm.Response, bool)                                            {}
+func (nopEvents) SessionRotated(string)                                                 {}
+func (nopEvents) Panicked(any, []byte)                                                  {}
 
 // captureEvents records the tool traces so a test can assert what was emitted; it
 // inherits the no-op behavior for every other event.
@@ -359,9 +360,10 @@ var _ = Describe("runner", func() {
 
 		It("rejects a local tool call missing a required parameter without running it", func() {
 			ev := &captureEvents{}
-			tool := &fisk2.FiskCommandTool{
-				Path:    []string{"do"},
-				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
+			// The tool carries no application path: the call is rejected before it
+			// would run, and a tool with no path cannot run at all.
+			tool := &fisktool.CommandTool{
+				Path: []string{"do"},
 				Model: &fisk.CmdModel{RestrictedSchema: map[string]any{
 					"type":     "object",
 					"required": []string{"subject"},
@@ -394,11 +396,8 @@ var _ = Describe("runner", func() {
 		})
 
 		It("dispatches a local command tool: traces the full call line and runs it", func() {
-			app := filepath.Join(GinkgoT().TempDir(), "app")
-			Expect(os.WriteFile(app, []byte("#!/bin/sh\necho hello\n"), 0o755)).To(Succeed())
-
 			ev := &captureEvents{}
-			tool := &fisk2.FiskCommandTool{Path: []string{"do"}, AppPath: app, Model: &fisk.CmdModel{}}
+			tool := runnableCommandTool()
 			r := &runner{stats: &RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"do": tool})}
 
 			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
@@ -408,10 +407,10 @@ var _ = Describe("runner", func() {
 			Expect(block.IsError).To(BeFalse())
 
 			Expect(ev.calls).To(HaveLen(1))
-			Expect(ev.calls[0].Present).To(Equal(toolkit.PresentCommand))
+			Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindApplication))
 			Expect(ev.calls[0].Display).NotTo(BeEmpty())
 			Expect(ev.results).To(HaveLen(1))
-			Expect(ev.results[0].Present).To(Equal(toolkit.PresentCommand))
+			Expect(ev.results[0].ProviderKind).To(Equal(toolkit.KindApplication))
 		})
 
 		It("dispatches a remote tool: reports the dispatch, counts it, and traces the agent", func() {
@@ -430,18 +429,19 @@ var _ = Describe("runner", func() {
 			Expect(block.IsError).To(BeFalse())
 
 			Expect(ev.calls).To(HaveLen(1))
-			Expect(ev.calls[0].Present).To(Equal(toolkit.PresentRemote))
+			Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindRemote))
 			Expect(ev.calls[0].Agent).To(Equal("nats"))
 			Expect(ev.results).To(HaveLen(1))
-			Expect(ev.results[0].Present).To(Equal(toolkit.PresentRemote))
+			Expect(ev.results[0].ProviderKind).To(Equal(toolkit.KindRemote))
 		})
 
 		It("gates a confirm-tagged local tool and denies it without running when no operator can approve", func() {
 			ev := &captureEvents{}
-			tool := &fisk2.FiskCommandTool{
-				Path:    []string{"stream", "rm"},
-				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
-				Model:   &fisk.CmdModel{Tags: []string{"ai:confirm"}},
+			// The tool carries no application path: the gate denies before it would
+			// run, and a tool with no path cannot run at all.
+			tool := &fisktool.CommandTool{
+				Path:  []string{"stream", "rm"},
+				Model: &fisk.CmdModel{Tags: []string{"ai:confirm"}},
 			}
 			r := &runner{
 				stats:  &RunStats{},
@@ -557,10 +557,11 @@ var _ = Describe("runner", func() {
 		})
 
 		It("gates a rewrite on the union: a redirect from a gated tool to an ungated one is still gated", func() {
-			orig := &fisk2.FiskCommandTool{
-				Path:    []string{"stream", "rm"},
-				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
-				Model:   &fisk.CmdModel{Tags: []string{"ai:confirm"}},
+			// The tool carries no application path: the gate denies before it would
+			// run, and a tool with no path cannot run at all.
+			orig := &fisktool.CommandTool{
+				Path:  []string{"stream", "rm"},
+				Model: &fisk.CmdModel{Tags: []string{"ai:confirm"}},
 			}
 			safe := &recordingTool{name: "safe", output: "safe-out"}
 			ev := &captureEvents{}
@@ -2113,5 +2114,68 @@ var _ = Describe("HumanPaced", func() {
 		_, err := r.run(context.Background())
 		Expect(err).ToNot(HaveOccurred())
 		Expect(seen).To(HaveExactElements(true))
+	})
+})
+
+// telemetry declares its own terminal reasons and tool kinds because it imports nothing
+// from the rest of this tree, so these two functions are the single place the sets meet.
+// A value neither of them recognizes reaches a metric label, where one distinct string
+// is one time series for the life of the process, so both fall back to a fixed member
+// rather than passing the text through.
+var _ = Describe("the telemetry vocabulary mapping", func() {
+	DescribeTable("should map a run path terminal reason onto telemetry's own",
+		func(reason runstate.TerminalReason, want telemetry.TerminalReason) {
+			Expect(telemetryReason(reason)).To(Equal(want))
+		},
+		Entry("completed", runstate.ReasonCompleted, telemetry.TerminalCompleted),
+		Entry("suspended", runstate.ReasonSuspended, telemetry.TerminalSuspended),
+		Entry("error", runstate.ReasonError, telemetry.TerminalError),
+		Entry("budget", runstate.ReasonBudget, telemetry.TerminalBudget),
+		Entry("max iterations", runstate.ReasonMaxIterations, telemetry.TerminalMaxIterations),
+		Entry("a reason this build does not know", runstate.TerminalReason("preempted"), telemetry.TerminalOther),
+		Entry("no reason at all", runstate.TerminalReason(""), telemetry.TerminalOther),
+	)
+
+	DescribeTable("should map a tool provider kind onto telemetry's own",
+		func(kind toolkit.Kind, want telemetry.ToolKind) {
+			Expect(telemetryToolKind(kind)).To(Equal(want))
+		},
+		Entry("application", toolkit.KindApplication, telemetry.ToolKindApplication),
+		Entry("builtin", toolkit.KindBuiltin, telemetry.ToolKindBuiltin),
+		Entry("remote", toolkit.KindRemote, telemetry.ToolKindRemote),
+		Entry("custom", toolkit.KindCustom, telemetry.ToolKindCustom),
+		Entry("mcp", toolkit.KindMCP, telemetry.ToolKindMCP),
+		Entry("unknown", toolkit.KindUnknown, telemetry.ToolKindUnknown),
+		Entry("a kind this build does not know", toolkit.Kind(99), telemetry.ToolKindUnknown),
+	)
+
+	// Every mapped member renders what toolkit.Kind.String already wrote, so a build that
+	// starts mapping does not move the kind token operators group by.
+	DescribeTable("should render the token toolkit already wrote for a kind",
+		func(kind toolkit.Kind) {
+			Expect(telemetryToolKind(kind).String()).To(Equal(kind.String()))
+		},
+		Entry("application", toolkit.KindApplication),
+		Entry("builtin", toolkit.KindBuiltin),
+		Entry("remote", toolkit.KindRemote),
+		Entry("custom", toolkit.KindCustom),
+		Entry("mcp", toolkit.KindMCP),
+		Entry("unknown", toolkit.KindUnknown),
+	)
+
+	// A crash leaves the reason unset on purpose, so runOutcome names the half of the run
+	// it stopped in rather than exporting an empty label.
+	DescribeTable("should name the half of the run a crash stopped in",
+		func(reachedRunner bool, want telemetry.TerminalReason) {
+			out := runOutcome(&Result{}, errors.New("boom"), reachedRunner, nil, 0, 0, 0)
+			Expect(out.TerminalReason).To(Equal(want))
+		},
+		Entry("before the loop", false, telemetry.TerminalSetupFailed),
+		Entry("inside the loop", true, telemetry.TerminalError),
+	)
+
+	It("should carry a run's own reason through", func() {
+		out := runOutcome(&Result{Reason: runstate.ReasonMaxIterations}, nil, true, nil, 0, 0, 0)
+		Expect(out.TerminalReason).To(Equal(telemetry.TerminalMaxIterations))
 	})
 })

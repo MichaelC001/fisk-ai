@@ -13,7 +13,6 @@
     },
     "terminal": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "reason"
       ],

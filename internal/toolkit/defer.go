@@ -7,6 +7,8 @@ package toolkit
 import (
 	"errors"
 	"fmt"
+
+	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
 
 // maxDeferralNoteRunes caps the note a deferring tool supplies. It is displayed to
@@ -76,14 +78,16 @@ func (d *DeferredResult) Unwrap() error { return ErrDeferredResult }
 // DeferResult builds the error a tool returns when it cannot answer now. note says
 // what the call is waiting on and handle names it in whatever system is doing the
 // waiting; handle may be empty. Both are capped, since they are tool-supplied text
-// that is journaled and later shown to an operator.
+// that is journaled and later shown to an operator. sanitize.ForTerminal takes the
+// note, which strips terminal escape sequences, collapses whitespace to one line and
+// marks a cut with an ellipsis.
 //
 // It is named DeferResult rather than Defer because deferral already means hiding a
 // tool behind tool search in this package (see Tool.Definition and
 // llm.ToolDef.DeferLoading), and the two must not read as one thing.
 func DeferResult(note, handle string) error {
 	return &DeferredResult{
-		Note:   truncateRunes(note, maxDeferralNoteRunes),
+		Note:   sanitize.ForTerminal(note, maxDeferralNoteRunes),
 		Handle: truncateRunes(handle, maxDeferralHandleRunes),
 	}
 }

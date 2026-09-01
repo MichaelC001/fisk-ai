@@ -20,12 +20,25 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-// Version is the on-disk record format version, stamped into the Meta record.
-// Fold accepts only this exact version: the record format is provider-neutral
-// (llm.Message), and the earlier Anthropic-wire format does not round-trip
-// through the neutral records, so any other version is rejected rather than
-// silently mis-folded.
-const Version = 3
+// Version is the on-disk record format version. Create stamps it into the Meta
+// record, so a caller does not set it.
+//
+// A bump is for a change an existing journal does not survive, such as a field
+// changing meaning or a record type being reshaped. Adding a field is not one:
+// the record model is provider-neutral and additive fields are omitempty, so a
+// build that predates one folds the record with that field zero, which is what it
+// would have read before the field existed.
+//
+// A bump ships a converter with it, so a build at this version folds a journal
+// written at any version below it. A journal from a later version is refused
+// rather than folded, since this build cannot know what a record it has never
+// seen holds. Fold refuses it, which is what every resume goes through, and the
+// JetStream backend refuses it a second time while summarizing a run for List.
+// Nothing needs converting while 1 is the only version there has been.
+//
+// This number is not the v1 in the Protocol ids or in the embedded schema paths.
+// That one is the a2a product namespace, and the two move on their own terms.
+const Version = 1
 
 // Protocol is the schema id of a Record, carried in the record body so a single
 // stored record is self describing: given just one record you can find its
@@ -128,6 +141,8 @@ type ClaimRecord struct {
 // API key. ConversationToken is the one credential it does carry, and it is the
 // caller's rather than this process's, recorded so that it can be recovered.
 type MetaRecord struct {
+	// Version is the record format version. Store.Create stamps it, so a caller
+	// leaves it zero; a value other than Version is refused rather than written.
 	Version     int         `json:"version"`
 	RunID       string      `json:"run_id"`
 	Created     time.Time   `json:"created"`

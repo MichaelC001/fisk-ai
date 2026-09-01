@@ -146,6 +146,12 @@ func (s *FileStore) Create(ctx context.Context, id string, meta runstate.MetaRec
 		return nil, err
 	}
 
+	// meta is this store's copy, so stamping the version leaves the caller's struct alone.
+	err = runstate.PrepareMeta(&meta)
+	if err != nil {
+		return nil, err
+	}
+
 	// The existence check lives inside openJournal, which holds the run's lock and
 	// opens O_EXCL, so checking and creating are one atomic step rather than a stat
 	// followed by an open that a second creator can interleave with.

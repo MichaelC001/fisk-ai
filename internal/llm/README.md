@@ -140,7 +140,7 @@ linked in by adding a second blank import there.
 
 `credentialEnvNames` is not documentation. Those names are stripped from the
 environment of any tool subprocess whose command line the model chooses (see
-`internal/toolkit/fisk`), so a tool can never read the agent's own credentials. List
+`internal/toolkit/fisktool`), so a tool can never read the agent's own credentials. List
 every SECRET-BEARING variable the provider's default credential chain reads (API
 keys, bearer or identity tokens, signing keys, any header variable that can carry an
 Authorization value). Do NOT list selector variables that only point at on-disk

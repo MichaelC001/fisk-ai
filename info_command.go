@@ -23,7 +23,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/ui/columns"
@@ -52,7 +52,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	ctx, cancel := interruptContext()
 	defer cancel()
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	// Discover remote tools best-effort: info must stay usable offline and when a
 	// remote agent is down, so a connection or discovery failure is reported as a
 	// warning and the local tools are still shown.
-	imports, err := remotetools.DiscoverForInfo(cfg, taken)
+	imports, err := remotetools.DiscoverForInfo(ctx, cfg, taken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: cannot connect to NATS context %q to discover remote tools: %v\n", cfg.NatsContext, err)
 	}

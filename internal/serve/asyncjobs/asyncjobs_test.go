@@ -248,12 +248,8 @@ var _ = Describe("Dispositions", func() {
 		Expect(validator.ValidateMessage(msg)).To(Succeed())
 	})
 
-	It("Should terminate work that was refused or crashed", func() {
-		_, err := ch.disposition(req, serve.Outcome{Rejected: true}, ch.log)
-		Expect(errors.Is(err, asyncjobs.ErrTerminateTask)).To(BeTrue())
-		Expect(err).To(MatchError(ContainSubstring("refused")))
-
-		_, err = ch.disposition(req, serve.Outcome{Crashed: true, Err: fmt.Errorf("boom")}, ch.log)
+	It("Should terminate work whose run crashed", func() {
+		_, err := ch.disposition(req, serve.Outcome{Crashed: true, Err: fmt.Errorf("boom")}, ch.log)
 		Expect(errors.Is(err, asyncjobs.ErrTerminateTask)).To(BeTrue())
 		Expect(err).To(MatchError(ContainSubstring("crashed")))
 	})

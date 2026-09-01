@@ -160,7 +160,7 @@ func newInstruments(meter metric.Meter) (*instruments, error) {
 // TurnMetrics is one agent invocation's worth of counters.
 type TurnMetrics struct {
 	AgentName      string
-	TerminalReason string
+	TerminalReason TerminalReason
 	Interactive    bool
 	Duration       time.Duration
 	InferenceCalls int64
@@ -185,7 +185,7 @@ func (p *Provider) RecordTurn(ctx context.Context, m TurnMetrics) {
 
 	attrs := attribute.NewSet(
 		semconv.GenAIAgentName(m.AgentName),
-		AttrRunTerminalReason.String(m.TerminalReason),
+		AttrRunTerminalReason.String(m.TerminalReason.String()),
 		AttrRunInteractive.Bool(m.Interactive),
 	)
 	set := metric.WithAttributeSet(attrs)
@@ -283,8 +283,8 @@ func (p *Provider) recordTool(ctx context.Context, o ToolOutcome, d time.Duratio
 	}
 
 	attrs := []attribute.KeyValue{
-		AttrToolKind.String(o.Kind),
-		AttrToolOutcome.String(o.Outcome),
+		AttrToolKind.String(o.Kind.String()),
+		AttrToolOutcome.String(o.Outcome.String()),
 	}
 	if o.Name != "" {
 		attrs = append(attrs, semconv.GenAIToolName(o.Name))

@@ -30,13 +30,11 @@ const (
 	// so a pathological many-word query cannot become an expensive lexical scan.
 	maxFTSTerms = 40
 
-	// minFTSTermRunes drops one-character terms, which add noise, not recall.
-	minFTSTermRunes = 2
-
-	// MinTermRunes is minFTSTermRunes for callers that have to explain the drop to a
-	// reader. A term below it is never queried, and under a completeness contract
-	// that has to be said out loud rather than left as a silent discard.
-	MinTermRunes = minFTSTermRunes
+	// MinTermRunes is the shortest term the lexical query keeps. A one-character
+	// term is dropped before the MATCH expression is built and never searched for,
+	// so a caller reporting a complete answer names the drop rather than discarding
+	// the term silently.
+	MinTermRunes = 2
 
 	// bm25Weights are the per-column BM25 weights for chunks_fts, in column order:
 	// body then heading_path. The heading is weighted 2.0 because a section title is
@@ -496,7 +494,7 @@ func ftsQuery(q string) string {
 
 	var terms []string
 	for _, f := range fields {
-		if utf8.RuneCountInString(f) < minFTSTermRunes {
+		if utf8.RuneCountInString(f) < MinTermRunes {
 			continue
 		}
 		terms = append(terms, `"`+strings.ReplaceAll(f, `"`, `""`)+`"`)

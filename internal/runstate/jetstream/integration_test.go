@@ -110,9 +110,10 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 		Expect(err).ToNot(HaveOccurred())
 	}
 
+	// No Version: Create stamps it, so every run here carries the version the store put
+	// there rather than one the test supplied.
 	newMeta := func(id string) runstate.MetaRecord {
 		return runstate.MetaRecord{
-			Version:     runstate.Version,
 			RunID:       id,
 			Created:     time.Unix(1700000000, 0).UTC(),
 			Prompt:      "hello",
@@ -216,6 +217,32 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(rs.Messages).To(HaveLen(3))
 			Expect(rs.NextIteration).To(Equal(int64(1)))
 			Expect(rs.Counters.ToolCalls).To(Equal(int64(1)))
+		})
+
+		It("Should stamp the record version and leave the caller's meta record alone", func() {
+			id := newID()
+			meta := newMeta(id)
+
+			j, err := store.Create(ctx, id, meta)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+			Expect(meta.Version).To(BeZero())
+
+			rs, err := store.Load(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(rs.Version).To(Equal(runstate.Version))
+		})
+
+		It("Should refuse a meta record carrying a version it does not write", func() {
+			id := newID()
+			meta := newMeta(id)
+			meta.Version = runstate.Version + 1
+
+			_, err := store.Create(ctx, id, meta)
+			Expect(err).To(MatchError(runstate.ErrVersion))
+
+			_, err = store.Load(ctx, id)
+			Expect(err).To(MatchError(runstate.ErrNotFound))
 		})
 
 		// The backend derives every JetStream call from the caller's context rather than
@@ -372,13 +399,17 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			good, bad := newID(), newID()
 			jg, err := store.Create(ctx, good, newMeta(good))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(jg.Close()).To(Succeed())
 
+			// Create refuses a version this build does not write, so the unreadable run is
+			// published straight onto the stream. What the listing has to survive is a
+			// record already stored, whichever build stored it.
 			meta := newMeta(bad)
 			meta.Version = runstate.Version + 1
-			jb, err := store.Create(ctx, bad, meta)
+			body, err := json.Marshal(runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(jb.Close()).To(Succeed())
+			_, err = js.Publish(ctx, jg.(*journal).store.metaSubject(bad), body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jg.Close()).To(Succeed())
 
 			infos, err := store.List(ctx)
 			Expect(err).ToNot(HaveOccurred())

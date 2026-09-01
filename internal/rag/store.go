@@ -45,7 +45,15 @@ const (
 	// surface as a query-time "no such column". Bump it for any change to the stored
 	// schema or to the text handed to the embedder, since neither is a function of
 	// anything else rag_meta pins.
-	formatVersion = 2
+	//
+	// An index is derived from documents that still exist, so a generation this
+	// build cannot read is discarded and rebuilt rather than converted. That is why
+	// this policy differs from runstate.Version, where the journal is the only copy
+	// of the run and a bump owes a converter.
+	//
+	// It is 1 because it always has been in anything anyone ran: it counted drafts
+	// of a format that was never released.
+	formatVersion = 1
 
 	// dbFileName is the SQLite index file inside the store directory.
 	dbFileName = "knowledge.db"
@@ -85,6 +93,12 @@ var (
 	// not a failure: the agent read path returns it so a missing store never bricks
 	// startup, and the CLI turns it into "run: fisk-ai knowledge index".
 	ErrIndexNotBuilt = errors.New("knowledge index has not been built")
+
+	// ErrCitationNotFound reports that a citation (<relpath>#<ordinal>) names no
+	// chunk in the index. A reindex renumbers a file's chunks, so a citation issued
+	// against an earlier build of the index can point past the end of the file it
+	// names, or at a file the index no longer holds.
+	ErrCitationNotFound = errors.New("no indexed chunk matches this citation")
 
 	// ErrMetaMismatch reports that the configured embedding identity (model,
 	// prefixes, normalization) differs from what the index was built with. The fix
@@ -549,6 +563,10 @@ func (s *Store) checkIndexFormat(ctx context.Context) (indexCheck, error) {
 	case m.FormatVersion > formatVersion:
 		return indexCheck{tooNew: m.FormatVersion}, nil
 
+	// No value satisfies this while formatVersion is 1, since 0 means an unpinned
+	// manifest rather than an older generation. The first bump is what gives an index
+	// a generation to be behind, and the shape checks below catch an old layout in the
+	// meantime.
 	case m.FormatVersion > 0 && m.FormatVersion < formatVersion:
 		return indexCheck{tooOld: fmt.Sprintf("its format_version is %d and this build writes %d", m.FormatVersion, formatVersion)}, nil
 

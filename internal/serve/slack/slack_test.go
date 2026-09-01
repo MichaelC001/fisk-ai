@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ func newTestChannel(opts Options, a api, s socket) *Channel {
 		log = quietLogger()
 	}
 
-	ch, err := newChannel(opts, a, s, log)
+	ch, err := newChannel(context.Background(), opts, a, s, log)
 	Expect(err).ToNot(HaveOccurred())
 
 	return ch
@@ -74,8 +75,10 @@ var _ = Describe("Options", func() {
 			return err.Error()
 		}
 
-		Expect(missing(func(o *Options) { o.AppToken = "" })).To(ContainSubstring(appTokenVar))
-		Expect(missing(func(o *Options) { o.BotToken = "" })).To(ContainSubstring(botTokenVar))
+		// The fields, not the environment variables: a caller assembling Options in
+		// process never set either variable and cannot fix one by setting it.
+		Expect(missing(func(o *Options) { o.AppToken = "" })).To(ContainSubstring("AppToken is required"))
+		Expect(missing(func(o *Options) { o.BotToken = "" })).To(ContainSubstring("BotToken is required"))
 		Expect(missing(func(o *Options) { o.Identity = "" })).To(ContainSubstring("identity is required"))
 		Expect(missing(func(o *Options) { o.Workers = 0 })).To(ContainSubstring("greater than zero"))
 		Expect(missing(func(o *Options) { o.Sessions = nil })).To(ContainSubstring("session store is required"))
@@ -107,9 +110,39 @@ var _ = Describe("New", func() {
 		api := newFakeAPI()
 		api.authErr = fmt.Errorf("invalid_auth")
 
-		_, err := newChannel(testOptions(), api, newFakeSocket(), quietLogger())
+		_, err := newChannel(context.Background(), testOptions(), api, newFakeSocket(), quietLogger())
 		Expect(err).To(MatchError(ContainSubstring(botTokenVar)))
 		Expect(err).To(MatchError(ContainSubstring("invalid_auth")))
+	})
+
+	It("Should refuse a context that has already ended, since the identity check reaches Slack", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		api := newFakeAPI()
+
+		_, err := newChannel(ctx, testOptions(), api, newFakeSocket(), quietLogger())
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(api.auths).To(Equal(0))
+	})
+
+	It("Should hold the socket open past the context it was built under", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		socket := newFakeSocket()
+
+		ch, err := newChannel(ctx, testOptions(), newFakeAPI(), socket, quietLogger())
+		Expect(err).ToNot(HaveOccurred())
+
+		ch.start()
+		Eventually(socket.ran).Should(BeClosed())
+
+		cancel()
+
+		Consistently(ch.socketEnd, 100*time.Millisecond).ShouldNot(BeClosed())
+
+		Expect(ch.Close()).To(Succeed())
 	})
 
 	It("Should open no connection until it is served", func() {
@@ -119,6 +152,68 @@ var _ = Describe("New", func() {
 		Consistently(socket.ran, 100*time.Millisecond).ShouldNot(BeClosed())
 
 		Expect(ch.Close()).To(Succeed())
+	})
+
+	Describe("ContextLines", func() {
+		// The direct path reaches neither the configuration parser nor its defaults, so a
+		// caller who set no allowance would otherwise get a bot deaf to its own thread.
+		It("Should read the default allowance when it is unset", func() {
+			api := newFakeAPI()
+			api.history["C1"] = []message{said("U1", "the deploy went out at four", "1700000000.000010")}
+
+			opts := testOptions()
+			opts.ContextLines = 0
+
+			ch := newTestChannel(opts, api, newFakeSocket())
+
+			m := &mention{ChannelID: "C1", ThreadTS: "1700000000.000100", TS: "1700000000.000100", UserID: "U1"}
+
+			msgs, err := ch.preload(context.Background(), m)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(msgs).To(HaveLen(1))
+
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Context Lines", Value: strconv.Itoa(defaultContextLines)}))
+		})
+
+		It("Should read none for a negative allowance, and report that as zero", func() {
+			api := newFakeAPI()
+			api.history["C1"] = []message{said("U1", "the deploy went out at four", "1700000000.000010")}
+
+			opts := testOptions()
+			opts.ContextLines = -1
+
+			ch := newTestChannel(opts, api, newFakeSocket())
+
+			m := &mention{ChannelID: "C1", ThreadTS: "1700000000.000100", TS: "1700000000.000100", UserID: "U1"}
+
+			msgs, err := ch.preload(context.Background(), m)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(msgs).To(BeEmpty())
+
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Context Lines", Value: "0"}))
+		})
+
+		It("Should read the allowance a caller set", func() {
+			api := newFakeAPI()
+			api.history["C1"] = []message{
+				said("U1", "one", "1700000000.000010"),
+				said("U1", "two", "1700000000.000020"),
+				said("U1", "three", "1700000000.000030"),
+			}
+
+			opts := testOptions()
+			opts.ContextLines = 2
+
+			ch := newTestChannel(opts, api, newFakeSocket())
+
+			m := &mention{ChannelID: "C1", ThreadTS: "1700000000.000100", TS: "1700000000.000100", UserID: "U1"}
+
+			msgs, err := ch.preload(context.Background(), m)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(msgs).To(HaveLen(2))
+
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Context Lines", Value: "2"}))
+		})
 	})
 })
 
@@ -137,7 +232,7 @@ var _ = Describe("Channel", func() {
 		It("Should name the workspace, the bot and the limits a turn answers under", func() {
 			ch := newTestChannel(testOptions(), newFakeAPI(), newFakeSocket())
 
-			Expect(ch.Describe()).To(Equal([]DescLine{
+			Expect(ch.Describe()).To(Equal([]serve.DescLine{
 				{Label: "Workspace", Value: "Example (T000)"},
 				{Label: "Bot", Value: "NATS Docs (U0BOT)"},
 				{Label: "Workers", Value: "5"},
@@ -156,7 +251,7 @@ var _ = Describe("Channel", func() {
 
 			ch := newTestChannel(opts, newFakeAPI(), newFakeSocket())
 
-			Expect(ch.Describe()).To(ContainElement(DescLine{Label: "Progress", Value: "off"}))
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Progress", Value: "off"}))
 		})
 	})
 

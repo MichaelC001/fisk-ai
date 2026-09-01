@@ -332,4 +332,37 @@ var _ = Describe("Work", func() {
 			Expect(out.Crashed).To(BeFalse())
 		})
 	})
+
+	Describe("Done", func() {
+		// A channel writing an outcome to a slow store needs to know how long it has, and
+		// needs to be able to raise it, so both the default and the option are contract.
+		doneDeadline := func(opts serve.Options) time.Duration {
+			GinkgoHelper()
+
+			var left time.Duration
+
+			opts.Provider = agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("one"))
+			serveOne(&serve.Work{
+				ID:     "job-1",
+				Prompt: "go",
+				Done: func(ctx context.Context, _ serve.Outcome) error {
+					deadline, ok := ctx.Deadline()
+					Expect(ok).To(BeTrue(), "the report is always limited")
+					left = time.Until(deadline)
+
+					return nil
+				},
+			}, opts)
+
+			return left
+		}
+
+		It("Should give a report thirty seconds when no option raises it", func() {
+			Expect(doneDeadline(serve.Options{})).To(BeNumerically("~", 30*time.Second, 5*time.Second))
+		})
+
+		It("Should give a report the time DoneTimeout asks for", func() {
+			Expect(doneDeadline(serve.Options{DoneTimeout: 4 * time.Minute})).To(BeNumerically("~", 4*time.Minute, 5*time.Second))
+		})
+	})
 })

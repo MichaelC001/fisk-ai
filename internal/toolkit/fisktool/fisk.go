@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package fisk
+package fisktool
 
 import (
 	"bytes"
@@ -65,23 +65,18 @@ const commandWaitDelay = 10 * time.Second
 // forever. A caller that needs a different bound passes a context with its own deadline.
 const introspectTimeout = 30 * time.Second
 
-// FiskCommandTool is our intermediate representation of a fisk command exposed as a FiskCommandTool.
+// CommandTool is one command of a fisk application presented to a model as a tool.
 // It is built from an application model, filtered with FilterTools, and finally
 // turned into a neutral tool definition with Definition. The captured
-// command Model is the source of truth for the FiskCommandTool's schema and tags (so
+// command Model is the source of truth for the tool's schema and tags (so
 // tag-based filtering is possible, which a bare tool definition cannot express)
-// and, later, for mapping a FiskCommandTool call's arguments back to the command's
+// and, later, for mapping a call's arguments back to the command's
 // arguments and flags.
-type FiskCommandTool struct {
+type CommandTool struct {
 	// Path is the command path components, e.g. {"auth", "user", "add"}.
 	Path []string
 	// Model is the leaf command this tool represents.
 	Model *fisk.CmdModel
-	// AppPath is the filesystem path of the application binary this command
-	// belongs to and which is executed when the tool is called. It is set by
-	// ToolsForApp; it is empty for tools built directly with ApplicationTools,
-	// whose handlers therefore cannot run until it is populated.
-	AppPath string
 	// GlobalFlags are the application-level (global) flags exposed on this command.
 	// They are resolved once from the configured allowlist (unioned with the
 	// application's required globals) and filtered so none collides with the
@@ -89,12 +84,34 @@ type FiskCommandTool struct {
 	// (InputSchema) and, when the model supplies them, rendered onto the command line
 	// after the command path (argv). It is nil when no globals are exposed.
 	GlobalFlags []*fisk.FlagModel
-	// SensitiveEnvVars are operator-named credential environment variables (see
+
+	// appPath is the filesystem path of the application binary this command belongs
+	// to and which is executed when the tool is called. ToolsForApp sets it together
+	// with sensitiveEnvVars; a tool built directly with ApplicationTools has neither
+	// and RunCommand refuses to run it. Unexported so a holder of the tool cannot
+	// repoint it at another binary. Read it with AppPath.
+	appPath string
+	// sensitiveEnvVars are operator-named credential environment variables (see
 	// config.CredentialEnvNames) stripped from the command's environment in addition
-	// to the provider-declared set (llm.CredentialEnvNames). Like AppPath it is set by
-	// ToolsForApp, so a tool that can execute (AppPath populated) always carries the
-	// scrub list.
-	SensitiveEnvVars []string
+	// to the provider-declared set (llm.CredentialEnvNames). Unexported so a holder of
+	// the tool cannot empty the scrub list and hand the child process the operator's
+	// credentials. Read it with SensitiveEnvVars.
+	sensitiveEnvVars []string
+}
+
+// AppPath is the filesystem path of the application binary this command runs. It is
+// empty for a tool built with ApplicationTools rather than ToolsForApp, and RunCommand
+// refuses to run such a tool.
+func (t *CommandTool) AppPath() string {
+	return t.appPath
+}
+
+// SensitiveEnvVars are the operator-named credential environment variables stripped
+// from the command's environment, on top of the provider-declared set every run
+// strips. It returns a copy, so writing to the result does not change what the tool
+// scrubs.
+func (t *CommandTool) SensitiveEnvVars() []string {
+	return slices.Clone(t.sensitiveEnvVars)
 }
 
 // frameworkGlobalFlags are the application-level flags fisk adds automatically:
@@ -117,19 +134,19 @@ var frameworkGlobalFlags = map[string]bool{
 
 // Name is the LLM tool name: the command path joined with "_", e.g. the command
 // "auth user add" becomes "auth_user_add".
-func (t *FiskCommandTool) Name() string {
+func (t *CommandTool) Name() string {
 	return strings.Join(t.Path, "_")
 }
 
 // Command is the full command path as a human would type it, space separated.
-func (t *FiskCommandTool) Command() string {
+func (t *CommandTool) Command() string {
 	return strings.Join(t.Path, " ")
 }
 
 // Description is the command help, falling back to the long help. It is the
 // plain, tag-free help used for human-facing listings; ModelDescription is what
 // a model sees.
-func (t *FiskCommandTool) Description() string {
+func (t *CommandTool) Description() string {
 	if t.Model.Help != "" {
 		return t.Model.Help
 	}
@@ -146,7 +163,7 @@ func (t *FiskCommandTool) Description() string {
 // and so the model can search for tools by tag when the tool set is deferred.
 // Reserved ai: tags are included as-is; an ai:deny command is never exposed to a
 // model in the first place, so it cannot appear here.
-func (t *FiskCommandTool) ModelDescription() string {
+func (t *CommandTool) ModelDescription() string {
 	desc := t.modelHelp()
 
 	tags := t.Tags()
@@ -166,7 +183,7 @@ func (t *FiskCommandTool) ModelDescription() string {
 // model sees. When both are set they are concatenated, short help first; if one
 // already contains the other only the longer is used, so a long help that
 // restates the summary does not repeat it.
-func (t *FiskCommandTool) modelHelp() string {
+func (t *CommandTool) modelHelp() string {
 	short := t.Model.Help
 	long := t.Model.HelpLong
 
@@ -185,7 +202,7 @@ func (t *FiskCommandTool) modelHelp() string {
 }
 
 // Tags are the fisk command tags.
-func (t *FiskCommandTool) Tags() []string {
+func (t *CommandTool) Tags() []string {
 	return t.Model.Tags
 }
 
@@ -198,7 +215,7 @@ func (t *FiskCommandTool) Tags() []string {
 // enforced against a local operator; over MCP it is requested from the calling
 // client through elicitation when the client supports it, and the command runs
 // ungated otherwise (see the mcpserver package).
-func (t *FiskCommandTool) NeedsConfirm(extraTags []string) bool {
+func (t *CommandTool) NeedsConfirm(extraTags []string) bool {
 	return toolkit.NeedsConfirm(t.Tags(), extraTags)
 }
 
@@ -210,7 +227,7 @@ func (t *FiskCommandTool) NeedsConfirm(extraTags []string) bool {
 // returned so the message is deterministic. It returns an empty string when the
 // command is not gated, which NeedsConfirm reports first, so callers consult it only
 // for a gated command.
-func (t *FiskCommandTool) ConfirmTrigger(extraTags []string) string {
+func (t *CommandTool) ConfirmTrigger(extraTags []string) string {
 	return toolkit.ConfirmTrigger(t.Tags(), extraTags)
 }
 
@@ -218,7 +235,16 @@ func (t *FiskCommandTool) ConfirmTrigger(extraTags []string) string {
 // precomputed by fisk during introspection. ApplicationTools guarantees it is
 // present, so it is non-nil for any tool obtained that way. When the tool exposes
 // application global flags they are merged in as extra properties.
-func (t *FiskCommandTool) InputSchema() map[string]any {
+//
+// A tool with no Model has no command and so no parameters, and it returns the schema
+// for that: an object with no properties. Only a hand-constructed tool reaches that
+// branch, and Definition, Tags, Describe and Behavior still dereference the Model, so
+// such a tool crashes at the first of those a run reaches.
+func (t *CommandTool) InputSchema() map[string]any {
+	if t.Model == nil {
+		return map[string]any{"type": "object"}
+	}
+
 	if len(t.GlobalFlags) == 0 {
 		return t.Model.RestrictedSchema
 	}
@@ -312,7 +338,7 @@ func globalFlagSchema(f *fisk.FlagModel) map[string]any {
 // fisk forbids a required flag or argument that also carries a default, so a
 // property in the required list genuinely must be supplied and this cannot reject
 // a call the command would have run from a default.
-func (t *FiskCommandTool) MissingRequired(input json.RawMessage) []string {
+func (t *CommandTool) MissingRequired(input json.RawMessage) []string {
 	required := toolkit.SchemaRequired(t.InputSchema()["required"])
 	if len(required) == 0 {
 		return nil
@@ -338,7 +364,7 @@ func (t *FiskCommandTool) MissingRequired(input json.RawMessage) []string {
 // command's full parameter roster, split into required and optional, so the model
 // can reconcile what it sent against what the command accepts and correct the call
 // in one turn rather than re-guessing a parameter name it got wrong.
-func (t *FiskCommandTool) MissingRequiredMessage(missing []string) string {
+func (t *CommandTool) MissingRequiredMessage(missing []string) string {
 	required, optional := t.parameters()
 
 	msg := fmt.Sprintf("tool %q was called without required parameter(s): %s. required: %s",
@@ -353,7 +379,7 @@ func (t *FiskCommandTool) MissingRequiredMessage(missing []string) string {
 // parameters returns the command's parameter names split into required and
 // optional. Required keeps the schema-declared order; optional is sorted, since
 // the schema properties are an unordered map, so the roster is deterministic.
-func (t *FiskCommandTool) parameters() (required, optional []string) {
+func (t *CommandTool) parameters() (required, optional []string) {
 	schema := t.InputSchema()
 	required = toolkit.SchemaRequired(schema["required"])
 
@@ -402,7 +428,7 @@ func decodeInputObject(input json.RawMessage) (map[string]any, bool) {
 // The arguments only ever reach the binary as argv, never a shell, so model
 // input cannot be interpreted as a shell command; t.Model.ArgsFromJSON is the
 // trust boundary that bounds it to the command's schema.
-func (t *FiskCommandTool) argv(args json.RawMessage) ([]string, error) {
+func (t *CommandTool) argv(args json.RawMessage) ([]string, error) {
 	// The model may emit a null or empty input for a command that takes no
 	// arguments; ArgsFromJSON expects an object, so normalize to an empty one.
 	if len(args) == 0 || string(args) == "null" {
@@ -440,7 +466,7 @@ func (t *FiskCommandTool) argv(args json.RawMessage) ([]string, error) {
 // flags, so fisk's own renderer decides the boolean, negatable and cumulative
 // forms rather than this package re-deriving them. A non-object input is passed
 // through unchanged for the command's ArgsFromJSON to reject with fisk's own error.
-func (t *FiskCommandTool) splitGlobalArgs(args json.RawMessage) (globalTail []string, localArgs json.RawMessage, err error) {
+func (t *CommandTool) splitGlobalArgs(args json.RawMessage) (globalTail []string, localArgs json.RawMessage, err error) {
 	if len(t.GlobalFlags) == 0 {
 		return nil, args, nil
 	}
@@ -488,7 +514,7 @@ func (t *FiskCommandTool) splitGlobalArgs(args json.RawMessage) (globalTail []st
 // CommandLine resolves the model's JSON arguments into the full command line a
 // user would type: the command path plus its arguments and flags, without the
 // binary path. It is what Execute runs and what tracing displays.
-func (t *FiskCommandTool) CommandLine(args json.RawMessage) (string, error) {
+func (t *CommandTool) CommandLine(args json.RawMessage) (string, error) {
 	argv, err := t.argv(args)
 	if err != nil {
 		return "", err
@@ -502,7 +528,7 @@ func (t *FiskCommandTool) CommandLine(args json.RawMessage) (string, error) {
 // command path when the model's arguments cannot be resolved. This is the single
 // source of truth for how a tool call is shown, whether during a live run or when
 // a stored transcript is replayed.
-func (t *FiskCommandTool) TraceLine(args json.RawMessage) string {
+func (t *CommandTool) TraceLine(args json.RawMessage) string {
 	cmdline, err := t.CommandLine(args)
 	if err != nil {
 		cmdline = t.Command()
@@ -517,7 +543,7 @@ func (t *FiskCommandTool) TraceLine(args json.RawMessage) string {
 // keep the full value, so an approval decision or an executed command is never
 // shortened. The command path and flag names are never elided, only argument
 // values. It falls back to the command path when the arguments cannot be resolved.
-func (t *FiskCommandTool) TraceLineShort(args json.RawMessage) string {
+func (t *CommandTool) TraceLineShort(args json.RawMessage) string {
 	argv, err := t.argv(args)
 	if err != nil {
 		return SanitizeCommandLine(t.Command())
@@ -561,8 +587,8 @@ func (t *FiskCommandTool) TraceLineShort(args json.RawMessage) string {
 // sibling run's. It sets cmd.Dir only; it is not a sandbox, and the command can still
 // write anywhere the process uid can (an absolute path, $HOME, $TMPDIR). Empty inherits
 // the process working directory, today's behavior.
-func (t *FiskCommandTool) RunCommand(ctx context.Context, args json.RawMessage, workDir string) (*toolkit.CommandResult, error) {
-	if t.AppPath == "" {
+func (t *CommandTool) RunCommand(ctx context.Context, args json.RawMessage, workDir string) (*toolkit.CommandResult, error) {
+	if t.appPath == "" {
 		return nil, fmt.Errorf("command %q has no application path to execute", t.Command())
 	}
 
@@ -571,11 +597,11 @@ func (t *FiskCommandTool) RunCommand(ctx context.Context, args json.RawMessage, 
 		return nil, err
 	}
 
-	cmd := exec.CommandContext(ctx, t.AppPath, argv...)
+	cmd := exec.CommandContext(ctx, t.appPath, argv...)
 	cmd.Stdin = nil
 	cmd.WaitDelay = commandWaitDelay
 	cmd.Dir = workDir
-	cmd.Env = commandEnv(t.SensitiveEnvVars, workDir)
+	cmd.Env = commandEnv(t.sensitiveEnvVars, workDir)
 	// Put the command in its own process group so a cancel kills its forked descendants
 	// too, not just the direct child, which would otherwise leak in a long-lived server.
 	configureProcessGroup(cmd)
@@ -756,8 +782,8 @@ func (w *capWriter) result() (string, bool) {
 }
 
 // ApplicationTools turns every runnable command of a fisk application model into
-// a FiskCommandTool. The command tree is walked recursively and each leaf command (one with
-// no subcommands) becomes a FiskCommandTool named by its full command path; non-leaf
+// a CommandTool. The command tree is walked recursively and each leaf command (one with
+// no subcommands) becomes a CommandTool named by its full command path; non-leaf
 // (grouping) commands and hidden commands, with their subtrees, are skipped.
 //
 // The model must come from a fisk introspection recent enough to precompute the
@@ -767,7 +793,7 @@ func (w *capWriter) result() (string, bool) {
 // globalFlags is the operator's allowlist of application global flags to expose to
 // the model (see config.Config.GlobalFlags). Every leaf tool carries the exposed
 // globals applicable to it; a name that matches no exposable global is an error.
-func ApplicationTools(app *fisk.ApplicationModel, globalFlags ...string) ([]*FiskCommandTool, error) {
+func ApplicationTools(app *fisk.ApplicationModel, globalFlags ...string) ([]*CommandTool, error) {
 	if app == nil {
 		return nil, fmt.Errorf("application model is nil")
 	}
@@ -777,7 +803,7 @@ func ApplicationTools(app *fisk.ApplicationModel, globalFlags ...string) ([]*Fis
 		return nil, err
 	}
 
-	var tools []*FiskCommandTool
+	var tools []*CommandTool
 	if app.CmdGroupModel == nil {
 		return tools, nil
 	}
@@ -880,8 +906,8 @@ func applicableGlobals(exposed []*fisk.FlagModel, cmd *fisk.CmdModel) []*fisk.Fl
 
 // commandTools recursively turns cmd and its subcommands into tools. prefix is
 // the path of command names leading to cmd. A command with subcommands is a
-// grouping node and is not itself turned into a FiskCommandTool; only its leaves are.
-func commandTools(cmd *fisk.CmdModel, prefix []string) []*FiskCommandTool {
+// grouping node and is not itself turned into a CommandTool; only its leaves are.
+func commandTools(cmd *fisk.CmdModel, prefix []string) []*CommandTool {
 	if cmd.Hidden {
 		return nil
 	}
@@ -889,14 +915,14 @@ func commandTools(cmd *fisk.CmdModel, prefix []string) []*FiskCommandTool {
 	path := append(append([]string{}, prefix...), cmd.Name)
 
 	if cmd.CmdGroupModel != nil && len(cmd.Commands) > 0 {
-		var tools []*FiskCommandTool
+		var tools []*CommandTool
 		for _, sub := range cmd.Commands {
 			tools = append(tools, commandTools(sub, path)...)
 		}
 		return tools
 	}
 
-	return []*FiskCommandTool{{
+	return []*CommandTool{{
 		Path:  path,
 		Model: cmd,
 	}}
@@ -921,7 +947,7 @@ const (
 // Tools tagged ai:deny are always removed, regardless of mode or filter, so this
 // is the enforcement point for that policy and should always be applied. A nil
 // filter imposes no include/exclude restriction and keeps everything else.
-func FilterTools(tools []*FiskCommandTool, filter *config.ToolFilter, mode FilterMode) ([]*FiskCommandTool, error) {
+func FilterTools(tools []*CommandTool, filter *config.ToolFilter, mode FilterMode) ([]*CommandTool, error) {
 	var patterns []*regexp.Regexp
 	if filter != nil {
 		for _, pattern := range filter.Tools {
@@ -933,7 +959,7 @@ func FilterTools(tools []*FiskCommandTool, filter *config.ToolFilter, mode Filte
 		}
 	}
 
-	var out []*FiskCommandTool
+	var out []*CommandTool
 	for _, t := range tools {
 		if slices.Contains(t.Tags(), denyTag) {
 			continue
@@ -960,10 +986,10 @@ func FilterTools(tools []*FiskCommandTool, filter *config.ToolFilter, mode Filte
 	return out, nil
 }
 
-// matchesFilter reports whether the FiskCommandTool matches the filter's name patterns or
+// matchesFilter reports whether the CommandTool matches the filter's name patterns or
 // tags. patterns are the pre-compiled forms of filter.Tools, matched against the
 // tool name (the underscore-joined command path).
-func matchesFilter(t *FiskCommandTool, filter *config.ToolFilter, patterns []*regexp.Regexp) bool {
+func matchesFilter(t *CommandTool, filter *config.ToolFilter, patterns []*regexp.Regexp) bool {
 	name := t.Name()
 	for _, re := range patterns {
 		if re.MatchString(name) {
@@ -988,16 +1014,17 @@ func matchesFilter(t *FiskCommandTool, filter *config.ToolFilter, patterns []*re
 }
 
 // ToolsForApp introspects the application binary at appPath and returns its
-// runnable commands as Tools, each bound to appPath so it can be executed. It is
-// the entry point for turning a binary into runnable tools: the binary path
-// travels with the tools, so a tool that does not know how to run cannot be
-// produced. Use ApplicationTools directly only when an executable path is not
-// needed (for example to inspect or filter the command tree).
+// runnable commands as Tools, each carrying appPath so it can be executed. It is the
+// only function that sets a tool's binary path and scrub list, and it sets both
+// together, so a tool that runs a binary always scrubs the credentials the operator
+// named. Use ApplicationTools directly only when an executable path is not needed
+// (for example to inspect or filter the command tree).
 //
-// credentialEnvNames (see config.CredentialEnvNames) is stored on every returned
-// tool as SensitiveEnvVars and used to scrub the introspection subprocess, so both
-// executions of the operator's binary run without the agent's named credentials.
-func ToolsForApp(ctx context.Context, appPath string, credentialEnvNames []string, globalFlags ...string) ([]*FiskCommandTool, error) {
+// credentialEnvNames (see config.CredentialEnvNames) is copied onto every returned
+// tool and used to scrub the introspection subprocess, so both executions of the
+// operator's binary run without the agent's named credentials. Read the stored copy
+// with SensitiveEnvVars and the binary path with AppPath.
+func ToolsForApp(ctx context.Context, appPath string, credentialEnvNames []string, globalFlags ...string) ([]*CommandTool, error) {
 	// FetchFiskAppModel already names the binary in its errors, so it is returned as-is
 	// rather than wrapped again with a second "introspecting %q".
 	model, err := FetchFiskAppModel(ctx, appPath, credentialEnvNames)
@@ -1010,9 +1037,11 @@ func ToolsForApp(ctx context.Context, appPath string, credentialEnvNames []strin
 		return nil, err
 	}
 
+	// Each tool gets its own copy of the names, so a caller that reuses or rewrites
+	// credentialEnvNames after this call does not change what the tools scrub.
 	for _, t := range tools {
-		t.AppPath = appPath
-		t.SensitiveEnvVars = credentialEnvNames
+		t.appPath = appPath
+		t.sensitiveEnvVars = slices.Clone(credentialEnvNames)
 	}
 
 	return tools, nil

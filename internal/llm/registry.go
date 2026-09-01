@@ -61,7 +61,7 @@ var (
 // Register adds a provider under name: its factory, and credentialEnvNames, the
 // environment variables the provider's SDK reads to authenticate the agent's own
 // API calls. Those names are stripped from the environment of any tool subprocess
-// whose command line the model chooses (see internal/toolkit/fisk), so a tool can
+// whose command line the model chooses (see internal/toolkit/fisktool), so a tool can
 // never read the agent's credentials. This is why the llm registry carries more
 // than the runstate/a2a/memory ones: a registered provider also contributes to a
 // security boundary elsewhere in the tree, so declaring its secrets is not optional
@@ -115,7 +115,7 @@ func Providers() []string {
 // CredentialEnvNames returns the sorted, deduplicated union of the credential
 // environment variable names declared by every provider linked into this build. A
 // caller strips them from the environment of a subprocess whose command line the
-// model chooses (see internal/toolkit/fisk), so no linked provider's secrets can
+// model chooses (see internal/toolkit/fisktool), so no linked provider's secrets can
 // leak to a tool, regardless of which provider is active. Names are trimmed and
 // empties dropped, matching config.CredentialEnvNames, which supplies the
 // operator-named half of the same strip. The union is computed once: the registry

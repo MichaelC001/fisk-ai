@@ -7,6 +7,7 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	. "github.com/onsi/ginkgo/v2"
@@ -73,22 +74,30 @@ func clientOver(nc *nats.Conn, sender string, timeout time.Duration) *a2a.Client
 	return client
 }
 
-// servingApp builds tools whose single command runs a stand-in executable, so a
-// served tool call actually executes.
+// servingApp returns the tools of a one-command application backed by a runnable
+// binary. ToolsForApp is the only route to a tool that carries a binary path, so the
+// script it introspects answers --fisk-introspect with the application's real model
+// and runs body for every other invocation. body is a shell fragment without a
+// shebang.
 func servingApp(name, body string) []toolkit.Tool {
 	GinkgoHelper()
 
 	app := fisk.New("app", "an app")
 	app.Command(name, "a command")
 
-	tools, err := fisk2.ApplicationTools(introspect(app))
+	model, err := json.Marshal(introspect(app))
 	Expect(err).NotTo(HaveOccurred())
 
-	path := filepath.Join(GinkgoT().TempDir(), "app")
-	Expect(os.WriteFile(path, []byte(body), 0o700)).To(Succeed())
-	for _, t := range tools {
-		t.AppPath = path
-	}
+	dir := GinkgoT().TempDir()
+	modelPath := filepath.Join(dir, "introspect.json")
+	Expect(os.WriteFile(modelPath, model, 0o600)).To(Succeed())
+
+	path := filepath.Join(dir, "app")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\n%s", modelPath, body)
+	Expect(os.WriteFile(path, []byte(script), 0o700)).To(Succeed())
+
+	tools, err := fisktool.ToolsForApp(context.Background(), path, nil)
+	Expect(err).NotTo(HaveOccurred())
 
 	return toolkit.Tools(tools)
 }
@@ -103,7 +112,7 @@ var _ = Describe("Integration: a2a NATS round-trip", Label("integration"), func(
 	It("Should discover an agent and invoke one of its tools", func() {
 		nc := runNATS()
 
-		serveOver(nc, "svc", servingApp("ping", "#!/bin/sh\necho pong\n"))
+		serveOver(nc, "svc", servingApp("ping", "echo pong\n"))
 		client := clientOver(nc, "caller", time.Second)
 
 		card, err := client.Discover(ctx, "svc")
@@ -122,7 +131,7 @@ var _ = Describe("Integration: a2a NATS round-trip", Label("integration"), func(
 	It("Should report a tool that does not exist as an in-band error", func() {
 		nc := runNATS()
 
-		serveOver(nc, "svc", servingApp("ping", "#!/bin/sh\necho pong\n"))
+		serveOver(nc, "svc", servingApp("ping", "echo pong\n"))
 		client := clientOver(nc, "caller", time.Second)
 
 		reply, err := client.InvokeTool(ctx, "svc", "missing", nil)
@@ -143,7 +152,7 @@ var _ = Describe("Integration: a2a NATS round-trip", Label("integration"), func(
 	It("Should reject a tool request that arrives on the discovery subject", func() {
 		nc := runNATS()
 
-		serveOver(nc, "svc", servingApp("ping", "#!/bin/sh\necho pong\n"))
+		serveOver(nc, "svc", servingApp("ping", "echo pong\n"))
 
 		// A tool request published to the discovery subject must be refused: each
 		// subject carries only the one message type it is contracted for.

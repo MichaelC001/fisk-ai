@@ -13,7 +13,6 @@
     },
     "assistant": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "iteration",
         "message",
@@ -44,6 +43,10 @@
         "cache_create_tokens": {
           "type": "integer",
           "description": "Input tokens written into the prompt cache. Additive and optional; absent on a journal written before prompt caching, where it folds as zero."
+        },
+        "thinking_tokens": {
+          "type": "integer",
+          "description": "The part of out_tokens the model spent reasoning, not a separate cost on top of it. Additive and optional; absent on a journal written before it existed, where it folds as zero."
         }
       }
     }

@@ -33,6 +33,10 @@ const (
 	EnvMetricsProtocol = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
 	// EnvServiceName names the service in the exported resource.
 	EnvServiceName = "OTEL_SERVICE_NAME"
+	// EnvResourceAttributes carries further resource attributes as comma-separated
+	// key=value pairs, the standard way an operator labels a process with its
+	// deployment environment, host role or team.
+	EnvResourceAttributes = "OTEL_RESOURCE_ATTRIBUTES"
 	// EnvSDKDisabled is the standard absolute off switch.
 	EnvSDKDisabled = "OTEL_SDK_DISABLED"
 	// EnvNoTelemetry is this repository's own off switch, the environment binding of
@@ -297,6 +301,27 @@ type Resolved struct {
 	// than the environment. Setup passes an explicit endpoint to the exporters only in
 	// that case, leaving the full standard environment handling to the SDK otherwise.
 	EndpointFromConfig bool
+
+	// ResourceAttributes are the OTEL_RESOURCE_ATTRIBUTES entries, in the order the
+	// variable listed them. Setup puts them on the resource it builds.
+	//
+	// They are read here, through the env function, rather than by Setup, because this
+	// package reads no environment of its own: a caller injecting an env decides the
+	// value of every key it names. The SDK still reads the real variable:
+	// sdktrace.WithResource and sdkmetric.WithResource each merge resource.Environment()
+	// under the resource they are handed, so a key the shell set and the env function did
+	// not still reaches a span.
+	ResourceAttributes []ResourceAttribute
+}
+
+// ResourceAttribute is one key and value from OTEL_RESOURCE_ATTRIBUTES.
+//
+// It is a pair of strings rather than an OpenTelemetry attribute so that Resolved stays
+// readable by a caller who does not import OpenTelemetry, which is the same reason
+// every other constructor here takes primitives.
+type ResourceAttribute struct {
+	Key   string
+	Value string
 }
 
 // Resolve computes the effective telemetry configuration from the config block and
@@ -363,6 +388,9 @@ func Resolve(s Settings, env func(string) string) (Resolved, error) {
 	r.SampleRatio = resolveSampleRatio(s)
 	r.Capture, r.Messages, r.MaxBytes = resolveCapture(s, env)
 
+	var valueless []string
+	r.ResourceAttributes, valueless = resolveResourceAttributes(env)
+
 	// Capture without export does nothing, so a run that is not exporting is not
 	// capturing however the file reads. This is not tidiness: every operator-facing
 	// surface reports this value, so leaving it true under a veto would warn at startup
@@ -379,7 +407,7 @@ func Resolve(s Settings, env func(string) string) (Resolved, error) {
 		return r, nil
 	}
 
-	err := validate(r, env)
+	err := validate(r, env, valueless)
 	if err != nil {
 		return r, err
 	}
@@ -509,6 +537,55 @@ func resolveExportBatch(r Resolved) Setting[int] {
 	return Setting[int]{Value: n, Origin: "derived from " + r.MaxBytes.Origin}
 }
 
+// resolveResourceAttributes reads OTEL_RESOURCE_ATTRIBUTES, returning its entries and
+// the entries that named no value.
+//
+// It parses the variable exactly as the SDK's own env detector does, because Setup
+// applies the result instead of calling resource.WithFromEnv and any difference would
+// show up as this build and every other OpenTelemetry process disagreeing about the
+// same variable. Entries are separated by commas and split at the first "=". The key
+// and the value are trimmed of surrounding whitespace, then the value is
+// percent-decoded, which is how a value holding a comma or an equals sign is written; a
+// value whose escape will not decode is kept exactly as it was written. An entry with
+// an empty key is dropped, since an attribute needs one. A repeated key is kept rather
+// than collapsed here and the last one wins on the resource, which is what an attribute
+// set does with duplicates. An entry with no "=" at all is returned as valueless, and
+// validate refuses the configuration over it, matching the error the SDK's detector
+// returns for the same input.
+func resolveResourceAttributes(env func(string) string) ([]ResourceAttribute, []string) {
+	raw := strings.TrimSpace(env(EnvResourceAttributes))
+	if raw == "" {
+		return nil, nil
+	}
+
+	var (
+		attrs     []ResourceAttribute
+		valueless []string
+	)
+
+	for _, entry := range strings.Split(raw, ",") {
+		k, v, found := strings.Cut(entry, "=")
+		if !found {
+			valueless = append(valueless, entry)
+			continue
+		}
+
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+
+		value, err := url.PathUnescape(strings.TrimSpace(v))
+		if err != nil {
+			value = v
+		}
+
+		attrs = append(attrs, ResourceAttribute{Key: key, Value: value})
+	}
+
+	return attrs, valueless
+}
+
 // attrValueLimit reads the SDK's attribute-value length limit and names which
 // variable supplied it, applying the SDK's own precedence. A missing or unparsable
 // value is no limit, matching the SDK's default of unlimited.
@@ -533,14 +610,22 @@ func attrValueLimit(env func(string) string) (int, string) {
 // validate applies the startup checks. OTLP/HTTP is connectionless, so nothing here
 // proves the collector is reachable; these are the mistakes that are knowable
 // locally, and each message names the fix rather than only the problem.
-func validate(r Resolved, env func(string) string) error {
+//
+// valueless are the OTEL_RESOURCE_ATTRIBUTES entries that named no value, passed in
+// because resolveResourceAttributes has already parsed the variable and parsing it a
+// second time here would let the two answers drift.
+func validate(r Resolved, env func(string) string, valueless []string) error {
 	err := validateProtocol(env)
 	if err != nil {
 		return err
 	}
 
 	if r.SampleRatio.Value < 0 || r.SampleRatio.Value > 1 {
-		return fmt.Errorf("invalid %s %v: must be between 0 and 1", r.SampleRatio.Origin, r.SampleRatio.Value)
+		return fmt.Errorf("%w: invalid %s %v: must be between 0 and 1", ErrInvalidSetting, r.SampleRatio.Origin, r.SampleRatio.Value)
+	}
+
+	if len(valueless) > 0 {
+		return fmt.Errorf("%w: invalid %s: %q names no value; each entry is key=value", ErrInvalidSetting, EnvResourceAttributes, strings.Join(valueless, ","))
 	}
 
 	err = validateCapture(r)
@@ -560,11 +645,11 @@ func validateCapture(r Resolved) error {
 	}
 
 	if !r.Messages.Value.Valid() {
-		return fmt.Errorf("invalid %s %q: must be %q or %q", r.Messages.Origin, r.Messages.Value, MessagesDelta, MessagesFull)
+		return fmt.Errorf("%w: invalid %s %q: must be %q or %q", ErrInvalidSetting, r.Messages.Origin, r.Messages.Value, MessagesDelta, MessagesFull)
 	}
 
 	if r.MaxBytes.Value < minMaxContentBytes || r.MaxBytes.Value > maxMaxContentBytes {
-		return fmt.Errorf("invalid %s %d: must be between %d and %d, default %d", r.MaxBytes.Origin, r.MaxBytes.Value, minMaxContentBytes, maxMaxContentBytes, defaultMaxContentBytes)
+		return fmt.Errorf("%w: invalid %s %d: must be between %d and %d, default %d", ErrInvalidSetting, r.MaxBytes.Origin, r.MaxBytes.Value, minMaxContentBytes, maxMaxContentBytes, defaultMaxContentBytes)
 	}
 
 	return nil
@@ -580,7 +665,7 @@ func validateProtocol(env func(string) string) error {
 			continue
 		}
 
-		return fmt.Errorf("%s is %q but this build speaks OTLP/HTTP only; set it to http/protobuf and use the OTLP/HTTP port (%s)", name, v, otlpHTTPPort)
+		return fmt.Errorf("%w: %s is %q but this build speaks OTLP/HTTP only; set it to http/protobuf and use the OTLP/HTTP port (%s)", ErrProtocolUnsupported, name, v, otlpHTTPPort)
 	}
 
 	return nil
@@ -599,24 +684,24 @@ func validateEndpoint(r Resolved) error {
 
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("invalid %s %q: %w", label, raw, err)
+		return fmt.Errorf("%w: invalid %s %q: %w", ErrInvalidEndpoint, label, raw, err)
 	}
 	if u.User != nil {
-		return fmt.Errorf("invalid %s %q: must not embed userinfo credentials", label, raw)
+		return fmt.Errorf("%w: invalid %s %q: must not embed userinfo credentials", ErrInvalidEndpoint, label, raw)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("invalid %s %q: scheme must be http or https", label, raw)
+		return fmt.Errorf("%w: invalid %s %q: scheme must be http or https", ErrInvalidEndpoint, label, raw)
 	}
 
 	if u.Port() == otlpGRPCPort {
-		return fmt.Errorf("%s %q is the OTLP/gRPC port; this build speaks OTLP/HTTP, use port %s", label, raw, otlpHTTPPort)
+		return fmt.Errorf("%w: %s %q is the OTLP/gRPC port; this build speaks OTLP/HTTP, use port %s", ErrProtocolUnsupported, label, raw, otlpHTTPPort)
 	}
 
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		// Two reasons to refuse the same endpoint, kept apart because they protect
 		// different things and an operator should be told which one they hit.
 		if r.HeadersSet {
-			return fmt.Errorf("%s %q uses http to a non-loopback host while an OTLP headers variable is set, which sends the credential in the clear; use https, or a loopback address (127.0.0.1, ::1, localhost) for a local collector", label, raw)
+			return fmt.Errorf("%w: %s %q uses http to a non-loopback host while an OTLP headers variable is set, which sends the credential in the clear; use https, or a loopback address (127.0.0.1, ::1, localhost) for a local collector", ErrInsecureEndpoint, label, raw)
 		}
 
 		// Content capture makes the payload the secret, so the header rule above is
@@ -624,7 +709,7 @@ func validateEndpoint(r Resolved) error {
 		// an internal network, where no headers variable is set at all and the whole
 		// conversation crosses the wire in cleartext.
 		if r.Capture.Value {
-			return fmt.Errorf("%s %q uses http to a non-loopback host while %s is set, which sends prompts, tool arguments and tool results in the clear; use https, or a loopback address (127.0.0.1, ::1, localhost) for a local collector", label, raw, r.Capture.Origin)
+			return fmt.Errorf("%w: %s %q uses http to a non-loopback host while %s is set, which sends prompts, tool arguments and tool results in the clear; use https, or a loopback address (127.0.0.1, ::1, localhost) for a local collector", ErrInsecureEndpoint, label, raw, r.Capture.Origin)
 		}
 	}
 

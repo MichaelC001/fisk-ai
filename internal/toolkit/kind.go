@@ -6,13 +6,8 @@ package toolkit
 
 // Kind identifies which provider supplies a tool: the wrapped application, the
 // harness itself, another agent, an MCP server, or the embedding caller. It is the
-// accounting axis and the value behind the machine-readable kind= log token, kept
-// deliberately distinct from Presentation, which is the visibility axis (how a call
-// is shown and suppressed). A single provider can present in more than one way: a
-// Builtin tool self-renders for the human-in-the-loop tools and is traced for the
-// memory and knowledge tools, and an MCP tool presents the way a remote one does
-// while being accounted under its own kind. Accounting therefore keys off Kind and
-// suppression off Presentation, and neither is ever derived from the other.
+// provider a call is accounted under and the value behind the machine-readable
+// kind= log token.
 type Kind int
 
 const (
@@ -24,8 +19,7 @@ const (
 	// KindApplication is a tool of the wrapped application: a fisk command tool.
 	KindApplication
 	// KindBuiltin is a tool the harness provides itself, in-process: the
-	// human-in-the-loop, memory, and knowledge tools. Their differing presentation is
-	// a Presentation concern, not a Kind: they are all one provider.
+	// human-in-the-loop, memory, and knowledge tools.
 	KindBuiltin
 	// KindRemote is a tool served by another agent over a2a.
 	KindRemote

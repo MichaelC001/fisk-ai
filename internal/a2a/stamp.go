@@ -11,17 +11,19 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
-// stampRequest fills in the framing fields of a standalone request header. The
-// message constructors set the protocol id, and a task request its own request tag, so a
-// message still needs an id, a conversation tag, a timestamp, and the sender before it is
-// schema-valid. A direct tool or discovery RPC is not part of a larger task or session, so
-// its request and conversation tags are one fresh id, and sequence is unused (the transport
-// reply inbox handles correlation), matching the transport notes for direct tool calls.
+// StampRequest fills in the framing fields the v1 header schema requires beyond the protocol
+// id a constructor sets: the message id, a conversation tag, the timestamp, and sender, which
+// is the name the caller answers to. A message that skips them is refused by the schema.
 //
-// The trace context of whatever span ctx carries is stamped alongside the rest, so a
-// receiver's spans join this one's trace. It is empty when nothing is tracing, which
-// is what leaves the field off the wire.
-func stampRequest(ctx context.Context, h *Header, sender string, recipient string) {
+// A request tag or a conversation tag the caller already set is kept rather than minted over,
+// so a caller names its own turn and correlates its own conversation before the message goes
+// out. A direct tool or discovery RPC carries neither and gets one fresh id for both. Sequence
+// is set to zero: the transport reply inbox correlates the answer.
+//
+// A recipient names who the message is for, and an empty one leaves whatever the header already
+// carried. The trace context comes from the span ctx carries, so a receiver's spans join this
+// one's trace, and it is empty when nothing is tracing.
+func StampRequest(ctx context.Context, h *Header, sender string, recipient string) {
 	id := NewID()
 
 	// A request tag the caller set is kept, so a caller holds the tag its own task

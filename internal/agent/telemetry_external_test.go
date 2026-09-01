@@ -889,7 +889,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeExecuted))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeExecuted.String()))
 
 		// Key names, never values: this is the no-content middle tier that answers "what
 		// did it ask for" without exporting what was said.
@@ -937,7 +937,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeExecuted))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeExecuted.String()))
 
 		_, ok = spanAttr(tool, "error.type")
 		Expect(ok).To(BeFalse())
@@ -1020,7 +1020,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeUnknownTool))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeUnknownTool.String()))
 	})
 
 	// A call a hook refused is still a span, distinguishable from one that ran and failed.
@@ -1055,7 +1055,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomePolicyDenied))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomePolicyDenied.String()))
 
 		// Denied, not failed: nothing ran, so this is not a tool error.
 		Expect(tool.Status.Code).ToNot(Equal(codes.Error))
@@ -1101,7 +1101,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeUnanswered))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeUnanswered.String()))
 	})
 
 	// A gate question whose answer arrives later is classified as deferred rather than as
@@ -1153,7 +1153,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeDeferred))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomeDeferred.String()))
 	})
 
 	// A recovered panic still produces a root span that ends, classified, and carrying no
@@ -1730,7 +1730,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		out, ok := spanAttr(tool, telemetry.AttrToolOutcome)
 		Expect(ok).To(BeTrue())
-		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomePolicyDenied))
+		Expect(out.AsString()).To(Equal(telemetry.ToolOutcomePolicyDenied.String()))
 
 		res, ok := spanAttr(tool, "gen_ai.tool.call.result")
 		Expect(ok).To(BeTrue(), "the model was told why, and that is what it acted on")

@@ -26,7 +26,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -425,10 +425,11 @@ type Options struct {
 	// resume itself continues. The slice order does not matter; the tools are ordered by
 	// name internally, so a set built by ranging a map still fingerprints identically.
 	//
-	// A custom tool built by functool.New with no Trace renderer runs silently: its call
-	// and result line are suppressed except under verbose, as a human-in-the-loop built-in
-	// is. Set functool.Spec.Trace to have its calls traced like the memory tools. A
-	// function tool is never rendered as an application-command line. A custom tool whose
+	// A custom tool built by functool.New with no Trace renderer declares no call line,
+	// the way a human-in-the-loop built-in does. Set functool.Spec.Trace to give its
+	// calls one, as the memory tools have. What a surface does with that line is the
+	// surface's own: the CLI prints the tool name and its arguments for every call
+	// either way, and gates the result on --tool-output. A custom tool whose
 	// Name, Definition, or Describe panics crashes the run as a *PanicError; the harness
 	// does not sandbox it.
 	CustomTools []toolkit.Tool
@@ -625,12 +626,51 @@ func startupErrorClass(err error) telemetry.ErrorClass {
 	return telemetry.ClassConfig
 }
 
-// setupFailedReason is the terminal reason for a run that never reached the loop. The
-// run path itself has no such outcome, because from its point of view nothing ran, but
-// a trace with an empty reason reads as a bug in the instrumentation rather than as a
-// refused resume or a bad config. It is the trace an operator goes looking for when a
-// run is rejected in CI.
-const setupFailedReason = "setup_failed"
+// telemetryReason maps a run path terminal reason onto telemetry's own closed
+// vocabulary.
+//
+// The two sets are declared apart because telemetry imports nothing from the rest of
+// this tree, so this is the single place they meet: a reason added to runstate without
+// a member here shows up as one unrecognized value rather than as a new string on a
+// span. A reason this build does not know maps to telemetry.TerminalOther rather than
+// through as itself, since the value reaches a metric label where one distinct string
+// is one time series for the life of the process.
+func telemetryReason(reason runstate.TerminalReason) telemetry.TerminalReason {
+	switch reason {
+	case runstate.ReasonCompleted:
+		return telemetry.TerminalCompleted
+	case runstate.ReasonSuspended:
+		return telemetry.TerminalSuspended
+	case runstate.ReasonError:
+		return telemetry.TerminalError
+	case runstate.ReasonBudget:
+		return telemetry.TerminalBudget
+	case runstate.ReasonMaxIterations:
+		return telemetry.TerminalMaxIterations
+	default:
+		return telemetry.TerminalOther
+	}
+}
+
+// telemetryToolKind maps a tool provider kind onto telemetry's own closed vocabulary,
+// on the same terms as telemetryReason. A kind this build does not know maps to
+// telemetry.ToolKindUnknown, the sentinel toolkit.Kind.String already uses for one.
+func telemetryToolKind(kind toolkit.Kind) telemetry.ToolKind {
+	switch kind {
+	case toolkit.KindApplication:
+		return telemetry.ToolKindApplication
+	case toolkit.KindBuiltin:
+		return telemetry.ToolKindBuiltin
+	case toolkit.KindRemote:
+		return telemetry.ToolKindRemote
+	case toolkit.KindCustom:
+		return telemetry.ToolKindCustom
+	case toolkit.KindMCP:
+		return telemetry.ToolKindMCP
+	default:
+		return telemetry.ToolKindUnknown
+	}
+}
 
 // runOutcome assembles what the root span records about a finished run.
 //
@@ -644,18 +684,22 @@ const setupFailedReason = "setup_failed"
 // session totals are reported separately, so that summing either one across a session's
 // traces gives an answer that means something.
 func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls, seedRemoteCalls, seedMCPCalls int64) telemetry.RunOutcome {
-	out := telemetry.RunOutcome{TerminalReason: string(res.Reason)}
+	out := telemetry.RunOutcome{TerminalReason: telemetryReason(res.Reason)}
 
 	var panicErr *PanicError
 	out.Crashed = errors.As(err, &panicErr)
 
-	if out.TerminalReason == "" {
-		out.TerminalReason = setupFailedReason
+	if res.Reason == "" {
+		// The run path has no outcome for a run that never reached the loop, since from
+		// its point of view nothing ran, but a trace with an empty reason reads as a bug
+		// in the instrumentation rather than as a refused resume or a bad config. This is
+		// the trace an operator goes looking for when a run is rejected in CI.
+		out.TerminalReason = telemetry.TerminalSetupFailed
 		if reachedRunner {
 			// The loop was running and did not reach a terminal state, which today means
 			// it crashed; reporting that as a setup failure would send an operator to the
 			// wrong half of the run.
-			out.TerminalReason = string(runstate.ReasonError)
+			out.TerminalReason = telemetry.TerminalError
 		}
 	}
 
@@ -961,12 +1005,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		return res, err
 	}
 
-	tools, err := fisk.LoadTools(ctx, cfg)
+	tools, err := fisktool.LoadTools(ctx, cfg)
 	if err != nil {
 		return res, err
 	}
 
-	byName := make(map[string]*fisk.FiskCommandTool, len(tools))
+	byName := make(map[string]*fisktool.CommandTool, len(tools))
 	for _, t := range tools {
 		byName[t.Name()] = t
 	}
@@ -1022,7 +1066,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	if opts.Conns != nil {
 		natsConns = opts.Conns
 	} else if memNeedsNats || sessionNeedsNats || transportNeedsNats {
-		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
+		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 		if err != nil {
 			return res, fmt.Errorf("connecting to NATS: %w", err)
 		}
@@ -1266,8 +1310,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// happens elsewhere. KindRemote is journaled remote and recomputed into the
 		// remote-call counters on resume, and KindMCP owns its own bucket in the per-kind
 		// accounting; either one declared by an injected tool reports work this process
-		// did as work a peer did. The check is on the kind rather than the presentation
-		// because the kind is what the accounting reads.
+		// did as work a peer did. The check is on the kind because the accounting reads
+		// the kind.
 		d, ok := t.(toolkit.Describer)
 		if ok {
 			switch d.Describe(json.RawMessage("{}")).Kind {
@@ -1960,7 +2004,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 		} else {
 			meta := runstate.MetaRecord{
-				Version:     runstate.Version,
 				RunID:       sessionID,
 				Created:     time.Now(),
 				Fingerprint: fp,
@@ -1996,7 +2039,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 			id := a2a.NewID()
 			meta := runstate.MetaRecord{
-				Version:     runstate.Version,
 				RunID:       id,
 				Created:     time.Now(),
 				Fingerprint: fp,
@@ -2302,34 +2344,11 @@ func LoadSession(ctx context.Context, cfg *config.Config, id string, opts Sessio
 	return store.Load(ctx, id)
 }
 
-// dialSessionNats dials the connection a jetstream session read needs. conns.Connect
-// blocks until the dial resolves and takes no context, so it runs in a goroutine while
-// this waits on ctx as well. On a cancel this returns ctx.Err() and starts a second
-// goroutine that waits for the dial and closes the connection it produced.
+// dialSessionNats dials the connection a jetstream session read needs, announcing it
+// under the configuration's product so the pre-flight read and the run that follows
+// appear on the server under one name.
 func dialSessionNats(ctx context.Context, cfg *config.Config) (*conns.Provider, error) {
-	type dial struct {
-		provider *conns.Provider
-		err      error
-	}
-
-	done := make(chan dial, 1)
-	go func() {
-		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
-		done <- dial{provider: p, err: err}
-	}()
-
-	select {
-	case d := <-done:
-		return d.provider, d.err
-
-	case <-ctx.Done():
-		go func() {
-			d := <-done
-			d.provider.Close()
-		}()
-
-		return nil, ctx.Err()
-	}
+	return conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 }
 
 // resumeHazards reports the resume situation that can misbehave: a pause at a

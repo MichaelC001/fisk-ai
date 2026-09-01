@@ -65,7 +65,7 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 		return nil, fmt.Errorf("%w: %q is not a valid request id", ErrInvalidMessage, request)
 	}
 
-	stampRequest(ctx, &reply.Header, c.sender, agent)
+	StampRequest(ctx, &reply.Header, c.sender, agent)
 
 	// An answer correlates to the task that asked rather than to itself, which is what
 	// stamping a standalone request gives it, so the tag is set to the task's after.

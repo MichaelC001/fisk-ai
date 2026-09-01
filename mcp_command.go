@@ -17,7 +17,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // defaultMCPPort is the TCP port the MCP server listens on when neither the
@@ -47,7 +47,7 @@ func mcpAction(_ *fisk.ParseContext) error {
 	ctx, cancel := interruptContext()
 	defer cancel()
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	if err != nil {
 		return err
 	}

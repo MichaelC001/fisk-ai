@@ -4,7 +4,7 @@
 
 //go:build !unix
 
-package fisk
+package fisktool
 
 import "os/exec"
 

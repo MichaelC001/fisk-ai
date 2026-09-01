@@ -42,12 +42,12 @@ func discoverAction(_ *fisk.ParseContext) error {
 	ctx, cancel := interruptContext()
 	defer cancel()
 
-	contextName, sender, wait, err := discoverContext()
+	contextName, sender, product, wait, err := discoverContext()
 	if err != nil {
 		return err
 	}
 
-	provider, err := conns.Connect(contextName, sender)
+	provider, err := conns.ConnectNatsContext(ctx, contextName, conns.Config{Product: product, Name: sender})
 	if err != nil {
 		return err
 	}
@@ -103,25 +103,33 @@ func discoverAction(_ *fisk.ParseContext) error {
 	return nil
 }
 
-// discoverContext resolves the NATS context name, the sender identity and how long to
-// wait for the card. A --context flag takes precedence and needs no config file;
-// otherwise the config file is read for nats_context and the agent's identity is used
-// as the sender. The sender defaults to "fisk-ai" when no config identity is available.
+// discoverContext resolves the NATS context name, the sender identity, the product the
+// connection announces and how long to wait for the card. A --context flag takes
+// precedence and needs no config file; otherwise the config file is read for
+// nats_context and the agent's identity is used as the sender. The sender defaults to
+// "fisk-ai" when no config identity is available.
 //
 // The wait comes from the same key a run waits on, so this command and `fisk info`
 // give a peer the same time to answer the same request. With --context there is no
 // configuration to read one from, and the transport applies its own default.
-func discoverContext() (contextName string, sender string, wait time.Duration, err error) {
+func discoverContext() (contextName string, sender string, product string, wait time.Duration, err error) {
 	if natsContextFlag != "" {
-		return natsContextFlag, "fisk-ai", 0, nil
+		// A default configuration carries no context and no identity, and is built here
+		// only for the product name this program announces.
+		cfg, cerr := versionedConfig(config.NewConfig())
+		if cerr != nil {
+			return "", "", "", 0, cerr
+		}
+
+		return natsContextFlag, "fisk-ai", cfg.ProductName(), 0, nil
 	}
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	if err != nil {
-		return "", "", 0, fmt.Errorf("reading %q for nats_context (or pass --context): %w", configFile, err)
+		return "", "", "", 0, fmt.Errorf("reading %q for nats_context (or pass --context): %w", configFile, err)
 	}
 	if cfg.NatsContext == "" {
-		return "", "", 0, fmt.Errorf("no nats_context in %q; set it or pass --context", configFile)
+		return "", "", "", 0, fmt.Errorf("no nats_context in %q; set it or pass --context", configFile)
 	}
 
 	sender = cfg.Identity
@@ -129,5 +137,5 @@ func discoverContext() (contextName string, sender string, wait time.Duration, e
 		sender = "fisk-ai"
 	}
 
-	return cfg.NatsContext, sender, cfg.A2ARequestTimeout(), nil
+	return cfg.NatsContext, sender, cfg.ProductName(), cfg.A2ARequestTimeout(), nil
 }

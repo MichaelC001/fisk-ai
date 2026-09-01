@@ -51,7 +51,16 @@ func BuildService(name string) *Service {
 func (s *Service) Faults() <-chan error { return s.faults }
 
 // Fault reports that this service has stopped answering for a reason nobody asked for.
-func (s *Service) Fault(err error) { s.faults <- err }
+//
+// The send is non-blocking over a buffer of one. A second fault is dropped: Serve returns
+// the first one and ends, and a blocking send would park the goroutine that reported the
+// second until the suite times out.
+func (s *Service) Fault(err error) {
+	select {
+	case s.faults <- err:
+	default:
+	}
+}
 
 // Name identifies the service.
 func (s *Service) Name() string { return s.name }

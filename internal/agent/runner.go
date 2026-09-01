@@ -397,7 +397,7 @@ func (r *runner) runTurn(ctx context.Context) (runstate.TerminalReason, error) {
 
 	if span != nil {
 		outcome := telemetry.TurnOutcome{
-			TerminalReason: string(reason),
+			TerminalReason: telemetryReason(reason),
 			Usage:          runStatsUsage(r.stats).Sub(beforeUsage),
 		}
 		if err != nil {
@@ -417,7 +417,7 @@ func (r *runner) runTurn(ctx context.Context) (runstate.TerminalReason, error) {
 	// would otherwise report every call the session has ever made.
 	r.telemetry.RecordTurn(ctx, telemetry.TurnMetrics{
 		AgentName:      r.identity,
-		TerminalReason: string(reason),
+		TerminalReason: telemetryReason(reason),
 		Interactive:    r.interactive,
 		Duration:       time.Since(started),
 		InferenceCalls: r.stats.LlmCalls - beforeCalls,
@@ -1417,7 +1417,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		RequestedName: use.Name,
 		CallID:        use.ID,
 		Identity:      r.identity,
-		Kind:          toolkit.KindUnknown.String(),
+		Kind:          telemetryToolKind(toolkit.KindUnknown),
 		ConfirmGated:  ok && confirmGated(tool, r.confirmTags),
 		Datastore:     isKnowledgeTool(use.Name),
 		Resumed:       r.completingPending,
@@ -1467,7 +1467,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// run the tool or mutate state, so calling it here is safe.
 	origInfo := describeCall(tool, use.Input)
 	origGated := confirmGated(tool, r.confirmTags)
-	outcome.Kind = origInfo.Kind.String()
+	outcome.Kind = telemetryToolKind(origInfo.Kind)
 
 	// PreToolUse sees a copy of the model's raw arguments so a hook cannot mutate the
 	// run's own buffer through the snapshot. A returned error aborts the run.
@@ -1538,7 +1538,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// the model originally asked for. The name is still registry-validated: a rewrite
 	// can only target a registered tool.
 	outcome.Name = effName
-	outcome.Kind = effInfo.Kind.String()
+	outcome.Kind = telemetryToolKind(effInfo.Kind)
 	outcome.Rewritten = pre.RewriteTool != "" || pre.RewriteInput != nil
 	if outcome.Rewritten {
 		outcome.ArgKeys = argumentKeys(effInput)
@@ -1616,9 +1616,8 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// beside CountToolKind, which is what makes them count calls that were made while
 	// the buckets count calls the model asked for. See RunStats.ToolCallsByKind.
 	//
-	// Both are keyed on the provider kind and never on the presentation or the agent
-	// name: presentation is the visibility axis, and other providers present the same way
-	// a remote call does while being accounted under their own kind.
+	// Both are keyed on the provider kind and never on the agent name, which an a2a
+	// peer and an MCP server both set while being accounted under their own kind.
 	dispatched = true
 	switch effInfo.Kind {
 	case toolkit.KindRemote:
@@ -1658,7 +1657,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// expired one there would end the span badly and abort the whole run on a hook that
 	// objects. Nothing after ExecuteUse uses execCtx.
 	execCtx, cancelExec := r.toolContext(ctx, effInfo)
-	result, exec, unansweredErr := toolkit.ExecuteUse(effTool, execCtx, effUse, deps)
+	result, exec, unansweredErr := toolkit.ExecuteUse(execCtx, effTool, effUse, deps)
 	timedOut := cancelExec()
 
 	// A call that produced no result has nothing to trace, hand to a hook or journal, so
@@ -1725,7 +1724,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		outcome.Failed = true
 	}
 
-	r.events.ToolResult(toolResultTrace(effInfo.Present, effInfo.Kind, result))
+	r.events.ToolResult(toolResultTrace(effInfo.Kind, result))
 	return result, dispatched, effInfo.Kind, nil
 }
 
@@ -1878,13 +1877,9 @@ func describeCall(tool toolkit.Tool, input json.RawMessage) toolkit.CallInfo {
 // traceCall emits the ToolCall trace for a dispatched call from the CallInfo the
 // runner already obtained, and returns the execution dependencies the call's kind
 // needs. The tool described its own call rather than the runner switching on its
-// concrete type, so the presentation and dependency needs
-// travel with the tool on info.Present: a built-in shows its own call line (a
-// human-in-the-loop tool is distracting to name and is shown only under verbose
-// downstream, a memory or knowledge tool is traced like a command); a remote tool
-// names the agent it runs on; a command tool carries the full call line and a short
-// form with long argument values elided, so a width-aware surface can fall back to
-// the short one only when the full line would overflow.
+// concrete type: a remote tool names the agent it runs on; a command tool carries the
+// full call line and a short form with long argument values elided, so a width-aware
+// surface can fall back to the short one only when the full line would overflow.
 func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) toolkit.ExecDeps {
 	r.events.ToolCall(ToolTrace{
 		ID:           use.ID,
@@ -1893,7 +1888,6 @@ func (r *runner) traceCall(use llm.ToolUseBlock, info toolkit.CallInfo) toolkit.
 		DisplayShort: info.DisplayShort,
 		Input:        use.Input,
 		Agent:        info.Agent,
-		Present:      info.Present,
 		ProviderKind: info.Kind,
 	})
 
@@ -1927,10 +1921,8 @@ func toolResultRecord(id string, result llm.ToolResultBlock, kind toolkit.Kind, 
 	}
 }
 
-// toolResultTrace extracts the display fields from a tool result: its presentation
-// (carried through so the result renderer suppresses it by the same rule as its
-// call), its provider kind for the log token, its text content, and whether the tool
-// reported a failure.
-func toolResultTrace(present toolkit.Presentation, provider toolkit.Kind, result llm.ToolResultBlock) ToolResultTrace {
-	return ToolResultTrace{CallID: result.ToolUseID, Present: present, ProviderKind: provider, IsError: result.IsError, Output: result.Content}
+// toolResultTrace extracts the display fields from a tool result: its provider kind
+// for the log token, its text content, and whether the tool reported a failure.
+func toolResultTrace(provider toolkit.Kind, result llm.ToolResultBlock) ToolResultTrace {
+	return ToolResultTrace{CallID: result.ToolUseID, ProviderKind: provider, IsError: result.IsError, Output: result.Content}
 }

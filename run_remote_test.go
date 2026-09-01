@@ -165,7 +165,7 @@ var _ = Describe("A run against a worker elsewhere", func() {
 		startRemoteWorker(ctx, url, cfg, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.TextResponse("there are three streams")), nil)
 
-		host, err := dialAgent(cfg, name, hostedLogger(), nil, nil)
+		host, err := dialAgent(ctx, cfg, name, hostedLogger(), nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(host.Close()).To(Succeed()) })
 
@@ -204,7 +204,7 @@ var _ = Describe("A run against a worker elsewhere", func() {
 
 		cfg := remoteWorkerConfig("nobody-home")
 
-		host, err := dialAgent(cfg, name, hostedLogger(), nil, nil)
+		host, err := dialAgent(ctx, cfg, name, hostedLogger(), nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(host.Close()).To(Succeed()) })
 
@@ -233,7 +233,7 @@ var _ = Describe("A run against a worker elsewhere", func() {
 		Expect(nc.Flush()).To(Succeed())
 
 		cfg := remoteWorkerConfig("silent")
-		host, err := dialAgent(cfg, name, hostedLogger(), nil, nil)
+		host, err := dialAgent(ctx, cfg, name, hostedLogger(), nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(host.Close()).To(Succeed()) })
 
@@ -316,7 +316,7 @@ var _ = Describe("An answer that arrived too late", func() {
 			agenttest.TextResponse("done"),
 		), store)
 
-		host, err := dialAgent(cfg, name, hostedLogger(), nil, nil)
+		host, err := dialAgent(ctx, cfg, name, hostedLogger(), nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(host.Close()).To(Succeed()) })
 

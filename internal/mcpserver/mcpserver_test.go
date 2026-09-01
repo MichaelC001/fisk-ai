@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -21,7 +22,7 @@ import (
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	tools2 "github.com/choria-io/fisk-ai/internal/toolkit"
-	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -71,26 +72,45 @@ func toolsFor(app *fisk.Application) []tools2.Tool {
 	return tools2.Tools(cmdToolsFor(app))
 }
 
-// cmdToolsFor builds the concrete command tools, for specs that set AppPath before
-// serving them.
-func cmdToolsFor(app *fisk.Application) []*fisk2.FiskCommandTool {
+// cmdToolsFor builds the concrete command tools, for specs that filter or inspect
+// them rather than run them.
+func cmdToolsFor(app *fisk.Application) []*fisktool.CommandTool {
 	GinkgoHelper()
 
-	tools, err := fisk2.ApplicationTools(introspect(app))
+	tools, err := fisktool.ApplicationTools(introspect(app))
 	Expect(err).NotTo(HaveOccurred())
 
 	return tools
 }
 
-// writeExecutable writes body to an executable file and returns its path, for
-// use as a stand-in application binary.
-func writeExecutable(body string) string {
+// runnableTools returns the command tools of app backed by a runnable binary.
+// ToolsForApp is the only route to a tool that carries a binary path, so the script
+// it introspects answers --fisk-introspect with the application's real model and
+// dispatches every other invocation on the command name. bodies maps a command name
+// to the shell fragment that runs for it, without a shebang.
+func runnableTools(app *fisk.Application, bodies map[string]string) []*fisktool.CommandTool {
 	GinkgoHelper()
 
-	path := filepath.Join(GinkgoT().TempDir(), "app")
-	Expect(os.WriteFile(path, []byte(body), 0o700)).To(Succeed())
+	model, err := json.Marshal(introspect(app))
+	Expect(err).NotTo(HaveOccurred())
 
-	return path
+	dir := GinkgoT().TempDir()
+	modelPath := filepath.Join(dir, "introspect.json")
+	Expect(os.WriteFile(modelPath, model, 0o600)).To(Succeed())
+
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\ncase \"$1\" in\n", modelPath)
+	for name, body := range bodies {
+		script += name + ")\n" + body + ";;\n"
+	}
+	script += "esac\n"
+
+	path := filepath.Join(dir, "app")
+	Expect(os.WriteFile(path, []byte(script), 0o700)).To(Succeed())
+
+	tools, err := fisktool.ToolsForApp(context.Background(), path, nil)
+	Expect(err).NotTo(HaveOccurred())
+
+	return tools
 }
 
 // connect wires an in-memory MCP client to the server and returns the session.
@@ -162,9 +182,8 @@ func taggedExecutable(name, tag, marker string) []tools2.Tool {
 	app := fisk.New("app", "an app")
 	app.Command(name, "a command").Tag(tag)
 
-	tools := cmdToolsFor(app)
+	tools := runnableTools(app, map[string]string{name: "echo " + marker + "\n"})
 	Expect(tools).To(HaveLen(1))
-	tools[0].AppPath = writeExecutable("#!/bin/sh\necho " + marker + "\n")
 
 	return tools2.Tools(tools)
 }
@@ -388,7 +407,7 @@ var _ = Describe("BuildServer", func() {
 		cmdTools := cmdToolsFor(app)
 
 		// The deny strip is the same first FilterTools pass the agent uses.
-		filtered, err := fisk2.FilterTools(cmdTools, nil, fisk2.IncludeFilter)
+		filtered, err := fisktool.FilterTools(cmdTools, nil, fisktool.IncludeFilter)
 		Expect(err).NotTo(HaveOccurred())
 
 		srv, registered := BuildServer(tools2.Tools(filtered), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
@@ -414,8 +433,8 @@ var _ = Describe("BuildServer", func() {
 	})
 
 	It("Should skip tools whose names are not valid MCP tool names", func() {
-		valid := &fisk2.FiskCommandTool{Path: []string{"ok"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{"type": "object"}}}
-		invalid := &fisk2.FiskCommandTool{Path: []string{"bad.name"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{"type": "object"}}}
+		valid := &fisktool.CommandTool{Path: []string{"ok"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{"type": "object"}}}
+		invalid := &fisktool.CommandTool{Path: []string{"bad.name"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{"type": "object"}}}
 
 		_, registered := BuildServer([]tools2.Tool{valid, invalid}, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("ok"))
@@ -439,22 +458,11 @@ var _ = Describe("tool calls", func() {
 			app.Command(name, "a command")
 		}
 
-		tools := cmdToolsFor(app)
-
-		byName := map[string]*fisk2.FiskCommandTool{}
-		for _, t := range tools {
-			byName[t.Name()] = t
-		}
-		for name, body := range bodies {
-			Expect(byName[name]).NotTo(BeNil())
-			byName[name].AppPath = writeExecutable(body)
-		}
-
-		return tools2.Tools(tools)
+		return tools2.Tools(runnableTools(app, bodies))
 	}
 
 	It("Should return command output as a successful result", func() {
-		tools := appWithExecutables(map[string]string{"ping": "#!/bin/sh\necho pong\n"})
+		tools := appWithExecutables(map[string]string{"ping": "echo pong\n"})
 		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 
 		cs := connect(ctx, srv)
@@ -470,7 +478,7 @@ var _ = Describe("tool calls", func() {
 	})
 
 	It("Should deliver a non-zero exit as a successful result, not an error", func() {
-		tools := appWithExecutables(map[string]string{"fail": "#!/bin/sh\nexit 4\n"})
+		tools := appWithExecutables(map[string]string{"fail": "exit 4\n"})
 		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 
 		cs := connect(ctx, srv)
@@ -487,8 +495,11 @@ var _ = Describe("tool calls", func() {
 	It("Should report an execution failure as an error result", func() {
 		app := fisk.New("app", "an app")
 		app.Command("broken", "a command")
-		tools := cmdToolsFor(app)
-		tools[0].AppPath = "/nonexistent/binary"
+		tools := runnableTools(app, map[string]string{"broken": "echo ok\n"})
+
+		// The binary is introspected at load and removed afterwards, so the call
+		// fails to start the command rather than failing inside it.
+		Expect(os.Remove(tools[0].AppPath())).To(Succeed())
 
 		srv, _ := BuildServer(tools2.Tools(tools), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 
@@ -500,7 +511,7 @@ var _ = Describe("tool calls", func() {
 	})
 
 	It("Should fail a call that exceeds the per-call timeout", func() {
-		tools := appWithExecutables(map[string]string{"slow": "#!/bin/sh\nsleep 2\n"})
+		tools := appWithExecutables(map[string]string{"slow": "sleep 2\n"})
 		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", CallTimeout: 100 * time.Millisecond, LogOutput: io.Discard})
 
 		cs := connect(ctx, srv)
@@ -511,7 +522,7 @@ var _ = Describe("tool calls", func() {
 	})
 
 	It("Should log the command line being run without its output", func() {
-		tools := appWithExecutables(map[string]string{"ping": "#!/bin/sh\necho pong\n"})
+		tools := appWithExecutables(map[string]string{"ping": "echo pong\n"})
 
 		var logbuf bytes.Buffer
 		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: &logbuf})
@@ -528,7 +539,7 @@ var _ = Describe("tool calls", func() {
 	})
 
 	It("Should serialize calls beyond the concurrency limit", func() {
-		tools := appWithExecutables(map[string]string{"work": "#!/bin/sh\nsleep 0.4\n"})
+		tools := appWithExecutables(map[string]string{"work": "sleep 0.4\n"})
 		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", Concurrency: 1, CallTimeout: 5 * time.Second, LogOutput: io.Discard})
 
 		cs := connect(ctx, srv)
@@ -563,8 +574,7 @@ var _ = Describe("Serve", func() {
 		// shutdownTimeout. This guards that the shutdown returns well within it.
 		app := fisk.New("app", "an app")
 		app.Command("ping", "a command")
-		tools := cmdToolsFor(app)
-		tools[0].AppPath = writeExecutable("#!/bin/sh\necho pong\n")
+		tools := runnableTools(app, map[string]string{"ping": "echo pong\n"})
 
 		srv, registered := BuildServer(tools2.Tools(tools), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("ping"))

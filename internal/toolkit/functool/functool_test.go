@@ -244,7 +244,7 @@ var _ = Describe("ExecuteUse", func() {
 
 	It("Should return a normal result carrying the handler output", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler})
-		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
+		res, _, _ := toolkit.ExecuteUse(context.Background(), tool, use("{}"), toolkit.ExecDeps{})
 		Expect(res.ToolUseID).To(Equal("u1"))
 		Expect(res.Content).To(Equal("ok"))
 		Expect(res.IsError).To(BeFalse())
@@ -255,7 +255,7 @@ var _ = Describe("ExecuteUse", func() {
 			return "", errors.New("boom")
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
+		res, _, _ := toolkit.ExecuteUse(context.Background(), tool, use("{}"), toolkit.ExecDeps{})
 		Expect(res.Content).To(Equal("boom"))
 		Expect(res.IsError).To(BeTrue())
 	})
@@ -265,7 +265,7 @@ var _ = Describe("ExecuteUse", func() {
 			return tc.WorkDir(), nil
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{WorkDir: "/run/42"})
+		res, _, _ := toolkit.ExecuteUse(context.Background(), tool, use("{}"), toolkit.ExecDeps{WorkDir: "/run/42"})
 		Expect(res.Content).To(Equal("/run/42"))
 	})
 
@@ -278,7 +278,7 @@ var _ = Describe("ExecuteUse", func() {
 			return "no-operator", nil
 		}
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: handler})
-		res, _, _ := toolkit.ExecuteUse(tool, context.Background(), use("{}"), toolkit.ExecDeps{})
+		res, _, _ := toolkit.ExecuteUse(context.Background(), tool, use("{}"), toolkit.ExecDeps{})
 		Expect(res.Content).To(Equal("no-operator"))
 	})
 })
@@ -306,27 +306,26 @@ var _ = Describe("Call", func() {
 var _ = Describe("Describe", func() {
 	input := json.RawMessage(`{"path":"x"}`)
 
-	It("Should present a remote tool as remote, naming its agent, with no dependencies", func() {
+	It("Should account a remote tool under the remote kind, naming its agent, with no dependencies", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, Remote: &RemoteSpec{Agent: "billing"}})
 		info := tool.Describe(input)
-		Expect(info.Present).To(Equal(toolkit.PresentRemote))
+		Expect(info.Kind).To(Equal(toolkit.KindRemote))
 		Expect(info.Agent).To(Equal("billing"))
 		Expect(info.NeedsPrompter).To(BeFalse())
 		Expect(info.NeedsWorkDir).To(BeFalse())
 		Expect(info.Display).To(Equal(""))
 	})
 
-	It("Should present a remote tool as remote even when its agent name is empty", func() {
+	It("Should account a remote tool under the remote kind even when its agent name is empty", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, Remote: &RemoteSpec{}})
 		info := tool.Describe(input)
-		Expect(info.Present).To(Equal(toolkit.PresentRemote))
+		Expect(info.Kind).To(Equal(toolkit.KindRemote))
 		Expect(info.Agent).To(Equal(""))
 	})
 
-	It("Should present an MCP tool as remote, naming its server, but account it under its own kind", func() {
+	It("Should account an MCP tool under its own kind, naming its server", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, MCP: &MCPSpec{Server: "docs"}})
 		info := tool.Describe(input)
-		Expect(info.Present).To(Equal(toolkit.PresentRemote))
 		Expect(info.Kind).To(Equal(toolkit.KindMCP))
 		Expect(info.Agent).To(Equal("docs"))
 		Expect(info.NeedsPrompter).To(BeFalse())
@@ -334,20 +333,18 @@ var _ = Describe("Describe", func() {
 		Expect(info.Display).To(Equal(""))
 	})
 
-	It("Should present a traced tool like a command and request the dependencies", func() {
+	It("Should carry a traced tool's call line and request the dependencies", func() {
 		trace := func(json.RawMessage) string { return "wrote key foo" }
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler, Trace: trace})
 		info := tool.Describe(input)
-		Expect(info.Present).To(Equal(toolkit.PresentTraced))
 		Expect(info.Display).To(Equal("wrote key foo"))
 		Expect(info.NeedsPrompter).To(BeTrue())
 		Expect(info.NeedsWorkDir).To(BeTrue())
 	})
 
-	It("Should present an untraced in-process tool as self-rendered with no display", func() {
+	It("Should give an untraced in-process tool no display and request the dependencies", func() {
 		tool := mustNew(Spec{Name: "n", Description: "d", Schema: objectSchema(), Handler: okHandler})
 		info := tool.Describe(input)
-		Expect(info.Present).To(Equal(toolkit.PresentSelfRendered))
 		Expect(info.Display).To(Equal(""))
 		Expect(info.NeedsPrompter).To(BeTrue())
 		Expect(info.NeedsWorkDir).To(BeTrue())

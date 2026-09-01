@@ -95,8 +95,7 @@ var _ = Describe("BuildServer built-ins", func() {
 	It("serves a command tool and a built-in from one list, each in its own shape", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ping", "a command")
-		cmdTools := cmdToolsFor(app)
-		cmdTools[0].AppPath = writeExecutable("#!/bin/sh\necho pong\n")
+		cmdTools := runnableTools(app, map[string]string{"ping": "echo pong\n"})
 
 		served := append(tools2.Tools(cmdTools), tools2.Tools(lexicalKnowledgeBuiltins(ctx))...)
 		srv, registered := BuildServer(served, Options{Name: "app", Version: "v1", LogOutput: io.Discard})

@@ -28,10 +28,41 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// ErrChannelDone reports that a channel has no more work and never will. A server
-// stops serving that channel without treating it as a failure, which is how a
-// finite channel (a fixed batch, a test double) ends cleanly.
-var ErrChannelDone = errors.New("channel has no more work")
+var (
+	// ErrChannelDone reports that a channel has no more work and never will. A server
+	// stops serving that channel without treating it as a failure, which is how a
+	// finite channel (a fixed batch, a test double) ends cleanly.
+	ErrChannelDone = errors.New("channel has no more work")
+
+	// ErrChannelPanic reports that a channel implementation panicked. The server
+	// recovers the panic and logs it. A panic in Next ends that channel's puller and
+	// faults the server, so Serve returns this error and a supervisor restarts the
+	// worker. A panic in Work.Done loses that one outcome, and the worker carries on.
+	ErrChannelPanic = errors.New("channel panicked")
+
+	// ErrConfigRequired reports that no configuration was supplied. New and NewResources
+	// both need one and neither can supply a default: it describes the agent every run
+	// executes.
+	ErrConfigRequired = errors.New("a configuration is required")
+
+	// ErrInvalidOptions reports options a caller has to correct before anything can be
+	// served: no endpoint at all, an endpoint that is nil or unnamed, a work directory
+	// that is not an absolute path to an existing directory, or a configuration that
+	// reaches NATS without naming a context. The same options fail the same way on a
+	// retry.
+	ErrInvalidOptions = errors.New("invalid options")
+
+	// ErrEndpointBuild reports that Endpoints could not produce the set a configuration
+	// asks for, either because a builder returned an error or because it returned a
+	// value that is neither a Channel nor a Service. Whatever was built before it has
+	// been released.
+	ErrEndpointBuild = errors.New("building an endpoint failed")
+
+	// ErrResourceBuild reports that NewResources could not build one of the values every
+	// run shares. Everything built before it has been released, so the caller holds
+	// nothing to release.
+	ErrResourceBuild = errors.New("building the shared resources failed")
+)
 
 // Channel is a calling endpoint an agent is hosted behind.
 //
@@ -48,6 +79,11 @@ type Channel interface {
 	// context is canceled. Any other error is logged and retried after a delay, so a
 	// transient failure to reach a queue does not end the channel. A nil error
 	// guarantees a non-nil Work.
+	//
+	// A panic is recovered and faults the server, on the path an endpoint reporting it
+	// has stopped working already takes: this channel is served no further, the rest are
+	// drained, and Serve returns ErrChannelPanic. It is not retried, because a panic is a
+	// bug in the implementation and the next call would raise it again.
 	Next(ctx context.Context) (*Work, error)
 }
 
@@ -139,6 +175,30 @@ type FaultingEndpoint interface {
 	// Faults yields at most one fault per endpoint lifetime; a nil channel never
 	// yields. It is read once, when Serve starts, and never closed by the reader.
 	Faults() <-chan error
+}
+
+// DescLine is one label and value describing an endpoint, for a program printing a
+// startup banner.
+type DescLine struct {
+	Label string
+	Value string
+}
+
+// DescribedEndpoint is the optional interface an endpoint implements when it has
+// something to tell an operator before the log takes over: the addresses it answers
+// on, the account it connected as, the limits it works under.
+//
+// A program prints Heading and then a line per DescLine under it, and skips an endpoint
+// that does not implement this. An embedder's own channel reaches a startup banner that
+// way, rather than the program asserting its concrete type.
+type DescribedEndpoint interface {
+	// Heading names the section these lines are printed under, in an operator's terms
+	// rather than the endpoint's own: "Answering in Slack" rather than "slack".
+	Heading() string
+
+	// Describe returns the lines in the order they are printed. An endpoint with
+	// nothing to say does not implement this rather than returning none.
+	Describe() []DescLine
 }
 
 // Work is one unit of work a channel supplies: what to do, and how to talk to
@@ -256,8 +316,13 @@ type Work struct {
 	RunContext func(context.Context) (context.Context, context.CancelFunc)
 
 	// Done reports the outcome exactly once, on a context that is not the run's so a
-	// canceled or timed-out run still records what happened. A non-nil error is
-	// logged; the server has nowhere else to take it. Required.
+	// canceled or timed-out run still records what happened. That context is canceled
+	// thirty seconds in, or after Options.DoneTimeout where the server was given one,
+	// so a channel that cannot reach its store does not hold a shutdown open. A
+	// non-nil error is logged; the server has nowhere else to take it. Required.
+	//
+	// A panic is recovered and logged like a returned error, and this outcome is then
+	// the only thing lost: the run's slot is released and the worker takes further work.
 	Done func(context.Context, Outcome) error
 }
 
@@ -294,7 +359,7 @@ type Caller struct {
 // Reason alone does not separate the cases a caller has to act on differently: a
 // crash and a failure during setup both leave it unset, and a model refusal, a reply
 // truncated at the output cap, a provider failure and an aborting hook all report the
-// error reason. The three flags below carry what Reason cannot.
+// error reason. Abandoned and Crashed carry what Reason cannot.
 type Outcome struct {
 	// ID is the work's identifier, minted by the server when the channel supplied
 	// none.
@@ -316,11 +381,6 @@ type Outcome struct {
 	// Err is the failure, nil on success. Note that a run stopped by its budget or its
 	// iteration cap reports both a reason and an error.
 	Err error
-
-	// Rejected reports that admission refused the work before it ran, so a caller
-	// knows a retry will not help. Nothing refuses work yet: Caller is recorded
-	// rather than enforced, so this is always false until a policy consults it.
-	Rejected bool
 
 	// Abandoned reports that the work was taken but never started, because the server
 	// shut down while it waited for a slot. Nothing ran, so a retry is safe.

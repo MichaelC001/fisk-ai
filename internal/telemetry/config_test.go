@@ -427,6 +427,87 @@ var _ = Describe("Resolve", func() {
 		)
 	})
 
+	// OTEL_RESOURCE_ATTRIBUTES is parsed here rather than by resource.WithFromEnv, so it
+	// has to behave exactly as the SDK's own detector does; a difference would show up as
+	// this build and every other OpenTelemetry process disagreeing about one string.
+	Describe("the resource attributes", func() {
+		attrs := func(value string) []ResourceAttribute {
+			GinkgoHelper()
+
+			r, err := Resolve(Settings{Enabled: true}, envFrom(map[string]string{EnvResourceAttributes: value}))
+			Expect(err).ToNot(HaveOccurred())
+
+			return r.ResourceAttributes
+		}
+
+		It("should read nothing from an empty variable", func() {
+			Expect(attrs("")).To(BeEmpty())
+			Expect(attrs("   ")).To(BeEmpty())
+		})
+
+		It("should read a pair", func() {
+			Expect(attrs("a=1")).To(Equal([]ResourceAttribute{{Key: "a", Value: "1"}}))
+		})
+
+		// Percent encoding is how a value carrying a comma or an equals sign is written,
+		// both being separators.
+		It("should decode a percent-encoded value", func() {
+			Expect(attrs("a=%20b%2Cc%3Dd")).To(Equal([]ResourceAttribute{{Key: "a", Value: " b,c=d"}}))
+		})
+
+		// The SDK decodes the value and leaves the key alone, so this does too.
+		It("should leave a percent-encoded key encoded", func() {
+			Expect(attrs("a%20b=1")).To(Equal([]ResourceAttribute{{Key: "a%20b", Value: "1"}}))
+		})
+
+		It("should keep a value whose escape will not decode", func() {
+			Expect(attrs("a=%zz")).To(Equal([]ResourceAttribute{{Key: "a", Value: "%zz"}}))
+		})
+
+		It("should trim whitespace around the key and the value", func() {
+			Expect(attrs("  a  =  1  ")).To(Equal([]ResourceAttribute{{Key: "a", Value: "1"}}))
+		})
+
+		It("should keep an empty value", func() {
+			Expect(attrs("a=,b=2")).To(Equal([]ResourceAttribute{{Key: "a", Value: ""}, {Key: "b", Value: "2"}}))
+		})
+
+		// An attribute needs a key, and the SDK's own set builder drops one without.
+		It("should drop an entry with an empty key", func() {
+			Expect(attrs("=1,b=2")).To(Equal([]ResourceAttribute{{Key: "b", Value: "2"}}))
+		})
+
+		// Both are kept in order and the attribute set takes the last, which is what the
+		// SDK does with a repeated key.
+		It("should keep a repeated key in order", func() {
+			Expect(attrs("a=1,a=2")).To(Equal([]ResourceAttribute{{Key: "a", Value: "1"}, {Key: "a", Value: "2"}}))
+		})
+
+		It("should split at the first equals sign", func() {
+			Expect(attrs("a=b=c")).To(Equal([]ResourceAttribute{{Key: "a", Value: "b=c"}}))
+		})
+
+		// The SDK's detector returns an error for these and Setup made that error fatal,
+		// so it stays fatal. The entries that did parse are on the returned Resolved,
+		// which is complete whether or not the error is nil.
+		DescribeTable("should refuse an entry that names no value",
+			func(value string) {
+				r, err := Resolve(Settings{Enabled: true}, envFrom(map[string]string{EnvResourceAttributes: value}))
+				Expect(err).To(MatchError(ErrInvalidSetting))
+				Expect(err).To(MatchError(ContainSubstring(EnvResourceAttributes)))
+				Expect(r.ResourceAttributes).To(Equal([]ResourceAttribute{{Key: "a", Value: "1"}}))
+			},
+			Entry("an entry with no equals sign", "a=1,justkey"),
+			Entry("a trailing comma", "a=1,"),
+		)
+
+		It("should not fail a configuration that is off over an entry with no value", func() {
+			r, err := Resolve(Settings{}, envFrom(map[string]string{EnvResourceAttributes: "a=1,justkey"}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(r.ResourceAttributes).To(Equal([]ResourceAttribute{{Key: "a", Value: "1"}}))
+		})
+	})
+
 	Describe("validation", func() {
 		// A stale endpoint in a file with telemetry off must never fail a run: nothing
 		// will be exported, so there is nothing to be wrong about.
@@ -621,4 +702,41 @@ var _ = Describe("MessagesMode", func() {
 		Expect(err).To(MatchError(ContainSubstring(`"delta"`)))
 		Expect(err).To(MatchError(ContainSubstring(`"full"`)))
 	})
+})
+
+// A caller has to be able to tell a sample ratio out of range from a credential headed
+// for a plain-http endpoint, and matching English is not a way to do it. Setup's own
+// ErrPipeline is driven in the Setup specs, since it needs a pipeline to fail.
+var _ = Describe("the failure sentinels", func() {
+	DescribeTable("should be reachable from the failure that returns it",
+		func(s Settings, env map[string]string, sentinel error) {
+			_, err := Resolve(s, envFrom(env))
+			Expect(err).To(MatchError(sentinel))
+		},
+		Entry("a sample ratio out of range",
+			Settings{Enabled: true, SampleRatio: ratio(2)}, nil, ErrInvalidSetting),
+		Entry("a capture message mode this build does not know",
+			Settings{Enabled: true, Capture: CaptureSettings{Enabled: true, Messages: ParseMessagesMode("detla")}},
+			nil, ErrInvalidSetting),
+		Entry("a content cap below the floor",
+			Settings{Enabled: true, Capture: CaptureSettings{Enabled: true, MaxBytes: 1}}, nil, ErrInvalidSetting),
+		Entry("a resource attribute entry that names no value",
+			Settings{Enabled: true}, map[string]string{EnvResourceAttributes: "justkey"}, ErrInvalidSetting),
+		Entry("an endpoint that will not parse",
+			Settings{Enabled: true, Endpoint: "http://[::1"}, nil, ErrInvalidEndpoint),
+		Entry("an endpoint embedding userinfo credentials",
+			Settings{Enabled: true, Endpoint: "https://user:pass@collector:4318"}, nil, ErrInvalidEndpoint),
+		Entry("an endpoint on a scheme that is neither http nor https",
+			Settings{Enabled: true, Endpoint: "ftp://collector:4318"}, nil, ErrInvalidEndpoint),
+		Entry("plain http to a remote host while a headers variable is set",
+			Settings{Enabled: true, Endpoint: "http://collector.example.net:4318"},
+			map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer secret"}, ErrInsecureEndpoint),
+		Entry("plain http to a remote host while content capture is on",
+			Settings{Enabled: true, Endpoint: "http://collector.example.net:4318", Capture: CaptureSettings{Enabled: true}},
+			nil, ErrInsecureEndpoint),
+		Entry("a grpc protocol selection",
+			Settings{Enabled: true}, map[string]string{EnvProtocol: "grpc"}, ErrProtocolUnsupported),
+		Entry("an endpoint on the OTLP/gRPC port",
+			Settings{Enabled: true, Endpoint: "http://127.0.0.1:4317"}, nil, ErrProtocolUnsupported),
+	)
 })

@@ -5,6 +5,7 @@
 package asyncjobs
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -22,8 +23,8 @@ func Builder() serve.EndpointBuilder {
 	return serve.EndpointBuilder{
 		Name:    "jobs",
 		Enabled: func(cfg *config.Config) bool { return cfg.JobsEnabled() },
-		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
-			ch, err := NewFromConfig(cfg, ConfigOptions{
+		Build: func(ctx context.Context, cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
+			ch, err := NewFromConfig(ctx, cfg, ConfigOptions{
 				Workers:          opts.Workers,
 				SuspendRequested: opts.SuspendRequested,
 				Logger:           opts.Logger,
@@ -65,7 +66,7 @@ type ConfigOptions struct {
 // It returns an error when the configuration does not enable the intake, since
 // building a channel nothing asked for would start a worker on a queue the operator
 // never named.
-func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
+func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 	if !cfg.JobsEnabled() {
 		return nil, fmt.Errorf("expose.agent.jobs is not configured")
 	}
@@ -80,7 +81,11 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 		workers = opts.Workers
 	}
 
-	provider, err := conns.Connect(natsContext, "jobs "+cfg.Identity, nats.UseOldRequestStyle())
+	provider, err := conns.ConnectNatsContext(ctx, natsContext, conns.Config{
+		Product: cfg.ProductName(),
+		Name:    "jobs " + cfg.Identity,
+		Options: []nats.Option{nats.UseOldRequestStyle()},
+	})
 	if err != nil {
 		return nil, err
 	}

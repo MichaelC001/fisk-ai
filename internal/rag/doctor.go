@@ -125,7 +125,7 @@ func (s *Store) Sources(ctx context.Context) ([]Source, error) {
 
 // ChunkText resolves a citation (<relpath>#<ordinal>) to one chunk's heading path
 // and verbatim content, backing knowledge show. It reports ErrIndexNotBuilt when
-// no index exists and sql.ErrNoRows when the citation resolves to nothing.
+// no index exists and ErrCitationNotFound when the citation names no chunk.
 func (s *Store) ChunkText(ctx context.Context, relPath string, ordinal int) (headingPath, content string, err error) {
 	if s.db == nil {
 		return "", "", ErrIndexNotBuilt
@@ -135,8 +135,11 @@ func (s *Store) ChunkText(ctx context.Context, relPath string, ordinal int) (hea
 		`SELECT c.heading_path, c.body
 		 FROM chunks c JOIN documents d ON d.id = c.document_id
 		 WHERE d.path = ? AND c.ordinal = ?`, relPath, ordinal).Scan(&headingPath, &content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", fmt.Errorf("%w: %s#%d", ErrCitationNotFound, relPath, ordinal)
+	}
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("reading chunk %s#%d: %w", relPath, ordinal, err)
 	}
 
 	return headingPath, content, nil

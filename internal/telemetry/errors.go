@@ -5,10 +5,41 @@
 package telemetry
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
+)
+
+// The sentinels every failure from Resolve, Setup and the validators carries, so a
+// caller tells a sample ratio out of range from a credential headed for a plain-http
+// endpoint by branching rather than by matching English. Each is always wrapped, and an
+// operator reads the text after it, which names the setting, where the value came from
+// and the fix.
+var (
+	// ErrInvalidSetting is a configured value this build does not accept: a sample ratio
+	// outside 0 to 1, a capture message mode that is neither delta nor full, a content
+	// cap outside its limits, or an OTEL_RESOURCE_ATTRIBUTES entry with no value.
+	ErrInvalidSetting = errors.New("telemetry setting")
+
+	// ErrInvalidEndpoint is an endpoint that will not parse, embeds userinfo
+	// credentials, or names a scheme other than http or https.
+	ErrInvalidEndpoint = errors.New("telemetry endpoint")
+
+	// ErrInsecureEndpoint is plain http to a non-loopback host while an OTLP headers
+	// variable or content capture is set, so a credential or the conversation itself
+	// would cross the wire in the clear. It is separate from ErrInvalidEndpoint because
+	// the endpoint parses and the refusal is about what would be sent over it.
+	ErrInsecureEndpoint = errors.New("insecure telemetry endpoint")
+
+	// ErrProtocolUnsupported is OTLP/gRPC asked for, by an OTEL_EXPORTER_OTLP*_PROTOCOL
+	// of grpc or by an endpoint on the gRPC port. This build speaks OTLP/HTTP.
+	ErrProtocolUnsupported = errors.New("unsupported OTLP protocol")
+
+	// ErrPipeline is the SDK refusing to build the resource, an exporter or the metric
+	// instruments, which is the only failure here that Resolve cannot have caught.
+	ErrPipeline = errors.New("telemetry pipeline")
 )
 
 // errorBufferMaxMessages bounds how many distinct messages an ErrorBuffer holds.

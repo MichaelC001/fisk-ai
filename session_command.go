@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,15 +32,15 @@ import (
 // mode, since the session command needs no prompt or model) and dials NATS when that
 // backend requires it. --state-dir is folded in through the same ApplyStateDir the run
 // command uses, so combining it with a non-file backend is the same hard error in both.
-func openSessionStore() (runstate.Store, func(), error) {
+func openSessionStore(ctx context.Context) (runstate.Store, func(), error) {
 	noop := func() {}
 
 	var cfg *config.Config
 	var err error
 	if sessionConfigFile == "" {
-		cfg, err = config.NewConfig()
+		cfg, err = versionedConfig(config.NewConfig())
 	} else {
-		cfg, err = config.ParseConfigFileForMode(sessionConfigFile, config.ModeMCP)
+		cfg, err = versionedConfig(config.ParseConfigFileForMode(sessionConfigFile, config.ModeMCP))
 	}
 	if err != nil {
 		return nil, noop, err
@@ -50,7 +51,7 @@ func openSessionStore() (runstate.Store, func(), error) {
 		return nil, noop, err
 	}
 
-	return sessionStoreFor(cfg)
+	return sessionStoreFor(ctx, cfg)
 }
 
 // sessionStoreFor opens the run-journal store a configuration names and returns a
@@ -64,16 +65,16 @@ func openSessionStore() (runstate.Store, func(), error) {
 // It is shared by the commands that read journals and by a run, which hands the same
 // store to the agent it hosts and to the channel in front of it: two stores would have
 // the channel reading a conversation the run beside it is not writing.
-func sessionStoreFor(cfg *config.Config) (runstate.Store, func(), error) {
+func sessionStoreFor(ctx context.Context, cfg *config.Config) (runstate.Store, func(), error) {
 	noop := func() {}
 	backend := cfg.SessionBackend()
 
 	env := runstate.RuntimeEnv{}
 	cleanup := noop
 	if runstate.NeedsNats(backend) {
-		p, err := conns.Connect(cfg.NatsContext, cfg.Identity)
+		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
 		if err != nil {
-			// conns.Connect already names the NATS context; add the stream so an
+			// conns already names the NATS context; add the stream so an
 			// unreachable jetstream backend names both. The stream is decoded
 			// best-effort: this is an error message, not a validation path.
 			var opts struct {
@@ -143,14 +144,14 @@ func sessionStatus(reason runstate.TerminalReason) string {
 }
 
 func sessionLsAction(_ *fisk.ParseContext) error {
-	store, cleanup, err := openSessionStore()
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	store, cleanup, err := openSessionStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-
-	ctx, cancel := interruptContext()
-	defer cancel()
 
 	infos, err := store.List(ctx)
 	if err != nil {
@@ -183,14 +184,14 @@ func sessionLsAction(_ *fisk.ParseContext) error {
 }
 
 func sessionShowAction(_ *fisk.ParseContext) error {
-	store, cleanup, err := openSessionStore()
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	store, cleanup, err := openSessionStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-
-	ctx, cancel := interruptContext()
-	defer cancel()
 
 	rs, err := store.Load(ctx, sessionArgID)
 	if err != nil {
@@ -347,14 +348,14 @@ func showTranscriptTUI(rs *runstate.RunState) (bool, error) {
 }
 
 func sessionRmAction(_ *fisk.ParseContext) error {
-	store, cleanup, err := openSessionStore()
+	ctx, cancel := interruptContext()
+	defer cancel()
+
+	store, cleanup, err := openSessionStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-
-	ctx, cancel := interruptContext()
-	defer cancel()
 
 	err = store.Delete(ctx, sessionArgID)
 	if err != nil {

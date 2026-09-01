@@ -78,7 +78,7 @@ func hostAgent() error {
 	// the knowledge index and the MCP sessions a fuller configuration calls for. They
 	// are closed after Serve returns and never before, since a run in flight is still
 	// using them.
-	resources, err := serve.NewResources(cfg, serve.ResourceOptions{
+	resources, err := serve.NewResources(ctx, cfg, serve.ResourceOptions{
 		ConfigFile: "(built in Go)",
 		StoreDir:   root,
 		Logger:     log,

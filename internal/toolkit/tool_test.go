@@ -45,7 +45,7 @@ var _ = Describe("ExecuteUse", func() {
 	It("passes an in-process tool's output through verbatim", func() {
 		tool := outcomeTool{outcome: &Outcome{Output: `{"status":"ok","results":[]}`}}
 
-		res, _, _ := ExecuteUse(tool, ctx, use, ExecDeps{})
+		res, _, _ := ExecuteUse(ctx, tool, use, ExecDeps{})
 		Expect(res.IsError).To(BeFalse())
 		Expect(res.ToolUseID).To(Equal("tu_1"))
 		Expect(res.Content).To(Equal(`{"status":"ok","results":[]}`))
@@ -57,7 +57,7 @@ var _ = Describe("ExecuteUse", func() {
 			Exec:   &CommandExec{Command: "ping", ExitCode: 2, Truncated: true},
 		}}
 
-		res, _, _ := ExecuteUse(tool, ctx, use, ExecDeps{})
+		res, _, _ := ExecuteUse(ctx, tool, use, ExecDeps{})
 		Expect(res.IsError).To(BeFalse())
 		Expect(res.ToolUseID).To(Equal("tu_1"))
 		Expect(res.Content).To(Equal(`{"command":"ping","exit_code":2,"output":"out","truncated":true}`))
@@ -71,14 +71,14 @@ var _ = Describe("ExecuteUse", func() {
 			Exec:   &CommandExec{Command: "ping"},
 		}}
 
-		res, _, _ := ExecuteUse(tool, ctx, use, ExecDeps{})
+		res, _, _ := ExecuteUse(ctx, tool, use, ExecDeps{})
 		Expect(res.Content).To(Equal(`{"command":"ping","exit_code":0,"output":"out"}`))
 	})
 
 	It("reports a harness failure as an error result carrying the tool_use id", func() {
 		tool := outcomeTool{err: errors.New("could not run")}
 
-		res, _, _ := ExecuteUse(tool, ctx, use, ExecDeps{})
+		res, _, _ := ExecuteUse(ctx, tool, use, ExecDeps{})
 		Expect(res.IsError).To(BeTrue())
 		Expect(res.ToolUseID).To(Equal("tu_1"))
 		Expect(res.Content).To(Equal("could not run"))

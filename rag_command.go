@@ -98,7 +98,7 @@ func knowledgeConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("--store-dir must be an absolute path, got %q", knowledgeStoreDir)
 	}
 
-	cfg, err := config.ParseConfigFileForMode(configFile, config.ModeMCP)
+	cfg, err := versionedConfig(config.ParseConfigFileForMode(configFile, config.ModeMCP))
 	if err != nil {
 		return nil, err
 	}
@@ -380,8 +380,11 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 	if errors.Is(err, rag.ErrIndexNotBuilt) {
 		return fmt.Errorf("the knowledge index has not been built yet; run: fisk knowledge index")
 	}
-	if err != nil {
+	if errors.Is(err, rag.ErrCitationNotFound) {
 		return fmt.Errorf("no chunk found for citation %q: it may have shifted since the last reindex; run 'fisk knowledge sources' to list files", knowledgeCitation)
+	}
+	if err != nil {
+		return err
 	}
 
 	if headingPath != "" {

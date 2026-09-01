@@ -38,7 +38,7 @@ func toolRequestFrom(ctx context.Context, name string) []byte {
 	GinkgoHelper()
 
 	req := NewToolRequest(name, nil)
-	stampRequest(ctx, &req.Header, "caller", "svc")
+	StampRequest(ctx, &req.Header, "caller", "svc")
 
 	data, err := json.Marshal(req)
 	Expect(err).NotTo(HaveOccurred())
@@ -67,7 +67,7 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -87,14 +87,14 @@ var _ = Describe("Serving telemetry", func() {
 
 		outcome, ok := attrOf(got, "fisk.tool.outcome")
 		Expect(ok).To(BeTrue())
-		Expect(outcome).To(Equal(telemetry.ToolOutcomeExecuted))
+		Expect(outcome).To(Equal(telemetry.ToolOutcomeExecuted.String()))
 	})
 
 	It("Should open a root when the caller sent no trace context", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -112,12 +112,12 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
 		req := NewToolRequest("ping", nil)
-		stampRequest(context.Background(), &req.Header, "caller", "svc")
+		StampRequest(context.Background(), &req.Header, "caller", "svc")
 		req.TraceParent = "nonsense"
 
 		body, err := json.Marshal(req)
@@ -139,7 +139,7 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -152,7 +152,7 @@ var _ = Describe("Serving telemetry", func() {
 
 		outcome, ok := attrOf(got, "fisk.tool.outcome")
 		Expect(ok).To(BeTrue())
-		Expect(outcome).To(Equal(telemetry.ToolOutcomeUnknownTool))
+		Expect(outcome).To(Equal(telemetry.ToolOutcomeUnknownTool.String()))
 
 		// The peer's string is an attribute and never the span name.
 		requested, ok := attrOf(got, "fisk.tool.requested_name")
@@ -162,7 +162,7 @@ var _ = Describe("Serving telemetry", func() {
 
 	It("Should serve a call with telemetry off", func() {
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard})
 		Expect(err).NotTo(HaveOccurred())
 

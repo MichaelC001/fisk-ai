@@ -21,12 +21,13 @@ import (
 // on the no-operator path). The run continues to its natural end and the spec asserts
 // ScriptingFaults afterward. It replaces the per-package fakePrompter copies the tree had
 // grown.
+//
+// A spec installs the closures and calls NoOperator before it starts a run. From then on
+// every method is safe to call from any goroutine, so one prompter answers several
+// concurrent runs while the spec reads LastGateRequest and ScriptingFaults. A closure runs
+// on the goroutine that prompted it, so a closure shared across runs guards its own state.
 type ScriptedPrompter struct {
 	tb testing.TB
-
-	// canPrompt is what CanPrompt reports; true by default, since a scripted operator
-	// is present. NoOperator flips it to model the no-operator path.
-	canPrompt bool
 
 	// ApproveFn answers the confirm-gate approval; ConfirmFn, SelectFn and InputFn
 	// answer the ask_human_confirm, ask_human_select and ask_human_input builtins.
@@ -36,11 +37,12 @@ type ScriptedPrompter struct {
 	SelectFn  func(question string, options []string) (int, error)
 	InputFn   func(question, def string) (string, error)
 
-	// LastGateRequest is the last request ApproveCommand received, for assertion.
-	LastGateRequest toolkit.GateRequest
-
-	mu     sync.Mutex
-	faults []ScriptingFault
+	mu sync.Mutex
+	// canPrompt is what CanPrompt reports; true by default, since a scripted operator
+	// is present. NoOperator flips it to model the no-operator path.
+	canPrompt bool
+	lastGate  toolkit.GateRequest
+	faults    []ScriptingFault
 }
 
 // NewScriptedPrompter returns a prompter with no closures installed and CanPrompt
@@ -62,19 +64,41 @@ func BuildScriptedPrompter() *ScriptedPrompter {
 }
 
 // CanPrompt reports whether an operator is reachable; true unless NoOperator was set.
-func (p *ScriptedPrompter) CanPrompt() bool { return p.canPrompt }
+func (p *ScriptedPrompter) CanPrompt() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.canPrompt
+}
 
 // NoOperator makes CanPrompt report false, modeling a run with no operator (the
 // default-deny path the confirm gate and human-in-the-loop tools take).
 func (p *ScriptedPrompter) NoOperator() *ScriptedPrompter {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.canPrompt = false
+
 	return p
+}
+
+// LastGateRequest is the last request ApproveCommand received, for assertion. It is a
+// method rather than a field because a run writes it while the spec reads it. A prompter
+// that no confirm gate reached returns the zero value.
+func (p *ScriptedPrompter) LastGateRequest() toolkit.GateRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.lastGate
 }
 
 // ApproveCommand answers the confirm gate through ApproveFn, and with no ApproveFn
 // installed records a ScriptingFault and declines.
 func (p *ScriptedPrompter) ApproveCommand(_ context.Context, req toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
-	p.LastGateRequest = req
+	p.mu.Lock()
+	p.lastGate = req
+	p.mu.Unlock()
+
 	if p.ApproveFn == nil {
 		return toolkit.ConfirmNo, p.recordFault("ApproveCommand", req.Command, "no ApproveFn was set")
 	}

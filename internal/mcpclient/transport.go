@@ -69,7 +69,7 @@ func commandTransport(server config.MCPServer, credentials []string, lookup func
 
 // childEnv builds the environment of a stdio child: the current environment with
 // the credential variables removed and the entry's own env applied on top, which
-// is the environment a command tool gets from internal/toolkit/fisk.
+// is the environment a command tool gets from internal/toolkit/fisktool.
 //
 // The stripped set is the union of the variables every llm provider linked into
 // this build declared as secret-bearing and the operator-named credentials in

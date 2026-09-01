@@ -141,9 +141,8 @@ func (u TokenUsage) Sub(other TokenUsage) TokenUsage {
 
 // RunOutcome is everything about a run that is only known once it has ended.
 type RunOutcome struct {
-	// TerminalReason is how the run ended, from the closed set the run path already
-	// uses, plus setup_failed for a run that never reached the loop.
-	TerminalReason string
+	// TerminalReason is how the run ended.
+	TerminalReason TerminalReason
 	// Crashed reports a recovered panic.
 	Crashed bool
 	// Class is the error class, or empty for a run that did not fail.
@@ -291,7 +290,7 @@ func (s *RunSpan) Finish(o RunOutcome) {
 
 	span := s.Span.span
 	span.SetAttributes(
-		AttrRunTerminalReason.String(o.TerminalReason),
+		AttrRunTerminalReason.String(o.TerminalReason.String()),
 		AttrRunCrashed.Bool(o.Crashed),
 		AttrRunToolCalls.Int64(o.ToolCalls),
 		AttrRunRemoteToolCalls.Int64(o.RemoteToolCalls),
@@ -357,7 +356,7 @@ type TurnInfo struct {
 type TurnOutcome struct {
 	// TerminalReason is why this turn stopped, which is not why the run stopped: a turn
 	// that hit the iteration cap ends the turn and hands back to the operator.
-	TerminalReason string
+	TerminalReason TerminalReason
 	// Class is the error class, empty for a turn that did not fail.
 	Class ErrorClass
 	// Failed reports whether the turn ended in failure.
@@ -407,7 +406,7 @@ func (s *TurnSpan) Finish(o TurnOutcome) {
 
 	span := s.Span.span
 	span.SetAttributes(
-		AttrRunTerminalReason.String(o.TerminalReason),
+		AttrRunTerminalReason.String(o.TerminalReason.String()),
 		semconv.GenAIUsageInputTokens(int(o.Usage.Input)),
 		semconv.GenAIUsageOutputTokens(int(o.Usage.Output)),
 		semconv.GenAIUsageCacheReadInputTokens(int(o.Usage.CacheRead)),
@@ -640,7 +639,7 @@ type ToolInfo struct {
 	// Identity is the agent identity.
 	Identity string
 	// Kind is the provider that supplied the tool.
-	Kind string
+	Kind ToolKind
 	// Datastore marks the knowledge tools, which the conventions type as a datastore
 	// rather than a function. A remote agent's tool is a function: it is client-side
 	// from the model's view, and extension means provider-side.
@@ -653,12 +652,12 @@ type ToolInfo struct {
 
 // ToolOutcome is what a tool call reports once it has finished, whether or not it ran.
 type ToolOutcome struct {
-	// Outcome is one of the closed ToolOutcome* set.
-	Outcome string
+	// Outcome is how the call ended.
+	Outcome ToolCallOutcome
 	// Name is the effective tool name after any rewrite, empty on the unknown path.
 	Name string
 	// Kind is the effective tool's kind, which a rewrite can change.
-	Kind string
+	Kind ToolKind
 	// ArgKeys is the argument key names, never their values.
 	ArgKeys []string
 	// Rewritten reports that a hook redirected the call or its arguments.
@@ -724,7 +723,7 @@ func (p *Provider) StartTool(ctx context.Context, i ToolInfo) (context.Context, 
 		semconv.GenAIToolCallID(i.CallID),
 		semconv.GenAIToolTypeKey.String(string(toolType)),
 		semconv.GenAIAgentName(i.Identity),
-		AttrToolKind.String(i.Kind),
+		AttrToolKind.String(i.Kind.String()),
 		AttrToolConfirmGated.Bool(i.ConfirmGated),
 		AttrToolResumed.Bool(i.Resumed),
 	}
@@ -774,7 +773,7 @@ func (s *ToolSpan) Finish(ctx context.Context, o ToolOutcome) {
 
 	span := s.Span.span
 	span.SetAttributes(
-		AttrToolOutcome.String(o.Outcome),
+		AttrToolOutcome.String(o.Outcome.String()),
 		AttrToolRewritten.Bool(o.Rewritten),
 		AttrToolRemote.Bool(o.Remote),
 	)
@@ -784,8 +783,8 @@ func (s *ToolSpan) Finish(ctx context.Context, o ToolOutcome) {
 	if o.Name != "" {
 		span.SetAttributes(semconv.GenAIToolName(o.Name))
 	}
-	if o.Kind != "" {
-		span.SetAttributes(AttrToolKind.String(o.Kind))
+	if o.Kind.Set() {
+		span.SetAttributes(AttrToolKind.String(o.Kind.String()))
 	}
 	if len(o.ArgKeys) > 0 {
 		span.SetAttributes(AttrToolArgKeys.StringSlice(o.ArgKeys))
@@ -860,9 +859,9 @@ type ServedToolInfo struct {
 
 // ServedToolOutcome is what a served call reports once it has finished.
 type ServedToolOutcome struct {
-	// Outcome is one of the closed ToolOutcome* set, shared with a local call so the
+	// Outcome is how the call ended, from the same vocabulary a local call uses so the
 	// two are comparable on one key.
-	Outcome string
+	Outcome ToolCallOutcome
 	// Failed reports that the peer was told the call failed. It cannot be inferred
 	// from a Go error: a tool that failed is reported in-band on the reply.
 	Failed bool
@@ -935,7 +934,7 @@ func (s *ServedToolSpan) Finish(o ServedToolOutcome) {
 	}
 
 	span := s.Span.span
-	span.SetAttributes(AttrToolOutcome.String(o.Outcome))
+	span.SetAttributes(AttrToolOutcome.String(o.Outcome.String()))
 
 	if o.ExitCode != nil {
 		span.SetAttributes(AttrToolExitCode.Int(*o.ExitCode))

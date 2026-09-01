@@ -14,7 +14,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/memory"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
@@ -236,12 +235,12 @@ var _ = Describe("Memory tools", func() {
 	})
 
 	Describe("call tracing", func() {
-		It("Should present memory tools as traced, unlike the self-rendering HITL tools", func() {
+		It("Should give a memory tool a call line and a HITL tool none", func() {
 			for _, t := range MemoryTools(enabled, store) {
-				Expect(t.Describe(json.RawMessage(`{}`)).Present).To(Equal(toolkit.PresentTraced), "%s should be traced", t.Name())
+				Expect(t.Describe(json.RawMessage(`{}`)).Display).NotTo(BeEmpty(), "%s should trace a call line", t.Name())
 			}
 			for _, t := range HITLTools(&config.Config{Harness: config.HarnessConfig{HumanInTheLoop: &config.HumanInTheLoopConfig{Enabled: true}}}) {
-				Expect(t.Describe(json.RawMessage(`{}`)).Present).To(Equal(toolkit.PresentSelfRendered), "%s should be self-rendering", t.Name())
+				Expect(t.Describe(json.RawMessage(`{}`)).Display).To(BeEmpty(), "%s shows its own prompt", t.Name())
 			}
 		})
 

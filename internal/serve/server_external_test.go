@@ -81,6 +81,70 @@ func (c *noDoneChannel) Next(context.Context) (*serve.Work, error) {
 	return nil, serve.ErrChannelDone
 }
 
+// panicNextChannel panics every time it is asked for work, which is what a third-party
+// channel with a bug in it does. It counts the calls so a spec can prove the server
+// stopped asking rather than retrying the same bug every five seconds.
+type panicNextChannel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *panicNextChannel) Name() string { return "broken" }
+
+func (c *panicNextChannel) Next(context.Context) (*serve.Work, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+
+	panic("taking work is broken")
+}
+
+func (c *panicNextChannel) Calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.calls
+}
+
+// panicDoneChannel hands over two pieces of work whose Done panics, so a spec can watch
+// a worker carry on past an outcome it could not report. It counts the Next and Done
+// calls it received, and stores no outcomes: the panic destroys each one.
+type panicDoneChannel struct {
+	mu    sync.Mutex
+	calls int
+	dones int
+}
+
+func (c *panicDoneChannel) Name() string { return "broken-done" }
+
+func (c *panicDoneChannel) Next(context.Context) (*serve.Work, error) {
+	c.mu.Lock()
+	c.calls++
+	n := c.calls
+	c.mu.Unlock()
+
+	if n > 2 {
+		return nil, serve.ErrChannelDone
+	}
+
+	return &serve.Work{ID: fmt.Sprintf("job-%d", n), Prompt: "go", Done: c.done}, nil
+}
+
+func (c *panicDoneChannel) done(context.Context, serve.Outcome) error {
+	c.mu.Lock()
+	c.dones++
+	c.mu.Unlock()
+
+	panic("reporting is broken")
+}
+
+func (c *panicDoneChannel) Counts() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.calls, c.dones
+}
+
 var _ = Describe("Server", func() {
 	var (
 		ctx    context.Context
@@ -95,11 +159,13 @@ var _ = Describe("Server", func() {
 	Describe("New", func() {
 		It("Should require a channel and a configuration", func() {
 			_, err := serve.New(serve.Options{Config: servedConfig()})
+			Expect(err).To(MatchError(serve.ErrInvalidOptions))
 			Expect(err).To(MatchError(ContainSubstring("at least one channel")))
 
 			_, err = serve.New(serve.Options{
 				Channels: []serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "c")},
 			})
+			Expect(err).To(MatchError(serve.ErrConfigRequired))
 			Expect(err).To(MatchError(ContainSubstring("configuration is required")))
 		})
 
@@ -108,6 +174,7 @@ var _ = Describe("Server", func() {
 				Channels: []serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "")},
 				Config:   servedConfig(),
 			})
+			Expect(err).To(MatchError(serve.ErrInvalidOptions))
 			Expect(err).To(MatchError(ContainSubstring("has no name")))
 		})
 
@@ -117,6 +184,7 @@ var _ = Describe("Server", func() {
 				Config:   servedConfig(),
 				WorkDir:  "relative",
 			})
+			Expect(err).To(MatchError(serve.ErrInvalidOptions))
 			Expect(err).To(MatchError(ContainSubstring("not an absolute path")))
 		})
 
@@ -364,6 +432,107 @@ var _ = Describe("Server", func() {
 
 			close(release)
 			Eventually(served).Should(Receive(BeNil()))
+		})
+	})
+
+	// A channel is somebody else's code. These drive the two calls the server makes into
+	// one, Next and Work.Done, with an implementation that panics in each.
+	Describe("A channel that panics", func() {
+		// A worker with one channel would otherwise end its only puller, return nil and
+		// exit zero with its queue served by nobody.
+		It("Should end the puller and fault the server", func() {
+			broken := &panicNextChannel{}
+			good := agenttest.NewQueue(GinkgoTB(), "good")
+
+			srv, err := serve.New(serve.Options{
+				Channels: []serve.Channel{broken, good},
+				Config:   servedConfig(),
+				Provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("ok")),
+				Logger:   quietLogger(),
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			err = srv.Serve(ctx)
+			Expect(err).To(MatchError(serve.ErrChannelPanic))
+			Expect(err).To(MatchError(ContainSubstring("taking work is broken")), "the panic value reaches the program that has to report it")
+
+			Expect(broken.Calls()).To(Equal(1), "a panic is a bug in the channel, so the same call is not made again")
+			Expect(good.Closes()).To(BeNumerically(">=", 1), "the fault drains the endpoints that were still working")
+		})
+
+		It("Should lose the outcome and take the next piece of work", func() {
+			broken := &panicDoneChannel{}
+
+			srv, err := serve.New(serve.Options{
+				Channels:    []serve.Channel{broken},
+				Config:      servedConfig(),
+				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("one"), agenttest.TextResponse("two")),
+				Concurrency: 1,
+				Logger:      quietLogger(),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(srv.Serve(ctx)).To(Succeed())
+
+			calls, dones := broken.Counts()
+			Expect(dones).To(Equal(2), "the second run needs the slot the first one held, so a slot lost to the panic would have deadlocked here")
+			Expect(calls).To(Equal(3), "the channel is asked again after the panic and reports it is finished")
+		})
+
+		It("Should survive a panic on the abandon path", func() {
+			started := make(chan struct{})
+			release := make(chan struct{})
+
+			var mu sync.Mutex
+			var abandoned serve.Outcome
+			var dones int
+
+			// The first run parks inside Starting and holds the only slot, so the second
+			// piece of work is taken and then abandoned when the context ends. Its Done
+			// runs on the puller's own goroutine, outside the recover that guards a run.
+			first := &serve.Work{ID: "first", Prompt: "go", Events: newStartProbe(func() {
+				close(started)
+				<-release
+			})}
+			second := &serve.Work{ID: "second", Prompt: "go", Done: func(_ context.Context, out serve.Outcome) error {
+				mu.Lock()
+				abandoned = out
+				dones++
+				mu.Unlock()
+
+				panic("reporting is broken")
+			}}
+			ch := agenttest.NewScriptedChannel(GinkgoTB(), "jobs", first, second)
+
+			srv, err := serve.New(serve.Options{
+				Channels:    []serve.Channel{ch},
+				Config:      servedConfig(),
+				Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("ok")),
+				Concurrency: 1,
+				Logger:      quietLogger(),
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			runCtx, stop := context.WithCancel(ctx)
+			served := make(chan error, 1)
+			go func() { served <- srv.Serve(runCtx) }()
+
+			Eventually(started).Should(BeClosed())
+			stop()
+
+			Eventually(func() int {
+				mu.Lock()
+				defer mu.Unlock()
+
+				return dones
+			}).Should(Equal(1))
+
+			close(release)
+			Eventually(served).Should(Receive(BeNil()))
+
+			mu.Lock()
+			defer mu.Unlock()
+			Expect(abandoned.ID).To(Equal("second"))
+			Expect(abandoned.Abandoned).To(BeTrue())
 		})
 	})
 })

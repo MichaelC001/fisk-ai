@@ -32,6 +32,30 @@ func ValidateID(id string) error {
 	return nil
 }
 
+// PrepareMeta stamps the record format version on a meta record whose Version is
+// zero and rejects one carrying a version this build cannot write. Every Store
+// calls it on the meta record handed to Create, before that record is appended.
+//
+// It is here rather than in each caller because the version is the store's fact,
+// not the caller's: a caller that left it zero wrote a journal nothing could fold,
+// and found out at the resume rather than at the write.
+//
+// A build writes its own version and no other, so a record already carrying a
+// different one is ErrVersion. Reading is where an earlier version will be accepted
+// once there is one, converted before it is folded; see Version. Fold refuses every
+// version but this one while 1 is the only version there has been.
+func PrepareMeta(meta *MetaRecord) error {
+	switch meta.Version {
+	case 0:
+		meta.Version = Version
+	case Version:
+	default:
+		return fmt.Errorf("%w: meta record is version %d, this build writes %d", ErrVersion, meta.Version, Version)
+	}
+
+	return nil
+}
+
 // CheckAppend is the append contract shared by every Journal: it decides, from the
 // last written seq and the seq being appended, whether the append is a duplicate
 // to skip or a gap to reject. It is a decision only. The caller still performs the

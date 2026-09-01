@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package fisk
+package fisktool
 
 import (
 	"context"
@@ -13,15 +13,15 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// A FiskCommandTool is a model-facing Tool that describes its own presentation and
-// behavior, can require operator confirmation, and can pre-validate a call's required
+// A CommandTool is a model-facing Tool that describes its own call and behavior,
+// can require operator confirmation, and can pre-validate a call's required
 // arguments.
 var (
-	_ toolkit.Tool              = (*FiskCommandTool)(nil)
-	_ toolkit.Describer         = (*FiskCommandTool)(nil)
-	_ toolkit.BehaviorDescriber = (*FiskCommandTool)(nil)
-	_ toolkit.Confirmable       = (*FiskCommandTool)(nil)
-	_ toolkit.ArgumentValidator = (*FiskCommandTool)(nil)
+	_ toolkit.Tool              = (*CommandTool)(nil)
+	_ toolkit.Describer         = (*CommandTool)(nil)
+	_ toolkit.BehaviorDescriber = (*CommandTool)(nil)
+	_ toolkit.Confirmable       = (*CommandTool)(nil)
+	_ toolkit.ArgumentValidator = (*CommandTool)(nil)
 )
 
 // Behavior is what running the command does to the world, as its author declared it
@@ -30,21 +30,20 @@ var (
 // resolved conservatively rather than rejected, so one mistagged command in a wrapped
 // binary cannot stop a run; toolkit.TagIssues reports the contradiction to a caller
 // that can warn about it.
-func (t *FiskCommandTool) Behavior() toolkit.Behavior {
+func (t *CommandTool) Behavior() toolkit.Behavior {
 	behavior, _ := toolkit.BehaviorFromTags(t.Tags())
 
 	return behavior
 }
 
-// Describe presents the tool as an application command: its call is traced with the
-// resolved command line and a short form with long argument values middle-elided, so
-// a width-aware surface can fall back to the short line only when the full one would
-// overflow. Both are already sanitized by TraceLine and TraceLineShort. It runs in
-// the caller's per-run working directory so concurrent runs do not collide, and it
-// never prompts.
-func (t *FiskCommandTool) Describe(input json.RawMessage) toolkit.CallInfo {
+// Describe names toolkit.KindApplication as the provider and returns two call lines:
+// the resolved command line, and a short form with long argument values middle-elided,
+// so a width-aware surface can fall back to the short one only when the full line would
+// overflow. TraceLine and TraceLineShort sanitize both. It asks for the per-run working
+// directory, which is where the command runs so concurrent runs do not collide, and for
+// no prompter.
+func (t *CommandTool) Describe(input json.RawMessage) toolkit.CallInfo {
 	return toolkit.CallInfo{
-		Present:      toolkit.PresentCommand,
 		Kind:         toolkit.KindApplication,
 		Display:      t.TraceLine(input),
 		DisplayShort: t.TraceLineShort(input),
@@ -55,7 +54,7 @@ func (t *FiskCommandTool) Describe(input json.RawMessage) toolkit.CallInfo {
 // Definition renders the command tool as a neutral tool definition. A tool tagged
 // ai:no_defer is always sent directly, even within a deferred set, so its deferral
 // is suppressed here rather than in the caller.
-func (t *FiskCommandTool) Definition(deferLoading bool) llm.ToolDef {
+func (t *CommandTool) Definition(deferLoading bool) llm.ToolDef {
 	return llm.ToolDef{
 		Name:         t.Name(),
 		Description:  t.ModelDescription(),
@@ -70,7 +69,7 @@ func (t *FiskCommandTool) Definition(deferLoading bool) llm.ToolDef {
 // outcome carrying the exit code and output. It uses only the WorkDir from ExecDeps
 // (a command tool never prompts), running the command in the caller's per-run
 // directory so concurrent runs do not collide.
-func (t *FiskCommandTool) Execute(ctx context.Context, input json.RawMessage, deps toolkit.ExecDeps) (*toolkit.Outcome, error) {
+func (t *CommandTool) Execute(ctx context.Context, input json.RawMessage, deps toolkit.ExecDeps) (*toolkit.Outcome, error) {
 	result, err := t.RunCommand(ctx, input, deps.WorkDir)
 	if err != nil {
 		return nil, err
@@ -90,8 +89,8 @@ func (t *FiskCommandTool) Execute(ctx context.Context, input json.RawMessage, de
 // MCP: serving them is what the surface exists for. Which commands an operator
 // actually serves is narrowed by the exposure selection and the ai:deny tag, not
 // here.
-func (t *FiskCommandTool) MCPExposable() bool { return true }
+func (t *CommandTool) MCPExposable() bool { return true }
 
 // A2AExposable reports that a wrapped application's command may be served over
 // a2a, on the same terms as MCPExposable.
-func (t *FiskCommandTool) A2AExposable() bool { return true }
+func (t *CommandTool) A2AExposable() bool { return true }

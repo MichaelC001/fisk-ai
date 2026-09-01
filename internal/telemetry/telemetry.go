@@ -38,6 +38,7 @@ import (
 
 	"github.com/go-logr/stdr"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
@@ -143,6 +144,13 @@ func (d Delivery) Complete() bool {
 // from the rest of the tree; it becomes service.version on the resource, where a
 // version belongs, rather than an attribute repeated on every span.
 //
+// This package reads no environment of its own. Resolve read OTEL_RESOURCE_ATTRIBUTES
+// through the env function it was given and put the entries on Resolved, so a caller
+// injecting an env decides the value of every key it names. The SDK
+// still reads that variable too: sdktrace.WithResource and sdkmetric.WithResource each
+// merge resource.Environment() under the resource they are handed, so a key the shell
+// set and the injected env did not reaches a span, and no option here stops it.
+//
 // An explicit endpoint is passed to the exporters only when the config file named
 // one. When it did not, no endpoint option is set at all and the SDK applies its own
 // standard OTEL_EXPORTER_OTLP_* handling, including the signal-specific variables and
@@ -162,25 +170,14 @@ func Setup(ctx context.Context, r Resolved, version string, opts ...Option) (*Pr
 		opt(p)
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithTelemetrySDK(),
-		resource.WithFromEnv(),
-		resource.WithSchemaURL(semconv.SchemaURL),
-		// Applied last so the resolved service name wins over OTEL_SERVICE_NAME,
-		// which resolveServiceName has already taken into account at its own
-		// precedence.
-		resource.WithAttributes(
-			semconv.ServiceName(r.ServiceName.Value),
-			semconv.ServiceVersion(version),
-		),
-	)
+	res, err := buildResource(ctx, r, version)
 	if err != nil {
-		return nil, fmt.Errorf("building the telemetry resource: %w", err)
+		return nil, err
 	}
 
 	traceExp, err := otlptracehttp.New(ctx, traceOptions(r)...)
 	if err != nil {
-		return nil, fmt.Errorf("building the OTLP/HTTP trace exporter: %w", err)
+		return nil, fmt.Errorf("%w: building the OTLP/HTTP trace exporter: %w", ErrPipeline, err)
 	}
 
 	tp := sdktrace.NewTracerProvider(
@@ -206,7 +203,7 @@ func Setup(ctx context.Context, r Resolved, version string, opts ...Option) (*Pr
 		// The trace pipeline is already running, so tear it down rather than leak its
 		// batch processor goroutine on the way out.
 		_ = tp.Shutdown(ctx)
-		return nil, fmt.Errorf("building the OTLP/HTTP metric exporter: %w", err)
+		return nil, fmt.Errorf("%w: building the OTLP/HTTP metric exporter: %w", ErrPipeline, err)
 	}
 
 	mp := sdkmetric.NewMeterProvider(
@@ -220,10 +217,38 @@ func Setup(ctx context.Context, r Resolved, version string, opts ...Option) (*Pr
 	if err != nil {
 		_ = mp.Shutdown(ctx)
 		_ = tp.Shutdown(ctx)
-		return nil, fmt.Errorf("building the metric instruments: %w", err)
+		return nil, fmt.Errorf("%w: building the metric instruments: %w", ErrPipeline, err)
 	}
 
 	return p, nil
+}
+
+// buildResource describes this process for everything it exports.
+//
+// The OTEL_RESOURCE_ATTRIBUTES entries go on first and the resolved service name and
+// version last. Duplicate keys resolve to the last value, so a service.name written
+// into that variable does not override the name resolveServiceName picked, which has
+// already weighed OTEL_SERVICE_NAME at its own precedence.
+func buildResource(ctx context.Context, r Resolved, version string) (*resource.Resource, error) {
+	attrs := make([]attribute.KeyValue, 0, len(r.ResourceAttributes)+2)
+	for _, a := range r.ResourceAttributes {
+		attrs = append(attrs, attribute.String(a.Key, a.Value))
+	}
+	attrs = append(attrs,
+		semconv.ServiceName(r.ServiceName.Value),
+		semconv.ServiceVersion(version),
+	)
+
+	res, err := resource.New(ctx,
+		resource.WithTelemetrySDK(),
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(attrs...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: building the telemetry resource: %w", ErrPipeline, err)
+	}
+
+	return res, nil
 }
 
 // sampler builds the trace sampler for a resolved ratio.

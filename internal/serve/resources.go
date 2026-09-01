@@ -156,9 +156,9 @@ type Resources struct {
 // It does I/O: binding a JetStream stream or KV bucket contacts the server, which is
 // the point. An operator who has not provisioned their storage finds out here rather
 // than one job at a time.
-func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err error) {
+func NewResources(ctx context.Context, cfg *config.Config, opts ResourceOptions) (res *Resources, err error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("a configuration is required")
+		return nil, ErrConfigRequired
 	}
 
 	r := &Resources{}
@@ -178,7 +178,7 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 		cfg.A2AEnabled()
 
 	if needsNats && opts.Conns == nil && cfg.NatsContext == "" {
-		return nil, fmt.Errorf("nats_context is required in %q: the session store, memory store, remote tools or served tools this configuration selects are reached over NATS", opts.ConfigFile)
+		return nil, fmt.Errorf("%w: nats_context is required in %q: the session store, memory store, remote tools or served tools this configuration selects are reached over NATS", ErrInvalidOptions, opts.ConfigFile)
 	}
 
 	// The provider is built first because it contacts nothing: a provider this build
@@ -197,9 +197,9 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 			connName = cfg.Identity
 		}
 
-		r.Conns, err = conns.Connect(cfg.NatsContext, connName)
+		r.Conns, err = conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: connName})
 		if err != nil {
-			return nil, fmt.Errorf("connecting to NATS: %w", err)
+			return nil, fmt.Errorf("%w: connecting to NATS: %w", ErrResourceBuild, err)
 		}
 		r.ownsConns = true
 	}
@@ -212,13 +212,13 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 	if cfg.MemoryEnabled() {
 		r.MemoryStore, err = memory.New(cfg, memory.RuntimeEnv{StoreDir: opts.StoreDir, Nats: r.Conns.Nats()})
 		if err != nil {
-			return nil, fmt.Errorf("building the memory store: %w", err)
+			return nil, fmt.Errorf("%w: the memory store: %w", ErrResourceBuild, err)
 		}
 	}
 
 	sessions, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: opts.StoreDir, Nats: r.Conns.Nats()})
 	if err != nil {
-		return nil, fmt.Errorf("building the session store: %w", err)
+		return nil, fmt.Errorf("%w: the session store: %w", ErrResourceBuild, err)
 	}
 	// A worker holds no conversation between turns, so every turn reads its journal back
 	// from here. Wrapping it is what makes that cost visible in the run log.
@@ -227,7 +227,7 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 	// Last, because it is the only resource here that starts other people's programs. A
 	// store that cannot be built therefore fails before a child is running rather than
 	// after, and the defer above closes the children when something later fails.
-	err = r.connectMCP(cfg, opts.Version, opts.Logger)
+	err = r.connectMCP(ctx, cfg, opts.Version, opts.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -242,23 +242,24 @@ func NewResources(cfg *config.Config, opts ResourceOptions) (res *Resources, err
 // the first job to arrive. It is the same strictness a run applies, for the same
 // reason: the prompts this worker serves may depend on tools that are not there.
 //
-// It connects on a background context rather than one the caller passes, since
-// NewResources takes none and a worker's shared resources outlive any one request.
-// Each entry's timeout bounds its own connect, so a server that never answers fails
-// this naming it instead of holding startup open.
-func (r *Resources) connectMCP(cfg *config.Config, version string, log *slog.Logger) error {
+// The context governs the connecting and nothing after it. A caller that gives up
+// while a server is starting gets its error back, and the sessions that were opened
+// outlive it, since a worker's shared resources are not scoped to any one request.
+// Each entry's timeout bounds its own connect as well, so a server that never answers
+// fails this naming it instead of holding startup open.
+func (r *Resources) connectMCP(ctx context.Context, cfg *config.Config, version string, log *slog.Logger) error {
 	if len(cfg.MCPClients) == 0 {
 		return nil
 	}
 
-	sessions, err := mcpclient.Connect(context.Background(), mcpclient.Options{
+	sessions, err := mcpclient.Connect(ctx, mcpclient.Options{
 		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
 		Version:            version,
 		CredentialEnvNames: cfg.CredentialEnvNames(),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: the MCP sessions: %w", ErrResourceBuild, err)
 	}
 
 	r.MCPSessions = sessions
@@ -296,7 +297,7 @@ func newProvider(cfg *config.Config, opts ResourceOptions) (llm.Provider, error)
 		Middlewares: []llm.Middleware{telemetry.HTTPMiddleware()},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("building the model provider: %w", err)
+		return nil, fmt.Errorf("%w: the model provider: %w", ErrResourceBuild, err)
 	}
 
 	return provider, nil
@@ -317,7 +318,7 @@ func (r *Resources) openKnowledge(cfg *config.Config, storeDir string, ragOpts r
 
 	store, err := rag.Open(cfg, storeDir, ragOpts)
 	if err != nil {
-		return fmt.Errorf("opening the knowledge index: %w", err)
+		return fmt.Errorf("%w: opening the knowledge index: %w", ErrResourceBuild, err)
 	}
 
 	if store.Built() {

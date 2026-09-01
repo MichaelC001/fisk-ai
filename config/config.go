@@ -34,6 +34,10 @@ var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // an application-less agent.
 const defaultIdentity = "fisk-ai"
 
+// defaultProduct is the product a connection announces when Product names none, which
+// is every connection this CLI dials.
+const defaultProduct = "fisk-ai"
+
 // Default budget values applied wherever a config leaves a value unset.
 //
 // defaultLLMMaxTokens bounds a whole conversation rather than one turn, so it has to
@@ -109,6 +113,16 @@ type Config struct {
 	// remote tools and for the a2a server. Required when RemoteTools is set or in
 	// server mode.
 	NatsContext string `json:"nats_context,omitempty" yaml:"nats_context,omitempty"`
+	// Product is the software every NATS connection built from this configuration
+	// announces itself as, the first half of the name an operator reads in
+	// nats server report connections. It is set by the program rather than by the file,
+	// so an embedder assigns it once after loading and every dial these libraries make
+	// follows. Empty announces "fisk-ai". Read it through ProductName.
+	Product string `json:"-" yaml:"-"`
+	// ProductVersion is the build version those connections announce after the product,
+	// as "acme-agent/4.5". Empty announces the product on its own. Read it through
+	// ProductName.
+	ProductVersion string `json:"-" yaml:"-"`
 	// SystemPrompt describes what we are doing and may be long; think of it as a
 	// single-skill agent where this is the skill. Optional if MCP.
 	SystemPrompt string `json:"system_prompt" yaml:"system_prompt"`
@@ -1689,6 +1703,25 @@ func Validate(cfg *Config) error {
 // A local run has no such exposure and does not ask.
 func (c *Config) IdentityIsNamed() bool { return c.Identity != "" && !c.identityDerived }
 
+// ProductName is what a connection built from this configuration announces itself as:
+// "fisk-ai/1.2.3", or "fisk-ai" when no version was set. An empty Product announces
+// "fisk-ai".
+//
+// Every dial these libraries make reads it, so setting Product and ProductVersion once
+// after loading names an embedder's connections everywhere they appear on a server.
+func (c *Config) ProductName() string {
+	product := c.Product
+	if product == "" {
+		product = defaultProduct
+	}
+
+	if c.ProductVersion == "" {
+		return product
+	}
+
+	return product + "/" + c.ProductVersion
+}
+
 // ValidateForMode checks that the fields required by mode are set. application_path
 // is optional for ModeAgent and ModeMCP, which can run on built-in and remote tools
 // alone. ModeMCP needs nothing more, since it serves tools and uses neither a prompt
@@ -2217,7 +2250,7 @@ var otlpCredentialEnvNames = []string{
 // CredentialEnvNames returns the names of the environment variables that config
 // identifies as holding a credential, so a caller can strip them from the
 // environment of a subprocess whose command line the model chooses (see
-// internal/toolkit/fisk). A future provider extends this function and nothing else:
+// internal/toolkit/fisktool). A future provider extends this function and nothing else:
 // any operator-named secret variable belongs here, never a static denylist. Names are
 // trimmed, empties dropped, and duplicates removed.
 //

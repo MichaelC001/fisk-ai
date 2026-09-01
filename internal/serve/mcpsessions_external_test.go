@@ -434,13 +434,13 @@ var _ = Describe("Resources and MCP servers", func() {
 		cfg := servedConfig()
 		cfg.MCPClients = []config.MCPServer{{Name: "docs", Command: "fisk-mcp-server-that-does-not-exist"}}
 
-		res, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
+		res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).To(MatchError(ContainSubstring(`connecting to mcp server "docs"`)))
 		Expect(res).To(BeNil())
 	})
 
 	It("Should leave the sessions nil when the configuration declares no servers", func() {
-		res, err := serve.NewResources(servedConfig(), serve.ResourceOptions{})
+		res, err := serve.NewResources(context.Background(), servedConfig(), serve.ResourceOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { Expect(res.Close()).To(Succeed()) })
 
@@ -455,7 +455,7 @@ var _ = Describe("Resources and MCP servers", func() {
 		cfg := servedConfig()
 		cfg.MCPClients = []config.MCPServer{{Name: "docs", URL: endpoint}}
 
-		res, err := serve.NewResources(cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
+		res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(res.MCPSessions).ToNot(BeNil())
 		Expect(res.MCPSessions.Names()).To(Equal([]string{"docs"}))

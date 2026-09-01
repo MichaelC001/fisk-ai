@@ -468,30 +468,21 @@ type ToolTrace struct {
 	// dispatched. It is untrusted and unsanitized, like Output on the result, and is
 	// what a surface shows when Display is empty because the tool runs no command.
 	Input json.RawMessage
-	// Present is the visibility axis: how a renderer shows and suppresses the call.
-	// A renderer keys its suppression off this, never off ProviderKind, so a built-in
-	// self-renders (the human-in-the-loop tools) or is traced (memory and knowledge)
-	// by the same rules regardless of which provider supplied it.
-	Present toolkit.Presentation
-	// ProviderKind is the accounting axis: the provider the tool is accounted under
-	// (the kind= log token). It is distinct from Present above; a built-in traces one
-	// ProviderKind whether it self-renders or is traced.
+	// ProviderKind is the provider the tool is accounted under, the value behind the
+	// kind= log token.
 	ProviderKind toolkit.Kind
 	Agent        string
 }
 
-// ToolResultTrace describes one tool's returned output for display. Present mirrors
-// the ToolTrace it answers, so a caller can apply the same visibility rules to the
-// result as to the call (for example suppressing a self-rendering built-in's result
-// unless verbose). Output is the raw result text, untrusted and unsanitized; IsError
-// reports whether the tool reported a failure.
+// ToolResultTrace describes one tool's returned output for display. Output is the raw
+// result text, untrusted and unsanitized; IsError reports whether the tool reported a
+// failure.
 type ToolResultTrace struct {
 	// CallID is the tool_use id of the ToolTrace this answers. Not every call
 	// produces a result: a denied confirmation, a call missing required arguments,
 	// a tool that answers later and an aborted run all end without one, so a
 	// surface pairing the two must tolerate a call that is never answered.
-	CallID  string
-	Present toolkit.Presentation
+	CallID string
 	// ProviderKind mirrors the ToolTrace it answers, so the result's kind= log token
 	// matches the call's.
 	ProviderKind toolkit.Kind
