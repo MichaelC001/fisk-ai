@@ -328,7 +328,10 @@ func (h *hostedAgent) Close() error {
 		err = h.server.Stop()
 	}
 	if h.broker != nil {
-		h.broker.Close()
+		closeErr := h.broker.Close()
+		if err == nil {
+			err = closeErr
+		}
 	}
 	if h.transport != nil {
 		closeErr := h.transport.Close()
