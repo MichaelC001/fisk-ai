@@ -114,7 +114,7 @@ var _ = Describe("ResourceOptions.RAG", func() {
 	It("Should open the shared knowledge store with the caller's embedder", func() {
 		e := buildIndex()
 
-		res, err := serve.NewResources(cfg, serve.ResourceOptions{
+		res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{
 			RAG:    rag.Options{Embedder: e},
 			Logger: quietLogger(),
 		})
@@ -128,7 +128,7 @@ var _ = Describe("ResourceOptions.RAG", func() {
 	It("Should refuse the index the caller's embedder wrote when it is given none", func() {
 		buildIndex()
 
-		_, err := serve.NewResources(cfg, serve.ResourceOptions{Logger: quietLogger()})
+		_, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{Logger: quietLogger()})
 		Expect(err).To(MatchError(ContainSubstring("configured-model")))
 	})
 })

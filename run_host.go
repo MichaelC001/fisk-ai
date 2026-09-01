@@ -234,8 +234,8 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 // Nothing is hosted: no broker, no server, no model provider and no journal on this
 // machine. What comes back is the same handle a hosted agent produces, so a client
 // written against one talks to the other without knowing which it has.
-func dialAgent(cfg *config.Config, natsContext string, logger *slog.Logger, wire io.Writer, reporter multiplex.StateReporter) (*hostedAgent, error) {
-	provider, err := conns.Connect(natsContext, cfg.Identity)
+func dialAgent(ctx context.Context, cfg *config.Config, natsContext string, logger *slog.Logger, wire io.Writer, reporter multiplex.StateReporter) (*hostedAgent, error) {
+	provider, err := conns.ConnectNatsContext(ctx, natsContext, conns.Config{Product: productName, Name: cfg.Identity})
 	if err != nil {
 		return nil, err
 	}

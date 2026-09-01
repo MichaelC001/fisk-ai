@@ -53,7 +53,7 @@ func exampleConfig() *config.Config {
 // suspend is polled by every run at a loop boundary, so a drain stops runs where their
 // journals can be picked up rather than wherever they happened to be. Nil never
 // suspends, which makes a drain a hard stop.
-func exampleWorker(suspend func() bool) (*serve.Server, func(), error) {
+func exampleWorker(ctx context.Context, suspend func() bool) (*serve.Server, func(), error) {
 	cfg := exampleConfig()
 
 	// The queue engine requires this connection option and nothing else wants it, which
@@ -65,7 +65,7 @@ func exampleWorker(suspend func() bool) (*serve.Server, func(), error) {
 
 	// The provider, session store and anything else expensive to build per job. The
 	// caller owns them and closes them after Serve has returned.
-	res, err := serve.NewResources(cfg, serve.ResourceOptions{APIKey: os.Getenv("ANTHROPIC_API_KEY")})
+	res, err := serve.NewResources(ctx, cfg, serve.ResourceOptions{APIKey: os.Getenv("ANTHROPIC_API_KEY")})
 	if err != nil {
 		nc.Close()
 		return nil, nil, err
@@ -121,7 +121,7 @@ func exampleWorker(suspend func() bool) (*serve.Server, func(), error) {
 // Example_programmatic runs a worker with no configuration file, no flags and no
 // signal handling, which is the smallest thing that takes queued work.
 func Example_programmatic() {
-	srv, release, err := exampleWorker(nil)
+	srv, release, err := exampleWorker(context.Background(), nil)
 	if err != nil {
 		panic(err)
 	}
@@ -145,7 +145,7 @@ func Example_programmatic() {
 func Example_drainOnSignal() {
 	var suspend atomic.Bool
 
-	srv, release, err := exampleWorker(suspend.Load)
+	srv, release, err := exampleWorker(context.Background(), suspend.Load)
 	if err != nil {
 		panic(err)
 	}

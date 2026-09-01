@@ -5,6 +5,7 @@
 package serve
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -49,7 +50,12 @@ type EndpointBuilder struct {
 	// Build constructs the endpoints, in the order they are to be run. It is called
 	// only when Enabled said so. Returning none is allowed and runs nothing; a
 	// service it returns is already answering by the time it arrives here.
-	Build func(*config.Config, BuildOptions) ([]Endpoint, error)
+	//
+	// The context governs construction, not the run: an endpoint that dials or binds
+	// storage does it here, and a caller that gives up while a broker is unreachable
+	// gets its error back instead of waiting the dial out. It is done by the time the
+	// endpoint is handed over, so a builder must not keep it.
+	Build func(context.Context, *config.Config, BuildOptions) ([]Endpoint, error)
 }
 
 // BuildOptions are what an endpoint needs that no configuration can state: what the
@@ -109,7 +115,7 @@ type BuildOptions struct {
 // them together: a channel set built by one call and a service that failed in a second
 // would leave a queue channel holding a NATS connection it dialed itself, with no
 // handle left anywhere to release it.
-func Endpoints(cfg *config.Config, opts BuildOptions, builders []EndpointBuilder) ([]Channel, []Service, error) {
+func Endpoints(ctx context.Context, cfg *config.Config, opts BuildOptions, builders []EndpointBuilder) ([]Channel, []Service, error) {
 	var (
 		builtChannels []Channel
 		builtServices []Service
@@ -126,7 +132,7 @@ func Endpoints(cfg *config.Config, opts BuildOptions, builders []EndpointBuilder
 			continue
 		}
 
-		built, err := b.Build(cfg, opts)
+		built, err := b.Build(ctx, cfg, opts)
 		if err != nil {
 			return fail(fmt.Errorf("building the %s endpoint: %w", b.Name, err))
 		}

@@ -71,7 +71,7 @@ var _ = Describe("openSessionStore", func() {
 
 		// No NATS server runs in the unit suite: that this succeeds proves the file
 		// backend path never dialed one.
-		store, cleanup, err := openSessionStore()
+		store, cleanup, err := openSessionStore(context.Background())
 		Expect(err).ToNot(HaveOccurred())
 		Expect(store).ToNot(BeNil())
 		defer cleanup()
@@ -101,7 +101,7 @@ harness:
 		sessionConfigFile = cfgPath
 		stateDirFlag = ""
 
-		store, cleanup, err := openSessionStore()
+		store, cleanup, err := openSessionStore(context.Background())
 		defer cleanup()
 		Expect(err).To(HaveOccurred())
 		Expect(store).To(BeNil())
@@ -125,7 +125,7 @@ harness:
 		sessionConfigFile = cfgPath
 		stateDirFlag = "/tmp/runs"
 
-		store, cleanup, err := openSessionStore()
+		store, cleanup, err := openSessionStore(context.Background())
 		defer cleanup()
 		Expect(err).To(HaveOccurred())
 		Expect(store).To(BeNil())

@@ -109,6 +109,14 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 
 	log := c.logger()
 
+	// Startup has a context of its own, separate from the one Serve runs on. It governs
+	// the dialing and binding below, so an interrupt while a broker is unreachable ends
+	// the command instead of waiting the dial out. Nothing reads it once the endpoints
+	// are built: an interrupt during a run means drain, which is a different answer and
+	// is what onInterrupt arranges.
+	startCtx, cancelStart := interruptContext()
+	defer cancelStart()
+
 	// Resolved before anything is opened, so a bad endpoint or sample ratio fails here
 	// rather than after the stores are bound. Its report is deferred first, which makes
 	// it run last: the flush belongs after every run has ended and every other resource
@@ -129,7 +137,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// different thing from the queue's: the jobs channel dials its own from
 	// expose.agent.jobs, so a deployment can keep its work queue on one cluster and its
 	// session and memory stores on another.
-	resources, err := serve.NewResources(cfg, serve.ResourceOptions{
+	resources, err := serve.NewResources(startCtx, cfg, serve.ResourceOptions{
 		ConfigFile: c.configFile,
 		ConnName:   "serve " + cfg.Identity,
 		Version:    version,
@@ -156,7 +164,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 	// An idle worker therefore exits on the first interrupt, having nothing to wait for.
 	var suspend atomic.Bool
 
-	channels, services, err := serve.Endpoints(cfg, serve.BuildOptions{
+	channels, services, err := serve.Endpoints(startCtx, cfg, serve.BuildOptions{
 		Workers:          c.workerOverride(),
 		SuspendRequested: suspend.Load,
 		Conns:            resources.Conns,

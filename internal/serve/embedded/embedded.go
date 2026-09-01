@@ -33,6 +33,11 @@ import (
 // process is in trouble, not that the machine is slow.
 const readyTimeout = 10 * time.Second
 
+// productName is what this broker's own connection calls itself. Nothing outside the
+// process can see it, since the server does not listen, so it is a literal rather than
+// something Start asks its caller for.
+const productName = "fisk-ai"
+
 // Broker is the in-process NATS server and the connection to it.
 //
 // The connection is offered as a conns.Provider so that whatever is hosted on it takes
@@ -98,7 +103,7 @@ func Start(name string, log *slog.Logger) (*Broker, error) {
 		log.Debug("The in-process broker reported an error", "error", err, "subject", subject)
 	})
 
-	conn, err := nats.Connect("", append(conns.Options(name), nats.InProcessServer(server), handler)...)
+	conn, err := nats.Connect("", append(conns.Options(conns.Config{Product: productName, Name: name}), nats.InProcessServer(server), handler)...)
 	if err != nil {
 		server.Shutdown()
 

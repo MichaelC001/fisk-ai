@@ -5,6 +5,7 @@
 package slack
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,7 +21,9 @@ func Builder() serve.EndpointBuilder {
 	return serve.EndpointBuilder{
 		Name:    channelName,
 		Enabled: func(cfg *config.Config) bool { return cfg.SlackEnabled() },
-		Build: func(cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
+		// No context: this channel talks to Slack over HTTP when it runs and opens
+		// nothing while it is built, so there is no construction I/O for one to govern.
+		Build: func(_ context.Context, cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 			ch, err := NewFromConfig(cfg, ConfigOptions{
 				Sessions:         opts.Sessions,
 				SuspendRequested: opts.SuspendRequested,

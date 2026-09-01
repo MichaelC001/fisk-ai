@@ -23,6 +23,11 @@ import (
 // default build ldflags set -X main.version=<tag>, so no extra config is needed.
 var version = "devel"
 
+// productName is what this program calls itself to a NATS server, the first half of
+// the name an operator reads in nats server report connections. The libraries take it
+// as a parameter, so an embedder announces its own name rather than ours.
+const productName = "fisk-ai"
+
 var (
 	configFile  string
 	apiKey      string

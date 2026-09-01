@@ -148,7 +148,7 @@ func runAction(_ *fisk.ParseContext) error {
 	// The store the hosted agent journals into and the channel reads a conversation back
 	// from. It is opened here so both are given the same one: two stores would have the
 	// channel reading a conversation the run beside it is not writing.
-	sessions, releaseSessions, err := sessionStoreFor(cfg)
+	sessions, releaseSessions, err := sessionStoreFor(runCtx, cfg)
 	if err != nil {
 		return err
 	}
@@ -345,7 +345,7 @@ func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.
 		reporter = multiplex.Detect(os.Getenv, cfg.Identity)
 	}
 
-	host, err := dialAgent(cfg, runNatsContext, clientWorkerLogger(usesTUI), wire, reporter)
+	host, err := dialAgent(ctx, cfg, runNatsContext, clientWorkerLogger(usesTUI), wire, reporter)
 	if err != nil {
 		return err
 	}

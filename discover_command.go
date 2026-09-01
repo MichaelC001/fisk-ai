@@ -47,7 +47,7 @@ func discoverAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	provider, err := conns.Connect(contextName, sender)
+	provider, err := conns.ConnectNatsContext(ctx, contextName, conns.Config{Product: productName, Name: sender})
 	if err != nil {
 		return err
 	}

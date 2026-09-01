@@ -91,7 +91,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	// Discover remote tools best-effort: info must stay usable offline and when a
 	// remote agent is down, so a connection or discovery failure is reported as a
 	// warning and the local tools are still shown.
-	imports, err := remotetools.DiscoverForInfo(cfg, taken)
+	imports, err := remotetools.DiscoverForInfo(ctx, cfg, taken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: cannot connect to NATS context %q to discover remote tools: %v\n", cfg.NatsContext, err)
 	}

@@ -158,7 +158,7 @@ var _ = Describe("Options", func() {
 			// this provider is what proves it never consulted llm_provider.
 			cfg.LLM.Provider = "no-such-provider"
 
-			res, err := serve.NewResources(cfg, serve.ResourceOptions{
+			res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{
 				Provider: provider,
 				Logger:   quietLogger(),
 			})
@@ -180,7 +180,7 @@ var _ = Describe("Options", func() {
 			cfg := servedConfig()
 			cfg.LLM.Provider = "no-such-provider"
 
-			_, err := serve.NewResources(cfg, serve.ResourceOptions{Logger: quietLogger()})
+			_, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{Logger: quietLogger()})
 			Expect(err).To(MatchError(ContainSubstring("no-such-provider")))
 		})
 	})
