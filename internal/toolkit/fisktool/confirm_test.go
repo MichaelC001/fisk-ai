@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package fisk
+package fisktool
 
 import (
 	"github.com/choria-io/fisk"
@@ -10,17 +10,17 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("FiskCommandTool.NeedsConfirm", func() {
+var _ = Describe("CommandTool.NeedsConfirm", func() {
 	It("Should report the always-on ai:confirm tag regardless of configured tags", func() {
-		confirm := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{confirmTag}}}
-		plain := &FiskCommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{}}
+		confirm := &CommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{confirmTag}}}
+		plain := &CommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{}}
 
 		Expect(confirm.NeedsConfirm(nil)).To(BeTrue())
 		Expect(plain.NeedsConfirm(nil)).To(BeFalse())
 	})
 
 	It("Should report a tool carrying a configured extra confirm tag", func() {
-		tool := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{"impact:rw"}}}
+		tool := &CommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{"impact:rw"}}}
 
 		Expect(tool.NeedsConfirm([]string{"impact:rw"})).To(BeTrue())
 		Expect(tool.NeedsConfirm([]string{"impact:ro"})).To(BeFalse())
@@ -28,19 +28,19 @@ var _ = Describe("FiskCommandTool.NeedsConfirm", func() {
 	})
 })
 
-var _ = Describe("FiskCommandTool.ConfirmTrigger", func() {
+var _ = Describe("CommandTool.ConfirmTrigger", func() {
 	It("Should prefer the always-on ai:confirm tag when several match", func() {
-		tool := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{"impact:rw", confirmTag}}}
+		tool := &CommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{"impact:rw", confirmTag}}}
 		Expect(tool.ConfirmTrigger([]string{"impact:rw"})).To(Equal(confirmTag))
 	})
 
 	It("Should name the first matching configured tag in command tag order", func() {
-		tool := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{"impact:rw", "admin"}}}
+		tool := &CommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{"impact:rw", "admin"}}}
 		Expect(tool.ConfirmTrigger([]string{"admin", "impact:rw"})).To(Equal("impact:rw"))
 	})
 
 	It("Should be empty for an ungated command", func() {
-		tool := &FiskCommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{Tags: []string{"impact:ro"}}}
+		tool := &CommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{Tags: []string{"impact:ro"}}}
 		Expect(tool.ConfirmTrigger([]string{"impact:rw"})).To(BeEmpty())
 	})
 })

@@ -19,7 +19,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/segmentio/ksuid"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -67,16 +67,16 @@ func toolSrcOf(tools map[string]toolkit.Tool) *ToolSource {
 // its rendering.
 type nopEvents struct{}
 
-func (nopEvents) Warn(Warning)                                                           {}
-func (nopEvents) Starting(RunInfo)                                                       {}
-func (nopEvents) RemoteHostNotes([]remotetools.HostImport)                               {}
-func (nopEvents) ResumeTranscript(*runstate.RunState, map[string]*fisk2.FiskCommandTool) {}
-func (nopEvents) LLMRequest(string)                                                      {}
-func (nopEvents) ToolCall(ToolTrace)                                                     {}
-func (nopEvents) ToolResult(ToolResultTrace)                                             {}
-func (nopEvents) Message(llm.Response, bool)                                             {}
-func (nopEvents) SessionRotated(string)                                                  {}
-func (nopEvents) Panicked(any, []byte)                                                   {}
+func (nopEvents) Warn(Warning)                                                          {}
+func (nopEvents) Starting(RunInfo)                                                      {}
+func (nopEvents) RemoteHostNotes([]remotetools.HostImport)                              {}
+func (nopEvents) ResumeTranscript(*runstate.RunState, map[string]*fisktool.CommandTool) {}
+func (nopEvents) LLMRequest(string)                                                     {}
+func (nopEvents) ToolCall(ToolTrace)                                                    {}
+func (nopEvents) ToolResult(ToolResultTrace)                                            {}
+func (nopEvents) Message(llm.Response, bool)                                            {}
+func (nopEvents) SessionRotated(string)                                                 {}
+func (nopEvents) Panicked(any, []byte)                                                  {}
 
 // captureEvents records the tool traces so a test can assert what was emitted; it
 // inherits the no-op behavior for every other event.
@@ -360,9 +360,10 @@ var _ = Describe("runner", func() {
 
 		It("rejects a local tool call missing a required parameter without running it", func() {
 			ev := &captureEvents{}
-			tool := &fisk2.FiskCommandTool{
-				Path:    []string{"do"},
-				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
+			// The tool carries no application path: the call is rejected before it
+			// would run, and a tool with no path cannot run at all.
+			tool := &fisktool.CommandTool{
+				Path: []string{"do"},
 				Model: &fisk.CmdModel{RestrictedSchema: map[string]any{
 					"type":     "object",
 					"required": []string{"subject"},
@@ -395,11 +396,8 @@ var _ = Describe("runner", func() {
 		})
 
 		It("dispatches a local command tool: traces the full call line and runs it", func() {
-			app := filepath.Join(GinkgoT().TempDir(), "app")
-			Expect(os.WriteFile(app, []byte("#!/bin/sh\necho hello\n"), 0o755)).To(Succeed())
-
 			ev := &captureEvents{}
-			tool := &fisk2.FiskCommandTool{Path: []string{"do"}, AppPath: app, Model: &fisk.CmdModel{}}
+			tool := runnableCommandTool()
 			r := &runner{stats: &RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"do": tool})}
 
 			block, dispatched, _, err := r.executeTool(context.Background(), llm.ToolUseBlock{ID: "t1", Name: "do", Input: json.RawMessage(`{}`)})
@@ -439,10 +437,11 @@ var _ = Describe("runner", func() {
 
 		It("gates a confirm-tagged local tool and denies it without running when no operator can approve", func() {
 			ev := &captureEvents{}
-			tool := &fisk2.FiskCommandTool{
-				Path:    []string{"stream", "rm"},
-				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
-				Model:   &fisk.CmdModel{Tags: []string{"ai:confirm"}},
+			// The tool carries no application path: the gate denies before it would
+			// run, and a tool with no path cannot run at all.
+			tool := &fisktool.CommandTool{
+				Path:  []string{"stream", "rm"},
+				Model: &fisk.CmdModel{Tags: []string{"ai:confirm"}},
 			}
 			r := &runner{
 				stats:  &RunStats{},
@@ -558,10 +557,11 @@ var _ = Describe("runner", func() {
 		})
 
 		It("gates a rewrite on the union: a redirect from a gated tool to an ungated one is still gated", func() {
-			orig := &fisk2.FiskCommandTool{
-				Path:    []string{"stream", "rm"},
-				AppPath: filepath.Join(GinkgoT().TempDir(), "never-run"),
-				Model:   &fisk.CmdModel{Tags: []string{"ai:confirm"}},
+			// The tool carries no application path: the gate denies before it would
+			// run, and a tool with no path cannot run at all.
+			orig := &fisktool.CommandTool{
+				Path:  []string{"stream", "rm"},
+				Model: &fisk.CmdModel{Tags: []string{"ai:confirm"}},
 			}
 			safe := &recordingTool{name: "safe", output: "safe-out"}
 			ev := &captureEvents{}

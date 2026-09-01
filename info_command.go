@@ -23,7 +23,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/ui/columns"

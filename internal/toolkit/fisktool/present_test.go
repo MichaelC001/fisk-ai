@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package fisk
+package fisktool
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-var _ = Describe("FiskCommandTool.Definition", func() {
+var _ = Describe("CommandTool.Definition", func() {
 	It("Should map name, description and deferred loading", func() {
 		app := fisk.New("app", "an app")
 		app.Command("deploy", "deploy things")
@@ -93,15 +93,15 @@ var _ = Describe("SanitizeCommandLine", func() {
 	})
 })
 
-var _ = Describe("FiskCommandTool.ExecuteUse", func() {
+var _ = Describe("CommandTool.ExecuteUse", func() {
 	// useBlock builds a tool_use block addressing tool t with the given raw input.
-	useBlock := func(t *FiskCommandTool, id, input string) llm.ToolUseBlock {
+	useBlock := func(t *CommandTool, id, input string) llm.ToolUseBlock {
 		return llm.ToolUseBlock{ID: id, Name: t.Name(), Input: json.RawMessage(input)}
 	}
 
 	// doTool builds an "app do" command tool with a required argument, bound to
 	// the given application path.
-	doTool := func(appPath string) *FiskCommandTool {
+	doTool := func(appPath string) *CommandTool {
 		GinkgoHelper()
 
 		app := fisk.New("app", "an app")
@@ -112,7 +112,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 
 		tool := toolsByName(tools)["do"]
 		Expect(tool).NotTo(BeNil())
-		tool.AppPath = appPath
+		tool.appPath = appPath
 		return tool
 	}
 

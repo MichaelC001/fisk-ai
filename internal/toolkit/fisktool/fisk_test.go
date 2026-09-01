@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package fisk
+package fisktool
 
 import (
 	"context"
@@ -23,9 +23,9 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-func TestFisk(t *testing.T) {
+func TestFiskTool(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Toolkit/Fisk")
+	RunSpecs(t, "Toolkit/FiskTool")
 }
 
 // fakeCredEnvVar is the sentinel credential variable the fake provider below
@@ -60,16 +60,16 @@ func writeExecutable(body string) string {
 }
 
 // toolsByName indexes tools by their name for order-independent assertions.
-func toolsByName(tools []*FiskCommandTool) map[string]*FiskCommandTool {
-	out := make(map[string]*FiskCommandTool, len(tools))
+func toolsByName(tools []*CommandTool) map[string]*CommandTool {
+	out := make(map[string]*CommandTool, len(tools))
 	for _, t := range tools {
 		out[t.Name()] = t
 	}
 	return out
 }
 
-// names returns the FiskCommandTool names in order.
-func names(tools []*FiskCommandTool) []string {
+// names returns the CommandTool names in order.
+func names(tools []*CommandTool) []string {
 	out := make([]string, 0, len(tools))
 	for _, t := range tools {
 		out = append(out, t.Name())
@@ -156,6 +156,13 @@ var _ = Describe("ApplicationTools", func() {
 		Expect(byName).To(HaveKey("two"))
 		Expect(byName["one"].Description()).To(Equal("first command"))
 		Expect(byName["one"].Command()).To(Equal("one"))
+	})
+
+	It("Should return an empty object schema for a tool with no command model", func() {
+		tool := &CommandTool{Path: []string{"do"}}
+
+		schema := tool.InputSchema()
+		Expect(schema).To(Equal(map[string]any{"type": "object"}))
 	})
 
 	It("Should build the restricted input schema from arguments and flags", func() {
@@ -297,17 +304,17 @@ var _ = Describe("ApplicationTools", func() {
 
 	Describe("Behavior", func() {
 		It("Should declare nothing for a command with no behavior tags", func() {
-			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{confirmTag}}}
+			tool := &CommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{confirmTag}}}
 			Expect(tool.Behavior().IsZero()).To(BeTrue())
 		})
 
 		It("Should derive the behavior its author tagged", func() {
-			tool := &FiskCommandTool{Path: []string{"stream", "ls"}, Model: &fisk.CmdModel{Tags: []string{toolkit.ReadOnlyTag, toolkit.IdempotentTag}}}
+			tool := &CommandTool{Path: []string{"stream", "ls"}, Model: &fisk.CmdModel{Tags: []string{toolkit.ReadOnlyTag, toolkit.IdempotentTag}}}
 			Expect(tool.Behavior()).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
 		})
 
 		It("Should resolve contradictory tags toward the more dangerous reading rather than refusing the command", func() {
-			tool := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{toolkit.ReadOnlyTag, toolkit.DestructiveTag}}}
+			tool := &CommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Tags: []string{toolkit.ReadOnlyTag, toolkit.DestructiveTag}}}
 			Expect(tool.Behavior().ReadOnly).To(Equal(toolkit.HintFalse))
 			Expect(tool.Behavior().Destructive).To(Equal(toolkit.HintTrue))
 
@@ -317,7 +324,7 @@ var _ = Describe("ApplicationTools", func() {
 		})
 
 		It("Should report a tag that only looks reserved", func() {
-			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{"ai:readonly"}}}
+			tool := &CommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{"ai:readonly"}}}
 			Expect(tool.Behavior().IsZero()).To(BeTrue())
 
 			unknown, _ := toolkit.TagIssues(tool)
@@ -327,32 +334,32 @@ var _ = Describe("ApplicationTools", func() {
 
 	Describe("ModelDescription", func() {
 		It("Should return the plain help when the command has no tags", func() {
-			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Help: "do a thing"}}
+			tool := &CommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Help: "do a thing"}}
 			Expect(tool.ModelDescription()).To(Equal("do a thing"))
 		})
 
 		It("Should append the command's tags, including reserved ai: tags, so a prompt can key off them", func() {
-			tool := &FiskCommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Help: "remove a stream", Tags: []string{"impact:rw", confirmTag}}}
+			tool := &CommandTool{Path: []string{"stream", "rm"}, Model: &fisk.CmdModel{Help: "remove a stream", Tags: []string{"impact:rw", confirmTag}}}
 			Expect(tool.ModelDescription()).To(Equal("remove a stream\n\nTags: impact:rw, ai:confirm"))
 		})
 
 		It("Should emit only the tag line when the command has no help", func() {
-			tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{"impact:ro"}}}
+			tool := &CommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{Tags: []string{"impact:ro"}}}
 			Expect(tool.ModelDescription()).To(Equal("Tags: impact:ro"))
 		})
 
 		It("Should combine the short and long help so the model gets the richer guidance", func() {
-			tool := &FiskCommandTool{Path: []string{"stream", "add"}, Model: &fisk.CmdModel{Help: "create a stream", HelpLong: "Creates a stream capturing messages on the given subjects."}}
+			tool := &CommandTool{Path: []string{"stream", "add"}, Model: &fisk.CmdModel{Help: "create a stream", HelpLong: "Creates a stream capturing messages on the given subjects."}}
 			Expect(tool.ModelDescription()).To(Equal("create a stream\n\nCreates a stream capturing messages on the given subjects."))
 		})
 
 		It("Should not repeat the short help when the long help already contains it", func() {
-			tool := &FiskCommandTool{Path: []string{"stream", "add"}, Model: &fisk.CmdModel{Help: "create a stream", HelpLong: "create a stream capturing messages on the given subjects"}}
+			tool := &CommandTool{Path: []string{"stream", "add"}, Model: &fisk.CmdModel{Help: "create a stream", HelpLong: "create a stream capturing messages on the given subjects"}}
 			Expect(tool.ModelDescription()).To(Equal("create a stream capturing messages on the given subjects"))
 		})
 
 		It("Should use the long help with tags when only the long help is set", func() {
-			tool := &FiskCommandTool{Path: []string{"stream", "add"}, Model: &fisk.CmdModel{HelpLong: "Creates a stream.", Tags: []string{"impact:rw"}}}
+			tool := &CommandTool{Path: []string{"stream", "add"}, Model: &fisk.CmdModel{HelpLong: "Creates a stream.", Tags: []string{"impact:rw"}}}
 			Expect(tool.ModelDescription()).To(Equal("Creates a stream.\n\nTags: impact:rw"))
 		})
 	})
@@ -378,8 +385,8 @@ var _ = Describe("ApplicationTools", func() {
 
 var _ = Describe("FilterTools", func() {
 	// fixture returns a fresh tool list covering tagged, untagged and ai:deny tools.
-	fixture := func() []*FiskCommandTool {
-		return []*FiskCommandTool{
+	fixture := func() []*CommandTool {
+		return []*CommandTool{
 			{Path: []string{"auth", "user", "add"}, Model: &fisk.CmdModel{Tags: []string{"admin"}}},
 			{Path: []string{"auth", "login"}, Model: &fisk.CmdModel{}},
 			{Path: []string{"server", "run"}, Model: &fisk.CmdModel{Tags: []string{denyTag}}},
@@ -452,7 +459,7 @@ var _ = Describe("FilterTools", func() {
 	})
 
 	It("Should let ai:deny win over ai:confirm so a doubly-tagged tool is never exposed", func() {
-		both := []*FiskCommandTool{{Path: []string{"server", "wipe"}, Model: &fisk.CmdModel{Tags: []string{denyTag, confirmTag}}}}
+		both := []*CommandTool{{Path: []string{"server", "wipe"}, Model: &fisk.CmdModel{Tags: []string{denyTag, confirmTag}}}}
 		tools, err := FilterTools(both, nil, IncludeFilter)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(tools).To(BeEmpty())
@@ -470,8 +477,8 @@ var _ = Describe("filterExposed", func() {
 	// fixture mirrors the FilterTools fixture; filterExposed runs after LoadTools,
 	// which has already stripped ai:deny, but the deny tool is kept here to assert
 	// the narrowing can never re-add one.
-	fixture := func() []*FiskCommandTool {
-		return []*FiskCommandTool{
+	fixture := func() []*CommandTool {
+		return []*CommandTool{
 			{Path: []string{"auth", "user", "add"}, Model: &fisk.CmdModel{Tags: []string{"admin"}}},
 			{Path: []string{"auth", "login"}, Model: &fisk.CmdModel{}},
 			{Path: []string{"server", "run"}, Model: &fisk.CmdModel{Tags: []string{denyTag}}},
@@ -530,7 +537,7 @@ var _ = Describe("filterExposed", func() {
 var _ = Describe("Command execution", func() {
 	// doTool builds an "app do" command tool with a flag and a required argument,
 	// bound to the given application path.
-	doTool := func(appPath string) *FiskCommandTool {
+	doTool := func(appPath string) *CommandTool {
 		GinkgoHelper()
 
 		app := fisk.New("app", "an app")
@@ -544,7 +551,7 @@ var _ = Describe("Command execution", func() {
 		tool := toolsByName(tools)["do"]
 		Expect(tool).NotTo(BeNil())
 
-		tool.AppPath = appPath
+		tool.appPath = appPath
 		return tool
 	}
 
@@ -670,11 +677,26 @@ var _ = Describe("Command execution", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\n" +
 			"printf 'MY_EMBED_KEY=[%s]\\n' \"$MY_EMBED_KEY\"\n" +
 			"printf 'MY_OTHER_VAR=[%s]\\n' \"$MY_OTHER_VAR\"\n"))
-		tool.SensitiveEnvVars = []string{"MY_EMBED_KEY"}
+		tool.sensitiveEnvVars = []string{"MY_EMBED_KEY"}
 
 		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Output).To(Equal("MY_EMBED_KEY=[]\nMY_OTHER_VAR=[keep-me]\n"))
+	})
+
+	It("Should hand out a copy of the scrub list, so writing to it does not expose the variable", func() {
+		GinkgoT().Setenv("MY_EMBED_KEY", "super-secret")
+		tool := doTool(writeExecutable("#!/bin/sh\nprintf 'MY_EMBED_KEY=[%s]\\n' \"$MY_EMBED_KEY\"\n"))
+		tool.sensitiveEnvVars = []string{"MY_EMBED_KEY"}
+
+		names := tool.SensitiveEnvVars()
+		Expect(names).To(Equal([]string{"MY_EMBED_KEY"}))
+		names[0] = "SOMETHING_ELSE"
+
+		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Output).To(Equal("MY_EMBED_KEY=[]\n"))
+		Expect(tool.SensitiveEnvVars()).To(Equal([]string{"MY_EMBED_KEY"}))
 	})
 
 	// The OpenTelemetry export credentials are stripped whether or not this agent
@@ -706,7 +728,7 @@ var _ = Describe("Command execution", func() {
 		}
 
 		tool := doTool(writeExecutable(script))
-		tool.SensitiveEnvVars = cfg.CredentialEnvNames()
+		tool.sensitiveEnvVars = cfg.CredentialEnvNames()
 
 		result, err := tool.RunCommand(context.Background(), json.RawMessage(`{"subject":"x"}`), "")
 		Expect(err).NotTo(HaveOccurred())
@@ -787,7 +809,7 @@ var _ = Describe("Command execution", func() {
 var _ = Describe("MissingRequired", func() {
 	// doTool builds an "app do" command with an optional "level" flag and a
 	// required "subject" argument, its schema computed by fisk introspection.
-	doTool := func() *FiskCommandTool {
+	doTool := func() *CommandTool {
 		GinkgoHelper()
 
 		app := fisk.New("app", "an app")
@@ -830,7 +852,7 @@ var _ = Describe("MissingRequired", func() {
 		// The schema is set directly so the check can be exercised against value
 		// types fisk positional strings cannot express; presence, not value, is what
 		// decides, so a false, a zero and an empty array all count as supplied.
-		tool := &FiskCommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{
+		tool := &CommandTool{Path: []string{"x"}, Model: &fisk.CmdModel{RestrictedSchema: map[string]any{
 			"type":     "object",
 			"required": []string{"a", "b", "c"},
 			"properties": map[string]any{
@@ -1164,7 +1186,7 @@ var _ = Describe("bounded subprocess output", func() {
 
 			tool := toolsByName(tools)["flood"]
 			Expect(tool).NotTo(BeNil())
-			tool.AppPath = writeExecutable("#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' a\n")
+			tool.appPath = writeExecutable("#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' a\n")
 
 			result, err := tool.RunCommand(context.Background(), json.RawMessage(`{}`), "")
 			Expect(err).NotTo(HaveOccurred())
@@ -1207,7 +1229,7 @@ var _ = Describe("FetchFiskAppModel", func() {
 var _ = Describe("Execute working directory", func() {
 	// noArgTool builds a tool for a no-argument command "run" bound to an executable
 	// with the given body, so Execute can be driven with an empty argument object.
-	noArgTool := func(body string) *FiskCommandTool {
+	noArgTool := func(body string) *CommandTool {
 		GinkgoHelper()
 
 		app := fisk.New("app", "an app")
@@ -1219,7 +1241,7 @@ var _ = Describe("Execute working directory", func() {
 		tool := toolsByName(tools)["run"]
 		Expect(tool).NotTo(BeNil())
 
-		tool.AppPath = writeExecutable(body)
+		tool.appPath = writeExecutable(body)
 		return tool
 	}
 

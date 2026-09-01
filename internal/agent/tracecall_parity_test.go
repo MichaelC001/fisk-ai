@@ -18,7 +18,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	fisk2 "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
@@ -72,7 +72,7 @@ var _ = Describe("runner.traceCall parity", func() {
 
 	It("Should trace a command tool with the full and short call lines under the application kind, given the work dir", func() {
 		ev := &captureEvents{}
-		tool := &fisk2.FiskCommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{}}
+		tool := &fisktool.CommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{}}
 		r := newRunner(ev, map[string]toolkit.Tool{"stream_info": tool})
 		use := llm.ToolUseBlock{ID: "t1", Name: "stream_info", Input: json.RawMessage(`{}`)}
 

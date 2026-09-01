@@ -17,7 +17,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // defaultMCPPort is the TCP port the MCP server listens on when neither the

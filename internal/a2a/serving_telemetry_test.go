@@ -67,7 +67,7 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -94,7 +94,7 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -112,7 +112,7 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -139,7 +139,7 @@ var _ = Describe("Serving telemetry", func() {
 		tel, exp := recordingTelemetry()
 
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -162,7 +162,7 @@ var _ = Describe("Serving telemetry", func() {
 
 	It("Should serve a call with telemetry off", func() {
 		ft := newFakeTransport()
-		_, err := NewServer(ft, servingApp("ping", "#!/bin/sh\necho pong\n"),
+		_, err := NewServer(ft, servingApp("ping", "echo pong\n"),
 			ServerOptions{Identity: "svc", LogOutput: io.Discard})
 		Expect(err).NotTo(HaveOccurred())
 

@@ -38,7 +38,7 @@ const maxPromptRunes = 500
 const maxSelectOptions = 25
 
 // A built-in tool is a tool fisk-ai implements itself and runs in-process, built on
-// the functool backend, as opposed to a *FiskCommandTool, which runs a command of
+// the functool backend, as opposed to a *fisktool.CommandTool, which runs a command of
 // the introspected fisk application. Built-in tools provide capabilities that are
 // not part of any application, such as putting a question to the operator. They run
 // with the agent's own privileges and unscrubbed ambient environment (see the

@@ -5,10 +5,12 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/choria-io/fisk"
 	. "github.com/onsi/ginkgo/v2"
@@ -16,7 +18,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	fisktool "github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // introspect mirrors the production path: it drives the application's real
@@ -54,7 +56,7 @@ func introspect(app *fisk.Application) *fisk.ApplicationModel {
 
 // toolkitSlice adapts application tools to the toolkit.Tool interface
 // BuildToolParams takes, so the deferral logic runs over a real command set.
-func toolkitSlice(tools []*fisktool.FiskCommandTool) []toolkit.Tool {
+func toolkitSlice(tools []*fisktool.CommandTool) []toolkit.Tool {
 	out := make([]toolkit.Tool, len(tools))
 	for i, t := range tools {
 		out[i] = t
@@ -63,7 +65,7 @@ func toolkitSlice(tools []*fisktool.FiskCommandTool) []toolkit.Tool {
 }
 
 // appWithCommands builds an application exposing n distinct tools, named cmd0..cmdN-1.
-func appWithCommands(n int) []*fisktool.FiskCommandTool {
+func appWithCommands(n int) []*fisktool.CommandTool {
 	GinkgoHelper()
 
 	app := fisk.New("app", "an app")
@@ -76,6 +78,35 @@ func appWithCommands(n int) []*fisktool.FiskCommandTool {
 	Expect(tools).To(HaveLen(n))
 
 	return tools
+}
+
+// runnableCommandTool returns the "do" tool of a one-command application, carrying
+// the path of a binary it can execute. ToolsForApp is the only route to a tool that
+// carries a binary path, so the binary it introspects is a script that replays the
+// application's real model on --fisk-introspect and echoes a line otherwise.
+func runnableCommandTool() *fisktool.CommandTool {
+	GinkgoHelper()
+
+	app := fisk.New("app", "an app")
+	app.Command("do", "do a thing")
+
+	model, err := json.Marshal(introspect(app))
+	Expect(err).NotTo(HaveOccurred())
+
+	dir := GinkgoT().TempDir()
+	modelPath := filepath.Join(dir, "introspect.json")
+	Expect(os.WriteFile(modelPath, model, 0o600)).To(Succeed())
+
+	appPath := filepath.Join(dir, "app")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\necho hello\n", modelPath)
+	Expect(os.WriteFile(appPath, []byte(script), 0o700)).To(Succeed())
+
+	tools, err := fisktool.ToolsForApp(context.Background(), appPath, nil)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(tools).To(HaveLen(1))
+	Expect(tools[0].Name()).To(Equal("do"))
+
+	return tools[0]
 }
 
 var _ = Describe("BuildToolParams over application tools", func() {

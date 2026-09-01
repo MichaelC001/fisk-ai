@@ -193,7 +193,7 @@ var _ = Describe("Provider.buildParams", func() {
 
 var _ = Describe("credential env vars", func() {
 	// This is the authoritative assertion of the names this provider registers for
-	// the tool-subprocess credential strip; internal/toolkit/fisk tests only the
+	// the tool-subprocess credential strip; internal/toolkit/fisktool tests only the
 	// mechanism. Only this provider is linked into its own test binary, so the
 	// registry union is exactly this list.
 	It("registers the secret-bearing anthropic variables", func() {

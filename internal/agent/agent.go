@@ -26,7 +26,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisk"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -1005,12 +1005,12 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		return res, err
 	}
 
-	tools, err := fisk.LoadTools(ctx, cfg)
+	tools, err := fisktool.LoadTools(ctx, cfg)
 	if err != nil {
 		return res, err
 	}
 
-	byName := make(map[string]*fisk.FiskCommandTool, len(tools))
+	byName := make(map[string]*fisktool.CommandTool, len(tools))
 	for _, t := range tools {
 		byName[t.Name()] = t
 	}
