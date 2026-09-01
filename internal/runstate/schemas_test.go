@@ -30,6 +30,16 @@ var _ = Describe("Validator", func() {
 			}
 		})
 
+		It("Should accept the reasoning effort and thinking tokens a run writes", func() {
+			meta := metaRecord()
+			meta.Meta.Fingerprint.ReasoningEffort = "xhigh"
+			Expect(v.ValidateRecord(meta)).To(Succeed())
+
+			asst := assistantWithTools(0, "tu_1")
+			asst.ThinkingTokens = 128
+			Expect(v.ValidateRecord(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: asst})).To(Succeed())
+		})
+
 		It("Should accept a terminal record with no message", func() {
 			Expect(v.ValidateRecord(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended}})).To(Succeed())
 		})
@@ -59,6 +69,23 @@ var _ = Describe("Validator", func() {
 		It("Should reject a stray payload key for the protocol", func() {
 			data := tamperRecord(metaRecord(), func(m map[string]any) {
 				m["terminal"] = map[string]any{"reason": "completed"}
+			})
+			Expect(v.Validate(data)).ToNot(Succeed())
+		})
+
+		// The schemas type every field a run writes, so a wrong type is caught. Both of
+		// these were unnamed until the bodies were opened, which made them rejected
+		// outright rather than typed.
+		It("Should reject a mistyped thinking_tokens", func() {
+			data := tamperRecord(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}, func(m map[string]any) {
+				m["assistant"].(map[string]any)["thinking_tokens"] = "banana"
+			})
+			Expect(v.Validate(data)).ToNot(Succeed())
+		})
+
+		It("Should reject a mistyped reasoning_effort", func() {
+			data := tamperRecord(metaRecord(), func(m map[string]any) {
+				m["meta"].(map[string]any)["fingerprint"].(map[string]any)["reasoning_effort"] = 7
 			})
 			Expect(v.Validate(data)).ToNot(Succeed())
 		})

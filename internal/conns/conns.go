@@ -15,7 +15,6 @@ package conns
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -23,11 +22,6 @@ import (
 	"github.com/nats-io/jsm.go/natscontext"
 	"github.com/nats-io/nats.go"
 )
-
-// ErrClosed is returned when a connection was closed before it came up. Its cause
-// is the connection's last error, which is what a permanent failure such as a bad
-// credential arrives as.
-var ErrClosed = errors.New("connection closed before it came up")
 
 // Provider gives a backend access to the shared connections by kind. A backend
 // uses only the kind it needs and treats a nil result as "this kind was not
@@ -44,8 +38,10 @@ var ErrClosed = errors.New("connection closed before it came up")
 // holding one from before must expect it to be closed under it, the same as any
 // shared connection.
 //
-// The Option functions are not safe against them. They run inside New, before the
-// Provider is reachable from another goroutine, which is the only place they run.
+// The Option functions are not safe against them, and take no lock. New calls them
+// before the Provider is reachable from another goroutine, which is what makes that
+// sound. Nothing stops a caller holding an Option and applying it to a Provider
+// already in use; doing so is a data race.
 type Provider struct {
 	mu      sync.Mutex
 	nats    *nats.Conn
@@ -134,6 +130,14 @@ func Options(cfg Config) []nats.Option {
 // It is the constructor for a caller that holds connection details. Credentials and
 // TLS travel as nats.Options in cfg, so every authentication mode nats.go supports
 // reaches it without this package naming any of them.
+//
+// A broker that is not answering does not fail this. The first attempt costs one
+// nats.Timeout, two seconds by default, and then the connection is handed back
+// reconnecting; using it returns the ordinary NATS errors until it comes up. A
+// credential the server refuses arrives the same way.
+//
+// The context is read before the dial and not during it, since nats.go's connect
+// takes none.
 func Connect(ctx context.Context, servers string, cfg Config) (*Provider, error) {
 	return connect(ctx, cfg, fmt.Sprintf("NATS servers %q", servers), func(opts []nats.Option) (*nats.Conn, error) {
 		return nats.Connect(servers, opts...)
@@ -147,72 +151,33 @@ func Connect(ctx context.Context, servers string, cfg Config) (*Provider, error)
 // It reads the CLI's context files from the user's home directory, which is a
 // convenience for people who already keep their brokers there and is why it is
 // separate from Connect rather than the only way in.
+//
+// A missing or unreadable context fails here. A broker that is not answering does
+// not; see Connect for what comes back instead.
 func ConnectNatsContext(ctx context.Context, natsContext string, cfg Config) (*Provider, error) {
 	return connect(ctx, cfg, fmt.Sprintf("NATS context %q", natsContext), func(opts []nats.Option) (*nats.Conn, error) {
 		return natscontext.Connect(natsContext, opts...)
 	})
 }
 
-// connect is the body both constructors share: the same options, the same wait for
-// the connection to come up, and the same error text bar the target it names.
+// connect is the body both constructors share: the same options and the same error
+// text bar the target it names.
 func connect(ctx context.Context, cfg Config, target string, dial func([]nats.Option) (*nats.Conn, error)) (*Provider, error) {
 	err := ctx.Err()
 	if err != nil {
 		return nil, err
 	}
 
-	// RetryOnFailedConnect is what makes the context mean anything: without it a
-	// broker that is down fails the dial outright and there is nothing for a caller
-	// to cancel. It is appended after the caller's options so it cannot be turned
-	// off, since waitConnected is written against it.
+	// RetryOnFailedConnect is appended after the caller's options, so a caller cannot
+	// turn it off and get a different contract from this constructor. Reconnection is
+	// unlimited for every connection this package makes, and this makes the first
+	// attempt behave the way every later one does.
 	nc, err := dial(append(Options(cfg), nats.RetryOnFailedConnect(true)))
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", target, err)
 	}
 
-	err = waitConnected(ctx, nc)
-	if err != nil {
-		return nil, fmt.Errorf("connecting to %s: %w", target, err)
-	}
-
 	return &Provider{nats: nc, ownNats: true}, nil
-}
-
-// waitConnected waits for a connection dialed with RetryOnFailedConnect to come up,
-// closing it and returning the context's error when the caller gives up first.
-//
-// A cancel is answered within one nats.Timeout, 2 seconds by default, rather than at
-// once: nats makes the first dial attempt synchronously before this is reached, and
-// Close waits out an attempt already in flight.
-//
-// A permanent failure arrives as CLOSED rather than as a retry that never ends. The
-// server closes the connection on a bad credential, and the connection's last error
-// is what says so, so it becomes the cause of ErrClosed rather than being lost.
-func waitConnected(ctx context.Context, nc *nats.Conn) error {
-	// Registered before the status is read, since Conn.StatusChanged does not replay
-	// the current status and a connection that comes up in between would be missed.
-	changed := nc.StatusChanged(nats.CONNECTED, nats.CLOSED)
-	defer nc.RemoveStatusListener(changed)
-
-	if nc.Status() == nats.CONNECTED {
-		return nil
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			nc.Close()
-			return ctx.Err()
-
-		case status := <-changed:
-			switch status {
-			case nats.CONNECTED:
-				return nil
-			case nats.CLOSED:
-				return fmt.Errorf("%w: %w", ErrClosed, nc.LastError())
-			}
-		}
-	}
 }
 
 // Nats returns the shared core NATS connection, or nil when no NATS connection

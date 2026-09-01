@@ -32,8 +32,9 @@ import (
 // A bump ships a converter with it, so a build at this version folds a journal
 // written at any version below it. A journal from a later version is refused
 // rather than folded, since this build cannot know what a record it has never
-// seen holds; Fold and the JetStream Open both do that today. Nothing needs
-// converting while 1 is the only version there has been.
+// seen holds. Fold refuses it, which is what every resume goes through, and the
+// JetStream backend refuses it a second time while summarizing a run for List.
+// Nothing needs converting while 1 is the only version there has been.
 //
 // This number is not the v1 in the Protocol ids or in the embedded schema paths.
 // That one is the a2a product namespace, and the two move on their own terms.

@@ -153,8 +153,6 @@ var _ = Describe("Index format gate", func() {
 		// it is named for: a message naming a fix that also refuses is worse than one
 		// naming none.
 		It("is discarded by the command the refusal names, leaving a rebuildable store", func() {
-			// The writer refusing must not leave the advisory lock held, or the fix it
-			// names would fail with ErrLocked instead of running.
 			removed, err := Destroy(cfg, "")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(removed).To(Equal(dbPath))

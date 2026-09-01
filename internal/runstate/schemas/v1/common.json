@@ -45,6 +45,10 @@
         "thinking_mode": {
           "type": "string"
         },
+        "reasoning_effort": {
+          "type": "string",
+          "description": "The effort level the run was started with, absent when the provider takes none. Additive and optional; a fingerprint written before it existed compares equal to one that carries no effort."
+        },
         "max_tokens": {
           "type": "integer"
         },

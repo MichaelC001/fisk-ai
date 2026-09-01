@@ -176,34 +176,16 @@ var _ = Describe("Connect", func() {
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 	})
 
-	// The cancel is answered within one nats.Timeout rather than at once, which is why
-	// this allows several seconds while still proving the dial does not run forever.
-	It("Should give up on an unreachable broker when the caller's context ends", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-
+	// A broker that is down is a reconnect rather than a failure, so the caller gets a
+	// Provider and the errors arrive when it uses the connection.
+	It("Should return a reconnecting Provider for a broker that is not answering", func() {
 		start := time.Now()
-		_, err := Connect(ctx, blackhole, Config{Product: "acme-agent", Name: "worker-3"})
-		Expect(err).To(MatchError(context.DeadlineExceeded))
-		Expect(err.Error()).To(ContainSubstring(blackhole))
-		Expect(time.Since(start)).To(BeNumerically("<", 10*time.Second))
-	})
-
-	// A rejected credential is not something retrying fixes. The server closes the
-	// connection, and the reason it gives has to survive into the error rather than
-	// being reported as an unexplained close.
-	It("Should fail with the server's reason when the credentials are refused", func() {
-		ns, err := natsd.NewServer(&natsd.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true, Username: "right", Password: "right"})
+		p, err := Connect(context.Background(), blackhole, Config{Product: "acme-agent", Name: "worker-3"})
 		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(p.Close)
 
-		go ns.Start()
-		Expect(ns.ReadyForConnections(10 * time.Second)).To(BeTrue())
-		DeferCleanup(ns.Shutdown)
-
-		cfg := Config{Product: "acme-agent", Name: "worker-3", Options: []nats.Option{nats.UserInfo("wrong", "wrong")}}
-		_, err = Connect(context.Background(), ns.ClientURL(), cfg)
-		Expect(err).To(MatchError(ErrClosed))
-		Expect(err.Error()).To(ContainSubstring("Authorization Violation"))
+		Expect(p.Nats().Status()).To(Equal(nats.RECONNECTING))
+		Expect(time.Since(start)).To(BeNumerically("<", 10*time.Second))
 	})
 })
 

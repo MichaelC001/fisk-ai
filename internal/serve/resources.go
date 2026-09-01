@@ -232,7 +232,7 @@ func NewResources(ctx context.Context, cfg *config.Config, opts ResourceOptions)
 	// Last, because it is the only resource here that starts other people's programs. A
 	// store that cannot be built therefore fails before a child is running rather than
 	// after, and the defer above closes the children when something later fails.
-	err = r.connectMCP(cfg, opts.Version, opts.Logger)
+	err = r.connectMCP(ctx, cfg, opts.Version, opts.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -247,16 +247,17 @@ func NewResources(ctx context.Context, cfg *config.Config, opts ResourceOptions)
 // the first job to arrive. It is the same strictness a run applies, for the same
 // reason: the prompts this worker serves may depend on tools that are not there.
 //
-// It connects on a background context rather than one the caller passes, since
-// NewResources takes none and a worker's shared resources outlive any one request.
-// Each entry's timeout bounds its own connect, so a server that never answers fails
-// this naming it instead of holding startup open.
-func (r *Resources) connectMCP(cfg *config.Config, version string, log *slog.Logger) error {
+// The context governs the connecting and nothing after it. A caller that gives up
+// while a server is starting gets its error back, and the sessions that were opened
+// outlive it, since a worker's shared resources are not scoped to any one request.
+// Each entry's timeout bounds its own connect as well, so a server that never answers
+// fails this naming it instead of holding startup open.
+func (r *Resources) connectMCP(ctx context.Context, cfg *config.Config, version string, log *slog.Logger) error {
 	if len(cfg.MCPClients) == 0 {
 		return nil
 	}
 
-	sessions, err := mcpclient.Connect(context.Background(), mcpclient.Options{
+	sessions, err := mcpclient.Connect(ctx, mcpclient.Options{
 		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
 		Version:            version,

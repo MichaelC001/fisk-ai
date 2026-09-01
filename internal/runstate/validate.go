@@ -41,8 +41,9 @@ func ValidateID(id string) error {
 // and found out at the resume rather than at the write.
 //
 // A build writes its own version and no other, so a record already carrying a
-// different one is ErrVersion. Read is where a version below this one is accepted,
-// converted first; see Version.
+// different one is ErrVersion. Reading is where an earlier version will be accepted
+// once there is one, converted before it is folded; see Version. Fold refuses every
+// version but this one while 1 is the only version there has been.
 func PrepareMeta(meta *MetaRecord) error {
 	switch meta.Version {
 	case 0:
