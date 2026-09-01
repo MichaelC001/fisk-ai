@@ -17,6 +17,11 @@ import (
 // that then" refers to a discussion it never saw. preload and gap are the two reads that
 // close that, both capped by context_lines and both dropping what nobody said.
 
+// defaultContextLines is how many messages preload and gap read when Options sets no
+// ContextLines. It matches config.DefaultSlackContextLines, so the direct path and the
+// configured one read the same amount.
+const defaultContextLines = 20
+
 // preload is the surrounding conversation an opening turn is given, oldest first.
 //
 // It reads the container the mention arrived in: the channel for a mention that started a
