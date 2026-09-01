@@ -21,10 +21,12 @@ package agenttest
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -36,6 +38,10 @@ import (
 // agent loads are real rather than hand-written JSON; every other invocation echoes
 // its arguments one per line, so a tool call produces a deterministic result a test
 // can assert against. Path is the value an agent config's application_path points at.
+//
+// The executable is a /bin/sh script, so it runs on Unix only. NewFakeApp skips the test
+// on Windows and BuildFakeApp returns an error there, so a caller learns the platform is
+// unsupported at construction rather than from an exec error wherever Path is later run.
 type FakeApp struct {
 	Path string
 }
@@ -45,13 +51,19 @@ type FakeApp struct {
 // arguments otherwise. It sets a no-op Terminate on app, since --fisk-introspect
 // would otherwise call os.Exit through fisk's default terminate.
 //
-// The executable is written once per process for each distinct command model and shared
+// The executable is a /bin/sh script, so on Windows NewFakeApp skips the calling test.
+//
+// The script is written once per process for each distinct command model and shared
 // by every later call that produces the same one, so a suite standing up the same
 // application in many tests writes one file rather than one per test. Nothing in the file
 // is per-test: it is read-only once written, and the working directory it reports is the
 // calling run's own.
 func NewFakeApp(tb testing.TB, app *fisk.Application) *FakeApp {
 	tb.Helper()
+
+	if runtime.GOOS == "windows" {
+		tb.Skipf("agenttest: %v", errFakeAppWindows)
+	}
 
 	fake, err := BuildFakeApp(app)
 	if err != nil {
@@ -63,11 +75,24 @@ func NewFakeApp(tb testing.TB, app *fisk.Application) *FakeApp {
 
 // BuildFakeApp is NewFakeApp without a testing.TB, for a func Example or any other
 // caller outside a test. It returns an error where NewFakeApp fails the test: app
-// could not be introspected, or the executable could not be written.
+// could not be introspected, or the script could not be written. With no testing.TB to
+// skip, Windows comes back as an error too, and a caller that wants to skip instead
+// checks runtime.GOOS before calling.
 //
-// Every call producing the same command model shares one executable, kept for the life of
+// Every call producing the same command model shares one script, kept for the life of
 // the process.
+//
+// Several goroutines may call BuildFakeApp at once. The one thing it cannot share the
+// process with is another writer to stdout: capturing the model means pointing os.Stdout
+// at a pipe, because fisk writes introspection there and takes no writer, so anything
+// else printing to stdout during the call lands in the captured model. BuildFakeApp
+// returns an error when that happens rather than handing back a fake application whose
+// --fisk-introspect output no longer parses.
 func BuildFakeApp(app *fisk.Application) (*FakeApp, error) {
+	if runtime.GOOS == "windows" {
+		return nil, errFakeAppWindows
+	}
+
 	model, err := introspectJSON(app)
 	if err != nil {
 		return nil, err
@@ -81,6 +106,11 @@ func BuildFakeApp(app *fisk.Application) (*FakeApp, error) {
 	return &FakeApp{Path: appPath}, nil
 }
 
+// errFakeAppWindows is what NewFakeApp skips with and BuildFakeApp returns on Windows.
+// It stays unexported: a caller branching on the platform reads runtime.GOOS, which it
+// can do before calling and which needs nothing from this package.
+var errFakeAppWindows = fmt.Errorf("the fake application is a /bin/sh script and runs on Unix only")
+
 var (
 	fakeAppRootOnce sync.Once
 	fakeAppRoot     string
@@ -88,6 +118,8 @@ var (
 
 	fakeAppMu    sync.Mutex
 	fakeAppPaths = map[string]string{}
+
+	introspectMu sync.Mutex
 )
 
 // fakeAppExecutable returns the path of the executable that replays model, writing it and
@@ -134,7 +166,9 @@ func fakeAppExecutable(model []byte) (string, error) {
 	// On --fisk-introspect the binary replays the captured model; otherwise it reports
 	// its working directory (so a test can observe the per-run ToolWorkDir) and echoes
 	// each argument on its own line, matching the long-standing fake-application idiom so
-	// a tool call's output is predictable.
+	// a tool call's output is predictable. The shell reads $PWD from the environment,
+	// which fisktool.RunCommand sets to the directory it was handed, so the reported path
+	// carries the caller's spelling rather than the one os.Getwd resolves symlinks to.
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\nprintf 'PWD=%%s\\n' \"$PWD\"\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; done\n", jsonPath)
 
 	appPath = filepath.Join(dir, "app")
@@ -151,10 +185,21 @@ func fakeAppExecutable(model []byte) (string, error) {
 // introspectJSON drives app's real --fisk-introspect handler in-process and returns
 // the JSON it writes, the same document the agent would read over the process
 // boundary, so the captured schemas are precomputed exactly as production sees them.
-// It redirects os.Stdout for the duration of the parse, so it must run serially.
+//
+// fisk's introspect action sets the application writer to os.Stdout itself and then calls
+// fmt.Println, so pointing os.Stdout at a pipe is the only way to read the document
+// in-process. introspectMu serializes that swap: two goroutines building fake
+// applications at once take it in turn, rather than restoring one another's saved
+// os.Stdout. Anything else in the process printing to stdout during the parse writes its
+// bytes into the same pipe, and they arrive interleaved with the model. So the capture is
+// decoded before it is returned, and a document that no longer parses is reported here
+// instead of becoming a fake application whose --fisk-introspect output is garbage.
 func introspectJSON(app *fisk.Application) ([]byte, error) {
 	// --fisk-introspect terminates the process; make that a no-op so the parse returns.
 	app.Terminate(func(int) {})
+
+	introspectMu.Lock()
+	defer introspectMu.Unlock()
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -189,6 +234,15 @@ func introspectJSON(app *fisk.Application) ([]byte, error) {
 	}
 	if closeErr != nil {
 		return nil, fmt.Errorf("closing introspect pipe: %w", closeErr)
+	}
+
+	// fisk emits one JSON document and nothing else, so anything that does not decode as
+	// the model carries bytes another writer to os.Stdout put in the pipe during the
+	// parse. The error names that, since it is the only way the capture goes wrong.
+	var model fisk.ApplicationModel
+	err = json.Unmarshal(data, &model)
+	if err != nil {
+		return nil, fmt.Errorf("introspecting fake application: the captured stdout is not an application model, so something else in this process printed to stdout during the parse: %w", err)
 	}
 
 	return data, nil

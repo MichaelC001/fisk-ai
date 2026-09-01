@@ -5,10 +5,14 @@
 package agenttest_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -80,11 +84,114 @@ var _ = Describe("FakeApp", func() {
 	// one calls os.Exit from the --fisk-introspect parse the constructor makes, which
 	// would end the test binary rather than return an application here.
 	It("Should write an executable file", func() {
+		// BuildFakeApp has no testing.TB to skip with, so it reports Windows as an error.
+		if runtime.GOOS == "windows" {
+			Skip("the fake application is a /bin/sh script")
+		}
+
 		fake, err := agenttest.BuildFakeApp(streamApp())
 		Expect(err).ToNot(HaveOccurred())
 
 		info, err := os.Stat(fake.Path)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(info.Mode().Perm() & 0o100).ToNot(BeZero())
+	})
+
+	// ToolsForApp runs the binary to introspect it, so this drives the fake the way the
+	// agent's LoadTools path does rather than by decoding its output here.
+	It("Should satisfy ToolsForApp, which runs the binary to introspect it", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), streamApp())
+
+		tools, err := fisktool.ToolsForApp(context.Background(), app.Path, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tools).To(HaveLen(1))
+		Expect(tools[0].Name()).To(Equal("stream_rm"))
+		Expect(tools[0].AppPath()).To(Equal(app.Path))
+
+		res, err := tools[0].RunCommand(context.Background(), json.RawMessage(`{}`), GinkgoT().TempDir())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.ExitCode).To(Equal(0))
+		Expect(res.Output).To(ContainSubstring("stream\nrm"))
+	})
+
+	// RunCommand sets cmd.Dir and PWD to the directory it was handed, and the run reads
+	// the tool's output to tell one run's work directory from another's, so the fake has
+	// to report the spelling it was given rather than the symlink-resolved one os.Getwd
+	// returns.
+	It("Should report the working directory it was handed, symlinks unresolved", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), streamApp())
+
+		tools, err := fisktool.ToolsForApp(context.Background(), app.Path, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		dir := GinkgoT().TempDir()
+		res, err := tools[0].RunCommand(context.Background(), json.RawMessage(`{}`), dir)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.Output).To(ContainSubstring("PWD=" + dir))
+	})
+
+	// A goroutine printing to stdout while the model is captured would corrupt it the same
+	// way, but only when it wins the race. A PreAction prints from inside app.Parse, ahead
+	// of fisk's introspect action, so the extra bytes reach the pipe on every run.
+	It("Should refuse a model that another writer to stdout corrupted", func() {
+		if runtime.GOOS == "windows" {
+			Skip("the fake application is a /bin/sh script")
+		}
+
+		app := streamApp()
+		app.PreAction(func(*fisk.ParseContext) error {
+			fmt.Println("output from elsewhere in the test process")
+			return nil
+		})
+
+		_, err := agenttest.BuildFakeApp(app)
+		Expect(err).To(MatchError(ContainSubstring("printed to stdout during the parse")))
+	})
+
+	// The introspection swaps the process os.Stdout, since fisk's introspect action
+	// writes there and takes no writer, so BuildFakeApp serializes it. Under -race this
+	// fails if that lock is dropped.
+	It("Should build fake applications from several goroutines at once", func() {
+		if runtime.GOOS == "windows" {
+			Skip("the fake application is a /bin/sh script")
+		}
+
+		const workers = 8
+
+		paths := make([]string, workers)
+		errs := make([]error, workers)
+
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer GinkgoRecover()
+
+				app := fisk.New(fmt.Sprintf("app%d", i), "concurrent build")
+				app.Command("stream", "stream commands").Command(fmt.Sprintf("rm%d", i), "removes a stream")
+
+				fake, err := agenttest.BuildFakeApp(app)
+				errs[i] = err
+				if err == nil {
+					paths[i] = fake.Path
+				}
+			}()
+		}
+		wg.Wait()
+
+		seen := map[string]bool{}
+		for i := range workers {
+			Expect(errs[i]).ToNot(HaveOccurred())
+			Expect(seen[paths[i]]).To(BeFalse(), "distinct models shared a path")
+			seen[paths[i]] = true
+
+			out, err := exec.Command(paths[i], "--fisk-introspect").Output()
+			Expect(err).ToNot(HaveOccurred())
+
+			var model fisk.ApplicationModel
+			Expect(json.Unmarshal(out, &model)).To(Succeed())
+			Expect(model.Name).To(Equal(fmt.Sprintf("app%d", i)))
+		}
 	})
 })
