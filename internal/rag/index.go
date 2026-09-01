@@ -27,13 +27,16 @@ const (
 	memoryDirName = "memory"
 )
 
-// DefaultExtensions is the set of file extensions the walk indexes: markdown and
-// plain text only.
-var DefaultExtensions = map[string]bool{
-	".md":       true,
-	".markdown": true,
-	".txt":      true,
-	".text":     true,
+// DefaultExtensions returns the file extensions the walk indexes when a caller
+// names none: markdown and plain text only. Every call builds a new map, so a
+// caller that adds to the one it received changes only its own copy.
+func DefaultExtensions() map[string]bool {
+	return map[string]bool{
+		".md":       true,
+		".markdown": true,
+		".txt":      true,
+		".text":     true,
+	}
 }
 
 // IndexOptions controls one index run.
@@ -47,7 +50,9 @@ type IndexOptions struct {
 	// Reconcile enables orphan deletion after the walk. It is set only for a
 	// full-corpus walk (no explicit path given); a subpath walk never deletes.
 	Reconcile bool
-	// Extensions is the allowed extension set; DefaultExtensions when nil.
+	// Extensions is the allowed extension set, DefaultExtensions() when nil. Index
+	// copies it once before the first root, so every root walks the set the call was
+	// made with however the caller edits its own map meanwhile.
 	Extensions map[string]bool
 	// Progress, when set, receives human-readable progress notes (skipped files,
 	// counts) for the CLI to print. It is never called with model-facing data.
@@ -104,12 +109,19 @@ type IndexStats struct {
 	FirstBuild bool
 }
 
+// exts is the extension set this run walks with, copied so the walk reads a map
+// nobody else holds.
 func (o IndexOptions) exts() map[string]bool {
-	if o.Extensions != nil {
-		return o.Extensions
+	if o.Extensions == nil {
+		return DefaultExtensions()
 	}
 
-	return DefaultExtensions
+	out := make(map[string]bool, len(o.Extensions))
+	for ext, allowed := range o.Extensions {
+		out[ext] = allowed
+	}
+
+	return out
 }
 
 func (o IndexOptions) note(msg string) {
@@ -162,9 +174,14 @@ func (s *Store) Index(ctx context.Context, roots []string, opts IndexOptions) (*
 		}
 	}
 
+	// One copy for the whole run rather than one per root, so every root walks the set
+	// the call was made with even when the caller writes to its map while root one is
+	// still going.
+	exts := opts.exts()
+
 	seen := map[string]bool{}
 	for _, root := range roots {
-		if err := s.walkRoot(ctx, root, opts, stats, seen); err != nil {
+		if err := s.walkRoot(ctx, root, exts, opts, stats, seen); err != nil {
 			return nil, err
 		}
 	}
@@ -180,10 +197,9 @@ func (s *Store) Index(ctx context.Context, roots []string, opts IndexOptions) (*
 	return stats, nil
 }
 
-// walkRoot walks one root, dispatching each eligible file to add / update / skip.
-func (s *Store) walkRoot(ctx context.Context, root string, opts IndexOptions, stats *IndexStats, seen map[string]bool) error {
-	exts := opts.exts()
-
+// walkRoot walks one root, dispatching each eligible file to add / update / skip. exts
+// is the extension set Index copied for the run, shared by every root it walks.
+func (s *Store) walkRoot(ctx context.Context, root string, exts map[string]bool, opts IndexOptions, stats *IndexStats, seen map[string]bool) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err

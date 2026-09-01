@@ -380,8 +380,11 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 	if errors.Is(err, rag.ErrIndexNotBuilt) {
 		return fmt.Errorf("the knowledge index has not been built yet; run: fisk knowledge index")
 	}
-	if err != nil {
+	if errors.Is(err, rag.ErrCitationNotFound) {
 		return fmt.Errorf("no chunk found for citation %q: it may have shifted since the last reindex; run 'fisk knowledge sources' to list files", knowledgeCitation)
+	}
+	if err != nil {
+		return err
 	}
 
 	if headingPath != "" {

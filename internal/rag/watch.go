@@ -100,7 +100,7 @@ func NewWatcher(cfg *config.Config, opts WatchOptions, r WatchReporter) (*Watche
 		debounce:    opts.Debounce,
 		reconcile:   opts.Reconcile,
 		skipInitial: opts.SkipInitial,
-		exts:        DefaultExtensions,
+		exts:        DefaultExtensions(),
 		baseDir:     opts.BaseDir,
 		storeDir:    filepath.Clean(resolveDir(cfg, opts.BaseDir)),
 		reporter:    r,

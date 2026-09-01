@@ -6,6 +6,8 @@ package rag
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,6 +143,149 @@ func writeDoc(root, rel, content string) string {
 
 	return path
 }
+
+var _ = Describe("The walk's extension set", func() {
+	ctx := context.Background()
+
+	var (
+		docsD string
+		cfg   *config.Config
+	)
+
+	BeforeEach(func() {
+		tmp := GinkgoT().TempDir()
+		docsD = filepath.Join(tmp, "docs")
+		cfg = lexicalConfig(filepath.Join(tmp, "knowledge"))
+	})
+
+	index := func(opts IndexOptions) *IndexStats {
+		w, err := OpenWriter(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		defer w.Close()
+
+		stats, err := w.Index(ctx, []string{docsD}, opts)
+		Expect(err).ToNot(HaveOccurred())
+
+		return stats
+	}
+
+	It("builds a new default map on every call", func() {
+		first := DefaultExtensions()
+		first[".rst"] = true
+		delete(first, ".md")
+
+		Expect(DefaultExtensions()).To(Equal(map[string]bool{
+			".md":       true,
+			".markdown": true,
+			".txt":      true,
+			".text":     true,
+		}))
+	})
+
+	It("indexes the default extensions after a caller edits the map it was handed", func() {
+		handed := DefaultExtensions()
+		handed[".rst"] = true
+
+		writeDoc(docsD, "design.md", "# Design\n\nThe queue applies backpressure.\n")
+		writeDoc(docsD, "guide.rst", "Guide\n=====\n\nRestructured text the walk does not index.\n")
+
+		stats := index(IndexOptions{Reconcile: true})
+		Expect(stats.Files).To(Equal(1))
+		Expect(stats.Added).To(Equal(1))
+	})
+
+	// Index copies the caller's map before the first root, so a write to it while the
+	// walk is running cannot change which files the rest of the walk accepts. OnFile
+	// runs on the walk goroutine between files, which is where the race would land.
+	It("walks the extension set the call was made with, not a write made during the walk", func() {
+		writeDoc(docsD, "a.md", "# A\n\nThe queue applies backpressure.\n")
+		writeDoc(docsD, "b.txt", "Tokens are validated against the issuer.\n")
+
+		exts := map[string]bool{".md": true, ".txt": true}
+		stats := index(IndexOptions{
+			Reconcile:  true,
+			Extensions: exts,
+			OnFile:     func(IndexEvent) { delete(exts, ".txt") },
+		})
+
+		Expect(stats.Files).To(Equal(2))
+	})
+
+	// knowledge.paths is a list, so a walk over several roots is the ordinary shape. A
+	// copy taken per root would let a write made while the first root walks reach the
+	// second.
+	It("walks every root with the set the call was made with", func() {
+		tmp := GinkgoT().TempDir()
+		one := filepath.Join(tmp, "one")
+		two := filepath.Join(tmp, "two")
+
+		writeDoc(one, "a.md", "# A\n\nThe queue applies backpressure.\n")
+		writeDoc(two, "b.txt", "Tokens are validated against the issuer.\n")
+
+		w, err := OpenWriter(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		defer w.Close()
+
+		exts := map[string]bool{".md": true, ".txt": true}
+		stats, err := w.Index(ctx, []string{one, two}, IndexOptions{
+			Reconcile:  true,
+			Extensions: exts,
+			OnFile:     func(IndexEvent) { delete(exts, ".txt") },
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(stats.Files).To(Equal(2))
+	})
+})
+
+var _ = Describe("ChunkText", func() {
+	ctx := context.Background()
+
+	var (
+		docsD string
+		cfg   *config.Config
+	)
+
+	BeforeEach(func() {
+		tmp := GinkgoT().TempDir()
+		docsD = filepath.Join(tmp, "docs")
+		cfg = lexicalConfig(filepath.Join(tmp, "knowledge"))
+	})
+
+	It("reports ErrIndexNotBuilt when no index file exists", func() {
+		r, err := Open(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		defer r.Close()
+
+		_, _, err = r.ChunkText(ctx, "docs/design.md", 0)
+		Expect(errors.Is(err, ErrIndexNotBuilt)).To(BeTrue())
+	})
+
+	It("reports ErrCitationNotFound for a citation that names no chunk", func() {
+		path := writeDoc(docsD, "design.md", "# Design\n\nThe queue applies backpressure.\n")
+
+		w, err := OpenWriter(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
+		Expect(err).ToNot(HaveOccurred())
+		w.Close()
+
+		r, err := Open(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		defer r.Close()
+
+		// Ordinal 0 of the indexed file resolves, so the miss is the ordinal alone.
+		_, _, err = r.ChunkText(ctx, filepath.ToSlash(path), 0)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, _, err = r.ChunkText(ctx, filepath.ToSlash(path), 4242)
+		Expect(errors.Is(err, ErrCitationNotFound)).To(BeTrue())
+		Expect(errors.Is(err, sql.ErrNoRows)).To(BeFalse())
+
+		_, _, err = r.ChunkText(ctx, "no/such/file.md", 0)
+		Expect(errors.Is(err, ErrCitationNotFound)).To(BeTrue())
+	})
+})
 
 var _ = Describe("Store (lexical tier)", func() {
 	ctx := context.Background()

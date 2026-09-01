@@ -94,6 +94,12 @@ var (
 	// startup, and the CLI turns it into "run: fisk-ai knowledge index".
 	ErrIndexNotBuilt = errors.New("knowledge index has not been built")
 
+	// ErrCitationNotFound reports that a citation (<relpath>#<ordinal>) names no
+	// chunk in the index. A reindex renumbers a file's chunks, so a citation issued
+	// against an earlier build of the index can point past the end of the file it
+	// names, or at a file the index no longer holds.
+	ErrCitationNotFound = errors.New("no indexed chunk matches this citation")
+
 	// ErrMetaMismatch reports that the configured embedding identity (model,
 	// prefixes, normalization) differs from what the index was built with. The fix
 	// is always a reindex.

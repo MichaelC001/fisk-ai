@@ -203,7 +203,7 @@ func compileEnumerateToken(tok enumToken) (enumTerm, string, error) {
 	// The same two-rune floor the ranked search uses. Reported rather than dropped
 	// silently: under a completeness contract, a term that was never queried has to
 	// be named or the answer is complete about a question nobody asked.
-	if !tok.quoted && utf8.RuneCountInString(term.Surface) < minFTSTermRunes {
+	if !tok.quoted && utf8.RuneCountInString(term.Surface) < MinTermRunes {
 		return term, term.Surface, nil
 	}
 
