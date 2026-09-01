@@ -67,7 +67,7 @@ func (s *fakeSink) sequences() []uint64 {
 // taskRequest is the inbound request header a reply set answers.
 func taskRequest() *Header {
 	req := NewRequest("do the thing")
-	stampRequest(context.Background(), &req.Header, "caller", "svc")
+	StampRequest(context.Background(), &req.Header, "caller", "svc")
 
 	return &req.Header
 }

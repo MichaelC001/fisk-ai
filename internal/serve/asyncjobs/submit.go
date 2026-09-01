@@ -5,9 +5,9 @@
 package asyncjobs
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/choria-io/asyncjobs"
 
@@ -88,13 +88,13 @@ func NewJob(job Job, opts ...asyncjobs.TaskOpt) (*asyncjobs.Task, error) {
 	req := a2a.NewRequest(job.Prompt)
 	req.Context = job.Context
 	req.Budget = job.Budget
-	req.ID = a2a.NewID()
-	req.Request = req.ID
 	req.Conversation = job.Conversation
-	req.Time = time.Now().UTC()
-	req.Sender = a2a.Identity{Name: job.Caller}
+	a2a.StampRequest(context.Background(), &req.Header, job.Caller, "")
 
-	if req.Conversation == "" {
+	// A one-shot job is one message, so the turn and the message carry the same id, and a
+	// job with nothing to group groups with itself.
+	req.Request = req.ID
+	if job.Conversation == "" {
 		req.Conversation = req.ID
 	}
 

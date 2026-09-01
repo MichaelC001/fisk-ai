@@ -93,7 +93,7 @@ func (c *Client) CanStream() bool { return c.stream != nil }
 // ErrAgentUnavailable is returned when no agent answers.
 func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error) {
 	req := NewDiscoveryRequest()
-	stampRequest(ctx, &req.Header, c.sender, agent)
+	StampRequest(ctx, &req.Header, c.sender, agent)
 
 	reply, err := c.roundTrip(ctx, agent, OpDiscovery, req, DiscoveryReplyProtocol)
 	if err != nil {
@@ -131,7 +131,7 @@ func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.
 	}
 
 	req := NewToolRequest(tool, normalizeInput(input))
-	stampRequest(ctx, &req.Header, c.sender, agent)
+	StampRequest(ctx, &req.Header, c.sender, agent)
 
 	data, err := c.marshalValid(req)
 	if err != nil {

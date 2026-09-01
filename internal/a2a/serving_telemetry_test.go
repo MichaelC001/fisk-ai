@@ -38,7 +38,7 @@ func toolRequestFrom(ctx context.Context, name string) []byte {
 	GinkgoHelper()
 
 	req := NewToolRequest(name, nil)
-	stampRequest(ctx, &req.Header, "caller", "svc")
+	StampRequest(ctx, &req.Header, "caller", "svc")
 
 	data, err := json.Marshal(req)
 	Expect(err).NotTo(HaveOccurred())
@@ -117,7 +117,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		req := NewToolRequest("ping", nil)
-		stampRequest(context.Background(), &req.Header, "caller", "svc")
+		StampRequest(context.Background(), &req.Header, "caller", "svc")
 		req.TraceParent = "nonsense"
 
 		body, err := json.Marshal(req)
