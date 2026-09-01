@@ -156,9 +156,12 @@ func natsContextFor(ns *natsd.Server) string {
 	return "spectest"
 }
 
-// announcedNames are the connection names ns has been given, open and closed alike. A
-// pre-flight read dials, reads and releases, so by the time it returns its connection
-// is among the closed ones.
+// announcedNames are the connection names ns has been given, open and closed alike.
+//
+// A pre-flight read dials, reads and releases, and the server moves the connection from
+// the open list to the closed ring on a goroutine of its own rather than as the client
+// closes, so there is a window where the name is in neither. A caller polls for the
+// name rather than reading once.
 func announcedNames(ns *natsd.Server) []string {
 	GinkgoHelper()
 
@@ -194,7 +197,7 @@ var _ = Describe("Integration: LoadSession dialing for itself", Label("integrati
 			_, err := agent.LoadSession(context.Background(), cfg, "no-such-run", agent.SessionOptions{})
 			Expect(err).To(MatchError(runstate.ErrNotFound))
 
-			Expect(announcedNames(ns)).To(ContainElement(want))
+			Eventually(func() []string { return announcedNames(ns) }).Should(ContainElement(want))
 		},
 		Entry("unset", "", "", "fisk-ai worker-3"),
 		Entry("product and version", "acme-agent", "4.5", "acme-agent/4.5 worker-3"),
