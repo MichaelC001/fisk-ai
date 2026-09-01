@@ -23,6 +23,13 @@ import (
 // list it belongs in, taking Channel first: Service asks only for Name and Close, so a
 // channel that can be released satisfies it too, and asking both questions would run
 // one value twice.
+//
+// A value that is neither is refused by Endpoints at run time rather than by the
+// compiler. Build hands over one list holding both kinds, so the type a builder had is
+// gone by the time Endpoints reads it. Returning a channel list and a service list
+// separately would move the check to the compiler, and it would change
+// EndpointBuilder.Build's signature, a2aendpoint.NewFromConfig's, every builder in this
+// repository and run_host.go, which is more than the check costs.
 type Endpoint interface {
 	// Name identifies the endpoint in logs, metrics and on a program's startup banner.
 	Name() string
@@ -134,7 +141,7 @@ func Endpoints(ctx context.Context, cfg *config.Config, opts BuildOptions, build
 
 		built, err := b.Build(ctx, cfg, opts)
 		if err != nil {
-			return fail(fmt.Errorf("building the %s endpoint: %w", b.Name, err))
+			return fail(fmt.Errorf("%w: the %s endpoint: %w", ErrEndpointBuild, b.Name, err))
 		}
 
 		for _, s := range built {
@@ -144,7 +151,7 @@ func Endpoints(ctx context.Context, cfg *config.Config, opts BuildOptions, build
 			case Service:
 				builtServices = append(builtServices, endpoint)
 			default:
-				return fail(fmt.Errorf("the %s endpoint built %T, which is neither a Channel nor a Service", b.Name, s))
+				return fail(fmt.Errorf("%w: the %s endpoint built %T, which is neither a Channel nor a Service", ErrEndpointBuild, b.Name, s))
 			}
 		}
 	}

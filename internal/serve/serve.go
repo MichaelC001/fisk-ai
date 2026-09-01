@@ -28,10 +28,41 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// ErrChannelDone reports that a channel has no more work and never will. A server
-// stops serving that channel without treating it as a failure, which is how a
-// finite channel (a fixed batch, a test double) ends cleanly.
-var ErrChannelDone = errors.New("channel has no more work")
+var (
+	// ErrChannelDone reports that a channel has no more work and never will. A server
+	// stops serving that channel without treating it as a failure, which is how a
+	// finite channel (a fixed batch, a test double) ends cleanly.
+	ErrChannelDone = errors.New("channel has no more work")
+
+	// ErrChannelPanic reports that a channel implementation panicked. The server
+	// recovers the panic and logs it. A panic in Next ends that channel's puller and
+	// faults the server, so Serve returns this error and a supervisor restarts the
+	// worker. A panic in Work.Done loses that one outcome, and the worker carries on.
+	ErrChannelPanic = errors.New("channel panicked")
+
+	// ErrConfigRequired reports that no configuration was supplied. New and NewResources
+	// both need one and neither can supply a default: it describes the agent every run
+	// executes.
+	ErrConfigRequired = errors.New("a configuration is required")
+
+	// ErrInvalidOptions reports options a caller has to correct before anything can be
+	// served: no endpoint at all, an endpoint that is nil or unnamed, a work directory
+	// that is not an absolute path to an existing directory, or a configuration that
+	// reaches NATS without naming a context. The same options fail the same way on a
+	// retry.
+	ErrInvalidOptions = errors.New("invalid options")
+
+	// ErrEndpointBuild reports that Endpoints could not produce the set a configuration
+	// asks for, either because a builder returned an error or because it returned a
+	// value that is neither a Channel nor a Service. Whatever was built before it has
+	// been released.
+	ErrEndpointBuild = errors.New("building an endpoint failed")
+
+	// ErrResourceBuild reports that NewResources could not build one of the values every
+	// run shares. Everything built before it has been released, so the caller holds
+	// nothing to release.
+	ErrResourceBuild = errors.New("building the shared resources failed")
+)
 
 // Channel is a calling endpoint an agent is hosted behind.
 //
@@ -48,6 +79,11 @@ type Channel interface {
 	// context is canceled. Any other error is logged and retried after a delay, so a
 	// transient failure to reach a queue does not end the channel. A nil error
 	// guarantees a non-nil Work.
+	//
+	// A panic is recovered and faults the server, on the path an endpoint reporting it
+	// has stopped working already takes: this channel is served no further, the rest are
+	// drained, and Serve returns ErrChannelPanic. It is not retried, because a panic is a
+	// bug in the implementation and the next call would raise it again.
 	Next(ctx context.Context) (*Work, error)
 }
 
@@ -284,6 +320,9 @@ type Work struct {
 	// thirty seconds in, or after Options.DoneTimeout where the server was given one,
 	// so a channel that cannot reach its store does not hold a shutdown open. A
 	// non-nil error is logged; the server has nowhere else to take it. Required.
+	//
+	// A panic is recovered and logged like a returned error, and this outcome is then
+	// the only thing lost: the run's slot is released and the worker takes further work.
 	Done func(context.Context, Outcome) error
 }
 

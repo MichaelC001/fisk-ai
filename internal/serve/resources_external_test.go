@@ -148,7 +148,8 @@ var _ = Describe("NewResources", func() {
 		cfg.Harness.Sessions = &config.SessionConfig{Backend: "nonesuch"}
 
 		res, err := serve.NewResources(context.Background(), cfg, serve.ResourceOptions{ConfigFile: "agent.yaml"})
-		Expect(err).To(MatchError(ContainSubstring("building the session store")))
+		Expect(err).To(MatchError(serve.ErrResourceBuild))
+		Expect(err).To(MatchError(ContainSubstring("the session store")))
 		Expect(res).To(BeNil())
 	})
 

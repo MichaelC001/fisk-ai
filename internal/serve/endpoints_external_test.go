@@ -120,6 +120,7 @@ var _ = Describe("Endpoints", func() {
 		}}
 
 		_, _, err := serve.Endpoints(context.Background(), cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
+		Expect(err).To(MatchError(serve.ErrEndpointBuild), "a builder that returns the wrong shape is the same class of failure as one that returns an error")
 		Expect(err).To(MatchError(ContainSubstring("the odd endpoint built")))
 		Expect(err).To(MatchError(ContainSubstring("neither a Channel nor a Service")))
 	})
@@ -161,7 +162,8 @@ var _ = Describe("Endpoints", func() {
 		}
 
 		_, _, err := serve.Endpoints(context.Background(), cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
-		Expect(err).To(MatchError(ContainSubstring("building the second endpoint")))
+		Expect(err).To(MatchError(serve.ErrEndpointBuild))
+		Expect(err).To(MatchError(ContainSubstring("the second endpoint")))
 		Expect(err).To(MatchError(ContainSubstring("no queue")))
 		Expect(first.Closes()).To(Equal(1))
 	})
@@ -198,7 +200,8 @@ var _ = Describe("Endpoints", func() {
 		}
 
 		_, _, err := serve.Endpoints(context.Background(), cfg, serve.BuildOptions{Logger: quietLogger()}, builders)
-		Expect(err).To(MatchError(ContainSubstring("building the second endpoint")))
+		Expect(err).To(MatchError(serve.ErrEndpointBuild))
+		Expect(err).To(MatchError(ContainSubstring("the second endpoint")))
 		Expect(err).To(MatchError(ContainSubstring("no transport")))
 		Expect(queue.Closes()).To(Equal(1))
 		Expect(service.Closes()).To(Equal(1))
