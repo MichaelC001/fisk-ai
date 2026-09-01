@@ -72,14 +72,15 @@ type Fault struct {
 	AfterFragments int
 }
 
-// Waiter is how a scripted delay passes. It returns nil once d has gone by and the call
-// carries on to its scripted answer, or an error the call returns instead.
+// Waiter is how a delay a fake was told to take passes. It returns nil once d has gone by
+// and the call carries on to its answer, or an error the call returns instead.
 //
 // The default waits on a timer and returns ctx.Err() when ctx ends first. A spec that
 // asserts on a delay rather than serving it installs one that records d and returns nil,
 // which keeps the suite fast, or one that returns context.DeadlineExceeded to drive what
-// an agent does when a deadline lands during a model call. The provider calls it only for
-// a fault that names a delay, and on the goroutine that called Call or CallStream.
+// an agent does when a deadline lands during a model call or a call to a peer. A
+// ScriptedProvider and a FakeTransport each call it only for a fault that names a delay,
+// and on the goroutine that made the call.
 type Waiter func(ctx context.Context, d time.Duration) error
 
 // NewScriptedProvider builds a provider that answers successive calls with the given
@@ -117,7 +118,7 @@ func BuildScriptedProvider(responses ...*llm.Response) (*ScriptedProvider, error
 }
 
 // wallWait serves a delay on a timer and returns ctx.Err() when ctx ends first. A
-// provider waits this way until SetWaiter installs another Waiter.
+// provider or a transport waits this way until SetWaiter installs another Waiter.
 func wallWait(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()

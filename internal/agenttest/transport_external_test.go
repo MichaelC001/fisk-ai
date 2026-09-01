@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -94,6 +95,170 @@ var _ = Describe("FakeTransport", func() {
 	It("Should refuse a request whose header it cannot decode", func() {
 		_, err := transport.RoundTrip(ctx, "peer", a2a.OpDiscovery, []byte("not json"))
 		Expect(err).To(MatchError(ContainSubstring("could not decode request header")))
+	})
+
+	Describe("Faults", func() {
+		It("Should report a peer nothing is listening for", func() {
+			transport.SetFaults(agenttest.TransportFault{Err: a2a.ErrNoResponders})
+
+			client := newClient()
+
+			_, err := client.Discover(ctx, "peer")
+			Expect(err).To(MatchError(a2a.ErrNoResponders))
+			Expect(err).To(MatchError(a2a.ErrAgentUnavailable), "the narrow sentinel wraps the wide one")
+
+			_, err = client.InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).To(MatchError(a2a.ErrNoResponders))
+
+			Expect(transport.RoundTrips()).To(Equal(2), "a request a fault failed is a request it was given")
+		})
+
+		It("Should report a peer that accepted the call and never answered", func() {
+			transport.SetFaults(agenttest.TransportFault{Err: a2a.ErrAgentUnavailable})
+
+			_, err := newClient().InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).To(MatchError(a2a.ErrAgentUnavailable))
+			Expect(err).ToNot(MatchError(a2a.ErrNoResponders), "somebody is listening, they were just silent")
+		})
+
+		It("Should report a reply the caller cannot use", func() {
+			transport.SetFaults(agenttest.TransportFault{Err: a2a.ErrToolImport})
+
+			_, err := newClient().Discover(ctx, "peer")
+			Expect(err).To(MatchError(a2a.ErrToolImport))
+		})
+
+		It("Should fail one peer and answer another", func() {
+			transport.SetFaults(agenttest.TransportFault{Agent: "gone", Err: a2a.ErrNoResponders})
+
+			client := newClient()
+
+			_, err := client.Discover(ctx, "gone")
+			Expect(err).To(MatchError(a2a.ErrNoResponders))
+
+			discovered, err := client.Discover(ctx, "peer")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(discovered.Name).To(Equal("peer"))
+
+			reply, err := client.InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(reply.Output).To(Equal("ok"))
+		})
+
+		It("Should answer discovery for a peer whose tool calls fail", func() {
+			transport.SetFaults(agenttest.TransportFault{
+				Ops: []a2a.RouteHint{a2a.OpTool},
+				Err: a2a.ErrAgentUnavailable,
+			})
+
+			client := newClient()
+
+			discovered, err := client.Discover(ctx, "peer")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(discovered.Tools).To(HaveLen(1))
+
+			_, err = client.InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).To(MatchError(a2a.ErrAgentUnavailable))
+		})
+
+		It("Should take the first fault a request matches", func() {
+			transport.SetFaults(
+				agenttest.TransportFault{Agent: "peer", Ops: []a2a.RouteHint{a2a.OpTool}, Err: a2a.ErrToolImport},
+				agenttest.TransportFault{Err: a2a.ErrNoResponders},
+			)
+
+			client := newClient()
+
+			_, err := client.InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).To(MatchError(a2a.ErrToolImport))
+
+			_, err = client.Discover(ctx, "peer")
+			Expect(err).To(MatchError(a2a.ErrNoResponders))
+		})
+
+		It("Should answer everything again once a spec clears the faults", func() {
+			transport.SetFaults(agenttest.TransportFault{Err: a2a.ErrNoResponders})
+			transport.SetFaults()
+
+			_, err := newClient().Discover(ctx, "peer")
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("Should hand a delay to the waiter rather than sleeping through it", func() {
+			transport.SetFaults(agenttest.TransportFault{Delay: time.Hour})
+
+			var waited []time.Duration
+			transport.SetWaiter(func(_ context.Context, d time.Duration) error {
+				waited = append(waited, d)
+				return nil
+			})
+
+			client := newClient()
+			started := time.Now()
+
+			_, err := client.Discover(ctx, "peer")
+			Expect(err).ToNot(HaveOccurred())
+
+			reply, err := client.InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(reply.Output).To(Equal("ok"), "a delay the fault names alone answers once it has passed")
+
+			Expect(waited).To(Equal([]time.Duration{time.Hour, time.Hour}))
+			Expect(time.Since(started)).To(BeNumerically("<", time.Second))
+		})
+
+		It("Should fail a call the waiter ended", func() {
+			transport.SetFaults(agenttest.TransportFault{Delay: time.Hour})
+			transport.SetWaiter(func(context.Context, time.Duration) error { return context.DeadlineExceeded })
+
+			client := newClient()
+
+			_, err := client.Discover(ctx, "peer")
+			Expect(err).To(MatchError(context.DeadlineExceeded))
+
+			_, err = client.InvokeTool(ctx, "peer", "echo", json.RawMessage(`{"text":"hi"}`))
+			Expect(err).To(MatchError(context.DeadlineExceeded))
+		})
+
+		It("Should wait on the default timer again when a spec sets a nil waiter", func() {
+			transport.SetFaults(agenttest.TransportFault{Delay: time.Hour})
+			transport.SetWaiter(func(context.Context, time.Duration) error { return nil })
+			transport.SetWaiter(nil)
+
+			// The default waiter selects on the context, so an already-canceled one returns
+			// from an hour's delay immediately.
+			callCtx, cancel := context.WithCancel(ctx)
+			cancel()
+
+			_, err := newClient().Discover(callCtx, "peer")
+			Expect(err).To(MatchError(context.Canceled))
+		})
+
+		It("Should leave the waiter out of a request with no delay", func() {
+			transport.SetWaiter(func(context.Context, time.Duration) error {
+				Fail("the waiter was called for a request with no delay")
+				return nil
+			})
+
+			_, err := newClient().Discover(ctx, "peer")
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("Should count a request as it arrives rather than once its delay has passed", func() {
+			transport.SetFaults(agenttest.TransportFault{Delay: time.Hour, Err: a2a.ErrAgentUnavailable})
+
+			counted := 0
+			transport.SetWaiter(func(context.Context, time.Duration) error {
+				counted = transport.RoundTrips()
+				return nil
+			})
+
+			_, err := newClient().Discover(ctx, "peer")
+			Expect(err).To(MatchError(a2a.ErrAgentUnavailable))
+
+			Expect(counted).To(Equal(1), "the transport answers a waiter that reads it back mid-wait")
+			Expect(transport.RoundTrips()).To(Equal(1))
+		})
 	})
 
 	// A borrowed transport is the caller's to close, so a spec asserts this stays false

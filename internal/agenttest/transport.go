@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -24,14 +25,47 @@ import (
 // not dial either). It is one of the separate-package fakes proving each injectable
 // interface can be implemented from outside its own package, and it is safe for the
 // concurrent use runs sharing one transport make of it.
+//
+// SetFaults makes a request fail with an a2a sentinel or take a stated time, by peer
+// and by operation, so a spec drives what an agent does when a peer is missing, silent
+// or slow without writing a transport of its own.
 type FakeTransport struct {
 	mu         sync.Mutex
 	card       a2a.AgentCard
 	toolOutput string
 	toolIsErr  bool
+	faults     []TransportFault
+	waiter     Waiter
 	roundTrips int
 	closeCalls int
 	serveCalls int
+}
+
+// TransportFault is what a FakeTransport does to a request instead of answering it, or
+// before it does.
+type TransportFault struct {
+	// Agent is the peer whose requests the fault applies to. An empty Agent applies it to every peer,
+	// which is a run whose broker reaches nothing; naming one peer leaves the others
+	// answering, which is a run that imported two agents and lost one of them.
+	Agent string
+
+	// Ops are the operations it applies to. An empty Ops applies it to all of them, and
+	// naming a2a.OpTool alone leaves discovery answering, so a run imports the peer's
+	// tools and fails when the model calls one.
+	Ops []a2a.RouteHint
+
+	// Err is what the request returns. Name a2a.ErrNoResponders for a peer nothing is
+	// listening for, a2a.ErrAgentUnavailable for a peer that accepted the request and
+	// never answered, or a2a.ErrToolImport for a reply the caller cannot use; the
+	// transport returns the error unchanged, so errors.Is on the caller's side reaches
+	// the sentinel a real transport reports. A fault with a nil Err answers from the
+	// card and the tool reply, after Delay.
+	Err error
+
+	// Delay is how long the request takes before it answers or fails. The transport
+	// passes it to the Waiter, which defaults to a timer that ctx cancels; a spec
+	// asserting on a delay rather than serving it installs its own with SetWaiter.
+	Delay time.Duration
 }
 
 // FakeTransport implements a2a.ReplySetTransport; the assertion is the
@@ -51,7 +85,7 @@ func NewFakeTransport(tb testing.TB, card a2a.AgentCard) *FakeTransport {
 // other caller outside a test. The transport answers from the card it was given and
 // dials nothing, so Close is there to satisfy the interface.
 func BuildFakeTransport(card a2a.AgentCard) *FakeTransport {
-	return &FakeTransport{card: card, toolOutput: "ok"}
+	return &FakeTransport{card: card, toolOutput: "ok", waiter: wallWait}
 }
 
 // SetToolReply sets what every direct tool call answers with.
@@ -62,8 +96,32 @@ func (t *FakeTransport) SetToolReply(output string, isError bool) {
 	t.toolIsErr = isError
 }
 
-// RoundTrips reports how many requests the transport answered, across discovery and
-// tool calls.
+// SetFaults replaces the faults the transport applies. A request takes the first fault
+// whose Agent and Ops match it, so a spec orders the narrow ones ahead of the wide ones.
+// Calling it with no faults restores a transport that answers everything.
+func (t *FakeTransport) SetFaults(faults ...TransportFault) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.faults = slices.Clone(faults)
+}
+
+// SetWaiter takes over how a fault's delay passes. A nil w restores the timer the
+// transport waits on by default.
+func (t *FakeTransport) SetWaiter(w Waiter) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if w == nil {
+		w = wallWait
+	}
+
+	t.waiter = w
+}
+
+// RoundTrips reports how many requests the transport was given, across discovery and
+// tool calls. A request a fault fails is counted, and counted as it arrives rather than
+// once its delay has passed, so this counter still tells a spec that made every peer
+// unreachable that the run reached the injected transport.
 func (t *FakeTransport) RoundTrips() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -78,24 +136,84 @@ func (t *FakeTransport) Closed() bool {
 	return t.closeCalls > 0
 }
 
-// RoundTrip implements a2a.Transport by answering discovery and tool requests from
-// its fixed card and reply, echoing the request's correlation tags so the reply
-// passes the engine's schema validation.
-func (t *FakeTransport) RoundTrip(_ context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
+// fakeRequest is one request as the transport found it: what it answers from, and the
+// fault it matched.
+type fakeRequest struct {
+	card       a2a.AgentCard
+	toolOutput string
+	toolIsErr  bool
+	fault      TransportFault
+	waiter     Waiter
+}
+
+// serve passes the fault's delay and returns the error it fails the request with. A
+// waiter that ends the wait early returns its own error to the caller, so a caller whose
+// deadline elapses during the delay gets the context error.
+func (r fakeRequest) serve(ctx context.Context) error {
+	if r.fault.Delay > 0 {
+		err := r.waiter(ctx, r.fault.Delay)
+		if err != nil {
+			return err
+		}
+	}
+
+	return r.fault.Err
+}
+
+// request counts a request and takes what answering it needs: the card and tool reply as
+// they stand, and the fault it matches. The delay and the encoding happen outside the
+// lock, so a delayed call does not hold up the calls a spec makes beside it.
+func (t *FakeTransport) request(agent string, op a2a.RouteHint) fakeRequest {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	t.roundTrips++
 
+	req := fakeRequest{
+		card:       t.card,
+		toolOutput: t.toolOutput,
+		toolIsErr:  t.toolIsErr,
+		waiter:     t.waiter,
+	}
+
+	for _, f := range t.faults {
+		if f.Agent != "" && f.Agent != agent {
+			continue
+		}
+
+		if len(f.Ops) > 0 && !slices.Contains(f.Ops, op) {
+			continue
+		}
+
+		req.fault = f
+		break
+	}
+
+	return req
+}
+
+// RoundTrip implements a2a.Transport by answering discovery and tool requests from
+// its fixed card and reply, echoing the request's correlation tags so the reply
+// passes the engine's schema validation. A fault matching the request fails it, or
+// delays the answer, before the body is read.
+func (t *FakeTransport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
+	req := t.request(agent, op)
+
+	err := req.serve(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	var reqHdr a2a.Header
-	err := json.Unmarshal(body, &reqHdr)
+	err = json.Unmarshal(body, &reqHdr)
 	if err != nil {
 		return nil, fmt.Errorf("agenttest: FakeTransport could not decode request header: %w", err)
 	}
 
 	switch op {
 	case a2a.OpDiscovery:
-		reply := a2a.NewDiscoveryReply(t.card.Name, t.card.Version)
-		reply.AgentCard = t.card
+		reply := a2a.NewDiscoveryReply(req.card.Name, req.card.Version)
+		reply.AgentCard = req.card
 		t.stamp(&reply.Header, &reqHdr, agent)
 		return json.Marshal(reply)
 	default:
@@ -105,18 +223,22 @@ func (t *FakeTransport) RoundTrip(_ context.Context, agent string, op a2a.RouteH
 
 // Stream implements a2a.ReplySetTransport by answering a tool call the way a binding
 // does: an ack, then the terminal tool reply. A real peer sends keepalives between the
-// two while its tool runs; a fake answers at once and has none to send.
-func (t *FakeTransport) Stream(_ context.Context, agent string, op a2a.RouteHint, body []byte) (a2a.Reader, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.roundTrips++
+// two while its tool runs; a fake answers at once and has none to send. A fault
+// matching the call fails it, or delays the whole set, before the reader is returned.
+func (t *FakeTransport) Stream(ctx context.Context, agent string, op a2a.RouteHint, body []byte) (a2a.Reader, error) {
+	req := t.request(agent, op)
+
+	err := req.serve(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	if op != a2a.OpTool {
 		return nil, fmt.Errorf("agenttest: FakeTransport got unexpected streaming op %v", op)
 	}
 
 	var reqHdr a2a.Header
-	err := json.Unmarshal(body, &reqHdr)
+	err = json.Unmarshal(body, &reqHdr)
 	if err != nil {
 		return nil, fmt.Errorf("agenttest: FakeTransport could not decode request header: %w", err)
 	}
@@ -125,7 +247,7 @@ func (t *FakeTransport) Stream(_ context.Context, agent string, op a2a.RouteHint
 	t.stamp(&ack.Header, &reqHdr, agent)
 	ack.Sequence = 1
 
-	reply := a2a.NewToolReply(t.toolOutput, t.toolIsErr)
+	reply := a2a.NewToolReply(req.toolOutput, req.toolIsErr)
 	t.stamp(&reply.Header, &reqHdr, agent)
 	reply.Sequence = 2
 
