@@ -13,8 +13,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// A FiskCommandTool is a model-facing Tool that describes its own presentation and
-// behavior, can require operator confirmation, and can pre-validate a call's required
+// A FiskCommandTool is a model-facing Tool that describes its own call and behavior,
+// can require operator confirmation, and can pre-validate a call's required
 // arguments.
 var (
 	_ toolkit.Tool              = (*FiskCommandTool)(nil)
@@ -36,15 +36,14 @@ func (t *FiskCommandTool) Behavior() toolkit.Behavior {
 	return behavior
 }
 
-// Describe presents the tool as an application command: its call is traced with the
-// resolved command line and a short form with long argument values middle-elided, so
-// a width-aware surface can fall back to the short line only when the full one would
-// overflow. Both are already sanitized by TraceLine and TraceLineShort. It runs in
-// the caller's per-run working directory so concurrent runs do not collide, and it
-// never prompts.
+// Describe names toolkit.KindApplication as the provider and returns two call lines:
+// the resolved command line, and a short form with long argument values middle-elided,
+// so a width-aware surface can fall back to the short one only when the full line would
+// overflow. TraceLine and TraceLineShort sanitize both. It asks for the per-run working
+// directory, which is where the command runs so concurrent runs do not collide, and for
+// no prompter.
 func (t *FiskCommandTool) Describe(input json.RawMessage) toolkit.CallInfo {
 	return toolkit.CallInfo{
-		Present:      toolkit.PresentCommand,
 		Kind:         toolkit.KindApplication,
 		Display:      t.TraceLine(input),
 		DisplayShort: t.TraceLineShort(input),

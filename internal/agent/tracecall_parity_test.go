@@ -52,9 +52,8 @@ func findBuiltin(tools []*functool.Tool, name string) *functool.Tool {
 	return nil
 }
 
-// These tests pin the observable output of traceCall per tool kind: the Presentation
-// carried on the emitted call trace (which drives output suppression), the provider
-// ProviderKind (the accounting axis and slog token, and what the dispatch counters and
+// These tests pin the observable output of traceCall per tool kind: the ProviderKind
+// carried on the emitted call trace (the slog token, and what the dispatch counters and
 // the journaled Remote flag are taken from), the trace's Display/DisplayShort/Agent, and
 // the per-run ExecDeps the kind receives. They assert today's behavior so a later
 // refactor cannot silently change what the operator or the journal sees.
@@ -71,7 +70,7 @@ var _ = Describe("runner.traceCall parity", func() {
 		}
 	}
 
-	It("Should present a command tool as PresentCommand with the full and short call lines, given the work dir", func() {
+	It("Should trace a command tool with the full and short call lines under the application kind, given the work dir", func() {
 		ev := &captureEvents{}
 		tool := &fisk2.FiskCommandTool{Path: []string{"stream", "info"}, Model: &fisk.CmdModel{}}
 		r := newRunner(ev, map[string]toolkit.Tool{"stream_info": tool})
@@ -83,14 +82,13 @@ var _ = Describe("runner.traceCall parity", func() {
 		Expect(deps.Prompter).To(BeNil())
 
 		Expect(ev.calls).To(HaveLen(1))
-		Expect(ev.calls[0].Present).To(Equal(toolkit.PresentCommand))
 		Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindApplication))
 		Expect(ev.calls[0].Display).To(Equal(tool.TraceLine(use.Input)))
 		Expect(ev.calls[0].DisplayShort).To(Equal(tool.TraceLineShort(use.Input)))
 		Expect(ev.calls[0].Display).NotTo(BeEmpty())
 	})
 
-	It("Should present a remote tool as PresentRemote naming its agent, under the remote kind, and pass no dependencies", func() {
+	It("Should trace a remote tool naming its agent, under the remote kind, and pass no dependencies", func() {
 		ev := &captureEvents{}
 		desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
 		rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
@@ -104,12 +102,11 @@ var _ = Describe("runner.traceCall parity", func() {
 		Expect(deps.WorkDir).To(Equal(""))
 
 		Expect(ev.calls).To(HaveLen(1))
-		Expect(ev.calls[0].Present).To(Equal(toolkit.PresentRemote))
 		Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindRemote))
 		Expect(ev.calls[0].Agent).To(Equal("nats"))
 	})
 
-	It("Should present a memory built-in as PresentTraced with its call line and pass the operator prompter", func() {
+	It("Should trace a memory built-in with its call line and pass the operator prompter", func() {
 		ev := &captureEvents{}
 		memCfg := &config.Config{Harness: config.HarnessConfig{Memory: &config.MemoryConfig{Enabled: true}}}
 		tool := findBuiltin(builtin.MemoryTools(memCfg, nil), "memory_list")
@@ -121,13 +118,12 @@ var _ = Describe("runner.traceCall parity", func() {
 		Expect(deps.Prompter).NotTo(BeNil())
 
 		Expect(ev.calls).To(HaveLen(1))
-		Expect(ev.calls[0].Present).To(Equal(toolkit.PresentTraced))
 		Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindBuiltin))
 		Expect(ev.calls[0].Display).To(Equal(tool.TraceLine(use.Input)))
 		Expect(ev.calls[0].Display).NotTo(BeEmpty())
 	})
 
-	It("Should present a human-in-the-loop built-in as PresentSelfRendered with no call line and pass the operator prompter", func() {
+	It("Should trace a human-in-the-loop built-in with no call line and pass the operator prompter", func() {
 		ev := &captureEvents{}
 		hitlCfg := &config.Config{Harness: config.HarnessConfig{HumanInTheLoop: &config.HumanInTheLoopConfig{Enabled: true}}}
 		tool := findBuiltin(builtin.HITLTools(hitlCfg), "ask_human_confirm")
@@ -139,13 +135,12 @@ var _ = Describe("runner.traceCall parity", func() {
 		Expect(deps.Prompter).NotTo(BeNil())
 
 		Expect(ev.calls).To(HaveLen(1))
-		Expect(ev.calls[0].Present).To(Equal(toolkit.PresentSelfRendered))
 		Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindBuiltin))
-		// A self-rendering tool shows its own prompt, so its call line is suppressed.
+		// A human-in-the-loop tool shows its own prompt, so it declares no call line.
 		Expect(ev.calls[0].Display).To(Equal(""))
 	})
 
-	It("Should present a tool that does not describe itself as PresentCommand by name, with no dependencies", func() {
+	It("Should trace a tool that does not describe itself by name, with no dependencies", func() {
 		ev := &captureEvents{}
 		r := newRunner(ev, map[string]toolkit.Tool{"mystery": describelessTool{}})
 		use := llm.ToolUseBlock{ID: "t1", Name: "mystery", Input: json.RawMessage(`{}`)}
@@ -156,7 +151,6 @@ var _ = Describe("runner.traceCall parity", func() {
 		Expect(deps.WorkDir).To(Equal(""))
 
 		Expect(ev.calls).To(HaveLen(1))
-		Expect(ev.calls[0].Present).To(Equal(toolkit.PresentCommand))
 		Expect(ev.calls[0].ProviderKind).To(Equal(toolkit.KindUnknown))
 		Expect(ev.calls[0].Name).To(Equal("mystery"))
 		Expect(ev.calls[0].Display).To(Equal(""))

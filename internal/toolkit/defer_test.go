@@ -38,14 +38,26 @@ var _ = Describe("DeferResult", func() {
 	})
 
 	// The note and handle are journaled and later printed, so a tool cannot use them
-	// to put a payload where a description belongs.
+	// to put a payload where a description belongs. sanitize.ForTerminal marks a cut
+	// with an ellipsis, so a capped note runs one rune past the cap.
 	It("Should cap the note and the handle", func() {
 		err := DeferResult(strings.Repeat("n", maxDeferralNoteRunes+50), strings.Repeat("h", maxDeferralHandleRunes+50))
 
 		var d *DeferredResult
 		Expect(errors.As(err, &d)).To(BeTrue())
-		Expect([]rune(d.Note)).To(HaveLen(maxDeferralNoteRunes))
+		Expect([]rune(d.Note)).To(HaveLen(maxDeferralNoteRunes + 1))
+		Expect(d.Note).To(HaveSuffix("…"))
 		Expect([]rune(d.Handle)).To(HaveLen(maxDeferralHandleRunes))
+	})
+
+	// The note is written for an operator's terminal, so a tool cannot use it to move
+	// the cursor, repaint the screen or hide what it did behind a color reset.
+	It("Should strip terminal escape sequences from the note", func() {
+		err := DeferResult("waiting\x1b[31m on\x1b[2J change\nrequest", "CHG-1")
+
+		var d *DeferredResult
+		Expect(errors.As(err, &d)).To(BeTrue())
+		Expect(d.Note).To(Equal("waiting on change request"))
 	})
 
 	It("Should report a bare sentinel as a deferral with no detail", func() {
@@ -70,7 +82,7 @@ var _ = Describe("ExecuteUse deferral", func() {
 	It("Should return a deferral as an error and no result block", func() {
 		tool := outcomeTool{err: DeferResult("waiting on a human", "TKT-1")}
 
-		res, exec, err := ExecuteUse(tool, ctx, use, ExecDeps{})
+		res, exec, err := ExecuteUse(ctx, tool, use, ExecDeps{})
 		Expect(errors.Is(err, ErrDeferredResult)).To(BeTrue())
 		Expect(exec).To(BeNil())
 		Expect(res).To(Equal(llm.ToolResultBlock{}))
@@ -79,7 +91,7 @@ var _ = Describe("ExecuteUse deferral", func() {
 	It("Should still turn every other failure into an error result", func() {
 		tool := outcomeTool{err: errors.New("could not run")}
 
-		res, _, err := ExecuteUse(tool, ctx, use, ExecDeps{})
+		res, _, err := ExecuteUse(ctx, tool, use, ExecDeps{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(res.IsError).To(BeTrue())
 		Expect(res.Content).To(Equal("could not run"))

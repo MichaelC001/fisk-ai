@@ -84,8 +84,8 @@ func plainCustomTool(name string) toolkit.Tool {
 	return tool
 }
 
-// remoteSpecTool is a custom tool carrying a RemoteSpec, so it presents as another
-// agent's work while running in this process.
+// remoteSpecTool is a custom tool carrying a RemoteSpec, so it is accounted as
+// another agent's work while running in this process.
 func remoteSpecTool() toolkit.Tool {
 	GinkgoHelper()
 
@@ -102,8 +102,8 @@ func remoteSpecTool() toolkit.Tool {
 }
 
 // remoteKindTool is an in-process tool that declares the remote kind without a
-// RemoteSpec, so it presents as self-rendered and a check on the presentation would
-// pass it through to be counted and journaled as another agent's call.
+// RemoteSpec, so it names no agent while asking to be counted and journaled as
+// another agent's call.
 func remoteKindTool() toolkit.Tool {
 	GinkgoHelper()
 

@@ -89,8 +89,8 @@ type ExposeSpec struct {
 
 // Spec describes a function tool: its model-facing identity and handler, and the
 // optional hooks that give it operator confirmation, argument validation, a call
-// trace, deferral control, remote or MCP presentation, or exposure on a serving
-// surface. New validates it into a *Tool.
+// trace, deferral control, a remote agent or MCP server it is served by, or exposure
+// on a serving surface. New validates it into a *Tool.
 type Spec struct {
 	// Name is the model-facing tool name, unique within a run; it is the key the
 	// runner dispatches on. Required.
@@ -147,7 +147,7 @@ type Spec struct {
 
 // Tool is a function tool built from a Spec: a name, description, schema and Go
 // handler exposed to the model as a toolkit.Tool, with optional confirmation,
-// argument validation, tracing and remote presentation. A local function tool (one
+// argument validation, tracing and remote dispatch. A local function tool (one
 // with neither a RemoteSpec nor an MCPSpec) runs in-process with the agent's own
 // privileges and unscrubbed ambient environment (the subprocess credential scrub that
 // protects command tools does not apply here), so its handler is trusted code, not
@@ -179,8 +179,8 @@ type Tool struct {
 	kind             toolkit.Kind
 }
 
-// A function tool is a model-facing Tool that describes its own presentation and
-// behavior, and opts into confirmation and argument validation through the narrow
+// A function tool is a model-facing Tool that describes its own call and behavior,
+// and opts into confirmation and argument validation through the narrow
 // capability interfaces the runner consults; those capabilities are inert
 // (NeedsConfirm and MissingRequired report nothing) unless the Spec enables them.
 var (
@@ -367,25 +367,24 @@ func (t *Tool) TraceLine(input json.RawMessage) string {
 	}
 }
 
-// Describe reports how a call is presented, which provider it is accounted under, and
-// what per-run dependencies it needs. A remote tool is presented as remote, named by
-// its agent, and accounted remote; an MCP tool is presented as remote too, named by
-// its server, and accounted under toolkit.KindMCP, since the two are one presentation
-// and two providers; an in-process tool with a Trace renderer is traced like a
-// command; an in-process tool without one is treated as rendering its own operator
-// interaction. Its provider is the explicit Spec.Kind when set (the harness
-// tags its built-ins), and toolkit.KindCustom otherwise, so a caller's own function
-// tool is accounted custom with no extra effort. Every in-process tool is offered the
-// operator Prompter and the per-run working directory, which a handler that needs
-// neither ignores. Only a tool whose Spec declared it is reported as operator paced,
-// since being offered a Prompter says nothing about whether the tool waits on one.
+// Describe reports which provider a call is accounted under, the line a surface
+// traces it with, and what per-run dependencies it needs. A remote tool is named by
+// its agent and accounted remote; an MCP tool is named by its server and accounted
+// under toolkit.KindMCP; an in-process tool with a Trace renderer carries that
+// renderer's line as its Display. Its provider is the explicit Spec.Kind when set
+// (the harness tags its built-ins), and toolkit.KindCustom otherwise, so a caller's
+// own function tool is accounted custom with no extra effort. Every in-process tool
+// is offered the operator Prompter and the per-run working directory, which a handler
+// that needs neither ignores. Only a tool whose Spec declared it is reported as
+// operator paced, since being offered a Prompter says nothing about whether the tool
+// waits on one.
 func (t *Tool) Describe(input json.RawMessage) toolkit.CallInfo {
 	if t.remote != nil {
-		return toolkit.CallInfo{Present: toolkit.PresentRemote, Kind: toolkit.KindRemote, Agent: t.remote.Agent}
+		return toolkit.CallInfo{Kind: toolkit.KindRemote, Agent: t.remote.Agent}
 	}
 
 	if t.mcp != nil {
-		return toolkit.CallInfo{Present: toolkit.PresentRemote, Kind: toolkit.KindMCP, Agent: t.mcp.Server}
+		return toolkit.CallInfo{Kind: toolkit.KindMCP, Agent: t.mcp.Server}
 	}
 
 	kind := t.kind
@@ -394,14 +393,12 @@ func (t *Tool) Describe(input json.RawMessage) toolkit.CallInfo {
 	}
 
 	info := toolkit.CallInfo{
-		Present:       toolkit.PresentSelfRendered,
 		Kind:          kind,
 		NeedsPrompter: true,
 		NeedsWorkDir:  true,
 		OperatorPaced: t.operatorPaced,
 	}
 	if t.trace != nil {
-		info.Present = toolkit.PresentTraced
 		info.Display = sanitize.ForTerminal(t.trace(input), maxTraceRunes)
 	}
 

@@ -2,16 +2,18 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package toolkit
+package tui
 
 import (
 	"bytes"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-var _ = Describe("surveyPrompter", func() {
+var _ = Describe("linePrompter", func() {
 	// The survey-backed methods need a real terminal, so only the rendering helpers
 	// (which write to an io.Writer and never call survey) are exercised here; the
 	// confirm gate and handler policy are covered against a scripted Prompter in
@@ -19,7 +21,7 @@ var _ = Describe("surveyPrompter", func() {
 	Describe("printGateHeader", func() {
 		It("Should name the command and the triggering tag and show the command line", func() {
 			var buf bytes.Buffer
-			printGateHeader(&buf, GateRequest{Command: "stream rm", Display: "stream rm ORDERS", Tag: "impact:rw"})
+			printGateHeader(&buf, toolkit.GateRequest{Command: "stream rm", Display: "stream rm ORDERS", Tag: "impact:rw"})
 
 			out := buf.String()
 			Expect(out).To(ContainSubstring(`confirmation required: "stream rm" carries tag "impact:rw"`))

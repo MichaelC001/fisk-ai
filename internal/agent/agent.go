@@ -425,10 +425,11 @@ type Options struct {
 	// resume itself continues. The slice order does not matter; the tools are ordered by
 	// name internally, so a set built by ranging a map still fingerprints identically.
 	//
-	// A custom tool built by functool.New with no Trace renderer runs silently: its call
-	// and result line are suppressed except under verbose, as a human-in-the-loop built-in
-	// is. Set functool.Spec.Trace to have its calls traced like the memory tools. A
-	// function tool is never rendered as an application-command line. A custom tool whose
+	// A custom tool built by functool.New with no Trace renderer declares no call line,
+	// the way a human-in-the-loop built-in does. Set functool.Spec.Trace to give its
+	// calls one, as the memory tools have. What a surface does with that line is the
+	// surface's own: the CLI prints the tool name and its arguments for every call
+	// either way, and gates the result on --tool-output. A custom tool whose
 	// Name, Definition, or Describe panics crashes the run as a *PanicError; the harness
 	// does not sandbox it.
 	CustomTools []toolkit.Tool
@@ -1309,8 +1310,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// happens elsewhere. KindRemote is journaled remote and recomputed into the
 		// remote-call counters on resume, and KindMCP owns its own bucket in the per-kind
 		// accounting; either one declared by an injected tool reports work this process
-		// did as work a peer did. The check is on the kind rather than the presentation
-		// because the kind is what the accounting reads.
+		// did as work a peer did. The check is on the kind because the accounting reads
+		// the kind.
 		d, ok := t.(toolkit.Describer)
 		if ok {
 			switch d.Describe(json.RawMessage("{}")).Kind {

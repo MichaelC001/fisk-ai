@@ -50,8 +50,8 @@ const maxSelectOptions = 25
 // failure would be a programming error in this package, surfaced as a panic rather
 // than threaded through every factory's signature, in the manner of the standard
 // library's regexp.MustCompile. Every tool built here is a harness built-in, so it is
-// accounted under toolkit.KindBuiltin regardless of what its presentation is; setting
-// the kind at this one chokepoint keeps each factory from having to remember it.
+// accounted under toolkit.KindBuiltin; setting the kind at this one chokepoint keeps
+// each factory from having to remember it.
 func mustNew(spec functool.Spec) *functool.Tool {
 	spec.Kind = toolkit.KindBuiltin
 

@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package toolkit
+package tui
 
 import (
 	"context"
@@ -14,21 +14,23 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/terminal"
 	"golang.org/x/term"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// surveyPrompter is the line-oriented Prompter used by the default CLI. It wraps
-// AlecAivazis/survey, rendering prompts and traces on stderr so stdout stays clean
-// for a piped final answer. survey turns an interrupt (Ctrl-C) or a closed input
-// into an error, which is reported as ErrPromptAborted so the caller does not record
-// it as a decline; it cannot be canceled mid-prompt through ctx, so the caller
-// performs the authoritative context and no-terminal deny checks before a prompt is
-// ever shown, and a full-screen Prompter (which can select on ctx) is used when one
-// owns the screen.
+// linePrompter is the line-oriented toolkit.Prompter used by the default CLI. It
+// wraps AlecAivazis/survey, rendering prompts and traces on stderr so stdout stays
+// clean for a piped final answer. survey turns an interrupt (Ctrl-C) or a closed
+// input into an error, which is reported as toolkit.ErrPromptAborted so the caller
+// does not record it as a decline; it cannot be canceled mid-prompt through ctx, so
+// the caller performs the authoritative context and no-terminal deny checks before a
+// prompt is ever shown, and tcellPrompter (which can select on ctx) is used when the
+// full-screen view owns the screen.
 //
 // survey holds the terminal in raw mode while a prompt is up, so an interrupt there
 // is delivered to survey rather than as a signal: the process never sees SIGINT and
 // this error is the only evidence the operator meant to stop.
-type surveyPrompter struct {
+type linePrompter struct {
 	// out is where prompt headers and command traces are written: os.Stderr in a
 	// real run, redirected in tests to keep their output quiet. The interactive
 	// survey widgets themselves render on os.Stderr, since survey needs a real
@@ -36,10 +38,10 @@ type surveyPrompter struct {
 	out io.Writer
 }
 
-// NewSurveyPrompter returns the CLI Prompter, writing its prompt headers and
-// command traces to stderr.
-func NewSurveyPrompter() Prompter {
-	return &surveyPrompter{out: os.Stderr}
+// NewLinePrompter returns the line-oriented CLI Prompter, writing its prompt headers
+// and command traces to stderr.
+func NewLinePrompter() toolkit.Prompter {
+	return &linePrompter{out: os.Stderr}
 }
 
 // CanPrompt reports whether stdin is an interactive terminal: survey reads and draws
@@ -47,7 +49,7 @@ func NewSurveyPrompter() Prompter {
 // the single place the CLI's terminal check now lives; the agent, the confirm gate,
 // and the human-in-the-loop tools consult it through the Prompter rather than testing
 // the terminal themselves.
-func (p *surveyPrompter) CanPrompt() bool {
+func (p *linePrompter) CanPrompt() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
@@ -55,7 +57,7 @@ func (p *surveyPrompter) CanPrompt() bool {
 // operator to allow the command. The safe option (No) is listed first so survey
 // highlights it and a reflexive Enter declines; an interrupt or closed input
 // returns an error the caller treats as a denial.
-func (p *surveyPrompter) ApproveCommand(_ context.Context, req GateRequest) (ConfirmChoice, error) {
+func (p *linePrompter) ApproveCommand(_ context.Context, req toolkit.GateRequest) (toolkit.ConfirmChoice, error) {
 	printGateHeader(p.out, req)
 
 	options := []string{
@@ -71,24 +73,24 @@ func (p *surveyPrompter) ApproveCommand(_ context.Context, req GateRequest) (Con
 		survey.WithStdio(os.Stdin, os.Stderr, os.Stderr),
 	)
 	if err != nil {
-		return ConfirmNo, promptError(err)
+		return toolkit.ConfirmNo, promptError(err)
 	}
 
 	switch idx {
 	case 1:
-		return ConfirmOnce, nil
+		return toolkit.ConfirmOnce, nil
 	case 2:
 		printAlwaysNote(p.out, req.Command)
-		return ConfirmAlways, nil
+		return toolkit.ConfirmAlways, nil
 	default:
-		return ConfirmNo, nil
+		return toolkit.ConfirmNo, nil
 	}
 }
 
 // Confirm prompts for a yes/no answer. The bound value starts false and the prompt
 // defaults to No, so an operator who simply presses Enter declines; survey returns
 // an error on Ctrl-C or a closed input, which the caller treats as a denial.
-func (p *surveyPrompter) Confirm(_ context.Context, question string) (bool, error) {
+func (p *linePrompter) Confirm(_ context.Context, question string) (bool, error) {
 	printPromptSeparator(p.out)
 
 	confirmed := false
@@ -107,7 +109,7 @@ func (p *surveyPrompter) Confirm(_ context.Context, question string) (bool, erro
 // Select prompts the operator to choose one of options and returns its index. The
 // index starts at -1, so a Ctrl-C or closed input (survey returns an error) leaves
 // no choice rather than defaulting to the first option.
-func (p *surveyPrompter) Select(_ context.Context, question string, options []string) (int, error) {
+func (p *linePrompter) Select(_ context.Context, question string, options []string) (int, error) {
 	printPromptSeparator(p.out)
 
 	idx := -1
@@ -125,7 +127,7 @@ func (p *surveyPrompter) Select(_ context.Context, question string, options []st
 
 // Input prompts the operator for a free-text value, pre-filled with def (which may
 // be empty). survey returns an error on Ctrl-C or a closed input.
-func (p *surveyPrompter) Input(_ context.Context, question, def string) (string, error) {
+func (p *linePrompter) Input(_ context.Context, question, def string) (string, error) {
 	printPromptSeparator(p.out)
 
 	answer := ""
@@ -150,7 +152,7 @@ func promptError(err error) error {
 	}
 
 	if errors.Is(err, terminal.InterruptErr) || errors.Is(err, io.EOF) {
-		return fmt.Errorf("%w: %w", ErrPromptAborted, err)
+		return fmt.Errorf("%w: %w", toolkit.ErrPromptAborted, err)
 	}
 
 	return err
@@ -159,7 +161,7 @@ func promptError(err error) error {
 // printGateHeader writes the confirm-gate approval header and command trace: a
 // separator to set the question apart from the model's preceding narration, a line
 // naming the command and the tag that gated it, and the sanitized command line.
-func printGateHeader(out io.Writer, req GateRequest) {
+func printGateHeader(out io.Writer, req toolkit.GateRequest) {
 	printPromptSeparator(out)
 	fmt.Fprintf(out, "confirmation required: %q carries tag %q\n", req.Command, req.Tag)
 	fmt.Fprintf(out, "-> %s\n", req.Display)

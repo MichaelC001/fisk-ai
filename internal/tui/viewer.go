@@ -2,13 +2,18 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-// Package tui is the opt-in full-screen terminal UI, an alternative to the
-// default line-oriented CLI. It has two entry points over one shared viewport:
-// ShowTranscript is a read-only viewer that renders a saved session's
-// conversation, driving no live run and reaching no operator, so it carries none
-// of the run-lifecycle, signal, or prompt concerns; Live drives a running agent,
-// owning the screen, the statusbar state machine, the suspend and abort contract,
-// and the native prompts that back the confirm gate.
+// Package tui is this repository's terminal presentation: the opt-in full-screen UI,
+// and the prompts the default line-oriented CLI puts to an operator.
+//
+// Two entry points share one viewport. ShowTranscript is a read-only viewer that
+// renders a saved session's conversation, driving no live run and reaching no
+// operator, so it carries none of the run-lifecycle, signal, or prompt concerns. Live
+// drives a running agent, owning the screen, the statusbar state machine, the suspend
+// and abort contract, and the native prompts that back the confirm gate.
+//
+// NewLinePrompter owns no screen. It puts the same questions on a plain terminal for a
+// run with no full-screen UI, which keeps both terminal implementations of
+// toolkit.Prompter here and the prompt library out of toolkit.
 package tui
 
 import (

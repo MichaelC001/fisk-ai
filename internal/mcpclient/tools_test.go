@@ -426,12 +426,11 @@ var _ = Describe("Tools", func() {
 			return out.Output, nil
 		}
 
-		It("should present the tool as served by its mcp server", func() {
+		It("should describe the tool as served by its mcp server", func() {
 			tool := built(textTool("search", "Searches the pages", "found"))
 
 			info := tool.Describe(nil)
 			Expect(info.Kind).To(Equal(toolkit.KindMCP))
-			Expect(info.Present).To(Equal(toolkit.PresentRemote))
 			Expect(info.Agent).To(Equal("docs"))
 			Expect(tool.Description()).To(Equal("Searches the pages"))
 			Expect(tool.InputSchema()).To(HaveKeyWithValue("type", "object"))

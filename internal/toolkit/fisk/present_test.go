@@ -124,7 +124,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should return a successful tool_result carrying the command JSON", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\necho ran\n"))
 
-		block, _, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_1", `{"subject":"x"}`), toolkit.ExecDeps{})
+		block, _, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_1", `{"subject":"x"}`), toolkit.ExecDeps{})
 		id, text, isError := resultBlock(block)
 		Expect(id).To(Equal("tu_1"))
 		Expect(isError).To(BeFalse())
@@ -138,7 +138,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should deliver a non-zero exit as a successful tool_result", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\nexit 4\n"))
 
-		block, _, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_2", `{"subject":"x"}`), toolkit.ExecDeps{})
+		block, _, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_2", `{"subject":"x"}`), toolkit.ExecDeps{})
 		_, text, isError := resultBlock(block)
 		Expect(isError).To(BeFalse())
 
@@ -150,7 +150,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should report an execution failure as an error tool_result", func() {
 		tool := doTool("/nonexistent/binary")
 
-		block, _, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_3", `{"subject":"x"}`), toolkit.ExecDeps{})
+		block, _, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_3", `{"subject":"x"}`), toolkit.ExecDeps{})
 		id, text, isError := resultBlock(block)
 		Expect(id).To(Equal("tu_3"))
 		Expect(isError).To(BeTrue())
@@ -160,7 +160,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should run with no arguments when the model sends a null input", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\necho ok\n"))
 
-		block, _, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_4", `null`), toolkit.ExecDeps{})
+		block, _, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_4", `null`), toolkit.ExecDeps{})
 		_, _, isError := resultBlock(block)
 		Expect(isError).To(BeFalse())
 	})
@@ -171,7 +171,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should return the command metadata alongside the model-facing result", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\nexit 4\n"))
 
-		_, exec, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_5", `{"subject":"x"}`), toolkit.ExecDeps{})
+		_, exec, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_5", `{"subject":"x"}`), toolkit.ExecDeps{})
 		Expect(exec).ToNot(BeNil())
 		Expect(exec.ExitCode).To(Equal(4))
 		Expect(exec.Command).To(Equal("do -- x"))
@@ -183,7 +183,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should return metadata for a command that succeeded", func() {
 		tool := doTool(writeExecutable("#!/bin/sh\necho ok\n"))
 
-		_, exec, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_6", `{"subject":"x"}`), toolkit.ExecDeps{})
+		_, exec, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_6", `{"subject":"x"}`), toolkit.ExecDeps{})
 		Expect(exec).ToNot(BeNil())
 		Expect(exec.ExitCode).To(BeZero())
 	})
@@ -192,7 +192,7 @@ var _ = Describe("FiskCommandTool.ExecuteUse", func() {
 	It("Should return no metadata when the command could not run", func() {
 		tool := doTool("/nonexistent/binary")
 
-		_, exec, _ := toolkit.ExecuteUse(tool, context.Background(), useBlock(tool, "tu_7", `{"subject":"x"}`), toolkit.ExecDeps{})
+		_, exec, _ := toolkit.ExecuteUse(context.Background(), tool, useBlock(tool, "tu_7", `{"subject":"x"}`), toolkit.ExecDeps{})
 		Expect(exec).To(BeNil())
 	})
 })

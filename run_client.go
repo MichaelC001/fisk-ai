@@ -238,7 +238,7 @@ func runAsClient(ctx context.Context, stop context.CancelFunc, host *hostedAgent
 	}
 
 	client := &lineClient{
-		prompter:       toolkit.NewSurveyPrompter(),
+		prompter:       tui.NewLinePrompter(),
 		noColor:        noColor,
 		showToolOutput: showToolOutput,
 		showThinking:   showThinking,
