@@ -195,7 +195,10 @@ func (r *OTLPReceiver) SpansNamed(prefix string) []OTLPSpan {
 	return out
 }
 
-// Metrics returns every instrument that arrived.
+// Metrics returns the histograms and sums that arrived, one entry per data point. Every
+// other instrument kind (a gauge, an exponential histogram, a summary) is dropped, and a
+// float-valued sum arrives with IntValue zero. internal/telemetry exports histograms and
+// integer counters alone, so a decoder here covers what this tree emits.
 func (r *OTLPReceiver) Metrics() []OTLPMetric {
 	r.mu.Lock()
 	defer r.mu.Unlock()

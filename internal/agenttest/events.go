@@ -124,6 +124,17 @@ func (e *RecordingEvents) Starts() []agent.RunInfo {
 	return out
 }
 
+// SessionRotations returns a copy of the previous session ids reported through
+// SessionRotated, in order, so a spec driving a context reset asserts that the run
+// started a fresh session and names the one it left resumable.
+func (e *RecordingEvents) SessionRotations() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.rotated))
+	copy(out, e.rotated)
+	return out
+}
+
 // HasWarning reports whether a warning of the given kind was emitted.
 func (e *RecordingEvents) HasWarning(kind agent.WarningKind) bool {
 	e.mu.Lock()

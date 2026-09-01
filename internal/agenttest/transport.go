@@ -161,13 +161,21 @@ func (r *fakeReader) Next(context.Context) ([]byte, error) {
 func (r *fakeReader) Close() error { return nil }
 
 // Serve implements a2a.Transport. The fake is a client transport only; Run never
-// serves through the injected transport, so a call here is recorded for a test to
-// catch rather than answered.
+// serves through the injected transport, so a call here is counted for ServeCalls
+// rather than answered.
 func (t *FakeTransport) Serve(a2a.RouteHint, a2a.Handler) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.serveCalls++
 	return nil
+}
+
+// ServeCalls reports how many times Serve was called. Run never serves through a
+// borrowed transport, so a test asserts this stays zero.
+func (t *FakeTransport) ServeCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.serveCalls
 }
 
 // Describe implements a2a.Transport with no address lines.

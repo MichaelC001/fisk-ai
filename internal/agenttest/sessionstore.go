@@ -137,10 +137,13 @@ func (s *FakeSessionStore) Open(ctx context.Context, id string) (runstate.Journa
 	return j, nil
 }
 
-// Evict makes the open journal for id report that it no longer holds its run, and
-// refuse further appends, as a journal on a shared store does once another worker has
-// taken the run over. It is how a test reaches the take-over path with one writer.
-// Evicting an unknown or unopened run does nothing.
+// Evict makes the journal for id report that it no longer holds its run, and refuse
+// further appends, as a journal on a shared store does once another worker has taken the
+// run over. It is how a test reaches the take-over path with one writer.
+//
+// Evicting an id the store never created does nothing. A run whose journal was closed is
+// still held here, so evicting one marks it taken over: a later Open succeeds and that
+// journal's CheckHeld and Append then report ErrLocked.
 func (s *FakeSessionStore) Evict(id string) {
 	s.mu.Lock()
 	j, ok := s.runs[id]
