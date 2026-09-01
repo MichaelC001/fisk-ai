@@ -141,6 +141,30 @@ type FaultingEndpoint interface {
 	Faults() <-chan error
 }
 
+// DescLine is one label and value describing an endpoint, for a program printing a
+// startup banner.
+type DescLine struct {
+	Label string
+	Value string
+}
+
+// DescribedEndpoint is the optional interface an endpoint implements when it has
+// something to tell an operator before the log takes over: the addresses it answers
+// on, the account it connected as, the limits it works under.
+//
+// A program prints Heading and then a line per DescLine under it, and skips an endpoint
+// that does not implement this. An embedder's own channel reaches a startup banner that
+// way, rather than the program asserting its concrete type.
+type DescribedEndpoint interface {
+	// Heading names the section these lines are printed under, in an operator's terms
+	// rather than the endpoint's own: "Answering in Slack" rather than "slack".
+	Heading() string
+
+	// Describe returns the lines in the order they are printed. An endpoint with
+	// nothing to say does not implement this rather than returning none.
+	Describe() []DescLine
+}
+
 // Work is one unit of work a channel supplies: what to do, and how to talk to
 // whoever asked for it.
 //
@@ -256,8 +280,10 @@ type Work struct {
 	RunContext func(context.Context) (context.Context, context.CancelFunc)
 
 	// Done reports the outcome exactly once, on a context that is not the run's so a
-	// canceled or timed-out run still records what happened. A non-nil error is
-	// logged; the server has nowhere else to take it. Required.
+	// canceled or timed-out run still records what happened. That context is canceled
+	// thirty seconds in, or after Options.DoneTimeout where the server was given one,
+	// so a channel that cannot reach its store does not hold a shutdown open. A
+	// non-nil error is logged; the server has nowhere else to take it. Required.
 	Done func(context.Context, Outcome) error
 }
 
@@ -294,7 +320,7 @@ type Caller struct {
 // Reason alone does not separate the cases a caller has to act on differently: a
 // crash and a failure during setup both leave it unset, and a model refusal, a reply
 // truncated at the output cap, a provider failure and an aborting hook all report the
-// error reason. The three flags below carry what Reason cannot.
+// error reason. Abandoned and Crashed carry what Reason cannot.
 type Outcome struct {
 	// ID is the work's identifier, minted by the server when the channel supplied
 	// none.
@@ -316,11 +342,6 @@ type Outcome struct {
 	// Err is the failure, nil on success. Note that a run stopped by its budget or its
 	// iteration cap reports both a reason and an error.
 	Err error
-
-	// Rejected reports that admission refused the work before it ran, so a caller
-	// knows a retry will not help. Nothing refuses work yet: Caller is recorded
-	// rather than enforced, so this is always false until a policy consults it.
-	Rejected bool
 
 	// Abandoned reports that the work was taken but never started, because the server
 	// shut down while it waited for a slot. Nothing ran, so a retry is safe.

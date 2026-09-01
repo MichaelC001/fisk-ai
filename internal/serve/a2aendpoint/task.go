@@ -747,9 +747,6 @@ func (t *task) done(_ context.Context, out serve.Outcome) error {
 // a context error and no terminal reason.
 func (t *task) disposition(out serve.Outcome) (string, string) {
 	switch {
-	case out.Rejected:
-		return codeRejected, "the work was refused"
-
 	case out.Crashed:
 		// The panic and its stack stay in this worker's log. A peer is told the run
 		// crashed and nothing about where.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,12 +18,13 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-// A prompt channel produces work and holds a transport, so it is both of the optional
-// shapes a channel can have. Declaring them makes a change to either contract a compile
-// error here rather than a channel the server silently stops asking.
+// A prompt channel sizes its own concurrency, holds a transport to release, and names
+// its addresses on a startup banner. Declaring those contracts makes a change to any of
+// them a compile error here rather than a channel the server silently stops asking.
 var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
+	_ serve.DescribedEndpoint = (*Channel)(nil)
 )
 
 // Channel is a serve.Channel over the a2a task route: a peer sends a prompt, this
@@ -135,11 +137,24 @@ const channelName = "a2a/prompts"
 // Name identifies the channel in the server's logs.
 func (c *Channel) Name() string { return channelName }
 
+// Heading names this endpoint on a startup banner. An identity that also serves tools
+// prints two sections, so each one names the path it answers on.
+func (c *Channel) Heading() string { return "Answering prompts over a2a" }
+
 // Describe returns the addresses a peer sends a prompt to and addresses a cancel under,
-// for display, and the one it answers questions on when this channel asks any. The
-// transport answers it, so a later binding describes itself in its own terms and this
-// endpoint never builds an address.
-func (c *Channel) Describe() []a2a.DescLine { return c.stream.DescribeTasks(c.identity, c.elicits) }
+// the one it answers questions on when this channel asks any, and how many prompts it
+// runs at once. The transport supplies the addresses, so a later binding describes
+// itself in its own terms and this endpoint never builds one.
+func (c *Channel) Describe() []serve.DescLine {
+	tasks := c.stream.DescribeTasks(c.identity, c.elicits)
+
+	lines := make([]serve.DescLine, 0, len(tasks)+1)
+	for _, l := range tasks {
+		lines = append(lines, serve.DescLine{Label: l.Label, Value: l.Value})
+	}
+
+	return append(lines, serve.DescLine{Label: "Workers", Value: strconv.Itoa(c.workers)})
+}
 
 // Concurrency is how many prompts this channel may have running at once, which admission
 // also refuses a caller above, so the server's slots and the channel's acks agree.

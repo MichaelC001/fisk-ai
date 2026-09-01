@@ -64,14 +64,16 @@ const (
 	botTokenVar = "SLACK_BOT_TOKEN"
 )
 
-// This channel is all three of the optional shapes a channel can have: it sizes its own
-// concurrency, it holds a socket connection to release, and its credential can be revoked
-// while it runs. Declaring them makes a change to any of those contracts a compile error
-// here rather than a channel the server silently stops asking.
+// This channel is every one of the optional shapes a channel can have: it sizes its own
+// concurrency, it holds a socket connection to release, its credential can be revoked
+// while it runs, and it names the workspace it joined on a startup banner. Declaring them
+// makes a change to any of those contracts a compile error here rather than a channel the
+// server silently stops asking.
 var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
 	_ serve.FaultingEndpoint  = (*Channel)(nil)
+	_ serve.DescribedEndpoint = (*Channel)(nil)
 )
 
 // Options configures a Channel.
@@ -566,12 +568,8 @@ func (c *Channel) fault(err error) {
 	c.faultOnce.Do(func() { c.faults <- err })
 }
 
-// DescLine is one label and value describing this channel, for a caller printing a
-// startup banner.
-type DescLine struct {
-	Label string
-	Value string
-}
+// Heading names this endpoint on a startup banner.
+func (c *Channel) Heading() string { return "Answering in Slack" }
 
 // Describe names the workspace this bot joined, the identity it joined as and the limits
 // it answers under, for the banner a worker prints before its log takes over.
@@ -580,13 +578,13 @@ type DescLine struct {
 // configuration, since neither is written there: an operator holding two bot tokens has no
 // other way to see which one this process is using. Both are named with their id, which is
 // what a Slack admin page and an audit log are searched by.
-func (c *Channel) Describe() []DescLine {
+func (c *Channel) Describe() []serve.DescLine {
 	progress := "on"
 	if !c.progress {
 		progress = "off"
 	}
 
-	return []DescLine{
+	return []serve.DescLine{
 		{Label: "Workspace", Value: fmt.Sprintf("%s (%s)", c.workspace.Team, c.workspace.TeamID)},
 		{Label: "Bot", Value: fmt.Sprintf("%s (%s)", c.workspace.User, c.workspace.UserID)},
 		{Label: "Workers", Value: strconv.Itoa(c.workers)},

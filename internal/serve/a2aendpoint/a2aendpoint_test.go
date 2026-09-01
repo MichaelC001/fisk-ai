@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -190,8 +191,32 @@ var _ = Describe("A2A endpoint", func() {
 			Expect(built).To(HaveLen(1), "no prompt channel was asked for")
 			Expect(svc.Name()).To(Equal("a2a"))
 			Expect(svc.ExposedTools()).To(ConsistOf("backup", "restore"))
-			Expect(svc.Describe()).To(HaveLen(2))
+			Expect(svc.Heading()).To(Equal("Serving tools over a2a"))
+			Expect(svc.Describe()).To(HaveLen(4))
 			Expect(svc.WithheldBuiltins()).To(BeEmpty(), "this configuration enables no built-in")
+		})
+
+		// A configuration that sets neither leaves the a2a server to its own defaults, so
+		// reporting the configured values would print a concurrency and a timeout of zero
+		// for a worker that in fact paces and stops every served call.
+		It("Should describe the limits a served call will actually get", func() {
+			built, err := NewFromConfig(toolsConfig(""), ConfigOptions{Conns: provider, Logger: quietLogger()})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(closeAll, built)
+
+			Expect(serviceOf(built).Describe()).To(ContainElements(
+				serve.DescLine{Label: "Concurrency", Value: strconv.Itoa(a2a.DefaultConcurrency())},
+				serve.DescLine{Label: "Tool Timeout", Value: a2a.DefaultCallTimeout.String()},
+			))
+
+			built, err = NewFromConfig(toolsConfig("      max_concurrent_tools: 7\n      tool_timeout: 90s\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(closeAll, built)
+
+			Expect(serviceOf(built).Describe()).To(ContainElements(
+				serve.DescLine{Label: "Concurrency", Value: "7"},
+				serve.DescLine{Label: "Tool Timeout", Value: "1m30s"},
+			))
 		})
 
 		// An agent that answers prompts needs no application, so the tool endpoint's own
@@ -205,10 +230,12 @@ var _ = Describe("A2A endpoint", func() {
 			Expect(built).To(HaveLen(1), "no tool service was asked for")
 			Expect(ch.Name()).To(Equal("a2a/prompts"))
 			Expect(ch.Concurrency()).To(Equal(3))
-			Expect(ch.Describe()).To(ConsistOf(
-				a2a.DescLine{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
-				a2a.DescLine{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
-			), "a channel that asks nothing advertises no answer address")
+			Expect(ch.Heading()).To(Equal("Answering prompts over a2a"))
+			Expect(ch.Describe()).To(Equal([]serve.DescLine{
+				{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
+				{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
+				{Label: "Workers", Value: "3"},
+			}), "a channel that asks nothing advertises no answer address")
 		})
 
 		// Discovery is one route on the one micro service an identity registers, so an
@@ -305,10 +332,8 @@ var _ = Describe("A2A endpoint", func() {
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(closeAll, built)
 
-			Expect(channelOf(built).Describe()).To(ConsistOf(
-				a2a.DescLine{Label: "Requests", Value: natstransport.TaskSubject("agent1")},
-				a2a.DescLine{Label: "Cancels", Value: natstransport.CancelSubject("agent1", "*")},
-				a2a.DescLine{Label: "Answers", Value: natstransport.ElicitSubject("agent1", "*")},
+			Expect(channelOf(built).Describe()).To(ContainElement(
+				serve.DescLine{Label: "Answers", Value: natstransport.ElicitSubject("agent1", "*")},
 			))
 		})
 

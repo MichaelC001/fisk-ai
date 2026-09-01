@@ -39,9 +39,10 @@ const (
 	// unexpected error, so an unreachable queue does not become a hot loop.
 	channelRetryDelay = 5 * time.Second
 
-	// doneTimeout bounds reporting one outcome. A channel that cannot reach its store
-	// must not hold up a shutdown indefinitely.
-	doneTimeout = 30 * time.Second
+	// defaultDoneTimeout limits reporting one outcome when Options.DoneTimeout sets
+	// nothing. A channel that cannot reach its store must not hold up a shutdown
+	// indefinitely.
+	defaultDoneTimeout = 30 * time.Second
 )
 
 // DefaultToolTimeout bounds one tool call for a run this server hosts, when the
@@ -114,6 +115,12 @@ type Options struct {
 	// values agree, so which one a run gets is not something an operator can observe.
 	// See config.Config.ToolTimeout for what the bound can and cannot stop.
 	ToolTimeout time.Duration
+
+	// DoneTimeout limits one call to Work.Done; <= 0 uses thirty seconds. The run has
+	// already ended by then, so this covers writing the outcome down: raise it where a
+	// channel records an outcome somewhere slow, and a channel that cannot reach its
+	// store at all is cut off here rather than holding a shutdown open.
+	DoneTimeout time.Duration
 
 	// WorkDir is the directory command tools run in. It must be an absolute path that
 	// already exists. Empty inherits the process working directory, which is what a
@@ -217,6 +224,9 @@ func (o *Options) applyDefaults() {
 	}
 	if o.ToolTimeout <= 0 {
 		o.ToolTimeout = DefaultToolTimeout
+	}
+	if o.DoneTimeout <= 0 {
+		o.DoneTimeout = defaultDoneTimeout
 	}
 	if o.LogOutput == nil {
 		o.LogOutput = os.Stderr
@@ -764,7 +774,7 @@ func (s *Server) withToolTimeout(cfg *config.Config) *config.Config {
 // was canceled or timed out still records what happened. There is nowhere to take a
 // failure here beyond the log: the channel is the thing that would have recorded it.
 func (s *Server) report(work *Work, out Outcome, log *slog.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), doneTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.opts.DoneTimeout)
 	defer cancel()
 
 	err := work.Done(ctx, out)

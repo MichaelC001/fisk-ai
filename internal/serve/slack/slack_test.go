@@ -172,7 +172,7 @@ var _ = Describe("New", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(msgs).To(HaveLen(1))
 
-			Expect(ch.Describe()).To(ContainElement(DescLine{Label: "Context Lines", Value: strconv.Itoa(defaultContextLines)}))
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Context Lines", Value: strconv.Itoa(defaultContextLines)}))
 		})
 
 		It("Should read none for a negative allowance, and report that as zero", func() {
@@ -190,7 +190,7 @@ var _ = Describe("New", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(msgs).To(BeEmpty())
 
-			Expect(ch.Describe()).To(ContainElement(DescLine{Label: "Context Lines", Value: "0"}))
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Context Lines", Value: "0"}))
 		})
 
 		It("Should read the allowance a caller set", func() {
@@ -212,7 +212,7 @@ var _ = Describe("New", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(msgs).To(HaveLen(2))
 
-			Expect(ch.Describe()).To(ContainElement(DescLine{Label: "Context Lines", Value: "2"}))
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Context Lines", Value: "2"}))
 		})
 	})
 })
@@ -232,7 +232,7 @@ var _ = Describe("Channel", func() {
 		It("Should name the workspace, the bot and the limits a turn answers under", func() {
 			ch := newTestChannel(testOptions(), newFakeAPI(), newFakeSocket())
 
-			Expect(ch.Describe()).To(Equal([]DescLine{
+			Expect(ch.Describe()).To(Equal([]serve.DescLine{
 				{Label: "Workspace", Value: "Example (T000)"},
 				{Label: "Bot", Value: "NATS Docs (U0BOT)"},
 				{Label: "Workers", Value: "5"},
@@ -251,7 +251,7 @@ var _ = Describe("Channel", func() {
 
 			ch := newTestChannel(opts, newFakeAPI(), newFakeSocket())
 
-			Expect(ch.Describe()).To(ContainElement(DescLine{Label: "Progress", Value: "off"}))
+			Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Progress", Value: "off"}))
 		})
 	})
 

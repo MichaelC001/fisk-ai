@@ -197,11 +197,6 @@ func (c *Channel) renew(ctx context.Context, task *asyncjobs.Task, log *slog.Log
 // resuming into the same wait.
 func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Logger) (any, error) {
 	switch {
-	case out.Rejected:
-		// No retry helps something admission refused. Nothing produces this yet.
-		log.Warn("Terminating a job that was refused", "error", out.Err)
-		return nil, fmt.Errorf("%w: the work was refused", asyncjobs.ErrTerminateTask)
-
 	case out.Crashed:
 		// A panic is deterministic and each redelivery is real model spend.
 		log.Error("Terminating a job whose run crashed", "error", out.Err)

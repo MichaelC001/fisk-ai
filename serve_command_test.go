@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"time"
 
@@ -12,11 +13,57 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
+
+// jobsConfig is a worker serving a queue, which is the shape most of the banner lines
+// are written against.
+func jobsConfig() *config.Config {
+	cfg := &config.Config{Identity: "worker", NatsContext: "production"}
+	cfg.LLM.Model = "claude-sonnet-5"
+	cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{Jobs: &config.ExposedJobsConfig{}}}
+
+	return cfg
+}
+
+// describedChannel is a channel this command was not written against, so what reaches
+// the banner from it is whatever serve.DescribedEndpoint carries.
+type describedChannel struct {
+	name    string
+	heading string
+}
+
+func (c *describedChannel) Name() string    { return c.name }
+func (c *describedChannel) Heading() string { return c.heading }
+
+func (c *describedChannel) Next(context.Context) (*serve.Work, error) {
+	return nil, serve.ErrChannelDone
+}
+
+func (c *describedChannel) Describe() []serve.DescLine {
+	return []serve.DescLine{{Label: "Address", Value: c.name + ".request"}}
+}
+
+// describedService describes itself and serves tools to peers, which is the pair of
+// answers the a2a tool endpoint gives.
+type describedService struct {
+	name     string
+	heading  string
+	exposed  []string
+	withheld []string
+}
+
+func (s *describedService) Name() string               { return s.name }
+func (s *describedService) Heading() string            { return s.heading }
+func (s *describedService) Close() error               { return nil }
+func (s *describedService) ExposedTools() []string     { return s.exposed }
+func (s *describedService) WithheldBuiltins() []string { return s.withheld }
+
+func (s *describedService) Describe() []serve.DescLine {
+	return []serve.DescLine{{Label: "Discovery", Value: s.name + ".discover"}}
+}
 
 // The banner is an operator's only view of what a worker resolved before the log takes
 // over, so what each line reports is the contract these cover.
@@ -91,34 +138,60 @@ var _ = Describe("fiskServeCommand", func() {
 		})
 	})
 
-	Describe("a2a bounds", func() {
-		// The a2a endpoint paces and bounds its calls with numbers of its own, and
-		// reporting the configured value alone would print zero for a worker that in fact
-		// bounds every call at thirty seconds.
-		It("Should report what a served call will actually get", func() {
+	Describe("describeEndpoints", func() {
+		// An endpoint states its own heading and lines, so a channel written outside this
+		// repository reaches the banner without this command knowing its type.
+		It("Should print a section for every endpoint that describes itself", func() {
 			c := &fiskServeCommand{}
+			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
 
-			Expect(c.a2aToolTimeout(&config.Config{})).To(Equal(a2a.DefaultCallTimeout))
-			Expect(c.a2aConcurrency(&config.Config{})).To(Equal(a2a.DefaultConcurrency()))
+			out := c.banner(jobsConfig(),
+				[]serve.Channel{&describedChannel{name: "widgets", heading: "Answering widgets"}},
+				nil, res, &telemetry.Provider{}).String()
 
-			cfg := &config.Config{Expose: &config.ExposeConfig{Agent: &config.AgentExpose{
-				A2A: &config.ExposedA2AConfig{MaxConcurrentTools: 7, ToolTimeoutParsed: 90 * time.Second},
-			}}}
+			Expect(out).To(ContainSubstring("Answering widgets"))
+			Expect(out).To(ContainSubstring("Address"))
+			Expect(out).To(ContainSubstring("widgets.request"))
+		})
 
-			Expect(c.a2aToolTimeout(cfg)).To(Equal(90 * time.Second))
-			Expect(c.a2aConcurrency(cfg)).To(Equal(7))
+		// A channel with nothing to say does not implement the interface, and a heading
+		// with nothing under it would read as a banner that lost its lines.
+		It("Should skip an endpoint that describes nothing", func() {
+			c := &fiskServeCommand{}
+			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
+
+			out := c.banner(jobsConfig(),
+				[]serve.Channel{agenttest.NewScriptedChannel(GinkgoTB(), "asyncjobs")},
+				nil, res, &telemetry.Provider{}).String()
+
+			Expect(out).To(ContainSubstring("asyncjobs"), "it is still named among the endpoints")
+			Expect(out).ToNot(ContainSubstring("Answering"))
+		})
+
+		// The two lists are values under one label rather than a label and a value, so
+		// they are asked for separately and printed inside the endpoint's own section.
+		It("Should print the served and withheld tools of an endpoint that serves tools", func() {
+			c := &fiskServeCommand{}
+			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
+
+			svc := &describedService{
+				name:     "a2a",
+				heading:  "Serving tools over a2a",
+				exposed:  []string{"backup", "restore"},
+				withheld: []string{"knowledge"},
+			}
+
+			out := c.banner(jobsConfig(), nil, []serve.Service{svc}, res, &telemetry.Provider{}).String()
+
+			Expect(out).To(ContainSubstring("Serving tools over a2a"))
+			Expect(out).To(ContainSubstring("backup"))
+			Expect(out).To(ContainSubstring("restore"))
+			Expect(out).To(ContainSubstring("knowledge"))
+			Expect(out).To(ContainSubstring("declare no a2a exposure"))
 		})
 	})
 
 	Describe("banner", func() {
-		jobsConfig := func() *config.Config {
-			cfg := &config.Config{Identity: "worker", NatsContext: "production"}
-			cfg.LLM.Model = "claude-sonnet-5"
-			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{Jobs: &config.ExposedJobsConfig{}}}
-
-			return cfg
-		}
-
 		// Every one of these describes a run or the queue it comes off, and a worker
 		// serving only tools has neither. Left in, the queue context would name a queue
 		// that is not there and the tool directory one that served calls do not use.
