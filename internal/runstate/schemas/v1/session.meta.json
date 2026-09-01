@@ -16,7 +16,6 @@
     },
     "meta": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "version",
         "run_id",

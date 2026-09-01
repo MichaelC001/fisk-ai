@@ -13,7 +13,6 @@
     },
     "claim": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "by",
         "claimed"

@@ -13,7 +13,6 @@
     },
     "user": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "message"
       ],

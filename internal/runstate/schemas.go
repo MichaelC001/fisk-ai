@@ -45,6 +45,14 @@ var protocolSchemaFile = map[Protocol]string{
 // stored record is self describing via its protocol id, so any consumer, reading
 // a journal line or a JetStream message, can validate it without knowing where it
 // came from.
+//
+// The schemas are open where the record format is open and closed where it is
+// closed. A record body accepts a field it does not name, because a field is added
+// without a version bump and a reader that predates one folds the record with it
+// zero (see Version), so a consumer holding an earlier copy of these schemas must
+// not call such a record invalid. The record itself is closed: a key beside the
+// envelope's own and the one body is a second body or a misspelling, neither of
+// which the format ever produces.
 type Validator struct {
 	schemas map[Protocol]*jsonschema.Schema
 }

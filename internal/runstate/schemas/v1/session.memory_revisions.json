@@ -13,7 +13,6 @@
     },
     "memory_revisions": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "revisions"
       ],

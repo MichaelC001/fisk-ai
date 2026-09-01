@@ -13,7 +13,6 @@
     },
     "decision": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "tool"
       ],

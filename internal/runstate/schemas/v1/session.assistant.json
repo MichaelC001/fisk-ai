@@ -13,7 +13,6 @@
     },
     "assistant": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "iteration",
         "message",
