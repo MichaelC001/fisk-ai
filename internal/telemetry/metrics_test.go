@@ -111,7 +111,7 @@ var _ = Describe("Metrics", func() {
 				ChatOutcome{Usage: TokenUsage{Input: 152, Output: 8}}, time.Second)
 			p.RecordTurn(ctx, TurnMetrics{
 				AgentName:      "demo",
-				TerminalReason: "completed",
+				TerminalReason: TerminalCompleted,
 				Duration:       time.Second,
 				InferenceCalls: 1,
 				ToolCalls:      1,
@@ -142,7 +142,7 @@ var _ = Describe("Metrics", func() {
 
 			p.RecordTurn(ctx, TurnMetrics{
 				AgentName:      "demo",
-				TerminalReason: "completed",
+				TerminalReason: TerminalCompleted,
 				Interactive:    true,
 				Duration:       250 * time.Millisecond,
 				InferenceCalls: 3,
@@ -161,7 +161,7 @@ var _ = Describe("Metrics", func() {
 				sets := attrSets(m)
 				Expect(sets).To(HaveLen(1))
 				Expect(hasAttr(sets[0], "gen_ai.agent.name", "demo")).To(BeTrue())
-				Expect(hasAttr(sets[0], AttrRunTerminalReason, "completed")).To(BeTrue())
+				Expect(hasAttr(sets[0], AttrRunTerminalReason, TerminalCompleted.String())).To(BeTrue())
 			}
 		})
 
@@ -222,7 +222,7 @@ var _ = Describe("Metrics", func() {
 			p.recordTool(ctx, ToolOutcome{
 				Outcome: ToolOutcomeExecuted,
 				Name:    "do",
-				Kind:    "command",
+				Kind:    ToolKindApplication,
 			}, 30*time.Millisecond)
 
 			m, ok := metricNamed(collected(reader), MetricExecuteToolDuration)
@@ -231,8 +231,8 @@ var _ = Describe("Metrics", func() {
 			sets := attrSets(m)
 			Expect(sets).To(HaveLen(1))
 			Expect(hasAttr(sets[0], "gen_ai.tool.name", "do")).To(BeTrue())
-			Expect(hasAttr(sets[0], AttrToolKind, "command")).To(BeTrue())
-			Expect(hasAttr(sets[0], AttrToolOutcome, ToolOutcomeExecuted)).To(BeTrue())
+			Expect(hasAttr(sets[0], AttrToolKind, ToolKindApplication.String())).To(BeTrue())
+			Expect(hasAttr(sets[0], AttrToolOutcome, ToolOutcomeExecuted.String())).To(BeTrue())
 		})
 
 		// The cardinality guard, on the surface where it costs money. A tool name the
@@ -254,7 +254,7 @@ var _ = Describe("Metrics", func() {
 			Expect(present).To(BeFalse())
 			_, present = sets[0].Value(AttrToolRequestedName)
 			Expect(present).To(BeFalse())
-			Expect(hasAttr(sets[0], AttrToolOutcome, ToolOutcomeUnknownTool)).To(BeTrue())
+			Expect(hasAttr(sets[0], AttrToolOutcome, ToolOutcomeUnknownTool.String())).To(BeTrue())
 		})
 	})
 })

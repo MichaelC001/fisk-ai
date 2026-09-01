@@ -29,6 +29,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	runstatefile "github.com/choria-io/fisk-ai/internal/runstate/file"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -2113,5 +2114,68 @@ var _ = Describe("HumanPaced", func() {
 		_, err := r.run(context.Background())
 		Expect(err).ToNot(HaveOccurred())
 		Expect(seen).To(HaveExactElements(true))
+	})
+})
+
+// telemetry declares its own terminal reasons and tool kinds because it imports nothing
+// from the rest of this tree, so these two functions are the single place the sets meet.
+// A value neither of them recognizes reaches a metric label, where one distinct string
+// is one time series for the life of the process, so both fall back to a fixed member
+// rather than passing the text through.
+var _ = Describe("the telemetry vocabulary mapping", func() {
+	DescribeTable("should map a run path terminal reason onto telemetry's own",
+		func(reason runstate.TerminalReason, want telemetry.TerminalReason) {
+			Expect(telemetryReason(reason)).To(Equal(want))
+		},
+		Entry("completed", runstate.ReasonCompleted, telemetry.TerminalCompleted),
+		Entry("suspended", runstate.ReasonSuspended, telemetry.TerminalSuspended),
+		Entry("error", runstate.ReasonError, telemetry.TerminalError),
+		Entry("budget", runstate.ReasonBudget, telemetry.TerminalBudget),
+		Entry("max iterations", runstate.ReasonMaxIterations, telemetry.TerminalMaxIterations),
+		Entry("a reason this build does not know", runstate.TerminalReason("preempted"), telemetry.TerminalOther),
+		Entry("no reason at all", runstate.TerminalReason(""), telemetry.TerminalOther),
+	)
+
+	DescribeTable("should map a tool provider kind onto telemetry's own",
+		func(kind toolkit.Kind, want telemetry.ToolKind) {
+			Expect(telemetryToolKind(kind)).To(Equal(want))
+		},
+		Entry("application", toolkit.KindApplication, telemetry.ToolKindApplication),
+		Entry("builtin", toolkit.KindBuiltin, telemetry.ToolKindBuiltin),
+		Entry("remote", toolkit.KindRemote, telemetry.ToolKindRemote),
+		Entry("custom", toolkit.KindCustom, telemetry.ToolKindCustom),
+		Entry("mcp", toolkit.KindMCP, telemetry.ToolKindMCP),
+		Entry("unknown", toolkit.KindUnknown, telemetry.ToolKindUnknown),
+		Entry("a kind this build does not know", toolkit.Kind(99), telemetry.ToolKindUnknown),
+	)
+
+	// Every mapped member renders what toolkit.Kind.String already wrote, so a build that
+	// starts mapping does not move the accounting axis operators group by.
+	DescribeTable("should render the token toolkit already wrote for a kind",
+		func(kind toolkit.Kind) {
+			Expect(telemetryToolKind(kind).String()).To(Equal(kind.String()))
+		},
+		Entry("application", toolkit.KindApplication),
+		Entry("builtin", toolkit.KindBuiltin),
+		Entry("remote", toolkit.KindRemote),
+		Entry("custom", toolkit.KindCustom),
+		Entry("mcp", toolkit.KindMCP),
+		Entry("unknown", toolkit.KindUnknown),
+	)
+
+	// A crash leaves the reason unset on purpose, so runOutcome names the half of the run
+	// it stopped in rather than exporting an empty label.
+	DescribeTable("should name the half of the run a crash stopped in",
+		func(reachedRunner bool, want telemetry.TerminalReason) {
+			out := runOutcome(&Result{}, errors.New("boom"), reachedRunner, nil, 0, 0, 0)
+			Expect(out.TerminalReason).To(Equal(want))
+		},
+		Entry("before the loop", false, telemetry.TerminalSetupFailed),
+		Entry("inside the loop", true, telemetry.TerminalError),
+	)
+
+	It("should carry a run's own reason through", func() {
+		out := runOutcome(&Result{Reason: runstate.ReasonMaxIterations}, nil, true, nil, 0, 0, 0)
+		Expect(out.TerminalReason).To(Equal(telemetry.TerminalMaxIterations))
 	})
 })

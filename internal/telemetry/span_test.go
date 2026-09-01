@@ -606,8 +606,8 @@ var _ = Describe("ToolSpan", func() {
 	It("should name the mcp server that served the call, apart from the remote agent", func() {
 		p, exp := recording()
 
-		ctx, span := p.StartTool(context.Background(), ToolInfo{Name: "docs_search", Identity: "demo", Kind: "mcp"})
-		span.Finish(ctx, ToolOutcome{Outcome: ToolOutcomeExecuted, Name: "docs_search", Kind: "mcp", MCPServer: "docs"})
+		ctx, span := p.StartTool(context.Background(), ToolInfo{Name: "docs_search", Identity: "demo", Kind: ToolKindMCP})
+		span.Finish(ctx, ToolOutcome{Outcome: ToolOutcomeExecuted, Name: "docs_search", Kind: ToolKindMCP, MCPServer: "docs"})
 
 		spans := exp.GetSpans()
 		Expect(spans).To(HaveLen(1))
@@ -618,5 +618,65 @@ var _ = Describe("ToolSpan", func() {
 
 		_, ok = attrOf(spans[0], AttrToolRemoteAgent)
 		Expect(ok).To(BeFalse())
+	})
+})
+
+// The three vocabularies that reach a metric label. Each is a struct wrapping an
+// unexported string for the reason ErrorClass is: a defined string type would let any
+// caller convert a per-call value in, and one distinct label value is one time series
+// for the life of the process.
+var _ = Describe("the closed metric vocabularies", func() {
+	DescribeTable("should give a caller no way to construct a member",
+		func(v any) {
+			t := reflect.TypeOf(v)
+
+			Expect(t.NumField()).To(Equal(1))
+			Expect(t.Field(0).IsExported()).To(BeFalse())
+		},
+		Entry("ToolCallOutcome", ToolCallOutcome{}),
+		Entry("ToolKind", ToolKind{}),
+		Entry("TerminalReason", TerminalReason{}),
+	)
+
+	// The tokens are the attribute and label values operators already group and alert
+	// on, so they are pinned as literals rather than derived from the members.
+	DescribeTable("should render the token the attribute carried before",
+		func(got, want string) {
+			Expect(got).To(Equal(want))
+		},
+		Entry("executed", ToolOutcomeExecuted.String(), "executed"),
+		Entry("error", ToolOutcomeError.String(), "error"),
+		Entry("unknown_tool", ToolOutcomeUnknownTool.String(), "unknown_tool"),
+		Entry("capacity", ToolOutcomeCapacity.String(), "capacity"),
+		Entry("policy_denied", ToolOutcomePolicyDenied.String(), "policy_denied"),
+		Entry("missing_arguments", ToolOutcomeMissingArguments.String(), "missing_arguments"),
+		Entry("confirm_denied", ToolOutcomeConfirmDenied.String(), "confirm_denied"),
+		Entry("unanswered", ToolOutcomeUnanswered.String(), "unanswered"),
+		Entry("deferred", ToolOutcomeDeferred.String(), "deferred"),
+
+		Entry("unknown", ToolKindUnknown.String(), "unknown"),
+		Entry("application", ToolKindApplication.String(), "application"),
+		Entry("builtin", ToolKindBuiltin.String(), "builtin"),
+		Entry("remote", ToolKindRemote.String(), "remote"),
+		Entry("custom", ToolKindCustom.String(), "custom"),
+		Entry("mcp", ToolKindMCP.String(), "mcp"),
+
+		Entry("completed", TerminalCompleted.String(), "completed"),
+		Entry("suspended", TerminalSuspended.String(), "suspended"),
+		Entry("terminal error", TerminalError.String(), "error"),
+		Entry("budget", TerminalBudget.String(), "budget"),
+		Entry("max_iterations", TerminalMaxIterations.String(), "max_iterations"),
+		Entry("setup_failed", TerminalSetupFailed.String(), "setup_failed"),
+		Entry("the terminal catch-all", TerminalOther.String(), "_OTHER"),
+	)
+
+	It("should report an unnamed member as unset", func() {
+		Expect(ToolCallOutcome{}.Set()).To(BeFalse())
+		Expect(ToolKind{}.Set()).To(BeFalse())
+		Expect(TerminalReason{}.Set()).To(BeFalse())
+
+		Expect(ToolOutcomeExecuted.Set()).To(BeTrue())
+		Expect(ToolKindBuiltin.Set()).To(BeTrue())
+		Expect(TerminalCompleted.Set()).To(BeTrue())
 	})
 })

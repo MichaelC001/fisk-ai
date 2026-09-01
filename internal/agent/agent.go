@@ -625,12 +625,51 @@ func startupErrorClass(err error) telemetry.ErrorClass {
 	return telemetry.ClassConfig
 }
 
-// setupFailedReason is the terminal reason for a run that never reached the loop. The
-// run path itself has no such outcome, because from its point of view nothing ran, but
-// a trace with an empty reason reads as a bug in the instrumentation rather than as a
-// refused resume or a bad config. It is the trace an operator goes looking for when a
-// run is rejected in CI.
-const setupFailedReason = "setup_failed"
+// telemetryReason maps a run path terminal reason onto telemetry's own closed
+// vocabulary.
+//
+// The two sets are declared apart because telemetry imports nothing from the rest of
+// this tree, so this is the single place they meet: a reason added to runstate without
+// a member here shows up as one unrecognized value rather than as a new string on a
+// span. A reason this build does not know maps to telemetry.TerminalOther rather than
+// through as itself, since the value reaches a metric label where one distinct string
+// is one time series for the life of the process.
+func telemetryReason(reason runstate.TerminalReason) telemetry.TerminalReason {
+	switch reason {
+	case runstate.ReasonCompleted:
+		return telemetry.TerminalCompleted
+	case runstate.ReasonSuspended:
+		return telemetry.TerminalSuspended
+	case runstate.ReasonError:
+		return telemetry.TerminalError
+	case runstate.ReasonBudget:
+		return telemetry.TerminalBudget
+	case runstate.ReasonMaxIterations:
+		return telemetry.TerminalMaxIterations
+	default:
+		return telemetry.TerminalOther
+	}
+}
+
+// telemetryToolKind maps a tool provider kind onto telemetry's own closed vocabulary,
+// on the same terms as telemetryReason. A kind this build does not know maps to
+// telemetry.ToolKindUnknown, the sentinel toolkit.Kind.String already uses for one.
+func telemetryToolKind(kind toolkit.Kind) telemetry.ToolKind {
+	switch kind {
+	case toolkit.KindApplication:
+		return telemetry.ToolKindApplication
+	case toolkit.KindBuiltin:
+		return telemetry.ToolKindBuiltin
+	case toolkit.KindRemote:
+		return telemetry.ToolKindRemote
+	case toolkit.KindCustom:
+		return telemetry.ToolKindCustom
+	case toolkit.KindMCP:
+		return telemetry.ToolKindMCP
+	default:
+		return telemetry.ToolKindUnknown
+	}
+}
 
 // runOutcome assembles what the root span records about a finished run.
 //
@@ -644,18 +683,22 @@ const setupFailedReason = "setup_failed"
 // session totals are reported separately, so that summing either one across a session's
 // traces gives an answer that means something.
 func runOutcome(res *Result, err error, reachedRunner bool, seed *telemetry.TokenUsage, seedCalls, seedRemoteCalls, seedMCPCalls int64) telemetry.RunOutcome {
-	out := telemetry.RunOutcome{TerminalReason: string(res.Reason)}
+	out := telemetry.RunOutcome{TerminalReason: telemetryReason(res.Reason)}
 
 	var panicErr *PanicError
 	out.Crashed = errors.As(err, &panicErr)
 
-	if out.TerminalReason == "" {
-		out.TerminalReason = setupFailedReason
+	if res.Reason == "" {
+		// The run path has no outcome for a run that never reached the loop, since from
+		// its point of view nothing ran, but a trace with an empty reason reads as a bug
+		// in the instrumentation rather than as a refused resume or a bad config. This is
+		// the trace an operator goes looking for when a run is rejected in CI.
+		out.TerminalReason = telemetry.TerminalSetupFailed
 		if reachedRunner {
 			// The loop was running and did not reach a terminal state, which today means
 			// it crashed; reporting that as a setup failure would send an operator to the
 			// wrong half of the run.
-			out.TerminalReason = string(runstate.ReasonError)
+			out.TerminalReason = telemetry.TerminalError
 		}
 	}
 

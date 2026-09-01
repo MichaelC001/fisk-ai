@@ -397,7 +397,7 @@ func (r *runner) runTurn(ctx context.Context) (runstate.TerminalReason, error) {
 
 	if span != nil {
 		outcome := telemetry.TurnOutcome{
-			TerminalReason: string(reason),
+			TerminalReason: telemetryReason(reason),
 			Usage:          runStatsUsage(r.stats).Sub(beforeUsage),
 		}
 		if err != nil {
@@ -417,7 +417,7 @@ func (r *runner) runTurn(ctx context.Context) (runstate.TerminalReason, error) {
 	// would otherwise report every call the session has ever made.
 	r.telemetry.RecordTurn(ctx, telemetry.TurnMetrics{
 		AgentName:      r.identity,
-		TerminalReason: string(reason),
+		TerminalReason: telemetryReason(reason),
 		Interactive:    r.interactive,
 		Duration:       time.Since(started),
 		InferenceCalls: r.stats.LlmCalls - beforeCalls,
@@ -1417,7 +1417,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		RequestedName: use.Name,
 		CallID:        use.ID,
 		Identity:      r.identity,
-		Kind:          toolkit.KindUnknown.String(),
+		Kind:          telemetryToolKind(toolkit.KindUnknown),
 		ConfirmGated:  ok && confirmGated(tool, r.confirmTags),
 		Datastore:     isKnowledgeTool(use.Name),
 		Resumed:       r.completingPending,
@@ -1467,7 +1467,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// run the tool or mutate state, so calling it here is safe.
 	origInfo := describeCall(tool, use.Input)
 	origGated := confirmGated(tool, r.confirmTags)
-	outcome.Kind = origInfo.Kind.String()
+	outcome.Kind = telemetryToolKind(origInfo.Kind)
 
 	// PreToolUse sees a copy of the model's raw arguments so a hook cannot mutate the
 	// run's own buffer through the snapshot. A returned error aborts the run.
@@ -1538,7 +1538,7 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// the model originally asked for. The name is still registry-validated: a rewrite
 	// can only target a registered tool.
 	outcome.Name = effName
-	outcome.Kind = effInfo.Kind.String()
+	outcome.Kind = telemetryToolKind(effInfo.Kind)
 	outcome.Rewritten = pre.RewriteTool != "" || pre.RewriteInput != nil
 	if outcome.Rewritten {
 		outcome.ArgKeys = argumentKeys(effInput)

@@ -87,7 +87,7 @@ var _ = Describe("Serving telemetry", func() {
 
 		outcome, ok := attrOf(got, "fisk.tool.outcome")
 		Expect(ok).To(BeTrue())
-		Expect(outcome).To(Equal(telemetry.ToolOutcomeExecuted))
+		Expect(outcome).To(Equal(telemetry.ToolOutcomeExecuted.String()))
 	})
 
 	It("Should open a root when the caller sent no trace context", func() {
@@ -152,7 +152,7 @@ var _ = Describe("Serving telemetry", func() {
 
 		outcome, ok := attrOf(got, "fisk.tool.outcome")
 		Expect(ok).To(BeTrue())
-		Expect(outcome).To(Equal(telemetry.ToolOutcomeUnknownTool))
+		Expect(outcome).To(Equal(telemetry.ToolOutcomeUnknownTool.String()))
 
 		// The peer's string is an attribute and never the span name.
 		requested, ok := attrOf(got, "fisk.tool.requested_name")

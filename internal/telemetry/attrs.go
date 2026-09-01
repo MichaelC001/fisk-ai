@@ -104,8 +104,8 @@ const (
 	// of agents startup may have had to reach over NATS.
 	AttrRemoteHosts = attribute.Key("fisk.remote_hosts")
 
-	// AttrRunTerminalReason is how the run ended: completed, max_iterations, error,
-	// budget, suspended, or setup_failed for one that never reached the loop.
+	// AttrRunTerminalReason is how the run ended, from the closed TerminalReason
+	// vocabulary.
 	AttrRunTerminalReason = attribute.Key("fisk.run.terminal_reason")
 	// AttrRunResumed reports that the run continued a checkpointed session.
 	AttrRunResumed = attribute.Key("fisk.run.resumed")
@@ -134,10 +134,11 @@ const (
 	// that cost the operator real money and cannot be un-sent.
 	AttrToolRequestedName = attribute.Key("fisk.tool.requested_name")
 	// AttrToolKind is the provider that supplied the tool, which is the true accounting
-	// axis: application command, built-in, remote, or custom.
+	// axis, from the closed ToolKind vocabulary.
 	AttrToolKind = attribute.Key("fisk.tool.kind")
-	// AttrToolOutcome is the one axis to group tool calls by. It separates a call that
-	// ran and failed from one that never ran, and why it never ran.
+	// AttrToolOutcome is the one axis to group tool calls by, from the closed
+	// ToolCallOutcome vocabulary. It separates a call that ran and failed from one that
+	// never ran, and why it never ran.
 	AttrToolOutcome = attribute.Key("fisk.tool.outcome")
 	// AttrToolArgKeys is the argument KEY NAMES, never their values. It is schema
 	// rather than data: it turns "it called stream_edit" into "with stream, max_age,
@@ -416,42 +417,137 @@ var (
 	DegradeOther = DegradeReason{"other"}
 )
 
-// The closed set of fisk.tool.outcome values. They are constants rather than strings
-// at the call sites because this is the one axis the documentation tells an operator
-// to group by, so a typo in one branch would silently split a series.
-const (
+// ToolCallOutcome is the closed vocabulary for how a tool call ended.
+//
+// It is a struct wrapping a string for the reason ErrorClass is: a defined string type
+// is convertible from any string by any package, so ToolCallOutcome(err.Error()) would
+// compile. This value carries the fisk.tool.outcome label on the tool duration
+// histogram, where one distinct string is one time series for the life of the process,
+// so a per-call value put here costs the operator money. There is no exported way to
+// build one; a caller picks one of the ToolOutcome members.
+type ToolCallOutcome struct{ s string }
+
+// String renders the token for the attribute and the metric label.
+func (o ToolCallOutcome) String() string { return o.s }
+
+// Set reports whether an outcome was named at all.
+func (o ToolCallOutcome) Set() bool { return o.s != "" }
+
+// The closed set of fisk.tool.outcome values. They are named rather than written as
+// strings at the call sites because this is the one axis the documentation tells an
+// operator to group by, so a typo in one branch would silently split a series.
+var (
 	// ToolOutcomeExecuted is a call that ran and returned a non-error result.
-	ToolOutcomeExecuted = "executed"
+	ToolOutcomeExecuted = ToolCallOutcome{"executed"}
 	// ToolOutcomeError is a call that ran and returned an error result. A non-zero
 	// command exit is NOT this: that round-trips as an ordinary result envelope, so an
 	// ordinary failing command is executed, not error.
-	ToolOutcomeError = "error"
+	ToolOutcomeError = ToolCallOutcome{"error"}
 	// ToolOutcomeUnknownTool is a call naming a tool that does not exist.
-	ToolOutcomeUnknownTool = "unknown_tool"
+	ToolOutcomeUnknownTool = ToolCallOutcome{"unknown_tool"}
 	// ToolOutcomeCapacity is a served call refused because the agent answering it was
 	// already running as many as it will run at once. Nothing was started, so it is
 	// neither an execution nor a failure of one; the peer was told to look elsewhere
 	// or come back. It is served-only, like ToolOutcomeUnknownTool.
-	ToolOutcomeCapacity = "capacity"
+	ToolOutcomeCapacity = ToolCallOutcome{"capacity"}
 	// ToolOutcomePolicyDenied is a call a hook refused.
-	ToolOutcomePolicyDenied = "policy_denied"
+	ToolOutcomePolicyDenied = ToolCallOutcome{"policy_denied"}
 	// ToolOutcomeMissingArguments is a call rejected before running because the model
 	// omitted a required parameter.
-	ToolOutcomeMissingArguments = "missing_arguments"
+	ToolOutcomeMissingArguments = ToolCallOutcome{"missing_arguments"}
 	// ToolOutcomeConfirmDenied is a call the operator refused at the gate.
-	ToolOutcomeConfirmDenied = "confirm_denied"
+	ToolOutcomeConfirmDenied = ToolCallOutcome{"confirm_denied"}
 	// ToolOutcomeUnanswered is a call whose question to the operator got no answer:
 	// they interrupted or closed the input, or the run ended while the question was up.
 	// It covers the approval gate and the human-in-the-loop tools alike, since both
 	// leave the call unanswered and both are asked again by the next resume. Nothing
 	// was refused and nothing ran, so counting these as refusals would report decisions
 	// no operator made.
-	ToolOutcomeUnanswered = "unanswered"
+	ToolOutcomeUnanswered = ToolCallOutcome{"unanswered"}
 	// ToolOutcomeDeferred is a call that started work whose answer arrives later. It
 	// is not a success and not a failure: nothing was returned to the model, the run
 	// suspended, and the result is supplied to the journal when it exists. A deferred
 	// call is answered exactly once and never runs again.
-	ToolOutcomeDeferred = "deferred"
+	ToolOutcomeDeferred = ToolCallOutcome{"deferred"}
+)
+
+// ToolKind is the closed vocabulary for which provider supplied a tool.
+//
+// It is a struct wrapping a string for the reason ErrorClass is: a defined string type
+// is convertible from any string by any package, so ToolKind(tool.Name()) would compile
+// and put one time series per tool name on the fisk.tool.kind label of the tool
+// duration histogram. There is no exported way to build one; a caller maps its own
+// provider type onto the ToolKind members.
+type ToolKind struct{ s string }
+
+// String renders the token for the attribute and the metric label.
+func (k ToolKind) String() string { return k.s }
+
+// Set reports whether a kind was named at all.
+func (k ToolKind) Set() bool { return k.s != "" }
+
+var (
+	// ToolKindUnknown is a tool that declared no provider, and a call naming a tool
+	// that is not in the registry. It is the value to map an unrecognized provider to,
+	// so a forgotten assignment is visible in the accounting rather than counted as a
+	// provider it was not.
+	ToolKindUnknown = ToolKind{"unknown"}
+	// ToolKindApplication is a tool of the wrapped application.
+	ToolKindApplication = ToolKind{"application"}
+	// ToolKindBuiltin is a tool the harness provides in-process: the human-in-the-loop,
+	// memory and knowledge tools.
+	ToolKindBuiltin = ToolKind{"builtin"}
+	// ToolKindRemote is a tool served by another agent over a2a.
+	ToolKindRemote = ToolKind{"remote"}
+	// ToolKindCustom is a tool the embedding caller supplied.
+	ToolKindCustom = ToolKind{"custom"}
+	// ToolKindMCP is a tool served by an MCP server the operator configured. It is a
+	// provider of its own rather than a flavor of ToolKindRemote: a call to a third
+	// party's server and a call to another agent are different providers, and an
+	// operator reading the accounting wants to tell them apart.
+	ToolKindMCP = ToolKind{"mcp"}
+)
+
+// TerminalReason is the closed vocabulary for why a run or a turn stopped.
+//
+// It is a struct wrapping a string for the reason ErrorClass is: a defined string type
+// is convertible from any string by any package, so TerminalReason(err.Error()) would
+// compile and mint one time series per distinct error text on the
+// fisk.run.terminal_reason label of the agent invocation metrics. There is no exported
+// way to build one.
+//
+// This package imports nothing from the rest of the tree, so the members are written out
+// here to mirror the run path's reasons. A caller maps its own reason onto them and uses
+// TerminalOther for one this build does not name.
+type TerminalReason struct{ s string }
+
+// String renders the token for the attribute and the metric label.
+func (r TerminalReason) String() string { return r.s }
+
+// Set reports whether a reason was named at all.
+func (r TerminalReason) Set() bool { return r.s != "" }
+
+var (
+	// TerminalCompleted is a run that returned a final answer.
+	TerminalCompleted = TerminalReason{"completed"}
+	// TerminalSuspended is a run that was checkpointed and exited to be resumed.
+	TerminalSuspended = TerminalReason{"suspended"}
+	// TerminalError is a run that ended on an error.
+	TerminalError = TerminalReason{"error"}
+	// TerminalBudget is a run whose token budget was exhausted.
+	TerminalBudget = TerminalReason{"budget"}
+	// TerminalMaxIterations is a run that reached its iteration cap.
+	TerminalMaxIterations = TerminalReason{"max_iterations"}
+	// TerminalSetupFailed is a run that never reached the loop. The run path has no
+	// such outcome, since from its point of view nothing ran, but a trace with an empty
+	// reason reads as a bug in the instrumentation rather than as a refused resume or a
+	// bad config, and this is the trace an operator goes looking for when a run is
+	// rejected in CI.
+	TerminalSetupFailed = TerminalReason{"setup_failed"}
+	// TerminalOther is the catch-all for a reason this build does not name, which is
+	// what a record written by a newer build carries. It is the value to map an
+	// unrecognized reason to rather than passing the text through onto a metric label.
+	TerminalOther = TerminalReason{"_OTHER"}
 )
 
 // The gen_ai.tool.type values this repository uses. The conventions define the

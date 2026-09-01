@@ -31,10 +31,11 @@ var _ = BeforeSuite(func() {
 	SetErrorHandler(io.Discard)
 })
 
-// envFrom returns an environment reader over a fixed map, the injection point every
-// spec here uses instead of setting process environment variables. Nothing in this
-// package reads os.Getenv, so specs never mutate process state and stay safe to run
-// in parallel with everything else.
+// envFrom returns an environment reader over a fixed map, which is how a spec supplies
+// a variable without setting one on the process. The two specs covering the SDK's own
+// merge of resource.Environment() do set one, through GinkgoT().Setenv, which restores
+// it when the spec ends; Ginkgo runs parallel specs as separate processes, so neither
+// reaches another suite.
 func envFrom(vars map[string]string) func(string) string {
 	return func(name string) string {
 		return vars[name]
