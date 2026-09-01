@@ -89,53 +89,6 @@ var _ = Describe("Index format gate", func() {
 		return stats.Added
 	}
 
-	Describe("an index built by an older format", func() {
-		BeforeEach(func() {
-			buildIndex()
-			pinFormatVersion(dbPath, formatVersion-1)
-		})
-
-		It("is refused by a reader, which names the discard and the rebuild", func() {
-			_, err := Open(cfg, "", Options{})
-			Expect(err).To(MatchError(ErrFormatTooOld))
-			Expect(err.Error()).To(ContainSubstring(storeD))
-			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
-			Expect(err.Error()).To(ContainSubstring("knowledge index"))
-		})
-
-		It("is refused by a writer before the schema can half-migrate", func() {
-			_, err := OpenWriter(cfg, "", Options{})
-			Expect(err).To(MatchError(ErrFormatTooOld))
-			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
-		})
-
-		// The refusal names a command, so that command has to work against the state
-		// it is named for: a message naming a fix that also refuses is worse than one
-		// naming none.
-		It("is discarded by the command the refusal names, leaving a rebuildable store", func() {
-			// The writer refusing must not leave the advisory lock held, or the fix it
-			// names would fail with ErrLocked instead of running.
-			removed, err := Destroy(cfg, "")
-			Expect(err).ToNot(HaveOccurred())
-			Expect(removed).To(Equal(dbPath))
-
-			exists, err := StoreExists(cfg, "")
-			Expect(err).ToNot(HaveOccurred())
-			Expect(exists).To(BeFalse())
-
-			Expect(buildIndex()).To(Equal(2))
-
-			r, err := Open(cfg, "", Options{})
-			Expect(err).ToNot(HaveOccurred())
-			defer r.Close()
-
-			res, err := r.Search(ctx, "backpressure buffer", 5)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(res.Status).To(Equal(StatusOK))
-			Expect(res.Hits).ToNot(BeEmpty())
-		})
-	})
-
 	Describe("an index whose manifest was cleared but whose table shape is from another format", func() {
 		BeforeEach(func() {
 			writeForeignShapeStore(storeD)
@@ -181,8 +134,11 @@ var _ = Describe("Index format gate", func() {
 		It("is refused by a reader, naming what is missing", func() {
 			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
+			Expect(err.Error()).To(ContainSubstring(storeD))
 			Expect(err.Error()).To(ContainSubstring("chunks_fts_exact"))
 			Expect(err.Error()).To(ContainSubstring("chunks_vocab"))
+			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
+			Expect(err.Error()).To(ContainSubstring("knowledge index"))
 		})
 
 		// A writer could create the missing table, but the rows already in chunks would
@@ -190,6 +146,33 @@ var _ = Describe("Index format gate", func() {
 		It("is refused by a writer rather than repaired underneath the existing rows", func() {
 			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
+			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
+		})
+
+		// The refusal names a command, so that command has to work against the state
+		// it is named for: a message naming a fix that also refuses is worse than one
+		// naming none.
+		It("is discarded by the command the refusal names, leaving a rebuildable store", func() {
+			// The writer refusing must not leave the advisory lock held, or the fix it
+			// names would fail with ErrLocked instead of running.
+			removed, err := Destroy(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(removed).To(Equal(dbPath))
+
+			exists, err := StoreExists(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(exists).To(BeFalse())
+
+			Expect(buildIndex()).To(Equal(2))
+
+			r, err := Open(cfg, "", Options{})
+			Expect(err).ToNot(HaveOccurred())
+			defer r.Close()
+
+			res, err := r.Search(ctx, "backpressure buffer", 5)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.Status).To(Equal(StatusOK))
+			Expect(res.Hits).ToNot(BeEmpty())
 		})
 	})
 

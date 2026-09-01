@@ -1960,7 +1960,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 		} else {
 			meta := runstate.MetaRecord{
-				Version:     runstate.Version,
 				RunID:       sessionID,
 				Created:     time.Now(),
 				Fingerprint: fp,
@@ -1996,7 +1995,6 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 			id := a2a.NewID()
 			meta := runstate.MetaRecord{
-				Version:     runstate.Version,
 				RunID:       id,
 				Created:     time.Now(),
 				Fingerprint: fp,

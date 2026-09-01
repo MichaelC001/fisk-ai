@@ -85,6 +85,14 @@ func (s *FakeSessionStore) Create(ctx context.Context, id string, meta runstate.
 		return nil, err
 	}
 
+	// meta is this store's copy, so stamping the version leaves the caller's struct
+	// alone. A fake that skipped this would journal a run at version 0 and fail the
+	// resume it exists to exercise.
+	err = runstate.PrepareMeta(&meta)
+	if err != nil {
+		return nil, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
