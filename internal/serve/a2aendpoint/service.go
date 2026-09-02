@@ -5,23 +5,21 @@
 package a2aendpoint
 
 import (
-	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
-	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/serve"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
-// A tool service answers its callers directly and produces no work, and it names its
-// subjects and its limits on a startup banner.
+// A tool service answers its callers directly and produces no work, it stops answering
+// when its registration is dropped, and it names its subjects and its limits on a
+// startup banner.
 var (
 	_ serve.Service           = (*Service)(nil)
+	_ serve.FaultingEndpoint  = (*Service)(nil)
 	_ serve.DescribedEndpoint = (*Service)(nil)
 )
 
@@ -35,50 +33,34 @@ type Service struct {
 	describe []serve.DescLine
 }
 
-// newService builds the tool-serving endpoint described by expose.agent.a2a.serve_tools
-// over the transport its siblings share.
-//
-// The tool set is loaded before anything is registered, so a configuration whose
-// filters leave nothing is refused rather than served as an agent with no tools.
-func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (*Service, error) {
-	// Loaded on a background context: the process installs its signal handling after
-	// the endpoints are built, so a context passed in here is one nothing would cancel.
-	// Introspecting the application carries a bound of its own.
-	tools, err := fisktool.ServedTools(context.Background(), cfg)
-	if err != nil {
-		return nil, err
-	}
-	if len(tools) == 0 {
-		return nil, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
-	}
-
+// newService builds the tool-serving endpoint Options.Tools describes over the
+// transport its siblings share.
+func newService(held *sharedTransport, opts Options) (*Service, error) {
 	// Resolved here rather than left to a2a.NewServer, which fills its own defaults in
 	// and never reports them: the banner names the limits a served call will actually
 	// get, and printing zero for a worker that in fact stops every call at thirty
 	// seconds is worse than printing nothing.
-	concurrency := cfg.A2AMaxConcurrentTools()
+	concurrency := opts.Tools.Concurrency
 	if concurrency <= 0 {
 		concurrency = a2a.DefaultConcurrency()
 	}
 
-	callTimeout := cfg.A2AToolTimeout()
+	callTimeout := opts.Tools.CallTimeout
 	if callTimeout <= 0 {
 		callTimeout = a2a.DefaultCallTimeout
 	}
 
 	svc := &Service{
 		held:     held,
-		withheld: builtin.WithheldFromA2A(cfg),
-		describe: describeService(transportLines(held.transport, cfg.Identity), concurrency, callTimeout),
+		withheld: opts.Tools.WithheldBuiltins,
+		describe: describeService(transportLines(held.transport, opts.Identity), concurrency, callTimeout),
 	}
 
-	svc.srv, err = a2a.NewServer(held.transport, toolkit.Tools(tools), a2a.ServerOptions{
-		Identity: cfg.Identity,
-		Version:  opts.Version,
-		// Only where this identity answers prompts. Serving tools runs no model, so an
-		// identity that only does that would be publishing one it never calls.
-		Model:       promptModel(cfg),
-		ConfirmTags: cfg.ConfirmTags(),
+	srv, err := a2a.NewServer(held.transport, opts.Tools.Tools, a2a.ServerOptions{
+		Identity:    opts.Identity,
+		Version:     opts.Version,
+		Model:       promptModel(opts),
+		ConfirmTags: opts.Tools.ConfirmTags,
 		Concurrency: concurrency,
 		CallTimeout: callTimeout,
 		Logger:      opts.Logger,
@@ -87,6 +69,8 @@ func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 	if err != nil {
 		return nil, err
 	}
+
+	svc.srv = srv
 
 	svc.exposed = svc.srv.ExposedTools()
 	if len(svc.exposed) == 0 {
@@ -107,30 +91,33 @@ func (s *Service) Name() string { return "a2a" }
 // being paths of the one service.
 //
 // A call already in flight is not covered. The a2a server answers on a goroutine of its
-// own, bounded by expose.agent.a2a.tool_timeout and nothing else, so a command it
-// started keeps running with nowhere to reply to.
+// own, which only ToolOptions.CallTimeout stops, so a command it started goes on running
+// with nowhere to reply to.
 func (s *Service) Close() error { return s.held.Close() }
 
 // Faults reports that this identity has stopped answering for a reason nobody asked
 // for. Both endpoints share one transport, so both report the same stop and whichever
 // the server reads first ends it.
-func (s *Service) Faults() <-chan error { return s.held.faults }
+func (s *Service) Faults() <-chan error { return s.held.faults.Faults() }
 
-// ExposedTools are the tools this endpoint serves, in card order.
-func (s *Service) ExposedTools() []string { return s.exposed }
+// ExposedTools are the tools this endpoint serves, in card order. It answers with a copy,
+// so a caller that sorts or truncates the answer leaves the service's own set alone.
+func (s *Service) ExposedTools() []string { return slices.Clone(s.exposed) }
 
-// WithheldBuiltins names the built-in tools this configuration enables that are not
-// served, which is all of them: no built-in declares a2a exposure. An operator who
-// enabled some would otherwise see a served set that silently excludes them.
-func (s *Service) WithheldBuiltins() []string { return s.withheld }
+// WithheldBuiltins names the built-in tools the program enabled that are not served,
+// which is all of them: no built-in declares a2a exposure. An operator who enabled some
+// would otherwise see a served set that silently excludes them. The list arrives on
+// ToolOptions.WithheldBuiltins, and this answers with a copy of it.
+func (s *Service) WithheldBuiltins() []string { return slices.Clone(s.withheld) }
 
 // Heading names this endpoint on a startup banner. The prompt channel under the same
 // identity prints a section of its own.
 func (s *Service) Heading() string { return "Serving tools over a2a" }
 
 // Describe returns the subjects this endpoint is reached on and the limits a served
-// call gets, for display.
-func (s *Service) Describe() []serve.DescLine { return s.describe }
+// call gets, for display. It answers with a copy, so a caller that reorders the lines it
+// prints leaves the service's own set alone.
+func (s *Service) Describe() []serve.DescLine { return slices.Clone(s.describe) }
 
 // describeService returns the banner lines for a service. addr names the addresses it
 // answers on, concurrency is how many calls it runs at once, and callTimeout stops one
