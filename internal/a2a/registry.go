@@ -91,6 +91,11 @@ func RegisterTransport(name string, factory Factory) {
 // Transports returns the names of every transport linked into this build, sorted.
 // A caller can show it so an operator sees which transports are available without
 // triggering an unknown-transport error.
+//
+// It is exported for a transport author, whose init registers a name: a test in the
+// transport's own package asserts that importing the package registered that name,
+// which is what internal/a2a/nats does. NewTransport lists the same names in its
+// unknown-transport error.
 func Transports() []string {
 	registryMu.Lock()
 	defer registryMu.Unlock()

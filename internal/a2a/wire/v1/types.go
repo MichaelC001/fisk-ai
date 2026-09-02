@@ -82,23 +82,45 @@ type Usage struct {
 // Budget bounds what an agent may use answering a request. The receiver's local
 // configuration is the ceiling; a request may only lower a limit.
 //
-// The two fields have the scopes the receiver's own configuration gives them, so what a
-// request lowers is those bounds rather than bounds of its own. MaxIterations is per
-// turn. MaxTokens is cumulative over the conversation, which means a request continuing
-// one can be refused at once for tokens earlier turns processed, and lowering it below
-// what a conversation has already used ends that conversation.
+// MaxTokens and MaxIterations have the scopes the receiver's own configuration gives
+// them, so what a request lowers is those bounds rather than bounds of its own.
+// MaxIterations is per turn. MaxTokens is cumulative over the conversation, which means
+// a request continuing one can be refused at once for tokens earlier turns processed,
+// and lowering it below what a conversation has already used ends that conversation.
 type Budget struct {
-	MaxTokens     int64  `json:"max_tokens,omitempty"`
-	MaxIterations int64  `json:"max_iterations,omitempty"`
-	CallTimeout   string `json:"call_timeout,omitempty"`
+	// MaxTokens is the cumulative token limit the request asks for. The receiver
+	// takes it only when its own configured limit is unset or larger: zero leaves
+	// that configured limit alone, and so does a value above it.
+	MaxTokens int64 `json:"max_tokens,omitempty"`
+	// MaxIterations is the per-turn iteration limit the request asks for, and the
+	// receiver clamps it the same way as MaxTokens.
+	MaxIterations int64 `json:"max_iterations,omitempty"`
+	// CallTimeout is how long the receiver may spend on one model call, as a Go
+	// duration string such as "60s". The serving side here drops it: the work item a
+	// channel builds carries MaxTokens and MaxIterations and has nowhere to put a
+	// duration, so a run uses the receiver's own configured call timeout.
+	CallTimeout string `json:"call_timeout,omitempty"`
 }
 
 // ExecResult is optional command metadata attached to a tool result when the
 // tool was a shell command. It is absent for non-shell tools.
+//
+// The agent importing a remote tool acts on whether the block is there: it rebuilds a
+// reply carrying one into the CommandResult envelope a local command tool would have
+// produced, and hands on an in-process tool's output unchanged, because that output is
+// already the JSON the caller asked for. The serving agent sets an exit code on the
+// call's span for every command that ran, so a command exiting zero is not taken for a
+// built-in that ran none.
 type ExecResult struct {
-	Command   string `json:"command,omitempty"`
-	ExitCode  int    `json:"exit_code,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	// Command is the command and its arguments, without the binary path.
+	Command string `json:"command,omitempty"`
+	// ExitCode is the command's exit status. It carries omitempty, so a zero exit
+	// leaves the field out of the JSON; that a command ran at all is what the
+	// presence of this block says.
+	ExitCode int `json:"exit_code,omitempty"`
+	// Truncated is true when the agent that ran the command capped its output, so
+	// the output in the reply is not everything the command wrote.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // ToolResult is the outcome of a tool invocation. It is shared by the streamed

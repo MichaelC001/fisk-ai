@@ -64,7 +64,8 @@ var (
 // a receiver's spans join this one's trace. It is empty when nothing is tracing.
 //
 // wire.StampRequest is the same fill given a traceparent, for a caller holding no
-// context.
+// context. Both write into h in place: h stays the caller's, and neither holds a
+// reference to it once the call returns.
 func StampRequest(ctx context.Context, h *wire.Header, sender string, recipient string) {
 	wire.StampRequest(h, sender, recipient, telemetry.TraceContextFrom(ctx).TraceParent)
 }

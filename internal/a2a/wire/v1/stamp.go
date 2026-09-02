@@ -20,6 +20,9 @@ import (
 // A recipient names who the message is for, and an empty one leaves whatever the header already
 // carried. The traceparent is the W3C trace context a receiver joins its spans to, and an empty
 // one leaves the field off.
+//
+// It writes into h in place and leaves Protocol, Parent and MustUnderstand as the caller set
+// them. h stays the caller's, and this package holds no reference to it once the call returns.
 func StampRequest(h *Header, sender string, recipient string, traceparent string) {
 	id := NewID()
 
@@ -58,6 +61,12 @@ func StampRequest(h *Header, sender string, recipient string, traceparent string
 //
 // Sequence is left at zero, which is what a single reply carries. A message
 // belonging to a reply set is numbered by the ReplyStream that sends it.
+//
+// It writes into h in place and only reads req. Both headers stay the caller's,
+// and this package holds a reference to neither once the call returns. It leaves
+// Protocol, Parent, MustUnderstand and TraceParent on h as the caller set them,
+// and it sets Recipient only when the request names a sender, so a recipient the
+// caller already put on h survives a request that does not.
 func StampReply(h *Header, req *Header, sender string) {
 	h.ID = NewID()
 	h.Request = req.Request

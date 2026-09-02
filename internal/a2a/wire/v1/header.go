@@ -47,6 +47,11 @@ const MaxRequestIDBytes = 64
 // the two answer different questions. A request id correlates a reply set, and on the
 // task path it also becomes part of the address the process running that task
 // listens on, so a caller choosing those bytes freely would shape a subscription.
+//
+// It is exported for a transport author, who checks an id before it becomes part of an
+// address: the NATS binding calls it before building the subject a cancel or an answer
+// is sent or listened on. The client calls it too, on the request id a caller handed
+// Cancel or Answer, so a bad id is refused where that caller can see it.
 func ValidRequestID(id string) bool {
 	if len(id) > MaxRequestIDBytes {
 		return false
