@@ -255,7 +255,7 @@ func New(opts Options) (*Channel, error) {
 		return nil, err
 	}
 
-	validator, err := a2a.NewValidator()
+	validator, err := a2a.SharedValidator()
 	if err != nil {
 		return nil, fmt.Errorf("compiling the a2a schemas: %w", err)
 	}

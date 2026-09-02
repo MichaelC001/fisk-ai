@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"regexp"
 	"runtime"
 	"time"
@@ -90,12 +89,20 @@ type ServerOptions struct {
 	// because it is protocol timing an operator has nothing to decide with, and a test
 	// that would otherwise wait a real interval needs it short.
 	KeepaliveInterval time.Duration
-	// LogOutput is the sink for the default Logger; nil means os.Stderr. It is
-	// ignored when Logger is supplied.
+	// LogOutput is the sink for the default Logger. It is ignored when Logger is
+	// supplied.
 	LogOutput io.Writer
-	// Logger receives structured progress; nil builds a text logger over
-	// LogOutput.
+	// Logger receives structured progress. Nil builds a text logger over LogOutput,
+	// and with LogOutput nil as well the server logs nowhere, since a library that
+	// reached for a default logger would write to an embedder's stderr uninvited.
 	Logger *slog.Logger
+
+	// Validator holds every message this server reads to the embedded schemas. A
+	// Validator compiles around three dozen JSON schemas, so a program hosting several
+	// agents builds one with NewValidator and passes it to each server and client. Nil
+	// uses a package-level Validator built on first use and shared with every other
+	// server and client that supplied none.
+	Validator *Validator
 	// Telemetry, when non-nil, receives a span per served call and is put on the
 	// context a tool runs under, so a served tool that opens spans of its own is not
 	// silent.
@@ -130,11 +137,12 @@ func (o *ServerOptions) applyDefaults() {
 	if o.KeepaliveInterval <= 0 {
 		o.KeepaliveInterval = KeepaliveInterval
 	}
-	if o.LogOutput == nil {
-		o.LogOutput = os.Stderr
-	}
 	if o.Logger == nil {
-		o.Logger = slog.New(slog.NewTextHandler(o.LogOutput, nil))
+		if o.LogOutput == nil {
+			o.Logger = slog.New(slog.DiscardHandler)
+		} else {
+			o.Logger = slog.New(slog.NewTextHandler(o.LogOutput, nil))
+		}
 	}
 }
 
@@ -143,6 +151,9 @@ func (o *ServerOptions) applyDefaults() {
 // producer side of the protocol. It owns all message validation and the
 // concurrency bound, refusing a call it has no slot for; the Transport only carries
 // bytes and keeps the discovery and tool paths separate.
+//
+// It is safe for concurrent use: its fields are set at construction and read after
+// it, which is what lets one transport dispatch calls to it from several goroutines.
 type Server struct {
 	opts      ServerOptions
 	identity  string
@@ -174,16 +185,20 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 		return nil, fmt.Errorf("%w: serving tools needs a transport that carries a reply set", ErrStreamUnsupported)
 	}
 
-	validator, err := NewValidator()
-	if err != nil {
-		return nil, fmt.Errorf("building message validator: %w", err)
+	if opts.Validator == nil {
+		validator, err := sharedValidator()
+		if err != nil {
+			return nil, fmt.Errorf("building message validator: %w", err)
+		}
+
+		opts.Validator = validator
 	}
 
 	s := &Server{
 		opts:      opts,
 		identity:  opts.Identity,
 		byName:    make(map[string]toolkit.Tool, len(tools)),
-		validator: validator,
+		validator: opts.Validator,
 		sem:       make(chan struct{}, opts.Concurrency),
 		transport: transport,
 	}
@@ -191,7 +206,7 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 	exposed := s.selectExposed(tools)
 	s.card = buildCard(opts, exposed)
 
-	err = transport.Serve(OpDiscovery, s.handleDiscovery)
+	err := transport.Serve(OpDiscovery, s.handleDiscovery)
 	if err != nil {
 		return nil, fmt.Errorf("registering discovery handler: %w", err)
 	}

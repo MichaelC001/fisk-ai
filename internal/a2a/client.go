@@ -19,6 +19,9 @@ import (
 // protocol, used to import remote tools. All message validation (outgoing request,
 // incoming reply size cap and schema) lives here in the engine; the Transport only
 // moves bytes.
+//
+// It is safe for concurrent use: its fields are set at construction and read after
+// it, and the wire log guards its writer with a mutex.
 type Client struct {
 	transport Transport
 	replySet  ReplySetTransport
@@ -53,6 +56,20 @@ func WithIdleTimeout(d time.Duration) ClientOption {
 	}
 }
 
+// WithValidator supplies the Validator the client holds every message it sends and
+// reads to. A Validator compiles around three dozen JSON schemas, so a program
+// building several clients and servers builds one with NewValidator and passes it to
+// each. A nil validator, or none, uses a package-level Validator built on first use
+// and shared with every other client and server that supplied none.
+func WithValidator(v *Validator) ClientOption {
+	return func(c *Client) {
+		if v == nil {
+			return
+		}
+		c.validator = v
+	}
+}
+
 // NewClient wraps a Transport as a Client. sender is this agent's identity, set as
 // the Header.Sender on outgoing requests. The Transport is borrowed: the caller
 // established it (and the Provider behind it) and closes them.
@@ -61,11 +78,6 @@ func WithIdleTimeout(d time.Duration) ClientOption {
 // that cannot carry a reply set knows it before a call is sent rather than one request
 // at a time.
 func NewClient(transport Transport, sender string, opts ...ClientOption) (*Client, error) {
-	validator, err := NewValidator()
-	if err != nil {
-		return nil, fmt.Errorf("building message validator: %w", err)
-	}
-
 	replySet, _ := transport.(ReplySetTransport)
 	stream, _ := transport.(StreamingTransport)
 
@@ -74,12 +86,22 @@ func NewClient(transport Transport, sender string, opts ...ClientOption) (*Clien
 		replySet:  replySet,
 		stream:    stream,
 		sender:    sender,
-		validator: validator,
 		idle:      DefaultIdleTimeout,
 	}
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	// After the options, since WithValidator is how a caller supplies one and the
+	// package-level set is compiled only for a client that did not.
+	if c.validator == nil {
+		validator, err := sharedValidator()
+		if err != nil {
+			return nil, fmt.Errorf("building message validator: %w", err)
+		}
+
+		c.validator = validator
 	}
 
 	return c, nil

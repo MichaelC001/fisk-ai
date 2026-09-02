@@ -93,7 +93,7 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 		return nil, fmt.Errorf("the %q transport carries a single reply, so it cannot answer prompts; remove expose.agent.a2a.prompts or use a binding that streams", cfg.A2ATransport())
 	}
 
-	validator, err := a2a.NewValidator()
+	validator, err := a2a.SharedValidator()
 	if err != nil {
 		return nil, fmt.Errorf("compiling the a2a schemas: %w", err)
 	}

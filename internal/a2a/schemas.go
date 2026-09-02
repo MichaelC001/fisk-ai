@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -153,6 +154,24 @@ func NewValidator() (*Validator, error) {
 
 	return v, nil
 }
+
+// sharedValidator compiles the schema set on first use and returns that same Validator
+// to every later caller. NewClient and NewServer use it when the caller supplied none,
+// so a process hosting several agents compiles the set once rather than once per
+// endpoint. A compile failure is returned to every caller, since the second call
+// repeats the first call's answer rather than recompiling.
+var sharedValidator = sync.OnceValues(NewValidator)
+
+// SharedValidator returns the Validator this package builds for a caller that supplied
+// none, compiling the schema set on the first call and answering with that same one
+// afterwards. A Validator holds compiled schemas and no per-message state, so one
+// serves every client, server and endpoint in a process.
+//
+// It is for a caller that validates bodies itself rather than through a Client or a
+// Server: the prompts channel and the job worker each check what arrives before
+// decoding it, and without this each would compile the set again. A caller wanting a
+// Validator of its own calls NewValidator.
+func SharedValidator() (*Validator, error) { return sharedValidator() }
 
 // Validate checks a raw message body against the schema for its protocol id. It
 // returns ErrUnknownProtocol when the protocol id has no schema.
