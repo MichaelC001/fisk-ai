@@ -86,7 +86,7 @@ var _ = Describe("buildCard", func() {
 
 		card := buildCard(ServerOptions{Identity: "svc", Version: "v1"}, toolsFor(app))
 		Expect(card.Tools).To(HaveLen(1))
-		Expect(card.Tools[0].Behavior).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
+		Expect(card.Tools[0].Behavior.Toolkit()).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
 	})
 
 	// An agent that takes no prompts calls no model, and a card naming one would say

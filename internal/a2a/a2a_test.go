@@ -282,6 +282,25 @@ var _ = Describe("A2A", func() {
 			Expect(block["text"]).To(Equal("hi"))
 		})
 
+		// Without the refusal encoding/json decodes a Block as an ordinary struct whose
+		// one field is unexported: every property goes nowhere, the caller gets a nil
+		// error and an empty Block, and the failure surfaces from MarshalJSON a step
+		// later. A caller storing blocks of its own hits that, and hits it in the
+		// direction that says least about what went wrong.
+		It("Should refuse to decode a block on its own, whatever it is handed", func() {
+			for _, body := range []string{`{"text":"hi"}`, `{}`, `null`, `[]`, `"text"`} {
+				var b Block
+				err := json.Unmarshal([]byte(body), &b)
+				Expect(err).To(MatchError(ErrInvalidMessage), body)
+				Expect(err).To(MatchError(ContainSubstring("decodes only as part of the event")), body)
+			}
+		})
+
+		It("Should refuse a slice of blocks rather than filling it with empty ones", func() {
+			var blocks []Block
+			Expect(json.Unmarshal([]byte(`[{"text":"a"},{"text":"b"}]`), &blocks)).To(MatchError(ErrInvalidMessage))
+		})
+
 		It("Should round-trip every block type", func() {
 			blocks := []Block{
 				NewThinkingBlock("reasoning"),

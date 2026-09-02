@@ -346,6 +346,21 @@ func (b Block) MarshalJSON() ([]byte, error) {
 	return json.Marshal(b.content)
 }
 
+// UnmarshalJSON refuses. A block object carries no name for its own kind, and
+// {"text":"..."} is a valid thinking block as well as a valid text one, so there is
+// nothing here to decide on: Event.UnmarshalJSON reads the kind off the protocol id
+// and is where a block is put back together.
+//
+// It exists to say that at the decode. Without it encoding/json decodes a Block as an
+// ordinary struct, whose one field is unexported, so every property goes to no field
+// and a caller gets a nil error and an empty Block; the failure then surfaces from
+// MarshalJSON, a step later, about a value the caller believes it read. A caller
+// keeping blocks of its own stores the events that carry them, or stores the type
+// beside each block and rebuilds the Event.
+func (b *Block) UnmarshalJSON([]byte) error {
+	return fmt.Errorf("%w: a block decodes only as part of the event whose protocol id names its kind", ErrInvalidMessage)
+}
+
 // unmarshalAs decodes the block as the type its event's id named, or into an
 // UnknownBlock when this build does not name it, so an event from a newer peer still
 // delivers its header, its sequence number and everything else it held.

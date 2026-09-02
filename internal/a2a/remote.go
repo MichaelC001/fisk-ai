@@ -96,6 +96,6 @@ func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteI
 		Schema:      schema,
 		Handler:     handler,
 		Remote:      &functool.RemoteSpec{Agent: agent},
-		Behavior:    desc.Behavior.Resolve(),
+		Behavior:    desc.Behavior.Toolkit().Resolve(),
 	})
 }

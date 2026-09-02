@@ -521,19 +521,115 @@ type ToolDescriptor struct {
 	// carries the neutral declaration rather than the serving agent's own tags, so a
 	// tool that declares its behavior some other way than a command tag is described
 	// the same way. It is the serving agent's unverified claim about its own tools, so
-	// an importer sanitizes it and never republishes it as its own; the toolkit type is
-	// used directly because this wire format has no need to differ from it.
-	Behavior toolkit.Behavior `json:"behavior,omitzero"`
+	// an importer sanitizes it and never republishes it as its own.
+	Behavior ToolBehavior `json:"behavior,omitzero"`
+}
+
+// ToolBehavior is what a serving agent asserts about one of its tools, as it travels
+// in a discovery reply. Every field is a claim the serving agent makes about its own
+// tool and never a guarantee, and a nil field asserts nothing.
+//
+// It is a type of this package rather than toolkit.Behavior, which it is built from and
+// converted back to, because this struct's tags are the JSON of the
+// io.choria.fisk-ai.v1.discovery.reply protocol. With toolkit's type here, renaming a
+// tag there would change the wire format of a versioned protocol, and nothing would
+// report it.
+type ToolBehavior struct {
+	// ReadOnly asserts the call does not modify its environment.
+	ReadOnly *bool `json:"read_only,omitempty"`
+	// Destructive asserts the call may destroy or overwrite existing state, rather
+	// than only adding to it. It is meaningful only when the call is not read-only.
+	Destructive *bool `json:"destructive,omitempty"`
+	// Idempotent asserts that repeating the call with the same arguments has no
+	// further effect. It is meaningful only when the call is not read-only.
+	Idempotent *bool `json:"idempotent,omitempty"`
+	// OpenWorld asserts the call reaches an open set of external entities, the way a
+	// web search does, rather than a closed one the operator configured.
+	OpenWorld *bool `json:"open_world,omitempty"`
+}
+
+// IsZero reports whether the serving agent asserted nothing, so a descriptor carrying
+// no claim omits the property rather than sending an empty object.
+func (b ToolBehavior) IsZero() bool {
+	return b == ToolBehavior{}
+}
+
+// toolBehavior converts a toolkit declaration to the wire shape. A hint outside the
+// three toolkit names travels as no claim, which is what toolkit.Hint reads an
+// unrecognized value as.
+func toolBehavior(b toolkit.Behavior) ToolBehavior {
+	return ToolBehavior{
+		ReadOnly:    wireHint(b.ReadOnly),
+		Destructive: wireHint(b.Destructive),
+		Idempotent:  wireHint(b.Idempotent),
+		OpenWorld:   wireHint(b.OpenWorld),
+	}
+}
+
+// Toolkit converts what a peer claimed back to a toolkit declaration, for an importer
+// building a local tool from a descriptor.
+func (b ToolBehavior) Toolkit() toolkit.Behavior {
+	return toolkit.Behavior{
+		ReadOnly:    toolkitHint(b.ReadOnly),
+		Destructive: toolkitHint(b.Destructive),
+		Idempotent:  toolkitHint(b.Idempotent),
+		OpenWorld:   toolkitHint(b.OpenWorld),
+	}
+}
+
+func wireHint(h toolkit.Hint) *bool {
+	switch h {
+	case toolkit.HintTrue:
+		yes := true
+		return &yes
+	case toolkit.HintFalse:
+		no := false
+		return &no
+	default:
+		return nil
+	}
+}
+
+func toolkitHint(v *bool) toolkit.Hint {
+	switch {
+	case v == nil:
+		return toolkit.HintUnset
+	case *v:
+		return toolkit.HintTrue
+	default:
+		return toolkit.HintFalse
+	}
 }
 
 // AgentCard is an agent's self description: who it is, its version, the model it
 // answers prompts with, and the tools it exposes.
 type AgentCard struct {
-	Name        string           `json:"name"`
-	Version     string           `json:"version"`
-	Description string           `json:"description,omitempty"`
-	Protocols   []string         `json:"protocols,omitempty"`
-	Tools       []ToolDescriptor `json:"tools,omitempty"`
+	// Name is the agent's identity, the same string a caller addresses it by. A card
+	// naming an identity other than the one it answered on is a peer describing
+	// somebody else, which a caller has no way to check and should not act on.
+	Name string `json:"name"`
+
+	// Version is the serving agent's own version, which a caller shows an operator
+	// rather than deciding on: what a peer can do is in Protocols and Tools.
+	Version string `json:"version"`
+
+	// Description is what the agent is for, in the operator's own words, for display
+	// beside Name. It is empty on an agent whose operator wrote none.
+	Description string `json:"description,omitempty"`
+
+	// Protocols are the message namespaces this agent speaks, as
+	// ProtocolNamespace-shaped strings. It is how a caller holding more than one
+	// version picks a namespace both ends hold, since a message id outside a
+	// receiver's namespace is rejected rather than carried.
+	//
+	// Empty means the agent did not say, which is an older peer rather than one that
+	// speaks nothing: a caller reads it as the namespace the card arrived under.
+	Protocols []string `json:"protocols,omitempty"`
+
+	// Tools are the tools this agent exposes, in the order it chose, each carrying
+	// enough to import it and later invoke it with a ToolRequest. A tool absent from
+	// the card is not callable: the serving agent refuses a name it did not publish.
+	Tools []ToolDescriptor `json:"tools,omitempty"`
 
 	// Model is the model this agent answers a prompt with, as its own configuration
 	// names it.

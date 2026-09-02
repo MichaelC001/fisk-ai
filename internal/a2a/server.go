@@ -573,7 +573,7 @@ func buildCard(opts ServerOptions, tools []toolkit.Tool) AgentCard {
 			Name:        t.Name(),
 			Description: t.ModelDescription(),
 			InputSchema: marshalSchema(t.InputSchema()),
-			Behavior:    toolkit.BehaviorOf(t),
+			Behavior:    toolBehavior(toolkit.BehaviorOf(t)),
 		})
 	}
 

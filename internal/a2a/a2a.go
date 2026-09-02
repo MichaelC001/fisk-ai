@@ -18,9 +18,10 @@
 // "io.choria.fisk-ai.v1.request.prompt". One id names one shape, so nothing in a body says
 // what kind of message it is: a prompt, an answer, a resume and a read are four ids, and so
 // are the ten kinds of streamed block and the eleven questions and answers of the elicit
-// family. The matching JSON schemas live under internal/a2a/schemas/io.choria.fisk-ai.v1,
-// one per id, each stating what its own shape requires and refusing by name the fields
-// belonging to its siblings.
+// family. The matching JSON schemas are embedded from internal/a2a/schemas/v1 and
+// published under https://choria.io/schemas/io.choria.fisk-ai.v1, one per id, each
+// stating what its own shape requires and refusing by name the fields belonging to its
+// siblings.
 //
 // A receiver ignores properties it does not recognize rather than rejecting the
 // message carrying them, so a peer built against an older copy of the schemas
@@ -35,6 +36,13 @@
 // An unrecognized protocol id is rejected, being the one thing a receiver cannot hold
 // and pass along: it decides what the message means, so a receiver that ignored it would
 // not know what it was ignoring.
+//
+// A later namespace is rejected the same way, id by id: a v1 receiver answers no
+// io.choria.fisk-ai.v2 message, so a sender holding both sends v1 to reach it.
+// AgentCard.Protocols is what a caller picks from, listing the namespaces the serving
+// agent speaks, and a caller holding more than one sends in the newest both ends list. A
+// card listing none is an older peer, and the namespace its card arrived under is the one
+// it speaks.
 //
 // Streamed blocks are the exception, and they are why every kind of block has an id of
 // its own under io.choria.fisk-ai.v1.event. An id in that family names a block whatever
