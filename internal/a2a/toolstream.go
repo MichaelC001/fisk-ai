@@ -68,13 +68,13 @@ func (t *toolSet) reply(ctx context.Context) (*ToolReply, error) {
 			return m, nil
 
 		default:
-			return nil, fmt.Errorf("%w: %q does not belong in a tool reply set", ErrProtocolMismatch, protocolOf(msg))
+			return nil, fmt.Errorf("%w: %q does not belong in a tool reply set", ErrProtocolMismatch, msg.MessageHeader().Protocol)
 		}
 	}
 }
 
 // next reads and decodes one message under the idle bound.
-func (t *toolSet) next(ctx context.Context) (any, error) {
+func (t *toolSet) next(ctx context.Context) (Message, error) {
 	readCtx, cancel := context.WithTimeout(ctx, t.idle)
 	defer cancel()
 
@@ -100,15 +100,4 @@ func (t *toolSet) next(ctx context.Context) (any, error) {
 	}
 
 	return Decode(body)
-}
-
-// protocolOf names the protocol id of a decoded message, for an error that has to say
-// what arrived. It answers empty for a message carrying no header.
-func protocolOf(msg any) string {
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return ""
-	}
-
-	return hdr.Protocol
 }

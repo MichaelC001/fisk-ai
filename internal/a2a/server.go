@@ -524,7 +524,7 @@ func servedOutcome(out *ToolResult) telemetry.ServedToolOutcome {
 // inbound size-caps, validates and decodes a request body and confirms it is the
 // protocol the receiving path is contracted to carry. The size cap runs first,
 // before any decode or allocation.
-func (s *Server) inbound(body []byte, want string) (any, error) {
+func (s *Server) inbound(body []byte, want string) (Message, error) {
 	if len(body) > MaxMessageSize {
 		return nil, fmt.Errorf("request exceeds %d bytes", MaxMessageSize)
 	}
@@ -534,7 +534,7 @@ func (s *Server) inbound(body []byte, want string) (any, error) {
 		return nil, fmt.Errorf("invalid request: %w", err)
 	}
 
-	return ExpectProtocol(body, want)
+	return ExpectProtocol[Message](body, want)
 }
 
 // respond marshals a reply and sends it through the request's Replier. The reply

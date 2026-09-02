@@ -43,9 +43,24 @@ var _ = Describe("ExpectProtocol", func() {
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 
-		msg, err := ExpectProtocol(data, ToolRequestProtocol)
+		msg, err := ExpectProtocol[*ToolRequest](data, ToolRequestProtocol)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(msg).To(BeAssignableToTypeOf(&ToolRequest{}))
+		Expect(msg.Name).To(Equal("ping"))
+	})
+
+	// The type argument names what the id decodes into, so a call naming another one is
+	// written wrong. It is refused rather than returning a zero value the caller would
+	// read as a message that arrived.
+	It("Should reject a type argument the wanted protocol does not decode into", func() {
+		req := NewToolRequest("ping", nil)
+		StampRequest(context.Background(), &req.Header, "me", "you")
+		data, err := json.Marshal(req)
+		Expect(err).NotTo(HaveOccurred())
+
+		msg, err := ExpectProtocol[*Cancel](data, ToolRequestProtocol)
+		Expect(err).To(MatchError(ErrProtocolMismatch))
+		Expect(err).To(MatchError(ContainSubstring("decodes into *a2a.ToolRequest, not *a2a.Cancel")))
+		Expect(msg).To(BeNil())
 	})
 
 	It("Should reject a message whose protocol is not the one the path carries", func() {
@@ -54,12 +69,12 @@ var _ = Describe("ExpectProtocol", func() {
 		data, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = ExpectProtocol(data, ToolRequestProtocol)
+		_, err = ExpectProtocol[*ToolRequest](data, ToolRequestProtocol)
 		Expect(err).To(MatchError(ErrProtocolMismatch))
 	})
 
 	It("Should reject an undecodable body", func() {
-		_, err := ExpectProtocol([]byte(`{"protocol":"nope"}`), ToolRequestProtocol)
+		_, err := ExpectProtocol[*ToolRequest]([]byte(`{"protocol":"nope"}`), ToolRequestProtocol)
 		Expect(err).To(MatchError(ErrProtocolMismatch))
 	})
 })

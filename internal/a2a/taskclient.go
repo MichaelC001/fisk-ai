@@ -94,12 +94,7 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 		return nil, fmt.Errorf("invalid answer reply: %w", err)
 	}
 
-	decoded, err := ExpectProtocol(raw, AckProtocol)
-	if err != nil {
-		return nil, err
-	}
-
-	return decoded.(*Ack), nil
+	return ExpectProtocol[*Ack](raw, AckProtocol)
 }
 
 // RunTask sends a request and drives the reply set to its end, rendering what arrives

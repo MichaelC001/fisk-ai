@@ -282,6 +282,18 @@ var _ = Describe("A2A", func() {
 			Expect(block["text"]).To(Equal("hi"))
 		})
 
+		// A caller reads the id off what Decode returns and switches on it, or switches
+		// on the concrete type. The header is what makes the first possible, and it is
+		// the same one carrying the correlation tag the caller needs anyway.
+		It("Should hand back a message whose header names its own protocol", func() {
+			body := eventOf(NewTextBlock("hi"))
+
+			msg, err := Decode(body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(msg.MessageHeader().Protocol).To(Equal(EventTextProtocol))
+			Expect(msg).To(BeAssignableToTypeOf(&Event{}))
+		})
+
 		// Without the refusal encoding/json decodes a Block as an ordinary struct whose
 		// one field is unexported: every property goes nowhere, the caller gets a nil
 		// error and an empty Block, and the failure surfaces from MarshalJSON a step

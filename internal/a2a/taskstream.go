@@ -184,11 +184,11 @@ func (t *TaskStream) read(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// Next returns the next message of the set, one of *Ack, *Event, *Result or
-// *ErrorMessage, and io.EOF once the terminal message has been returned. A terminal
-// failure arrives as an *ErrorMessage value rather than as the error, so the error
-// return means the set could not be read at all.
-func (t *TaskStream) Next(ctx context.Context) (any, error) {
+// Next returns the next message of the set, one of *Ack, *Event, *ElicitRequest,
+// *Result or *ErrorMessage, and io.EOF once the terminal message has been returned. A
+// terminal failure arrives as an *ErrorMessage value rather than as the error, so the
+// error return means the set could not be read at all.
+func (t *TaskStream) Next(ctx context.Context) (Message, error) {
 	if t.done {
 		return nil, io.EOF
 	}
@@ -214,12 +214,7 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 		return nil, err
 	}
 
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return nil, fmt.Errorf("%w: message carries no header", ErrProtocolMismatch)
-	}
-
-	t.countGap(hdr.Sequence)
+	t.countGap(msg.MessageHeader().Sequence)
 
 	switch m := msg.(type) {
 	case *Ack, *Event, *ElicitRequest:
@@ -228,7 +223,7 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 		t.done = true
 		return m, nil
 	default:
-		return nil, fmt.Errorf("%w: %q does not belong in a reply set", ErrProtocolMismatch, hdr.Protocol)
+		return nil, fmt.Errorf("%w: %q does not belong in a reply set", ErrProtocolMismatch, msg.MessageHeader().Protocol)
 	}
 }
 
@@ -334,10 +329,5 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 		return nil, fmt.Errorf("invalid cancel reply: %w", err)
 	}
 
-	decoded, err := ExpectProtocol(reply, AckProtocol)
-	if err != nil {
-		return nil, err
-	}
-
-	return decoded.(*Ack), nil
+	return ExpectProtocol[*Ack](reply, AckProtocol)
 }

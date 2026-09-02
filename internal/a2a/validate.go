@@ -53,26 +53,31 @@ var (
 const MaxMessageSize = 768 * 1024
 
 // ExpectProtocol decodes a raw body, confirms its protocol id is the one the
-// receiving path is contracted to carry, and returns the decoded message. A
+// receiving path is contracted to carry, and returns the decoded message as T. A
 // mismatch (a tool request arriving where a discovery request is expected, a
 // malformed body) is reported as an error so the caller can fail closed rather
 // than guess; this is the per-path type contract, not an inference of meaning from
 // the transport.
-func ExpectProtocol(data []byte, want string) (any, error) {
+//
+// T is the type the wanted id decodes into, e.g.
+// ExpectProtocol[*Cancel](body, CancelProtocol). An id names one shape, so the pairing
+// is fixed, and naming T here is what saves every caller a type assertion whose failure
+// branch cannot run. A T that is not the wanted id's type is reported as a mismatch, on
+// the same terms as a body carrying the wrong id.
+func ExpectProtocol[T Message](data []byte, want string) (T, error) {
+	var zero T
+
 	msg, err := Decode(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrProtocolMismatch, err)
+		return zero, fmt.Errorf("%w: %w", ErrProtocolMismatch, err)
 	}
 
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return nil, fmt.Errorf("%w: message carries no header", ErrProtocolMismatch)
-	}
-	if hdr.Protocol != want {
-		return nil, fmt.Errorf("%w: got %q, want %q", ErrProtocolMismatch, hdr.Protocol, want)
+	got := msg.MessageHeader().Protocol
+	if got != want {
+		return zero, fmt.Errorf("%w: got %q, want %q", ErrProtocolMismatch, got, want)
 	}
 
-	return msg, nil
+	return narrow[T](msg, got)
 }
 
 // ExpectOneProtocol is ExpectProtocol for a path contracted to carry any of several
@@ -82,53 +87,35 @@ func ExpectProtocol(data []byte, want string) (any, error) {
 // A path takes the ids it can act on rather than a prefix of the family they sit in. The
 // two halves of the elicit family share a prefix and travel in opposite directions, so a
 // prefix would admit a question on the subject a worker reads answers from.
-func ExpectOneProtocol(data []byte, want []string) (any, error) {
+//
+// Every id in want decodes into T, which is what makes a family askable as a set: the
+// six answers are one ElicitReply and the four requests are one Request.
+func ExpectOneProtocol[T Message](data []byte, want []string) (T, error) {
+	var zero T
+
 	msg, err := Decode(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrProtocolMismatch, err)
+		return zero, fmt.Errorf("%w: %w", ErrProtocolMismatch, err)
 	}
 
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return nil, fmt.Errorf("%w: message carries no header", ErrProtocolMismatch)
+	got := msg.MessageHeader().Protocol
+	if !slices.Contains(want, got) {
+		return zero, fmt.Errorf("%w: got %q, want one of %s", ErrProtocolMismatch, got, strings.Join(want, ", "))
 	}
 
-	if !slices.Contains(want, hdr.Protocol) {
-		return nil, fmt.Errorf("%w: got %q, want one of %s", ErrProtocolMismatch, hdr.Protocol, strings.Join(want, ", "))
-	}
-
-	return msg, nil
+	return narrow[T](msg, got)
 }
 
-// headerOf returns the embedded Header of any decoded a2a message, or nil if the
-// value is not one of the known message types.
-func headerOf(msg any) *Header {
-	switch m := msg.(type) {
-	case *Request:
-		return &m.Header
-	case *Event:
-		return &m.Header
-	case *Result:
-		return &m.Header
-	case *ErrorMessage:
-		return &m.Header
-	case *Cancel:
-		return &m.Header
-	case *Ack:
-		return &m.Header
-	case *ToolRequest:
-		return &m.Header
-	case *ToolReply:
-		return &m.Header
-	case *DiscoveryRequest:
-		return &m.Header
-	case *DiscoveryReply:
-		return &m.Header
-	case *ElicitRequest:
-		return &m.Header
-	case *ElicitReply:
-		return &m.Header
-	default:
-		return nil
+// narrow is the assertion the two Expect functions share. It fails where the caller
+// named a T the wanted id does not decode into, which is a call written wrong rather
+// than a message that arrived wrong; the error says both so whoever reads it can tell
+// which.
+func narrow[T Message](msg Message, protocol string) (T, error) {
+	out, ok := msg.(T)
+	if !ok {
+		var zero T
+		return zero, fmt.Errorf("%w: %q decodes into %T, not %T", ErrProtocolMismatch, protocol, msg, zero)
 	}
+
+	return out, nil
 }

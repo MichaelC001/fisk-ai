@@ -187,15 +187,20 @@ func NewID() string {
 
 // Decode parses a raw message body and returns the concrete message type as a
 // pointer (*Request, *Event, *Result, *ErrorMessage, *Cancel, *Ack, *ToolRequest,
-// *ToolReply, *DiscoveryRequest or *DiscoveryReply), chosen by its protocol id.
-// It returns ErrUnknownProtocol for an unrecognized id.
+// *ToolReply, *DiscoveryRequest, *DiscoveryReply, *ElicitRequest or *ElicitReply),
+// chosen by its protocol id. It returns ErrUnknownProtocol for an unrecognized id.
+//
+// The return is a Message, so a caller switches on the concrete type or reads the id
+// off the header with MessageHeader().Protocol and switches on that. Either dispatch
+// stays open, and the header a caller reaches for the id is the one carrying the
+// correlation tag and the sequence number.
 //
 // An event id names the block it carries, so io.choria.fisk-ai.v1.event.text decodes
 // into an Event holding a TextBlock. An id in that family this build does not name
 // decodes into an Event holding an UnknownBlock, which keeps the peer's own bytes and
 // the message's header: a block is one line of narration, and losing the message that
 // held it costs more than the line is worth.
-func Decode(data []byte) (any, error) {
+func Decode(data []byte) (Message, error) {
 	var probe struct {
 		Protocol string `json:"protocol"`
 	}
@@ -270,19 +275,8 @@ func DecodeTerminal(data []byte) (*Result, error) {
 	case *ErrorMessage:
 		return nil, m
 	default:
-		return nil, fmt.Errorf("%w: %q is not a terminal message", ErrProtocolMismatch, headerProtocol(msg))
+		return nil, fmt.Errorf("%w: %q is not a terminal message", ErrProtocolMismatch, msg.MessageHeader().Protocol)
 	}
-}
-
-// headerProtocol reports the protocol id of a decoded message, for naming the one that
-// arrived where a terminal message was expected.
-func headerProtocol(msg any) string {
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return ""
-	}
-
-	return hdr.Protocol
 }
 
 func decodeInto[T any](data []byte, msg *T) (*T, error) {

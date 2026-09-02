@@ -317,14 +317,9 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 		return nil, fmt.Errorf("the request is not a valid v1 message: %w", err)
 	}
 
-	msg, err := a2a.ExpectOneProtocol(body, a2a.RequestProtocols())
+	req, err := a2a.ExpectOneProtocol[*a2a.Request](body, a2a.RequestProtocols())
 	if err != nil {
 		return nil, fmt.Errorf("this path carries requests: %w", err)
-	}
-
-	req, ok := msg.(*a2a.Request)
-	if !ok {
-		return nil, fmt.Errorf("this path carries requests, not %T", msg)
 	}
 
 	if req.Kind == a2a.RequestAnswer {
@@ -708,12 +703,12 @@ func (c *Channel) inboundCancel(body []byte) (*a2a.Cancel, error) {
 		return nil, fmt.Errorf("the cancel is not a valid v1 message: %w", err)
 	}
 
-	msg, err := a2a.ExpectProtocol(body, a2a.CancelProtocol)
+	cancel, err := a2a.ExpectProtocol[*a2a.Cancel](body, a2a.CancelProtocol)
 	if err != nil {
 		return nil, fmt.Errorf("the cancel path carries %s messages: %w", a2a.CancelProtocol, err)
 	}
 
-	return msg.(*a2a.Cancel), nil
+	return cancel, nil
 }
 
 // done reports the run's outcome to the caller and ends the task. The server calls it

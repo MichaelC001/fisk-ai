@@ -185,7 +185,7 @@ func remoteOutcome(reply *ToolReply, err error) telemetry.RemoteAgentOutcome {
 // reply decoded once it passes the size cap, the schema, and the expected protocol
 // id. A missing responder or an elapsed deadline is surfaced by the transport as
 // ErrAgentUnavailable; an unusable reply is ErrToolImport.
-func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req any, wantReply string) (any, error) {
+func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req any, wantReply string) (Message, error) {
 	data, err := c.marshalValid(req)
 	if err != nil {
 		return nil, err
@@ -209,7 +209,7 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 		return nil, fmt.Errorf("%w: invalid reply: %w", ErrToolImport, err)
 	}
 
-	return ExpectProtocol(reply, wantReply)
+	return ExpectProtocol[Message](reply, wantReply)
 }
 
 // marshalValid encodes an outgoing message and holds it to the same schema a
