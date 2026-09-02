@@ -403,12 +403,13 @@ func answerNotTaken(code string) bool {
 
 // endsSession reports whether an ending takes the whole conversation with it.
 //
-// A turn that failed, was refused for want of capacity or was not taken leaves the
-// conversation where it was, so the input row reopens and the operator decides. The
-// rest are endings the conversation does not continue past here.
+// A turn that failed, was refused for want of capacity, was not taken, or met a model
+// provider that is busy leaves the conversation where it was, so the input row reopens
+// and the operator decides. The rest are endings the conversation does not continue
+// past here.
 func endsSession(code string) bool {
 	switch code {
-	case wire.CodeFailed, wire.CodeCapacity, wire.CodeConversationBusy, wire.CodeTurnNotTaken:
+	case wire.CodeFailed, wire.CodeCapacity, wire.CodeConversationBusy, wire.CodeTurnNotTaken, wire.CodeProviderBusy:
 		return false
 	}
 

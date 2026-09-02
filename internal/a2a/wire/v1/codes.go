@@ -61,6 +61,31 @@ const (
 	// Starting a conversation is what gets a fresh allowance.
 	CodeBudgetExhausted = "budget_exhausted"
 
+	// CodeProviderBusy means the agent's model provider refused the call for want of
+	// capacity, or because the account is over its rate limit. Nothing about the
+	// request is wrong and every worker of this identity calls the same provider, so a
+	// caller waits and sends the same work again rather than trying a peer.
+	//
+	// The turn may have run some way first: a loop that called tools for three
+	// iterations and met the refusal on the fourth journaled those three.
+	CodeProviderBusy = "provider_busy"
+	// CodeProviderRefused means the agent cannot use its model provider at all: the
+	// provider rejected its credentials, or the configured model does not exist. Every
+	// worker of this identity runs the same configuration, so a retry here and a retry
+	// against a sibling both reach this. A caller with another agent to ask asks it; an
+	// operator fixes this one.
+	CodeProviderRefused = "provider_refused"
+	// CodeContextExceeded means the conversation holds more than the model's context
+	// window takes, so the model refused the call. A first prompt reaches it by carrying
+	// too much context, and sending less is what gets a turn. A conversation reaches it
+	// by growing, and no further turn of it will run, so a caller starts a conversation
+	// instead.
+	//
+	// The conversation is not left as it was. The window is measured at the call, which
+	// is after the prompt was journaled, so the journal holds a user turn with no answer
+	// after it.
+	CodeContextExceeded = "context_exceeded"
+
 	// CodeUnknownCall means no such call is waiting for an answer.
 	CodeUnknownCall = "unknown_call"
 	// CodeAlreadyAnswered means the call already has an answer.

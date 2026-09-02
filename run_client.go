@@ -504,6 +504,15 @@ func endingMessage(msg *wire.ErrorMessage) string {
 	case wire.CodeTurnNotTaken:
 		return "the conversation could not take this turn, so nothing ran: " + detail
 
+	case wire.CodeProviderBusy:
+		return "the agent's model provider is busy or rate limited; try again shortly: " + detail
+
+	case wire.CodeProviderRefused:
+		return "the agent cannot use its model provider, which a retry will not change; whoever runs the agent has to fix its credentials or its model name: " + detail
+
+	case wire.CodeContextExceeded:
+		return "this conversation is longer than the model's context window takes; start a new conversation, or send a shorter prompt with less context: " + detail
+
 	case wire.CodeConfigDrift:
 		// The detail lists what changed. --force is this program's way of asking for the
 		// resume the code says is available, which the agent states as a choice rather

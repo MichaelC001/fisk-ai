@@ -243,6 +243,11 @@ func (c *Channel) disposition(req *wire.Request, out serve.Outcome, log *slog.Lo
 
 		msg := wire.NewError(out.Err.Error())
 		msg.StopReason = reason
+		// The stop reason has five values across every way a run can fail, so a rate
+		// limit, a rejected API key and a broken tool all store "error" and a submitter
+		// reading the answer off the task record has only the free text to go on. The
+		// code is the same one the a2a endpoint sends for the same failure.
+		msg.Code = serve.ErrorCode(out)
 		// What the attempt cost, on the same terms as a run that answered. A job that
 		// died on its token budget, or part way through an expensive turn, is where an
 		// operator most wants the number, and it is the one case that used to store

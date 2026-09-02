@@ -230,6 +230,9 @@ closes the set. The `error` carries a `code` the caller can branch on:
 | `conversation_busy` | a turn of this conversation is running here; wait for its terminal message |
 | `turn_not_taken`    | the conversation could not take the turn, and the prompt did not run |
 | `budget_exhausted`  | the conversation has used its whole token allowance and is finished  |
+| `provider_busy`     | the agent's model provider had no capacity or refused a rate-limited call; wait and send the same work again |
+| `provider_refused`  | the agent cannot use its model provider at all; an operator has to fix its credentials or its model name |
+| `context_exceeded`  | the conversation holds more than the model's context window takes, so the model refused the call; start a new conversation or send less context |
 | `unknown_call`      | no such call is waiting for an answer                                |
 | `already_answered`  | the call already has an answer                                       |
 | `answer_too_large`  | the answer is over 256KB                                             |

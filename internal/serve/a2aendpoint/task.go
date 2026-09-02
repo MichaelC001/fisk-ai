@@ -738,6 +738,8 @@ func (t *task) done(_ context.Context, out serve.Outcome) error {
 // reports canceled is the worker stopping a run under its caller, which reaches here as
 // a context error and no terminal reason.
 func (t *task) disposition(out serve.Outcome) (string, string) {
+	classified := serve.ErrorCode(out)
+
 	switch {
 	case out.Crashed:
 		// The panic and its stack stay in this worker's log. A peer is told the run
@@ -787,6 +789,16 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 		t.log.Info("A conversation reached its token budget", "session", t.session)
 
 		return codeBudgetExhausted, out.Err.Error() + "; it will take no further turn, so continue in a new conversation or raise the budget where the agent runs"
+
+	case classified != "":
+		// Below the budget case, so a run that spent its allowance and then met a
+		// provider failure reports the budget, which no further turn of that
+		// conversation gets past. Above the follow-up case, which would otherwise report
+		// a provider refusal as a conversation waiting on a deferred tool result and
+		// send the caller off to answer a call that has nothing to do with it.
+		t.log.Info("A run failed on a class its caller can act on", "session", t.session, "code", classified, "error", out.Err)
+
+		return classified, out.Err.Error()
 
 	case t.followUp && !out.FollowUpTaken:
 		// The conversation was waiting on a deferred tool result, so it reached no

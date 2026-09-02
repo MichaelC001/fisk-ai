@@ -574,6 +574,22 @@ var _ = Describe("The prompt channel", func() {
 			// the prompt again once something that does not exist has been answered.
 			Entry("a conversation that has spent its token budget", true,
 				serve.Outcome{Reason: runstate.ReasonBudget, Err: fmt.Errorf("this conversation has processed 210 of its 200 token budget (llm.budget.max_tokens)")}, codeBudgetExhausted),
+			// A rate limit on a follow-up leaves FollowUpTaken false as well, and the
+			// deferred-tool branch below would tell the caller to answer a call, which
+			// gets it nowhere. What works is waiting and sending the same prompt again.
+			Entry("a follow-up whose model provider was rate limited", true,
+				serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("llm call: %w: 429 rate_limit_error", llm.ErrRateLimited)}, wire.CodeProviderBusy),
+			Entry("a follow-up whose credentials the provider rejected", true,
+				serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("llm call: %w: 401 authentication_error", llm.ErrAuthentication)}, wire.CodeProviderRefused),
+			// Below the budget case, so a conversation that spent its allowance and then
+			// met a provider failure still ends on the one that is permanent for it.
+			Entry("a spent budget met alongside a rate limit", true,
+				serve.Outcome{Reason: runstate.ReasonBudget, Err: fmt.Errorf("this conversation has processed 210 of its 200 token budget: %w", llm.ErrRateLimited)}, codeBudgetExhausted),
+			// A provider that refuses before the loop runs leaves no terminal reason, so
+			// this arm has to sit above the one that claims every outcome without one.
+			// There the caller would be told the run failed, with the class in prose.
+			Entry("a first turn whose provider refused before the run started", false,
+				serve.Outcome{Err: fmt.Errorf("llm call: %w: 429 rate_limit_error", llm.ErrRateLimited)}, wire.CodeProviderBusy),
 		)
 
 		It("Should tell a caller a spent budget is permanent, and say what it spent", func() {

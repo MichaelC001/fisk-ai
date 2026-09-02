@@ -225,6 +225,12 @@ var _ = Describe("endsSession", func() {
 		Expect(endsSession(wire.CodeTurnNotTaken)).To(BeFalse())
 	})
 
+	// The provider takes the same prompt again once it has capacity, so closing the
+	// session here would throw away a conversation over a wait.
+	It("Should keep the conversation open where the model provider was busy", func() {
+		Expect(endsSession(wire.CodeProviderBusy)).To(BeFalse())
+	})
+
 	It("Should end it for an ending the conversation does not continue past", func() {
 		Expect(endsSession(wire.CodeSuspended)).To(BeTrue())
 		Expect(endsSession(wire.CodeDeferred)).To(BeTrue())

@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -296,6 +297,32 @@ var _ = Describe("How a turn ends", func() {
 		Entry("a thread whose journal is gone",
 			fmt.Errorf("cannot resume %q: %w", "s-abcdef", agent.ErrConversationNotFound), lostThreadNote),
 	)
+
+	// The provider maps its backend's refusal onto an llm sentinel and the runner wraps
+	// that in "llm call: %w", so the sentinel is what the thread is read off rather than
+	// the backend's own wording, which names a model, a status code and an account.
+	DescribeTable("Should say what the model provider did in words a thread can use",
+		func(err error, expected string) {
+			ch := roomyChannel(opts, api, socket)
+
+			Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonError, Err: err})).Should(Equal(statusText(emojiFailed, expected)))
+		},
+		Entry("a rate limit", fmt.Errorf("llm call: %w: 429 rate_limit_error", llm.ErrRateLimited), modelBusyNote),
+		Entry("a provider with no capacity", fmt.Errorf("llm call: %w: 529 overloaded_error", llm.ErrOverloaded), modelBusyNote),
+		Entry("rejected credentials", fmt.Errorf("llm call: %w: 401 authentication_error", llm.ErrAuthentication), modelUnusableNote),
+		Entry("a model that does not exist", fmt.Errorf("llm call: %w: 404 not_found_error", llm.ErrModelNotFound), modelUnusableNote),
+		Entry("a conversation past the context window", fmt.Errorf("llm call: %w: 400 invalid_request_error", llm.ErrContextLengthExceeded), threadTooLongNote),
+		Entry("a journal another writer holds", fmt.Errorf("cannot resume %q: %w", "s-abcdef", runstate.ErrLocked), threadWorkingNote),
+	)
+
+	// The four above say what to do next; everything else says the turn failed and leaves
+	// the detail in the worker's log.
+	It("Should still say a failure it does not place failed", func() {
+		ch := roomyChannel(opts, api, socket)
+
+		Eventually(endedOn(ch, serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("llm call: %w: 500 api_error", llm.ErrBackendFailure)})).
+			Should(Equal(statusText(emojiFailed, failedNote)))
+	})
 
 	// The resume path builds its errors out of the session and the call they name, so
 	// rendering Outcome.Err would publish exactly what every other decision here keeps out
