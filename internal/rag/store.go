@@ -121,11 +121,11 @@ var (
 	// build supports.
 	ErrFormatTooNew = errors.New("knowledge index format is newer than this build supports")
 
-	// ErrFormatTooOld reports an index written at an earlier format generation. It is
-	// the mirror of ErrFormatTooNew and the fix is the opposite one: nothing migrates
-	// such an index today, so it is discarded and rebuilt from the documents rather
-	// than upgraded. Every open refuses it, and Destroy is the one call that can act
-	// on it, since an index nothing can open has no rows to clear.
+	// ErrFormatTooOld reports an index written at an earlier format generation.
+	// Nothing migrates such an index today, so it is discarded and rebuilt from the
+	// documents rather than upgraded. Every open refuses it, and Destroy is the one
+	// call that can act on it, since an index nothing can open has no rows to clear.
+	// The same holds for ErrFormatTooNew where no build reading that format exists.
 	ErrFormatTooOld = errors.New("knowledge index was built at an earlier format generation and cannot be read by this build")
 
 	// ErrLocked reports that another knowledge index writer holds the advisory lock.
@@ -526,8 +526,9 @@ var baseSchemaObjects = []string{
 // there is no schema yet.
 type indexCheck struct {
 	// tooNew reports a format newer than this build. It is refused everywhere the
-	// older one is, but the fix is the opposite: run a build that supports the format,
-	// since discarding it would throw away an index a newer build can still read.
+	// older one is, and a build that reads the format is the fix where one exists.
+	// Lowering the format pin puts every index in the field here with no such build to
+	// reach for, so discarding is the other route and both are offered.
 	tooNew int
 	// tooOld describes why the index predates this build, or is empty when it does
 	// not, phrased to complete "cannot be read because ...".
@@ -619,10 +620,11 @@ func (s *Store) missingSchemaObjects(ctx context.Context) ([]string, error) {
 	return missing, nil
 }
 
-// formatTooNewError renders the refusal for an index from a newer build, whose fix
-// is to run the binary that wrote it rather than to discard anything.
+// formatTooNewError renders the refusal for an index written at a later format
+// generation than this build reads. It carries both version numbers, which is what a
+// caller needs to tell an index from a newer build apart from a pin that was lowered.
 func formatTooNewError(pinned int) error {
-	return fmt.Errorf("%w: index format_version=%d, this build supports up to %d; reading it needs a build that supports that format", ErrFormatTooNew, pinned, formatVersion)
+	return fmt.Errorf("%w: index format_version=%d, this build supports up to %d", ErrFormatTooNew, pinned, formatVersion)
 }
 
 // refuseUnusableIndex fails when the open database is from any format generation
@@ -640,7 +642,7 @@ func (s *Store) refuseUnusableIndex(ctx context.Context) error {
 	case check.tooNew > 0:
 		return formatTooNewError(check.tooNew)
 	case check.tooOld != "":
-		return fmt.Errorf("%w: the index at %q cannot be read because %s; nothing migrates it, so it has to be discarded and rebuilt from the documents", ErrFormatTooOld, s.dir, check.tooOld)
+		return fmt.Errorf("%w: the index at %q cannot be read because %s; nothing migrates it, so it has to be discarded and rebuilt from the documents", ErrFormatTooOld, s.dbPath, check.tooOld)
 	}
 
 	return nil

@@ -180,11 +180,11 @@ var _ = Describe("Index format gate", func() {
 			pinFormatVersion(dbPath, formatVersion+1)
 		})
 
-		It("is refused by a reader, naming the format it needs rather than a rebuild", func() {
+		It("is refused by a reader, carrying both version numbers", func() {
 			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
 			Expect(err.Error()).To(ContainSubstring("index format_version=" + strconv.Itoa(formatVersion+1)))
-			Expect(err.Error()).To(ContainSubstring("reading it needs a build that supports that format"))
+			Expect(err.Error()).To(ContainSubstring("this build supports up to " + strconv.Itoa(formatVersion)))
 		})
 
 		// The writer read the manifest nowhere at all before the gate, so an older
@@ -192,6 +192,31 @@ var _ = Describe("Index format gate", func() {
 		It("is refused by a writer", func() {
 			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
+		})
+
+		// Lowering the format pin puts every index in the field into this state, and a
+		// caller that reached for a newer build would find none: the build moved back
+		// rather than the index forward. Discarding has to work from here, or the index
+		// can only be removed by hand.
+		It("is discarded by Destroy, leaving a rebuildable store", func() {
+			removed, err := Destroy(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(removed).To(Equal(dbPath))
+
+			exists, err := StoreExists(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(exists).To(BeFalse())
+
+			Expect(buildIndex()).To(Equal(2))
+
+			r, err := Open(cfg, "", Options{})
+			Expect(err).ToNot(HaveOccurred())
+			defer r.Close()
+
+			res, err := r.Search(ctx, "backpressure buffer", 5)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.Status).To(Equal(StatusOK))
+			Expect(res.Hits).ToNot(BeEmpty())
 		})
 	})
 

@@ -37,9 +37,32 @@ var _ = Describe("knowledgeAdvice", func() {
 		Entry("a stale embedding identity", rag.ErrMetaMismatch, "fisk knowledge index --reindex"),
 		Entry("a changed dimension", rag.ErrDimensionMismatch, "fisk knowledge index --reindex"),
 		Entry("a substituted model", rag.ErrModelMismatch, "knowledge.embeddings.model"),
-		Entry("a later format generation", rag.ErrFormatTooNew, "upgrade fisk"),
+		Entry("a later format generation", rag.ErrFormatTooNew, "fisk knowledge reset --force"),
 		Entry("an earlier format generation", rag.ErrFormatTooOld, "fisk knowledge reset --force"),
 	)
+
+	// Reset discards the file rather than clearing rows for either of these, and it
+	// covering only the earlier one is what left an operator with no working command
+	// after the format pin was lowered.
+	It("Should treat both format refusals as reset's to answer", func() {
+		Expect(formatRefusal(rag.ErrFormatTooOld)).To(BeTrue())
+		Expect(formatRefusal(rag.ErrFormatTooNew)).To(BeTrue())
+		Expect(formatRefusal(fmt.Errorf("wrapped: %w", rag.ErrFormatTooNew))).To(BeTrue())
+
+		Expect(formatRefusal(nil)).To(BeFalse())
+		Expect(formatRefusal(rag.ErrLocked)).To(BeFalse())
+		Expect(formatRefusal(rag.ErrMetaMismatch)).To(BeFalse())
+	})
+
+	// A pin that was lowered leaves an index this build reads as later than its own,
+	// and there is no newer build to reach for, so the advice that names only one of the
+	// two routes names the one that does not apply.
+	It("Should offer both routes out of a later format generation", func() {
+		advice := knowledgeAdvice(rag.ErrFormatTooNew).Error()
+
+		Expect(advice).To(ContainSubstring("run a build that reads that format"))
+		Expect(advice).To(ContainSubstring("fisk knowledge reset --force"))
+	})
 
 	// Every command this product ships is fisk, and the binary named in the advice is
 	// the one the operator has to type.

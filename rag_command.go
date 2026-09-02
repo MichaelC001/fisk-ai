@@ -109,6 +109,18 @@ func knowledgeConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
+// formatRefusal reports an open this build refused because the index was written at
+// another format generation, either direction.
+//
+// Which way the generation differs decides whether the index could have been migrated,
+// and nothing migrates either one, so it does not decide whether the file can be
+// discarded. Reset covering only the earlier generation left every operator whose index
+// came from a later one with no command that worked, which is how lowering the format
+// pin stranded them.
+func formatRefusal(err error) bool {
+	return errors.Is(err, rag.ErrFormatTooOld) || errors.Is(err, rag.ErrFormatTooNew)
+}
+
 // knowledgeAdvice appends the command that repairs the index state a rag sentinel
 // reports. The library states what is wrong and names no binary, since an embedder
 // ships its own commands, so this CLI renders its own. An error carrying none of
@@ -125,7 +137,11 @@ func knowledgeAdvice(err error) error {
 		return fmt.Errorf("%w; set knowledge.embeddings.model to the model the server serves, or point knowledge.embeddings.base_url at a server that serves the configured one", err)
 
 	case errors.Is(err, rag.ErrFormatTooNew):
-		return fmt.Errorf("%w; upgrade fisk to a build that can read it", err)
+		// An operator whose index came from a newer build runs that build. One whose
+		// build moved back, which lowering the format pin does to everybody at once, has
+		// no newer build to reach for and discards the index instead. Either can be the
+		// case here, so both are named.
+		return fmt.Errorf("%w; run a build that reads that format, or discard it with 'fisk knowledge reset --force' and rebuild it with 'fisk knowledge index'", err)
 
 	case errors.Is(err, rag.ErrFormatTooOld):
 		return fmt.Errorf("%w; discard it with 'fisk knowledge reset --force' and rebuild it with 'fisk knowledge index'", err)
@@ -493,10 +509,10 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 	// neither counted nor cleared, and discarding the file is the whole of the fix.
 	// Reset is the command that does that, so it answers for itself here rather than
 	// passing on an error that would tell the operator to run reset.
-	if errors.Is(err, rag.ErrFormatTooOld) {
+	if formatRefusal(err) {
 		if !knowledgeForce {
-			return fmt.Errorf("knowledge reset would discard the index at %s, which this build cannot read; re-run with --force to confirm",
-				rag.StorePath(cfg, knowledgeStoreDir))
+			return fmt.Errorf("knowledge reset would discard the index at %s: %v\nre-run with --force to confirm",
+				rag.StorePath(cfg, knowledgeStoreDir), err)
 		}
 
 		path, destroyErr := rag.Destroy(cfg, knowledgeStoreDir)
@@ -504,7 +520,7 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 			return destroyErr
 		}
 
-		fmt.Printf("reset: discarded %s, which was built by an older format and could not be read\n", path)
+		fmt.Printf("reset: discarded %s, which was written at a format generation this build cannot read\n", path)
 		fmt.Println("run: fisk knowledge index")
 
 		return nil
