@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -232,7 +233,7 @@ func (s *Store) Doctor(ctx context.Context, paths []string) (*DoctorReport, erro
 	}
 
 	if s.db == nil {
-		add("Store present", false, false, fmt.Sprintf("no index file at %s; run: fisk knowledge index", s.dbPath))
+		add("Store present", false, false, s.absentStoreDetail())
 	} else {
 		add("Store present", true, false, s.dbPath)
 		s.doctorDBChecks(ctx, add)
@@ -243,6 +244,26 @@ func (s *Store) Doctor(ctx context.Context, paths []string) (*DoctorReport, erro
 	s.doctorEmbeddingChecks(ctx, add)
 
 	return report, nil
+}
+
+// absentStoreDetail reports the index file the store found nothing at.
+//
+// It names the absolute path because dbPath is relative whenever the configured
+// knowledge directory is, and a relative path in a report resolves against whatever
+// directory the reader is standing in rather than the one this run searched. The same
+// relative directory is what puts an operator with a perfectly good index in front of
+// this check, so the report says the path was resolved against the current directory.
+func (s *Store) absentStoreDetail() string {
+	abs, err := filepath.Abs(s.dbPath)
+	if err != nil {
+		abs = s.dbPath
+	}
+
+	if filepath.IsAbs(s.dbPath) {
+		return fmt.Sprintf("no index file at %s; run: fisk knowledge index", abs)
+	}
+
+	return fmt.Sprintf("no index file at %s; the configured knowledge directory is relative, so it resolved against the current directory; run: fisk knowledge index", abs)
 }
 
 // doctorIntegrityCheck verifies that the full-text indexes still match the chunk

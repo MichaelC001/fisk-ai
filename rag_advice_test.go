@@ -7,10 +7,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
 )
 
@@ -70,5 +72,66 @@ var _ = Describe("knowledgeAdvice", func() {
 		for _, sentinel := range []error{rag.ErrMetaMismatch, rag.ErrDimensionMismatch, rag.ErrModelMismatch, rag.ErrFormatTooNew, rag.ErrFormatTooOld} {
 			Expect(knowledgeAdvice(sentinel).Error()).ToNot(ContainSubstring("fisk-ai"))
 		}
+	})
+})
+
+var _ = Describe("knowledgeStoreDetail", func() {
+	cfg := func(dir string) *config.Config {
+		return &config.Config{
+			Identity: "agent",
+			Harness:  config.HarnessConfig{RAG: &config.RAGConfig{Enabled: true, Directory: dir}},
+		}
+	}
+
+	// A relative directory resolves against wherever the process is standing, which is
+	// the case where an index exists and this command searched somewhere else, so the
+	// report has to carry the path it searched rather than the one the config holds.
+	It("Should resolve a relative configured directory and name it", func() {
+		detail := knowledgeStoreDetail(cfg("kb"), "")
+		Expect(detail).To(HaveLen(2))
+
+		abs, err := filepath.Abs(filepath.Join("kb", "knowledge.db"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(detail[0]).To(Equal("looked for: " + abs))
+		Expect(detail[1]).To(Equal(`knowledge.directory "kb" is relative, so it resolved against the current directory`))
+	})
+
+	// With nothing configured there is no value to quote, so the line says where the
+	// default puts the index instead.
+	It("Should name the default layout when no directory is configured", func() {
+		detail := knowledgeStoreDetail(cfg(""), "")
+		Expect(detail).To(HaveLen(2))
+
+		abs, err := filepath.Abs(filepath.Join("knowledge", "agent", "knowledge.db"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(detail[0]).To(Equal("looked for: " + abs))
+		Expect(detail[1]).To(Equal("knowledge.directory is not set, so the index defaults to knowledge/agent under the current directory"))
+	})
+
+	It("Should say nothing about the working directory for an absolute configured directory", func() {
+		detail := knowledgeStoreDetail(cfg("/srv/kb"), "")
+
+		Expect(detail).To(Equal([]string{"looked for: " + filepath.Join("/srv/kb", "knowledge.db")}))
+	})
+
+	// Reset prints the store detail alone: there is nothing to reset, and building an
+	// index is not what the operator asked for.
+	It("Should carry the build command only in the not-built detail", func() {
+		store := knowledgeStoreDetail(cfg("/srv/kb"), "")
+		notBuilt := knowledgeNotBuiltDetail(cfg("/srv/kb"), "")
+
+		Expect(notBuilt[len(notBuilt)-1]).To(Equal("run: fisk knowledge index"))
+		Expect(notBuilt).To(HaveLen(len(store) + 1))
+		for _, line := range store {
+			Expect(line).ToNot(ContainSubstring("fisk knowledge index"))
+		}
+	})
+
+	It("Should render the headline and every detail line as an error", func() {
+		err := knowledgeReportError(knowledgeNotBuiltHeadline, knowledgeNotBuiltDetail(cfg("/srv/kb"), ""))
+
+		Expect(err.Error()).To(Equal(knowledgeNotBuiltHeadline +
+			"\n  looked for: " + filepath.Join("/srv/kb", "knowledge.db") +
+			"\n  run: fisk knowledge index"))
 	})
 })
