@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // fakeTransport is an a2a.Transport that records the handlers the Server registers
@@ -113,7 +115,7 @@ func (r *fakeReplier) Error(code, _ string) error {
 }
 
 // terminal decodes the last message of the set, which is the tool's own answer.
-func (r *fakeReplier) terminal() *ToolReply {
+func (r *fakeReplier) terminal() *wire.ToolReply {
 	GinkgoHelper()
 
 	r.mu.Lock()
@@ -121,7 +123,7 @@ func (r *fakeReplier) terminal() *ToolReply {
 
 	Expect(r.final).ToNot(BeEmpty(), "the reply set carries no terminal message")
 
-	var reply ToolReply
+	var reply wire.ToolReply
 	Expect(json.Unmarshal(r.final, &reply)).To(Succeed())
 
 	return &reply
@@ -148,7 +150,7 @@ func (r *fakeReplier) keepalives() int {
 func toolRequestBody(name string) []byte {
 	GinkgoHelper()
 
-	req := NewToolRequest(name, nil)
+	req := wire.NewToolRequest(name, nil)
 	StampRequest(context.Background(), &req.Header, "caller", "svc")
 	data, err := json.Marshal(req)
 	Expect(err).NotTo(HaveOccurred())
@@ -175,7 +177,7 @@ var _ = Describe("handleTool dispatch", func() {
 		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("danger"), rep)
 		Expect(rep.responded.Load()).To(BeTrue())
 
-		var ack Ack
+		var ack wire.Ack
 		Expect(json.Unmarshal(rep.body, &ack)).To(Succeed())
 		Expect(ack.Accepted).To(BeFalse())
 
@@ -235,7 +237,7 @@ var _ = Describe("Integration: a2a tool keepalives", Label("integration"), func(
 		Expect(rep.responded.Load()).To(BeTrue())
 		Expect(rep.finished()).To(BeFalse())
 
-		var ack Ack
+		var ack wire.Ack
 		Expect(json.Unmarshal(rep.body, &ack)).To(Succeed())
 		Expect(ack.Accepted).To(BeTrue())
 
@@ -295,12 +297,12 @@ var _ = Describe("Integration: a2a capacity refusal", Label("integration"), func
 		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep2)
 		Expect(rep2.finished()).To(BeTrue())
 
-		var refusedAck Ack
+		var refusedAck wire.Ack
 		Expect(json.Unmarshal(rep2.body, &refusedAck)).To(Succeed())
 		Expect(refusedAck.Accepted).To(BeFalse())
 
 		refused := rep2.terminal()
-		Expect(refused.Code).To(Equal(CodeCapacity))
+		Expect(refused.Code).To(Equal(wire.CodeCapacity))
 		Expect(refused.IsError).To(BeTrue())
 		Expect(refused.Output).To(ContainSubstring("did not run"))
 		Expect(refused.Output).To(ContainSubstring("maximum of 1"))

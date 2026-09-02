@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // fakeReporter records what it was told, in order. The hooks fire it from one goroutine
@@ -50,7 +51,7 @@ var _ = Describe("ClientHooks", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		hooks.TurnAccepted(ctx, a2a.TurnAcceptedInfo{})
-		hooks.QuestionAsked(ctx, a2a.QuestionAskedInfo{Kind: a2a.ElicitConfirm, Question: "remove ORDERS?"})
+		hooks.QuestionAsked(ctx, a2a.QuestionAskedInfo{Kind: wire.ElicitConfirm, Question: "remove ORDERS?"})
 		hooks.QuestionAnswered(ctx, a2a.QuestionAnsweredInfo{Answered: true})
 		hooks.TurnEnd(ctx, a2a.ClientTurnEndInfo{Answered: true})
 
@@ -73,7 +74,7 @@ var _ = Describe("ClientHooks", func() {
 			Expect(rep.states).To(HaveExactElements("idle"))
 		},
 		Entry("an answer", a2a.ClientTurnEndInfo{Answered: true}),
-		Entry("a failure", a2a.ClientTurnEndInfo{Code: a2a.CodeCapacity}),
+		Entry("a failure", a2a.ClientTurnEndInfo{Code: wire.CodeCapacity}),
 		Entry("a run somebody canceled", a2a.ClientTurnEndInfo{Err: context.Canceled}),
 		Entry("a set that stopped early", a2a.ClientTurnEndInfo{Err: a2a.ErrIncompleteStream}),
 	)
@@ -94,7 +95,7 @@ var _ = Describe("ClientHooks", func() {
 	Describe("What a blocked pane shows", func() {
 		It("Should show the question of a question", func() {
 			hooks.QuestionAsked(ctx, a2a.QuestionAskedInfo{
-				Kind:     a2a.ElicitConfirm,
+				Kind:     wire.ElicitConfirm,
 				Question: "remove ORDERS?",
 			})
 
@@ -105,7 +106,7 @@ var _ = Describe("ClientHooks", func() {
 		// of panes a bare command line does not say that a decision is what is wanted.
 		It("Should label the command of an approval", func() {
 			hooks.QuestionAsked(ctx, a2a.QuestionAskedInfo{
-				Kind:    a2a.ElicitApprove,
+				Kind:    wire.ElicitApprove,
 				Display: "stream rm ORDERS",
 			})
 

@@ -10,7 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
@@ -76,16 +76,16 @@ var _ = Describe("RunStats", func() {
 		})
 
 		It("Should produce a usage the v1 schema accepts", func() {
-			validator, err := a2a.NewValidator()
+			validator, err := wire.NewValidator()
 			Expect(err).ToNot(HaveOccurred())
 
-			res := a2a.NewResult(a2a.StopEndTurn)
-			res.Header.ID = a2a.NewID()
+			res := wire.NewResult(wire.StopEndTurn)
+			res.Header.ID = wire.NewID()
 			res.Header.Request = res.Header.ID
-			res.Header.Conversation = a2a.NewID()
+			res.Header.Conversation = wire.NewID()
 			res.Header.Sequence = 1
 			res.Header.Time = time.Now().UTC()
-			res.Header.Sender = a2a.Identity{Name: "agent-a"}
+			res.Header.Sender = wire.Identity{Name: "agent-a"}
 			res.Usage = (&RunStats{InTokens: 1, OutTokens: 2, CacheReadTokens: 3, LlmCalls: 4, ToolCalls: 5}).Usage()
 
 			Expect(validator.ValidateMessage(res)).To(Succeed())

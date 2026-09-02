@@ -17,6 +17,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	natstransport "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
@@ -95,15 +96,15 @@ expose:
 		client, err := a2a.NewClient(transport, "caller1")
 		Expect(err).ToNot(HaveOccurred())
 
-		stream, err := client.Task(ctx, "agent1", a2a.NewRequest("wipe it"))
+		stream, err := client.Task(ctx, "agent1", wire.NewRequest("wipe it"))
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(stream.Close)
 
 		// The caller reads its set, answers the question that arrives in it, and keeps
 		// reading to the terminal message.
 		var (
-			asked  *a2a.ElicitRequest
-			result *a2a.Result
+			asked  *wire.ElicitRequest
+			result *wire.Result
 		)
 
 		for result == nil {
@@ -114,7 +115,7 @@ expose:
 			Expect(nerr).ToNot(HaveOccurred())
 
 			switch m := msg.(type) {
-			case *a2a.ElicitRequest:
+			case *wire.ElicitRequest:
 				asked = m
 				Expect(m.WaitMS).To(Equal(int64(500)), "the caller is told what it has to beat")
 
@@ -124,7 +125,7 @@ expose:
 				for range 2 {
 					time.Sleep(300 * time.Millisecond)
 
-					held, merr := json.Marshal(a2a.NewWaitingAck(m, "caller1"))
+					held, merr := json.Marshal(wire.NewWaitingAck(m, "caller1"))
 					Expect(merr).ToNot(HaveOccurred())
 
 					acked, rerr := nc.Request(natstransport.ElicitSubject("agent1", m.Request), held, 5*time.Second)
@@ -132,25 +133,25 @@ expose:
 					Expect(acked.Header.Get("Nats-Service-Error-Code")).To(BeEmpty())
 				}
 
-				body, merr := json.Marshal(a2a.NewApproveReply(m, "caller1", a2a.ChoiceOnce))
+				body, merr := json.Marshal(wire.NewApproveReply(m, "caller1", wire.ChoiceOnce))
 				Expect(merr).ToNot(HaveOccurred())
 
 				answered, rerr := nc.Request(natstransport.ElicitSubject("agent1", m.Request), body, 5*time.Second)
 				Expect(rerr).ToNot(HaveOccurred())
 				Expect(answered.Header.Get("Nats-Service-Error-Code")).To(BeEmpty())
 
-			case *a2a.Result:
+			case *wire.Result:
 				result = m
 			}
 		}
 
 		Expect(asked).ToNot(BeNil(), "the run put no question to the caller")
-		Expect(asked.Kind).To(Equal(a2a.ElicitApprove))
+		Expect(asked.Kind).To(Equal(wire.ElicitApprove))
 		Expect(asked.Command).To(Equal("wipe"))
 		Expect(asked.Tag).To(Equal("ai:confirm"))
 
 		Expect(result).ToNot(BeNil(), "the set ended with no result")
-		Expect(result.StopReason).To(Equal(a2a.StopEndTurn))
+		Expect(result.StopReason).To(Equal(wire.StopEndTurn))
 		Expect(result.Text).To(Equal("everything is gone"))
 	})
 })

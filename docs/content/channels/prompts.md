@@ -507,7 +507,7 @@ The rules a client follows:
 
 * Send a `waiting` every `wait_ms / 3`, starting when the question goes on screen. The window restarts when the worker
   receives the message, so the remaining two thirds cover the round trip and one lost message. In Go,
-  `a2a.NewWaitingAck(question, sender)` builds the message and `question.AckInterval()` is the interval.
+  `wire.NewWaitingAck(question, sender)` builds the message and `question.AckInterval()` is the interval.
 * Stop before sending the answer. A `waiting` that arrives after the answer is refused, since the worker has finished
   with the question.
 * A `404` means the question is gone: take it off the screen and send no answer, since that would be refused too.

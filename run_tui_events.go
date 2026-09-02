@@ -7,7 +7,7 @@ package main
 import (
 	"context"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/tui"
 )
 
@@ -31,14 +31,14 @@ type tuiClient struct {
 //
 // It runs on the goroutine reading the reply set, and Live.Append marshals onto the
 // tview loop, so nothing here touches view state directly.
-func (c *tuiClient) Block(block a2a.Block) {
+func (c *tuiClient) Block(block wire.Block) {
 	// The first block is the view's cue that there is something to draw.
 	if !c.drawn {
 		c.drawn = true
 		c.live.HideSplash()
 	}
 
-	if status, ok := block.Content().(a2a.StatusBlock); ok {
+	if status, ok := block.Content().(wire.StatusBlock); ok {
 		c.usage(status)
 	}
 
@@ -51,14 +51,14 @@ func (c *tuiClient) Block(block a2a.Block) {
 // this client arrived, and an iteration adds what that one model call cost. The turn's
 // last call sends no status of its own, so the counter is set from the terminal
 // message's totals when the turn ends rather than left short.
-func (c *tuiClient) usage(b a2a.StatusBlock) {
+func (c *tuiClient) usage(b wire.StatusBlock) {
 	if b.Usage == nil {
 		return
 	}
 
 	in, out, cacheRead, cacheCreate, thinking := liveUsage(b.Usage)
 
-	if b.Phase == a2a.PhaseReplayEnd {
+	if b.Phase == wire.PhaseReplayEnd {
 		c.live.SeedUsage(in, out, cacheRead, cacheCreate, thinking)
 
 		return
@@ -69,7 +69,7 @@ func (c *tuiClient) usage(b a2a.StatusBlock) {
 
 // setUsage fixes the counter at a run's totals, which is what a terminal message
 // carries and what the end-of-run summary reports.
-func (c *tuiClient) setUsage(u *a2a.Usage) {
+func (c *tuiClient) setUsage(u *wire.Usage) {
 	if u == nil {
 		return
 	}
@@ -79,17 +79,17 @@ func (c *tuiClient) setUsage(u *a2a.Usage) {
 
 // Question puts one of the run's questions to the operator through the full-screen
 // widgets and answers it.
-func (c *tuiClient) Question(ctx context.Context, ask *a2a.ElicitRequest) (*a2a.ElicitReply, error) {
+func (c *tuiClient) Question(ctx context.Context, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
 	return answerQuestion(ctx, c.live.Prompter(), ask, nil)
 }
 
 // liveUsage splits what the wire reports into what the live counter tracks.
 //
-// a2a.Usage counts cache with the rest of the input, since a caller reading a bill
+// wire.Usage counts cache with the rest of the input, since a caller reading a bill
 // wants the number it was billed for. The status bar shows the uncached remainder
 // beside a cache figure of its own, so the two are separated here rather than
 // double-counting every cached token.
-func liveUsage(u *a2a.Usage) (in, out, cacheRead, cacheCreate, thinking int64) {
+func liveUsage(u *wire.Usage) (in, out, cacheRead, cacheCreate, thinking int64) {
 	in = u.InputTokens - u.CacheReadTokens - u.CacheCreateTokens
 	if in < 0 {
 		in = 0

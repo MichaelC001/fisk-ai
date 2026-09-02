@@ -15,6 +15,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	natstransport "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
@@ -54,7 +55,7 @@ var _ = Describe("Elicitation", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		DeferCleanup(cancel)
 
-		stream, err := client.Task(ctx, "agent1", a2a.NewRequest("do the thing"))
+		stream, err := client.Task(ctx, "agent1", wire.NewRequest("do the thing"))
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(stream.Close)
 
@@ -69,7 +70,7 @@ var _ = Describe("Elicitation", func() {
 
 	// question reads messages off the set until the question arrives, since the ack
 	// comes first.
-	question := func(stream *a2a.TaskStream) *a2a.ElicitRequest {
+	question := func(stream *a2a.TaskStream) *wire.ElicitRequest {
 		GinkgoHelper()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -79,7 +80,7 @@ var _ = Describe("Elicitation", func() {
 			msg, err := stream.Next(ctx)
 			Expect(err).ToNot(HaveOccurred())
 
-			ask, ok := msg.(*a2a.ElicitRequest)
+			ask, ok := msg.(*wire.ElicitRequest)
 			if ok {
 				return ask
 			}
@@ -88,14 +89,14 @@ var _ = Describe("Elicitation", func() {
 
 	// answer replies to a question on the task's own subject, as a caller does, and
 	// returns what the worker answered.
-	answer := func(task string, reply *a2a.ElicitReply) *a2a.Ack {
+	answer := func(task string, reply *wire.ElicitReply) *wire.Ack {
 		GinkgoHelper()
 
-		reply.ID = a2a.NewID()
+		reply.ID = wire.NewID()
 		reply.Request = task
 		reply.Conversation = task
 		reply.Time = time.Now().UTC()
-		reply.Sender = a2a.Identity{Name: "caller1"}
+		reply.Sender = wire.Identity{Name: "caller1"}
 
 		body, err := json.Marshal(reply)
 		Expect(err).ToNot(HaveOccurred())
@@ -103,10 +104,10 @@ var _ = Describe("Elicitation", func() {
 		msg, err := nc.Request(natstransport.ElicitSubject("agent1", task), body, 5*time.Second)
 		Expect(err).ToNot(HaveOccurred())
 
-		decoded, err := a2a.Decode(msg.Data)
+		decoded, err := wire.Decode(msg.Data)
 		Expect(err).ToNot(HaveOccurred())
 
-		ack, ok := decoded.(*a2a.Ack)
+		ack, ok := decoded.(*wire.Ack)
 		Expect(ok).To(BeTrue())
 
 		return ack
@@ -114,14 +115,14 @@ var _ = Describe("Elicitation", func() {
 
 	// refusalFor sends a reply the worker is expected to turn down and returns the code
 	// it refused with, where answer above decodes an acceptance.
-	refusalFor := func(task string, reply *a2a.ElicitReply) string {
+	refusalFor := func(task string, reply *wire.ElicitReply) string {
 		GinkgoHelper()
 
-		reply.ID = a2a.NewID()
+		reply.ID = wire.NewID()
 		reply.Request = task
 		reply.Conversation = task
 		reply.Time = time.Now().UTC()
-		reply.Sender = a2a.Identity{Name: "caller1"}
+		reply.Sender = wire.Identity{Name: "caller1"}
 
 		body, err := json.Marshal(reply)
 		Expect(err).ToNot(HaveOccurred())
@@ -186,13 +187,13 @@ var _ = Describe("Elicitation", func() {
 			})
 
 			asked := question(stream)
-			Expect(asked.Kind).To(Equal(a2a.ElicitApprove))
+			Expect(asked.Kind).To(Equal(wire.ElicitApprove))
 			Expect(asked.Command).To(Equal("stream rm"))
 			Expect(asked.Display).To(Equal("stream rm ORDERS"))
 			Expect(asked.Tag).To(Equal("ai:confirm"))
 
-			reply := a2a.NewElicitReply(asked.QuestionID, a2a.AnswerChoice)
-			reply.Choice = a2a.ChoiceAlways
+			reply := wire.NewElicitReply(asked.QuestionID, wire.AnswerChoice)
+			reply.Choice = wire.ChoiceAlways
 			Expect(answer(asked.Request, reply).Accepted).To(BeTrue())
 
 			var got struct {
@@ -214,10 +215,10 @@ var _ = Describe("Elicitation", func() {
 			})
 
 			asked := question(stream)
-			Expect(asked.Kind).To(Equal(a2a.ElicitConfirm))
+			Expect(asked.Kind).To(Equal(wire.ElicitConfirm))
 			Expect(asked.Question).To(Equal("Proceed?"))
 
-			reply := a2a.NewElicitReply(asked.QuestionID, a2a.AnswerConfirmed)
+			reply := wire.NewElicitReply(asked.QuestionID, wire.AnswerConfirmed)
 			reply.Confirmed = true
 			answer(asked.Request, reply)
 
@@ -236,10 +237,10 @@ var _ = Describe("Elicitation", func() {
 			})
 
 			asked = question(stream)
-			Expect(asked.Kind).To(Equal(a2a.ElicitSelect))
+			Expect(asked.Kind).To(Equal(wire.ElicitSelect))
 			Expect(asked.Options).To(Equal([]string{"east", "west"}))
 
-			reply = a2a.NewElicitReply(asked.QuestionID, a2a.AnswerIndex)
+			reply = wire.NewElicitReply(asked.QuestionID, wire.AnswerIndex)
 			reply.Index = 1
 			answer(asked.Request, reply)
 
@@ -252,10 +253,10 @@ var _ = Describe("Elicitation", func() {
 			})
 
 			asked = question(stream)
-			Expect(asked.Kind).To(Equal(a2a.ElicitInput))
+			Expect(asked.Kind).To(Equal(wire.ElicitInput))
 			Expect(asked.Default).To(Equal("orders.>"))
 
-			reply = a2a.NewElicitReply(asked.QuestionID, a2a.AnswerValue)
+			reply = wire.NewElicitReply(asked.QuestionID, wire.AnswerValue)
 			reply.Value = "orders.new"
 			answer(asked.Request, reply)
 
@@ -276,7 +277,7 @@ var _ = Describe("Elicitation", func() {
 			})
 
 			asked := question(stream)
-			answer(asked.Request, a2a.NewElicitReply(asked.QuestionID, a2a.AnswerNoOperator))
+			answer(asked.Request, wire.NewElicitReply(asked.QuestionID, wire.AnswerNoOperator))
 
 			var got struct {
 				answer string
@@ -297,15 +298,15 @@ var _ = Describe("Elicitation", func() {
 
 			msg, err := stream.Next(ctx)
 			Expect(err).ToNot(HaveOccurred())
-			ack, ok := msg.(*a2a.Ack)
+			ack, ok := msg.(*wire.Ack)
 			Expect(ok).To(BeTrue())
 
-			reply := a2a.NewElicitReply("q-nobody-asked", a2a.AnswerConfirmed)
-			reply.ID = a2a.NewID()
+			reply := wire.NewElicitReply("q-nobody-asked", wire.AnswerConfirmed)
+			reply.ID = wire.NewID()
 			reply.Request = ack.Request
 			reply.Conversation = ack.Conversation
 			reply.Time = time.Now().UTC()
-			reply.Sender = a2a.Identity{Name: "caller1"}
+			reply.Sender = wire.Identity{Name: "caller1"}
 
 			body, merr := json.Marshal(reply)
 			Expect(merr).ToNot(HaveOccurred())
@@ -369,10 +370,10 @@ var _ = Describe("Elicitation", func() {
 			Eventually(done, 5*time.Second).Should(Receive(&got))
 			Expect(got.err).To(MatchError(toolkit.ErrDeferredResult))
 
-			refused := refusalFor(asked.Request, a2a.NewWaitingAck(asked, "caller1"))
+			refused := refusalFor(asked.Request, wire.NewWaitingAck(asked, "caller1"))
 			Expect(refused).To(Equal("404"), "the question is gone")
 
-			refused = refusalFor(asked.Request, a2a.NewConfirmReply(asked, "caller1", true))
+			refused = refusalFor(asked.Request, wire.NewConfirmReply(asked, "caller1", true))
 			Expect(refused).To(Equal("404"), "and so is the answer behind it")
 		})
 	})
@@ -421,11 +422,11 @@ var _ = Describe("Elicitation", func() {
 			for range 3 {
 				time.Sleep(300 * time.Millisecond)
 
-				ack := answer(asked.Request, a2a.NewWaitingAck(asked, "caller1"))
+				ack := answer(asked.Request, wire.NewWaitingAck(asked, "caller1"))
 				Expect(ack.Accepted).To(BeTrue())
 			}
 
-			answer(asked.Request, a2a.NewConfirmReply(asked, "caller1", true))
+			answer(asked.Request, wire.NewConfirmReply(asked, "caller1", true))
 
 			var got struct {
 				answer string
@@ -449,9 +450,9 @@ var _ = Describe("Elicitation", func() {
 
 			// Two acks back to back leave one queued, since the signal is one deep. The
 			// second is still accepted, and neither takes the slot the answer needs.
-			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
-			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue(), "a duplicate reaches a question that is wide open")
-			Expect(answer(asked.Request, a2a.NewConfirmReply(asked, "caller1", true)).Accepted).To(BeTrue())
+			Expect(answer(asked.Request, wire.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
+			Expect(answer(asked.Request, wire.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue(), "a duplicate reaches a question that is wide open")
+			Expect(answer(asked.Request, wire.NewConfirmReply(asked, "caller1", true)).Accepted).To(BeTrue())
 
 			var got struct {
 				answer string
@@ -470,10 +471,10 @@ var _ = Describe("Elicitation", func() {
 
 			msg, err := stream.Next(ctx)
 			Expect(err).ToNot(HaveOccurred())
-			ack, ok := msg.(*a2a.Ack)
+			ack, ok := msg.(*wire.Ack)
 			Expect(ok).To(BeTrue())
 
-			refused := refusalFor(ack.Request, a2a.NewElicitReply("q-nobody-asked", a2a.AnswerWaiting))
+			refused := refusalFor(ack.Request, wire.NewElicitReply("q-nobody-asked", wire.AnswerWaiting))
 			Expect(refused).To(Equal("404"))
 		})
 
@@ -490,7 +491,7 @@ var _ = Describe("Elicitation", func() {
 			})
 
 			asked := question(stream)
-			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
+			Expect(answer(asked.Request, wire.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
 
 			endRun()
 
@@ -519,7 +520,7 @@ var _ = Describe("Elicitation", func() {
 
 			// The ack is still delivered, since the task's own subscriptions outlive the
 			// service registration. What it no longer does is buy another window.
-			Expect(answer(asked.Request, a2a.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
+			Expect(answer(asked.Request, wire.NewWaitingAck(asked, "caller1")).Accepted).To(BeTrue())
 
 			var got struct {
 				answer string

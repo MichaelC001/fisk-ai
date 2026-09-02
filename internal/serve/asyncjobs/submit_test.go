@@ -14,18 +14,18 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // requestOf decodes the payload NewJob built, which is the only thing a worker ever
 // sees of a job.
-func requestOf(task *asyncjobs.Task) *a2a.Request {
+func requestOf(task *asyncjobs.Task) *wire.Request {
 	GinkgoHelper()
 
-	msg, err := a2a.Decode(task.Payload)
+	msg, err := wire.Decode(task.Payload)
 	Expect(err).ToNot(HaveOccurred())
 
-	req, ok := msg.(*a2a.Request)
+	req, ok := msg.(*wire.Request)
 	Expect(ok).To(BeTrue())
 
 	return req
@@ -48,7 +48,7 @@ var _ = Describe("NewJob", func() {
 	})
 
 	It("Should carry the optional fields a caller sets", func() {
-		budget := &a2a.Budget{MaxTokens: 100, MaxIterations: 3}
+		budget := &wire.Budget{MaxTokens: 100, MaxIterations: 3}
 
 		task, err := NewJob(Job{
 			Prompt:       "go",
@@ -149,30 +149,30 @@ var _ = Describe("ParseAnswer", func() {
 	}
 
 	It("Should return the result of a run that answered", func() {
-		msg := a2a.NewResult(a2a.StopEndTurn)
+		msg := wire.NewResult(wire.StopEndTurn)
 		msg.Text = "all done"
-		msg.Usage = &a2a.Usage{InputTokens: 10, OutputTokens: 5}
+		msg.Usage = &wire.Usage{InputTokens: 10, OutputTokens: 5}
 
 		res, err := ParseAnswer(stored(msg))
 		Expect(err).ToNot(HaveOccurred())
 		Expect(res.Text).To(Equal("all done"))
-		Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+		Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 		Expect(res.Usage.InputTokens).To(BeNumerically("==", 10))
 	})
 
 	// The stored message implements error, so a caller reaches its stop reason through
 	// errors.As rather than through a second return value.
 	It("Should return a recorded failure as the error it already is", func() {
-		msg := a2a.NewError("the run failed")
-		msg.StopReason = a2a.StopBudgetExhausted
+		msg := wire.NewError("the run failed")
+		msg.StopReason = wire.StopBudgetExhausted
 
 		res, err := ParseAnswer(stored(msg))
 		Expect(res).To(BeNil())
 		Expect(err).To(MatchError("the run failed"))
 
-		var stored *a2a.ErrorMessage
+		var stored *wire.ErrorMessage
 		Expect(errors.As(err, &stored)).To(BeTrue())
-		Expect(stored.StopReason).To(Equal(a2a.StopBudgetExhausted))
+		Expect(stored.StopReason).To(Equal(wire.StopBudgetExhausted))
 	})
 
 	It("Should say a task carries no answer rather than panic on it", func() {
@@ -184,10 +184,10 @@ var _ = Describe("ParseAnswer", func() {
 		Expect(err).To(MatchError(ContainSubstring("active")), "the state is what tells a caller to wait or give up")
 	})
 
-	// What the message means is a2a.DecodeTerminal's to decide, so this only proves the
+	// What the message means is wire.DecodeTerminal's to decide, so this only proves the
 	// unwrapped payload reaches it.
 	It("Should refuse a payload that is not a terminal message", func() {
-		_, err := ParseAnswer(stored(a2a.NewRequest("go")))
+		_, err := ParseAnswer(stored(wire.NewRequest("go")))
 		Expect(err).To(MatchError(ContainSubstring("is not a terminal message")))
 	})
 })

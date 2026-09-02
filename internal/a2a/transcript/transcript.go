@@ -20,7 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -31,11 +31,11 @@ import (
 // The grouping is what makes a partial replay coherent: a caller asking for the last
 // so many blocks gets whole turns, so a result never arrives without the call it
 // answers.
-type Turns [][]a2a.Block
+type Turns [][]wire.Block
 
 // Blocks is every block of the conversation, oldest first.
-func (t Turns) Blocks() []a2a.Block {
-	var out []a2a.Block
+func (t Turns) Blocks() []wire.Block {
+	var out []wire.Block
 	for _, turn := range t {
 		out = append(out, turn...)
 	}
@@ -49,7 +49,7 @@ func (t Turns) Blocks() []a2a.Block {
 //
 // A max of zero returns nothing, which is what a caller that asked for no history
 // gets. A negative max returns everything.
-func (t Turns) Tail(max int) (blocks []a2a.Block, truncated bool) {
+func (t Turns) Tail(max int) (blocks []wire.Block, truncated bool) {
 	if max == 0 {
 		return nil, len(t) > 0
 	}
@@ -138,7 +138,7 @@ func Of(rs *runstate.RunState) Turns {
 
 // add appends a turn, dropping an empty one so a message that rendered nothing does
 // not become a turn a tail has to count.
-func (t Turns) add(turn []a2a.Block) Turns {
+func (t Turns) add(turn []wire.Block) Turns {
 	if len(turn) == 0 {
 		return t
 	}
@@ -149,12 +149,12 @@ func (t Turns) add(turn []a2a.Block) Turns {
 // toolResult is one stored result and the call it answers.
 type toolResult struct {
 	call  string
-	block a2a.Block
+	block wire.Block
 }
 
 // resultsOf splits a stored message into the tool results it carries and everything
 // else it holds, so the results can join the turn that called them.
-func resultsOf(msg llm.Message) ([]toolResult, []a2a.Block) {
+func resultsOf(msg llm.Message) ([]toolResult, []wire.Block) {
 	var (
 		results []toolResult
 		rest    llm.Message
@@ -178,18 +178,18 @@ func resultsOf(msg llm.Message) ([]toolResult, []a2a.Block) {
 //
 // A result whose call is not in this turn is kept at the end rather than dropped: the
 // journal is the record, and losing one would hide a call that was answered.
-func interleave(turn []a2a.Block, results []toolResult) []a2a.Block {
+func interleave(turn []wire.Block, results []toolResult) []wire.Block {
 	if len(results) == 0 {
 		return turn
 	}
 
 	placed := make([]bool, len(results))
-	out := make([]a2a.Block, 0, len(turn)+len(results))
+	out := make([]wire.Block, 0, len(turn)+len(results))
 
 	for _, block := range turn {
 		out = append(out, block)
 
-		call, ok := block.Content().(a2a.ToolCallBlock)
+		call, ok := block.Content().(wire.ToolCallBlock)
 		if !ok {
 			continue
 		}
@@ -219,20 +219,20 @@ func interleave(turn []a2a.Block, results []toolResult) []a2a.Block {
 // A turn that called a tool is left alone however its results were stored. The model
 // meant to continue, so its text is narration on the way to an answer rather than the
 // answer, which is the distinction a live run's terminal flag draws.
-func markFinal(turn []a2a.Block) []a2a.Block {
+func markFinal(turn []wire.Block) []wire.Block {
 	for _, block := range turn {
-		if _, ok := block.Content().(a2a.ToolCallBlock); ok {
+		if _, ok := block.Content().(wire.ToolCallBlock); ok {
 			return turn
 		}
 	}
 
 	for i := len(turn) - 1; i >= 0; i-- {
-		text, ok := turn[i].Content().(a2a.TextBlock)
+		text, ok := turn[i].Content().(wire.TextBlock)
 		if !ok {
 			continue
 		}
 
-		turn[i] = a2a.NewFinalTextBlock(text.Text)
+		turn[i] = wire.NewFinalTextBlock(text.Text)
 
 		return turn
 	}
@@ -243,8 +243,8 @@ func markFinal(turn []a2a.Block) []a2a.Block {
 // blocksOf renders one stored message. A user message is a prompt, tool results, or
 // both: a follow-up typed while the previous turn's results were still being appended
 // folds into one message, and each half is rendered as what it is.
-func blocksOf(msg llm.Message) []a2a.Block {
-	var out []a2a.Block
+func blocksOf(msg llm.Message) []wire.Block {
+	var out []wire.Block
 
 	for _, block := range msg.Content {
 		switch {
@@ -253,24 +253,24 @@ func blocksOf(msg llm.Message) []a2a.Block {
 				continue
 			}
 			if msg.Role == llm.RoleUser {
-				out = append(out, a2a.NewBlock(a2a.PromptBlock{Text: a2a.TrimBlockText(block.Text.Text)}))
+				out = append(out, wire.NewBlock(wire.PromptBlock{Text: wire.TrimBlockText(block.Text.Text)}))
 
 				continue
 			}
 
-			text, cut := a2a.TrimmedBlockText(block.Text.Text)
-			out = append(out, a2a.NewBlock(a2a.TextBlock{Text: text, Trimmed: cut}))
+			text, cut := wire.TrimmedBlockText(block.Text.Text)
+			out = append(out, wire.NewBlock(wire.TextBlock{Text: text, Trimmed: cut}))
 
 		case block.Thinking != nil:
 			if block.Thinking.Text == "" {
 				continue
 			}
 
-			text, cut := a2a.TrimmedBlockText(block.Thinking.Text)
-			out = append(out, a2a.NewBlock(a2a.ThinkingBlock{Text: text, Trimmed: cut}))
+			text, cut := wire.TrimmedBlockText(block.Thinking.Text)
+			out = append(out, wire.NewBlock(wire.ThinkingBlock{Text: text, Trimmed: cut}))
 
 		case block.ToolUse != nil:
-			out = append(out, a2a.NewToolCallBlock(block.ToolUse.ID, block.ToolUse.Name, objectInput(block.ToolUse.Input)))
+			out = append(out, wire.NewToolCallBlock(block.ToolUse.ID, block.ToolUse.Name, objectInput(block.ToolUse.Input)))
 
 		case block.ToolResult != nil:
 			out = append(out, resultBlock(*block.ToolResult))
@@ -281,8 +281,8 @@ func blocksOf(msg llm.Message) []a2a.Block {
 }
 
 // resultBlock renders one tool result.
-func resultBlock(res llm.ToolResultBlock) a2a.Block {
-	return a2a.NewToolResultBlock(res.ToolUseID, a2a.TrimBlockText(res.Content), res.IsError)
+func resultBlock(res llm.ToolResultBlock) wire.Block {
+	return wire.NewToolResultBlock(res.ToolUseID, wire.TrimBlockText(res.Content), res.IsError)
 }
 
 // objectInput carries a call's arguments only when they are a JSON object, which is

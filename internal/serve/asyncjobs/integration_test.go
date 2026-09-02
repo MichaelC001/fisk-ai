@@ -18,7 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -122,7 +122,7 @@ func answerOf(task *asyncjobs.Task) any {
 	raw, err := json.Marshal(task.Result.Payload)
 	Expect(err).ToNot(HaveOccurred())
 
-	msg, err := a2a.Decode(raw)
+	msg, err := wire.Decode(raw)
 	Expect(err).ToNot(HaveOccurred())
 
 	return msg
@@ -326,10 +326,10 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			task := loadTask(client, "job1")
 			Expect(task.Tries).To(Equal(1), "one delivery, no retry")
 
-			res, ok := answerOf(task).(*a2a.Result)
+			res, ok := answerOf(task).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("all done"))
-			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 			Expect(res.Request).To(Equal(req.Request), "the answer correlates to the request that asked")
 			Expect(res.Sender.Name).To(Equal("worker"))
 		})
@@ -352,7 +352,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			res, err := ParseAnswer(loadTask(client, "job1"))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(res.Text).To(Equal("all done"))
-			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 			Expect(res.Request).To(Equal(requestOf(task).Request), "the answer correlates to the request the helper built")
 		})
 
@@ -370,7 +370,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			Eventually(taskState(client, "job1"), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
 
 			task := loadTask(client, "job1")
-			msg, ok := answerOf(task).(*a2a.ErrorMessage)
+			msg, ok := answerOf(task).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue(), "a run that ran out of model responses answers with an error message")
 			Expect(msg.Err).ToNot(BeEmpty())
 			Expect(task.Tries).To(Equal(1), "a finished run is not retried")
@@ -397,7 +397,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			task := loadTask(client, "job1")
 			Expect(task.Tries).To(Equal(1), "the lease was renewed, so the job was never delivered twice")
 
-			res, ok := answerOf(task).(*a2a.Result)
+			res, ok := answerOf(task).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("slow but done"))
 		})
@@ -465,7 +465,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 
 			Eventually(taskState(client, "job1"), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
 
-			res, ok := answerOf(loadTask(client, "job1")).(*a2a.Result)
+			res, ok := answerOf(loadTask(client, "job1")).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("finished"))
 
@@ -518,10 +518,10 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			task := loadTask(client, "job1")
 			Expect(task.Tries).To(Equal(1))
 
-			answer, ok := answerOf(task).(*a2a.Result)
+			answer, ok := answerOf(task).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(answer.Text).To(Equal("paid for already"), "the stored answer, not a second one")
-			Expect(answer.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(answer.StopReason).To(Equal(wire.StopEndTurn))
 			// What this asserts is that the replayed answer carries the first run's
 			// accounting rather than an empty one. How stats become a Usage is the
 			// mapping's own business and is covered where it lives.
@@ -587,7 +587,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 				"not a valid v1 message"),
 			Entry("a valid message that is not a request", "job2",
 				func() []byte {
-					cancel := a2a.NewCancel()
+					cancel := wire.NewCancel()
 					stampHeader(&cancel.Header)
 					return encode(cancel)
 				},
@@ -597,7 +597,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 				"not a valid v1 message"),
 			Entry("a request that is not a prompt", "job6",
 				func() []byte {
-					resume := a2a.NewResume("2Ab3Cd4Ef5Gh")
+					resume := wire.NewResume("2Ab3Cd4Ef5Gh")
 					stampHeader(&resume.Header)
 					return encode(resume)
 				},

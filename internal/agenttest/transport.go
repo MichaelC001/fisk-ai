@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // FakeTransport is an a2a.Transport for tests: it answers discovery with a fixed
@@ -31,7 +32,7 @@ import (
 // or slow without writing a transport of its own.
 type FakeTransport struct {
 	mu         sync.Mutex
-	card       a2a.AgentCard
+	card       wire.AgentCard
 	toolOutput string
 	toolIsErr  bool
 	faults     []TransportFault
@@ -79,7 +80,7 @@ var (
 
 // NewFakeTransport returns a transport that answers discovery with card. Tool calls
 // answer with a success reply carrying "ok"; use SetToolReply to change it.
-func NewFakeTransport(tb testing.TB, card a2a.AgentCard) *FakeTransport {
+func NewFakeTransport(tb testing.TB, card wire.AgentCard) *FakeTransport {
 	tb.Helper()
 	return BuildFakeTransport(card)
 }
@@ -87,7 +88,7 @@ func NewFakeTransport(tb testing.TB, card a2a.AgentCard) *FakeTransport {
 // BuildFakeTransport is NewFakeTransport without a testing.TB, for a func Example or any
 // other caller outside a test. The transport answers from the card it was given and
 // dials nothing, so Close is there to satisfy the interface.
-func BuildFakeTransport(card a2a.AgentCard) *FakeTransport {
+func BuildFakeTransport(card wire.AgentCard) *FakeTransport {
 	return &FakeTransport{card: card, toolOutput: "ok", waiter: wallWait}
 }
 
@@ -142,7 +143,7 @@ func (t *FakeTransport) Closed() bool {
 // fakeRequest is one request as the transport found it: what it answers from, and the
 // fault it matched.
 type fakeRequest struct {
-	card       a2a.AgentCard
+	card       wire.AgentCard
 	toolOutput string
 	toolIsErr  bool
 	fault      TransportFault
@@ -207,7 +208,7 @@ func (t *FakeTransport) RoundTrip(ctx context.Context, agent string, op a2a.Rout
 		return nil, err
 	}
 
-	var reqHdr a2a.Header
+	var reqHdr wire.Header
 	err = json.Unmarshal(body, &reqHdr)
 	if err != nil {
 		return nil, fmt.Errorf("agenttest: FakeTransport could not decode request header: %w", err)
@@ -215,7 +216,7 @@ func (t *FakeTransport) RoundTrip(ctx context.Context, agent string, op a2a.Rout
 
 	switch op {
 	case a2a.OpDiscovery:
-		reply := a2a.NewDiscoveryReply(req.card.Name, req.card.Version)
+		reply := wire.NewDiscoveryReply(req.card.Name, req.card.Version)
 		reply.AgentCard = req.card
 		t.stamp(&reply.Header, &reqHdr, agent)
 		return json.Marshal(reply)
@@ -240,17 +241,17 @@ func (t *FakeTransport) Stream(ctx context.Context, agent string, op a2a.RouteHi
 		return nil, fmt.Errorf("agenttest: FakeTransport got unexpected streaming op %v", op)
 	}
 
-	var reqHdr a2a.Header
+	var reqHdr wire.Header
 	err = json.Unmarshal(body, &reqHdr)
 	if err != nil {
 		return nil, fmt.Errorf("agenttest: FakeTransport could not decode request header: %w", err)
 	}
 
-	ack := a2a.NewAck(true)
+	ack := wire.NewAck(true)
 	t.stamp(&ack.Header, &reqHdr, agent)
 	ack.Sequence = 1
 
-	reply := a2a.NewToolReply(req.toolOutput, req.toolIsErr)
+	reply := wire.NewToolReply(req.toolOutput, req.toolIsErr)
 	t.stamp(&reply.Header, &reqHdr, agent)
 	reply.Sequence = 2
 
@@ -332,13 +333,13 @@ func (t *FakeTransport) Close() error {
 // stamp fills a reply header so it echoes the request it answers and validates
 // against the message schema: a fresh id, the request's correlation and conversation
 // tags, this agent as sender, and the original sender as recipient.
-func (t *FakeTransport) stamp(h *a2a.Header, req *a2a.Header, sender string) {
-	h.ID = a2a.NewID()
+func (t *FakeTransport) stamp(h *wire.Header, req *wire.Header, sender string) {
+	h.ID = wire.NewID()
 	h.Request = req.Request
 	h.Conversation = req.Conversation
 	h.Time = time.Now().UTC()
-	h.Sender = a2a.Identity{Name: sender}
+	h.Sender = wire.Identity{Name: sender}
 	if req.Sender.Name != "" {
-		h.Recipient = &a2a.Identity{Name: req.Sender.Name}
+		h.Recipient = &wire.Identity{Name: req.Sender.Name}
 	}
 }

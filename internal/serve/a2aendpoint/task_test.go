@@ -16,6 +16,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	natstransport "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -64,7 +65,7 @@ var _ = Describe("The prompt channel", func() {
 	}
 
 	// send sends a prompt and returns the stream the caller reads its run on.
-	send := func(req *a2a.Request) *a2a.TaskStream {
+	send := func(req *wire.Request) *a2a.TaskStream {
 		GinkgoHelper()
 
 		stream, err := client.Task(bounded(), "agent1", req)
@@ -76,10 +77,10 @@ var _ = Describe("The prompt channel", func() {
 
 	// read builds a request that asks for a conversation back, whose replay count the
 	// constructor bounds.
-	read := func(token string, replay int) *a2a.Request {
+	read := func(token string, replay int) *wire.Request {
 		GinkgoHelper()
 
-		req, err := a2a.NewRead(token, replay)
+		req, err := wire.NewRead(token, replay)
 		Expect(err).ToNot(HaveOccurred())
 
 		return req
@@ -90,12 +91,12 @@ var _ = Describe("The prompt channel", func() {
 	rawRequest := func(id, prompt string) []byte {
 		GinkgoHelper()
 
-		req := a2a.NewRequest(prompt)
+		req := wire.NewRequest(prompt)
 		req.ID = id
 		req.Request = id
 		req.Conversation = id
 		req.Time = time.Now().UTC()
-		req.Sender = a2a.Identity{Name: "caller1"}
+		req.Sender = wire.Identity{Name: "caller1"}
 
 		body, err := json.Marshal(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -105,16 +106,16 @@ var _ = Describe("The prompt channel", func() {
 
 	// ackOf sends a body on the task subject and decodes the ack it answers with, which
 	// is the one message a plain request-reply sees of the set.
-	ackOf := func(body []byte) *a2a.Ack {
+	ackOf := func(body []byte) *wire.Ack {
 		GinkgoHelper()
 
 		reply, err := nc.Request(natstransport.TaskSubject("agent1"), body, 5*time.Second)
 		Expect(err).ToNot(HaveOccurred())
 
-		msg, err := a2a.Decode(reply.Data)
+		msg, err := wire.Decode(reply.Data)
 		Expect(err).ToNot(HaveOccurred())
 
-		ack, ok := msg.(*a2a.Ack)
+		ack, ok := msg.(*wire.Ack)
 		Expect(ok).To(BeTrue())
 
 		return ack
@@ -123,14 +124,14 @@ var _ = Describe("The prompt channel", func() {
 	// refuse sends a request the worker is expected to turn down at intake and returns
 	// what it said, which reaches the caller as a transport error since nothing was
 	// accepted and there is no reply set to end.
-	refuse := func(req *a2a.Request) string {
+	refuse := func(req *wire.Request) string {
 		GinkgoHelper()
 
-		req.ID = a2a.NewID()
+		req.ID = wire.NewID()
 		req.Request = req.ID
 		req.Conversation = req.ID
 		req.Time = time.Now().UTC()
-		req.Sender = a2a.Identity{Name: "caller1"}
+		req.Sender = wire.Identity{Name: "caller1"}
 
 		body, err := json.Marshal(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -179,9 +180,9 @@ var _ = Describe("The prompt channel", func() {
 		It("Should ack a request, run it, and close the set with a result", func() {
 			newChannel(1)
 
-			stream := send(a2a.NewRequest("do the thing"))
+			stream := send(wire.NewRequest("do the thing"))
 
-			ack, ok := next(stream).(*a2a.Ack)
+			ack, ok := next(stream).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(ack.Accepted).To(BeTrue())
 			Expect(ack.Sequence).To(Equal(uint64(1)))
@@ -201,18 +202,18 @@ var _ = Describe("The prompt channel", func() {
 				Stats:  &agent.RunStats{InTokens: 3, OutTokens: 4, LlmCalls: 1},
 			})
 
-			res, ok := next(stream).(*a2a.Result)
+			res, ok := next(stream).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("did the thing"))
-			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 			Expect(res.Usage.OutputTokens).To(Equal(int64(4)))
 		})
 
 		It("Should carry a caller's budget for the server to clamp", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("do the thing")
-			req.Budget = &a2a.Budget{MaxTokens: 10, MaxIterations: 2, CallTimeout: "1m"}
+			req := wire.NewRequest("do the thing")
+			req.Budget = &wire.Budget{MaxTokens: 10, MaxIterations: 2, CallTimeout: "1m"}
 			send(req)
 
 			work := takeWork()
@@ -234,27 +235,27 @@ var _ = Describe("The prompt channel", func() {
 		It("Should refuse a prompt over its worker count with a code the caller can act on", func() {
 			newChannel(1)
 
-			first := send(a2a.NewRequest("first"))
-			Expect(next(first).(*a2a.Ack).Accepted).To(BeTrue())
+			first := send(wire.NewRequest("first"))
+			Expect(next(first).(*wire.Ack).Accepted).To(BeTrue())
 			work := takeWork()
 
-			second := send(a2a.NewRequest("second"))
+			second := send(wire.NewRequest("second"))
 
-			ack, ok := next(second).(*a2a.Ack)
+			ack, ok := next(second).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(ack.Accepted).To(BeFalse())
 			Expect(ack.Reason).To(ContainSubstring("maximum of 1 prompts"))
 
-			failed, ok := next(second).(*a2a.ErrorMessage)
+			failed, ok := next(second).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeCapacity))
 
 			// The slot comes back when the outcome is reported, so the next caller is taken.
 			report(work, serve.Outcome{Reason: runstate.ReasonCompleted})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.Result{}))
 
-			third := send(a2a.NewRequest("third"))
-			Expect(next(third).(*a2a.Ack).Accepted).To(BeTrue())
+			third := send(wire.NewRequest("third"))
+			Expect(next(third).(*wire.Ack).Accepted).To(BeTrue())
 		})
 
 		// The request id addresses the cancel subscription, so two runs sharing one would
@@ -298,9 +299,9 @@ var _ = Describe("The prompt channel", func() {
 		It("Should hand back a token on a first turn and resume its journal on the next", func() {
 			newChannel(1)
 
-			first := send(a2a.NewRequest("how many streams are there"))
+			first := send(wire.NewRequest("how many streams are there"))
 
-			ack, ok := next(first).(*a2a.Ack)
+			ack, ok := next(first).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(ack.Accepted).To(BeTrue())
 			Expect(ack.ConversationToken).ToNot(BeEmpty())
@@ -317,12 +318,12 @@ var _ = Describe("The prompt channel", func() {
 			Expect(opening.Checkpoint.ConversationToken).To(Equal(ack.ConversationToken))
 
 			report(opening, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "there are three"})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.Result{}))
 
 			// The next turn carries the token back and lands in the same journal.
-			second := send(a2a.NewFollowUp(ack, "what is the first one called"))
+			second := send(wire.NewFollowUp(ack, "what is the first one called"))
 
-			echoed, ok := next(second).(*a2a.Ack)
+			echoed, ok := next(second).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(echoed.Accepted).To(BeTrue())
 			Expect(echoed.ConversationToken).To(Equal(ack.ConversationToken), "a caller reads back which conversation it is on")
@@ -336,7 +337,7 @@ var _ = Describe("The prompt channel", func() {
 
 			report(turn, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "the first is ORDERS", FollowUpTaken: true})
 
-			res, ok := next(second).(*a2a.Result)
+			res, ok := next(second).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("the first is ORDERS"))
 		})
@@ -346,20 +347,20 @@ var _ = Describe("The prompt channel", func() {
 		It("Should resume the conversation an answer names without adding a turn", func() {
 			newChannel(1)
 
-			first := send(a2a.NewRequest("delete the stream"))
-			ack := next(first).(*a2a.Ack)
+			first := send(wire.NewRequest("delete the stream"))
+			ack := next(first).(*wire.Ack)
 			opening := takeWork()
 			report(opening, serve.Outcome{Reason: runstate.ReasonSuspended})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.ErrorMessage{}))
 
-			asked := a2a.NewElicitRequest(a2a.ElicitInput, "q1")
+			asked := wire.NewElicitRequest(wire.ElicitInput, "q1")
 			asked.ToolUseID = "toolu_1"
 
-			answering, err := a2a.NewAnsweringRequest(ack.ConversationToken, asked, a2a.NewInputReply(asked, "caller1", "ORDERS"))
+			answering, err := wire.NewAnsweringRequest(ack.ConversationToken, asked, wire.NewInputReply(asked, "caller1", "ORDERS"))
 			Expect(err).ToNot(HaveOccurred())
 
 			second := send(answering)
-			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(second).(*wire.Ack).Accepted).To(BeTrue())
 
 			resumed := takeWork()
 			Expect(resumed.Prompt).To(BeEmpty(), "an answer is not a prompt")
@@ -373,7 +374,7 @@ var _ = Describe("The prompt channel", func() {
 			// that reached no boundary would be.
 			report(resumed, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "deleted"})
 
-			res, ok := next(second).(*a2a.Result)
+			res, ok := next(second).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("deleted"))
 		})
@@ -386,20 +387,20 @@ var _ = Describe("The prompt channel", func() {
 			// its callers nothing does not have.
 			ch.elicits = true
 
-			first := send(a2a.NewRequest("delete the stream"))
-			ack := next(first).(*a2a.Ack)
+			first := send(wire.NewRequest("delete the stream"))
+			ack := next(first).(*wire.Ack)
 			report(takeWork(), serve.Outcome{Reason: runstate.ReasonSuspended})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.ErrorMessage{}))
 
-			asked := a2a.NewElicitRequest(a2a.ElicitApprove, "q1")
+			asked := wire.NewElicitRequest(wire.ElicitApprove, "q1")
 			asked.ToolUseID = "toolu_1"
 			asked.Command = "stream rm"
 
-			answering, err := a2a.NewAnsweringRequest(ack.ConversationToken, asked, a2a.NewApproveReply(asked, "caller1", a2a.ChoiceOnce))
+			answering, err := wire.NewAnsweringRequest(ack.ConversationToken, asked, wire.NewApproveReply(asked, "caller1", wire.ChoiceOnce))
 			Expect(err).ToNot(HaveOccurred())
 
 			second := send(answering)
-			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(second).(*wire.Ack).Accepted).To(BeTrue())
 
 			resumed := takeWork()
 			Expect(resumed.Checkpoint.Answer).To(BeNil(), "an approval writes nothing to the journal")
@@ -409,26 +410,26 @@ var _ = Describe("The prompt channel", func() {
 			Expect(choice).To(Equal(toolkit.ConfirmOnce), "the question is answered from what the caller sent")
 
 			report(resumed, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "deleted"})
-			Expect(next(second)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(second)).To(BeAssignableToTypeOf(&wire.Result{}))
 		})
 
 		It("Should spend a held approval on the call it was given for and no other", func() {
 			newChannel(1)
 			ch.elicits = true
 
-			first := send(a2a.NewRequest("delete the streams"))
-			ack := next(first).(*a2a.Ack)
+			first := send(wire.NewRequest("delete the streams"))
+			ack := next(first).(*wire.Ack)
 			report(takeWork(), serve.Outcome{Reason: runstate.ReasonSuspended})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.ErrorMessage{}))
 
-			asked := a2a.NewElicitRequest(a2a.ElicitApprove, "q1")
+			asked := wire.NewElicitRequest(wire.ElicitApprove, "q1")
 			asked.ToolUseID = "toolu_1"
 
-			answering, err := a2a.NewAnsweringRequest(ack.ConversationToken, asked, a2a.NewApproveReply(asked, "caller1", a2a.ChoiceOnce))
+			answering, err := wire.NewAnsweringRequest(ack.ConversationToken, asked, wire.NewApproveReply(asked, "caller1", wire.ChoiceOnce))
 			Expect(err).ToNot(HaveOccurred())
 
 			second := send(answering)
-			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(second).(*wire.Ack).Accepted).To(BeTrue())
 
 			resumed := takeWork()
 			prompter := resumed.Prompter.(*elicitPrompter)
@@ -443,7 +444,7 @@ var _ = Describe("The prompt channel", func() {
 			Expect(held).To(BeFalse(), "and it authorizes one dispatch")
 
 			report(resumed, serve.Outcome{Reason: runstate.ReasonCompleted})
-			Expect(next(second)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(second)).To(BeAssignableToTypeOf(&wire.Result{}))
 		})
 
 		// Each id states its own shape and refuses the fields belonging to its siblings,
@@ -451,22 +452,22 @@ var _ = Describe("The prompt channel", func() {
 		It("Should refuse a body that does not fit the id it arrived under", func() {
 			newChannel(1)
 
-			answer := &a2a.Answer{ToolUseID: "toolu_1", Kind: a2a.ElicitInput, Answer: a2a.AnswerValue, Value: "ORDERS"}
+			answer := &wire.Answer{ToolUseID: "toolu_1", Kind: wire.ElicitInput, Answer: wire.AnswerValue, Value: "ORDERS"}
 
-			untokened := a2a.NewAnswerRequest("", answer)
+			untokened := wire.NewAnswerRequest("", answer)
 			Expect(refuse(untokened)).To(ContainSubstring("conversation_token"))
 
-			both := a2a.NewRequest("do the thing")
+			both := wire.NewRequest("do the thing")
 			both.ConversationToken = "t1"
 			both.Answer = answer
 			Expect(refuse(both)).To(ContainSubstring("answer"))
 
-			empty := a2a.NewRequest("")
+			empty := wire.NewRequest("")
 			Expect(refuse(empty)).To(ContainSubstring("prompt"))
 
 			// A resume carrying a replay count is a read, and the two are separate
 			// operations.
-			replaying := a2a.NewResume("t1")
+			replaying := wire.NewResume("t1")
 			replaying.Replay = 10
 			Expect(refuse(replaying)).To(ContainSubstring("replay"))
 		})
@@ -476,16 +477,16 @@ var _ = Describe("The prompt channel", func() {
 		It("Should take a request that continues a run and adds nothing", func() {
 			newChannel(1)
 
-			first := send(a2a.NewRequest("how many streams are there"))
-			ack, ok := next(first).(*a2a.Ack)
+			first := send(wire.NewRequest("how many streams are there"))
+			ack, ok := next(first).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 
 			opening := takeWork()
 			report(opening, serve.Outcome{Reason: runstate.ReasonSuspended})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.ErrorMessage{}))
 
-			second := send(a2a.NewResume(ack.ConversationToken))
-			Expect(next(second).(*a2a.Ack).Accepted).To(BeTrue())
+			second := send(wire.NewResume(ack.ConversationToken))
+			Expect(next(second).(*wire.Ack).Accepted).To(BeTrue())
 
 			resumed := takeWork()
 			Expect(resumed.Prompt).To(BeEmpty())
@@ -500,14 +501,14 @@ var _ = Describe("The prompt channel", func() {
 		It("Should carry force onto a resume", func() {
 			newChannel(1)
 
-			first := send(a2a.NewRequest("how many streams are there"))
-			ack := next(first).(*a2a.Ack)
+			first := send(wire.NewRequest("how many streams are there"))
+			ack := next(first).(*wire.Ack)
 			report(takeWork(), serve.Outcome{Reason: runstate.ReasonSuspended})
-			Expect(next(first)).To(BeAssignableToTypeOf(&a2a.ErrorMessage{}))
+			Expect(next(first)).To(BeAssignableToTypeOf(&wire.ErrorMessage{}))
 
-			forced := a2a.NewFollowUp(ack, "and the second one")
+			forced := wire.NewFollowUp(ack, "and the second one")
 			forced.Force = true
-			Expect(next(send(forced)).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(send(forced)).(*wire.Ack).Accepted).To(BeTrue())
 
 			Expect(takeWork().Checkpoint.Force).To(BeTrue())
 		})
@@ -515,8 +516,8 @@ var _ = Describe("The prompt channel", func() {
 		It("Should refuse an answer whose value does not fit the question it names", func() {
 			newChannel(1)
 
-			mismatched := a2a.NewAnswerRequest("t1", &a2a.Answer{
-				ToolUseID: "toolu_1", Kind: a2a.ElicitApprove, Answer: a2a.AnswerValue, Value: "yes",
+			mismatched := wire.NewAnswerRequest("t1", &wire.Answer{
+				ToolUseID: "toolu_1", Kind: wire.ElicitApprove, Answer: wire.AnswerValue, Value: "yes",
 			})
 
 			Expect(refuse(mismatched)).To(ContainSubstring("an approval is answered with a choice"))
@@ -528,18 +529,18 @@ var _ = Describe("The prompt channel", func() {
 		It("Should refuse a turn of a conversation it is already running", func() {
 			newChannel(2)
 
-			first := send(a2a.NewRequest("how many streams are there"))
-			ack, ok := next(first).(*a2a.Ack)
+			first := send(wire.NewRequest("how many streams are there"))
+			ack, ok := next(first).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			takeWork()
 
-			second := send(a2a.NewFollowUp(ack, "and the other one"))
+			second := send(wire.NewFollowUp(ack, "and the other one"))
 
-			refused, ok := next(second).(*a2a.Ack)
+			refused, ok := next(second).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(refused.Accepted).To(BeFalse())
 
-			failed, ok := next(second).(*a2a.ErrorMessage)
+			failed, ok := next(second).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeConversationBusy))
 			Expect(failed.Err).To(ContainSubstring("wait for its terminal message"))
@@ -549,16 +550,16 @@ var _ = Describe("The prompt channel", func() {
 			func(followUp bool, out serve.Outcome, code string) {
 				newChannel(1)
 
-				req := a2a.NewRequest("and the other one")
+				req := wire.NewRequest("and the other one")
 				if followUp {
 					req.ConversationToken = "2Ab3Cd4Ef5Gh"
 				}
 				stream := send(req)
-				Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+				Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 				report(takeWork(), out)
 
-				failed, ok := next(stream).(*a2a.ErrorMessage)
+				failed, ok := next(stream).(*wire.ErrorMessage)
 				Expect(ok).To(BeTrue())
 				Expect(failed.Code).To(Equal(code))
 			},
@@ -578,17 +579,17 @@ var _ = Describe("The prompt channel", func() {
 		It("Should tell a caller a spent budget is permanent, and say what it spent", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("and the other one")
+			req := wire.NewRequest("and the other one")
 			req.ConversationToken = "2Ab3Cd4Ef5Gh"
 			stream := send(req)
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			report(takeWork(), serve.Outcome{
 				Reason: runstate.ReasonBudget,
 				Err:    fmt.Errorf("this conversation has processed 210 of its 200 token budget (llm.budget.max_tokens)"),
 			})
 
-			failed, ok := next(stream).(*a2a.ErrorMessage)
+			failed, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeBudgetExhausted))
 
@@ -598,40 +599,40 @@ var _ = Describe("The prompt channel", func() {
 			Expect(failed.Err).To(ContainSubstring("llm.budget.max_tokens"))
 			Expect(failed.Err).To(ContainSubstring("no further turn"))
 			Expect(failed.Err).ToNot(ContainSubstring("deferred"))
-			Expect(failed.StopReason).To(Equal(a2a.StopBudgetExhausted))
+			Expect(failed.StopReason).To(Equal(wire.StopBudgetExhausted))
 		})
 	})
 
 	Describe("Endings", func() {
 		DescribeTable("Should tell a caller how the run ended",
-			func(out serve.Outcome, code string, reason a2a.StopReason) {
+			func(out serve.Outcome, code string, reason wire.StopReason) {
 				newChannel(1)
 
-				stream := send(a2a.NewRequest("do the thing"))
-				Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+				stream := send(wire.NewRequest("do the thing"))
+				Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 				report(takeWork(), out)
 
-				failed, ok := next(stream).(*a2a.ErrorMessage)
+				failed, ok := next(stream).(*wire.ErrorMessage)
 				Expect(ok).To(BeTrue())
 				Expect(failed.Code).To(Equal(code))
 				Expect(failed.StopReason).To(Equal(reason))
 			},
-			Entry("a failure", serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("the model refused")}, codeFailed, a2a.StopError),
-			Entry("a suspend", serve.Outcome{Reason: runstate.ReasonSuspended}, codeSuspended, a2a.StopSuspended),
-			Entry("work never started", serve.Outcome{Abandoned: true}, codeNotStarted, a2a.StopError),
-			Entry("a run that reached no outcome", serve.Outcome{}, codeFailed, a2a.StopError),
+			Entry("a failure", serve.Outcome{Reason: runstate.ReasonError, Err: fmt.Errorf("the model refused")}, codeFailed, wire.StopError),
+			Entry("a suspend", serve.Outcome{Reason: runstate.ReasonSuspended}, codeSuspended, wire.StopSuspended),
+			Entry("work never started", serve.Outcome{Abandoned: true}, codeNotStarted, wire.StopError),
+			Entry("a run that reached no outcome", serve.Outcome{}, codeFailed, wire.StopError),
 		)
 
 		It("Should tell a caller a run crashed and nothing of the stack", func() {
 			newChannel(1)
 
-			stream := send(a2a.NewRequest("do the thing"))
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			stream := send(wire.NewRequest("do the thing"))
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			report(takeWork(), serve.Outcome{Crashed: true, Err: fmt.Errorf("internal error at /home/rip/go/src/agent.go:41")})
 
-			failed, ok := next(stream).(*a2a.ErrorMessage)
+			failed, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeCrashed))
 			Expect(failed.Err).To(Equal("the run crashed"))
@@ -643,8 +644,8 @@ var _ = Describe("The prompt channel", func() {
 		It("Should name the session and the calls a deferred run is waiting on", func() {
 			newChannel(1)
 
-			stream := send(a2a.NewRequest("do the thing"))
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			stream := send(wire.NewRequest("do the thing"))
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			work := takeWork()
 			report(work, serve.Outcome{
@@ -652,7 +653,7 @@ var _ = Describe("The prompt channel", func() {
 				Deferred: []agent.DeferredCall{{ToolUseID: "toolu_1", ToolName: "ask", Note: "waiting on a human"}},
 			})
 
-			failed, ok := next(stream).(*a2a.ErrorMessage)
+			failed, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeDeferred))
 			Expect(failed.Err).To(ContainSubstring("toolu_1"), "the call an answer names")
@@ -665,12 +666,12 @@ var _ = Describe("The prompt channel", func() {
 		It("Should end a prompt accepted while the worker was stopping", func() {
 			newChannel(1)
 
-			stream := send(a2a.NewRequest("do the thing"))
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			stream := send(wire.NewRequest("do the thing"))
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			Expect(ch.Close()).To(Succeed())
 
-			failed, ok := next(stream).(*a2a.ErrorMessage)
+			failed, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeDraining))
 		})
@@ -683,9 +684,9 @@ var _ = Describe("The prompt channel", func() {
 		It("Should ask the run to stop at its next boundary", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("do the thing")
+			req := wire.NewRequest("do the thing")
 			stream := send(req)
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			work := takeWork()
 			runCtx, cancel := work.RunContext(context.Background())
@@ -701,7 +702,7 @@ var _ = Describe("The prompt channel", func() {
 
 			report(work, serve.Outcome{Reason: runstate.ReasonSuspended})
 
-			failed, ok := next(stream).(*a2a.ErrorMessage)
+			failed, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeSuspended))
 		})
@@ -712,9 +713,9 @@ var _ = Describe("The prompt channel", func() {
 		It("Should honor a cancel that arrives before the run starts", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("do the thing")
+			req := wire.NewRequest("do the thing")
 			stream := send(req)
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			work := takeWork()
 
@@ -733,12 +734,12 @@ var _ = Describe("The prompt channel", func() {
 		It("Should report a worker that stopped the run as canceled", func() {
 			newChannel(1)
 
-			stream := send(a2a.NewRequest("do the thing"))
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			stream := send(wire.NewRequest("do the thing"))
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			report(takeWork(), serve.Outcome{Err: context.Canceled})
 
-			failed, ok := next(stream).(*a2a.ErrorMessage)
+			failed, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
 			Expect(failed.Code).To(Equal(codeCanceled))
 		})
@@ -749,19 +750,19 @@ var _ = Describe("The prompt channel", func() {
 		It("Should leave a cancel for an unknown task unanswered", func() {
 			newChannel(1)
 
-			_, err := client.Cancel(context.Background(), "agent1", a2a.NewID(), "whatever")
+			_, err := client.Cancel(context.Background(), "agent1", wire.NewID(), "whatever")
 			Expect(err).To(MatchError(a2a.ErrAgentUnavailable))
 		})
 
 		It("Should release the cancel address when the task ends", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("do the thing")
+			req := wire.NewRequest("do the thing")
 			stream := send(req)
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			report(takeWork(), serve.Outcome{Reason: runstate.ReasonCompleted})
-			Expect(next(stream)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(stream)).To(BeAssignableToTypeOf(&wire.Result{}))
 
 			_, err := client.Cancel(context.Background(), "agent1", req.Request, "too late")
 			Expect(err).To(MatchError(a2a.ErrAgentUnavailable))
@@ -806,31 +807,31 @@ var _ = Describe("The prompt channel", func() {
 
 			stream := send(read("tok1", 50))
 
-			ack, ok := next(stream).(*a2a.Ack)
+			ack, ok := next(stream).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(ack.Accepted).To(BeTrue())
 			Expect(ack.ConversationToken).To(Equal("tok1"))
 
-			start, ok := next(stream).(*a2a.Event)
+			start, ok := next(stream).(*wire.Event)
 			Expect(ok).To(BeTrue())
-			Expect(start.Block.Content().(a2a.StatusBlock).Phase).To(Equal(a2a.PhaseReplayStart))
+			Expect(start.Block.Content().(wire.StatusBlock).Phase).To(Equal(wire.PhaseReplayStart))
 
-			prompt, ok := next(stream).(*a2a.Event)
+			prompt, ok := next(stream).(*wire.Event)
 			Expect(ok).To(BeTrue())
-			Expect(prompt.Block.Content().(a2a.PromptBlock).Text).To(Equal("how many streams"))
+			Expect(prompt.Block.Content().(wire.PromptBlock).Text).To(Equal("how many streams"))
 
-			answer, ok := next(stream).(*a2a.Event)
+			answer, ok := next(stream).(*wire.Event)
 			Expect(ok).To(BeTrue())
-			Expect(answer.Block.Content().(a2a.TextBlock).Text).To(Equal("there are three"))
+			Expect(answer.Block.Content().(wire.TextBlock).Text).To(Equal("there are three"))
 
-			end, ok := next(stream).(*a2a.Event)
+			end, ok := next(stream).(*wire.Event)
 			Expect(ok).To(BeTrue())
-			Expect(end.Block.Content().(a2a.StatusBlock).Phase).To(Equal(a2a.PhaseReplayEnd))
-			Expect(end.Block.Content().(a2a.StatusBlock).Usage).ToNot(BeNil(), "a client seeds its running total from here")
+			Expect(end.Block.Content().(wire.StatusBlock).Phase).To(Equal(wire.PhaseReplayEnd))
+			Expect(end.Block.Content().(wire.StatusBlock).Usage).ToNot(BeNil(), "a client seeds its running total from here")
 
-			res, ok := next(stream).(*a2a.Result)
+			res, ok := next(stream).(*wire.Result)
 			Expect(ok).To(BeTrue())
-			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 			Expect(res.Text).To(BeEmpty(), "a read answers nothing, it only says what is there")
 		})
 
@@ -852,11 +853,11 @@ var _ = Describe("The prompt channel", func() {
 
 			stream := send(read("tok2", 50))
 
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			for {
 				msg := next(stream)
-				if _, ok := msg.(*a2a.Result); ok {
+				if _, ok := msg.(*wire.Result); ok {
 					break
 				}
 			}
@@ -870,11 +871,11 @@ var _ = Describe("The prompt channel", func() {
 
 			stream := send(read("nosuchtoken", 50))
 
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
-			msg, ok := next(stream).(*a2a.ErrorMessage)
+			msg, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
-			Expect(msg.Code).To(Equal(a2a.CodeUnknownConversation))
+			Expect(msg.Code).To(Equal(wire.CodeUnknownConversation))
 		})
 
 		// A resume that asks for no history is the other operation: continue a run that
@@ -882,16 +883,16 @@ var _ = Describe("The prompt channel", func() {
 		It("Should leave a plain resume as work for the run", func() {
 			withStore("tok4")
 
-			stream := send(a2a.NewResume("tok4"))
+			stream := send(wire.NewResume("tok4"))
 
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			work := takeWork()
 			Expect(work.Prompt).To(BeEmpty())
 			Expect(work.Checkpoint.ResumeID).To(Equal(SessionFor("agent1", "tok4")))
 
 			report(work, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "carried on"})
-			Expect(next(stream)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(stream)).To(BeAssignableToTypeOf(&wire.Result{}))
 		})
 
 		It("Should refuse a read when the worker holds no store", func() {
@@ -899,13 +900,13 @@ var _ = Describe("The prompt channel", func() {
 
 			stream := send(read("tok5", 50))
 
-			ack, ok := next(stream).(*a2a.Ack)
+			ack, ok := next(stream).(*wire.Ack)
 			Expect(ok).To(BeTrue())
 			Expect(ack.Accepted).To(BeFalse())
 
-			msg, ok := next(stream).(*a2a.ErrorMessage)
+			msg, ok := next(stream).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue())
-			Expect(msg.Code).To(Equal(a2a.CodeRejected))
+			Expect(msg.Code).To(Equal(wire.CodeRejected))
 		})
 	})
 
@@ -913,8 +914,8 @@ var _ = Describe("The prompt channel", func() {
 		It("Should stream what the run narrates and end with the answer", func() {
 			newChannel(1)
 
-			stream := send(a2a.NewRequest("do the thing"))
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			stream := send(wire.NewRequest("do the thing"))
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			work := takeWork()
 			Expect(work.Events).ToNot(BeNil())
@@ -922,17 +923,17 @@ var _ = Describe("The prompt channel", func() {
 			work.Events.ToolCall(agent.ToolTrace{ID: "toolu_1", Name: "backup", Input: []byte(`{"target":"orders"}`)})
 			work.Events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: "backed up"})
 
-			call, ok := next(stream).(*a2a.Event)
+			call, ok := next(stream).(*wire.Event)
 			Expect(ok).To(BeTrue())
-			Expect(call.Block.Type()).To(Equal(a2a.BlockToolCall))
-			Expect(call.Block.Content().(a2a.ToolCallBlock).ID).To(Equal("toolu_1"))
+			Expect(call.Block.Type()).To(Equal(wire.BlockToolCall))
+			Expect(call.Block.Content().(wire.ToolCallBlock).ID).To(Equal("toolu_1"))
 
-			result, ok := next(stream).(*a2a.Event)
+			result, ok := next(stream).(*wire.Event)
 			Expect(ok).To(BeTrue())
-			Expect(result.Block.Content().(a2a.ToolResultBlock).CallID).To(Equal("toolu_1"), "a result answers the call it names")
+			Expect(result.Block.Content().(wire.ToolResultBlock).CallID).To(Equal("toolu_1"), "a result answers the call it names")
 
 			report(work, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "done"})
-			Expect(next(stream)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(stream)).To(BeAssignableToTypeOf(&wire.Result{}))
 			Expect(stream.Gaps()).To(Equal(uint64(0)))
 		})
 
@@ -941,18 +942,18 @@ var _ = Describe("The prompt channel", func() {
 		It("Should send no events to a caller that asked for none", func() {
 			newChannel(1)
 
-			req := a2a.NewRequest("do the thing")
+			req := wire.NewRequest("do the thing")
 			no := false
 			req.Stream = &no
 
 			stream := send(req)
-			Expect(next(stream).(*a2a.Ack).Accepted).To(BeTrue())
+			Expect(next(stream).(*wire.Ack).Accepted).To(BeTrue())
 
 			work := takeWork()
 			Expect(work.Events).To(BeNil())
 
 			report(work, serve.Outcome{Reason: runstate.ReasonCompleted, Text: "done"})
-			Expect(next(stream)).To(BeAssignableToTypeOf(&a2a.Result{}))
+			Expect(next(stream)).To(BeAssignableToTypeOf(&wire.Result{}))
 		})
 	})
 })

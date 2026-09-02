@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // ClientHooks drives a reporter from what an a2a client sees, so a caller wires one
@@ -65,7 +66,7 @@ func ClientHooks(r StateReporter) a2a.ClientHooks {
 // An approve question carries the command instead of a question, so it is labeled: on a
 // list of panes a bare command line does not say that a decision is what is wanted.
 func questionReason(info a2a.QuestionAskedInfo) string {
-	if info.Kind == a2a.ElicitApprove {
+	if info.Kind == wire.ElicitApprove {
 		return "approve: " + info.Display
 	}
 

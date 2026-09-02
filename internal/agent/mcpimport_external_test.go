@@ -26,7 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -336,10 +336,10 @@ var _ = Describe("the MCP import", func() {
 		It("Should abort against a tool imported from a peer", func() {
 			// The peer's tool is imported under its own name, since nothing local claims it,
 			// so it takes the name the server's "search" would take under the alias "docs".
-			transport := agenttest.NewFakeTransport(GinkgoTB(), a2a.AgentCard{
+			transport := agenttest.NewFakeTransport(GinkgoTB(), wire.AgentCard{
 				Name:    "docs-svc",
 				Version: "1.0.0",
-				Tools: []a2a.ToolDescriptor{{
+				Tools: []wire.ToolDescriptor{{
 					Name:        "docs_search",
 					Description: "search the documentation",
 					InputSchema: json.RawMessage(`{"type":"object"}`),

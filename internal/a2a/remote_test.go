@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
@@ -19,7 +20,7 @@ import (
 // fakeInvoker is a hand-written RemoteInvoker for driving RemoteTool without a
 // transport: it records the last call and returns a canned reply or error.
 type fakeInvoker struct {
-	reply *ToolReply
+	reply *wire.ToolReply
 	err   error
 
 	gotAgent string
@@ -27,7 +28,7 @@ type fakeInvoker struct {
 	gotInput json.RawMessage
 }
 
-func (f *fakeInvoker) InvokeTool(_ context.Context, agent, tool string, input json.RawMessage) (*ToolReply, error) {
+func (f *fakeInvoker) InvokeTool(_ context.Context, agent, tool string, input json.RawMessage) (*wire.ToolReply, error) {
 	f.gotAgent = agent
 	f.gotTool = tool
 	f.gotInput = input
@@ -36,7 +37,7 @@ func (f *fakeInvoker) InvokeTool(_ context.Context, agent, tool string, input js
 }
 
 var _ = Describe("RemoteTool", func() {
-	descriptor := ToolDescriptor{
+	descriptor := wire.ToolDescriptor{
 		Name:        "stream_info",
 		Description: "Reports on a stream",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"stream":{"type":"string"}},"required":["stream"]}`),
@@ -53,18 +54,18 @@ var _ = Describe("RemoteTool", func() {
 		})
 
 		It("Should default to an object schema when none is advertised", func() {
-			rt, err := NewRemoteTool("nats_x", "nats", ToolDescriptor{Name: "x", Description: "does x"}, &fakeInvoker{})
+			rt, err := NewRemoteTool("nats_x", "nats", wire.ToolDescriptor{Name: "x", Description: "does x"}, &fakeInvoker{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rt.InputSchema()).To(Equal(map[string]any{"type": "object"}))
 		})
 
 		It("Should reject an unparsable input schema", func() {
-			_, err := NewRemoteTool("nats_x", "nats", ToolDescriptor{Name: "x", InputSchema: json.RawMessage(`not json`)}, &fakeInvoker{})
+			_, err := NewRemoteTool("nats_x", "nats", wire.ToolDescriptor{Name: "x", InputSchema: json.RawMessage(`not json`)}, &fakeInvoker{})
 			Expect(err).To(MatchError(ContainSubstring("unparsable input schema")))
 		})
 
 		It("Should reject a descriptor that advertises no description", func() {
-			_, err := NewRemoteTool("nats_x", "nats", ToolDescriptor{Name: "x"}, &fakeInvoker{})
+			_, err := NewRemoteTool("nats_x", "nats", wire.ToolDescriptor{Name: "x"}, &fakeInvoker{})
 			Expect(err).To(MatchError(ContainSubstring("advertises no description")))
 		})
 
@@ -80,7 +81,7 @@ var _ = Describe("RemoteTool", func() {
 
 			rt, err := NewRemoteTool("nats_stream_info", "nats", desc, &fakeInvoker{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(rt.Behavior()).To(Equal(desc.Behavior.Toolkit()))
+			Expect(rt.Behavior()).To(Equal(BehaviorOf(desc.Behavior)))
 		})
 
 		It("Should not repeat the behavior the serving agent already wrote into its description", func() {
@@ -127,9 +128,9 @@ var _ = Describe("RemoteTool", func() {
 		use := llm.ToolUseBlock{ID: "call-1", Name: "nats_stream_info", Input: json.RawMessage(`{"stream":"ORDERS"}`)}
 
 		It("Should map a successful reply to a CommandResult JSON result", func() {
-			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{
+			inv := &fakeInvoker{reply: &wire.ToolReply{ToolResult: wire.ToolResult{
 				Output: "all good",
-				Exec:   &ExecResult{Command: "stream info ORDERS", ExitCode: 0, Truncated: false},
+				Exec:   &wire.ExecResult{Command: "stream info ORDERS", ExitCode: 0, Truncated: false},
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
@@ -148,9 +149,9 @@ var _ = Describe("RemoteTool", func() {
 		})
 
 		It("Should preserve a non-zero exit as a successful result", func() {
-			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{
+			inv := &fakeInvoker{reply: &wire.ToolReply{ToolResult: wire.ToolResult{
 				Output: "boom",
-				Exec:   &ExecResult{Command: "stream info ORDERS", ExitCode: 3},
+				Exec:   &wire.ExecResult{Command: "stream info ORDERS", ExitCode: 3},
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
@@ -168,7 +169,7 @@ var _ = Describe("RemoteTool", func() {
 		// fabricated exit_code 0 for a command that never ran, with the tool's own
 		// JSON string-escaped inside it.
 		It("Should pass an exec-less reply through verbatim rather than wrapping it", func() {
-			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{
+			inv := &fakeInvoker{reply: &wire.ToolReply{ToolResult: wire.ToolResult{
 				Output: `{"status":"ok","results":[]}`,
 			}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
@@ -180,7 +181,7 @@ var _ = Describe("RemoteTool", func() {
 		})
 
 		It("Should map a remote harness failure to an error result", func() {
-			inv := &fakeInvoker{reply: &ToolReply{ToolResult: ToolResult{IsError: true, Output: "tool not available"}}}
+			inv := &fakeInvoker{reply: &wire.ToolReply{ToolResult: wire.ToolResult{IsError: true, Output: "tool not available"}}}
 			rt, _ := NewRemoteTool("nats_stream_info", "nats", descriptor, inv)
 
 			block, _, _ := toolkit.ExecuteUse(context.Background(), rt, use, toolkit.ExecDeps{})

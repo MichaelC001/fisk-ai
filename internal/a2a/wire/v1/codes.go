@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 // The codes a terminal error carries, so a caller decides on a value rather than on
 // prose. A refusal names why the work was refused; an ending names how the run ended.

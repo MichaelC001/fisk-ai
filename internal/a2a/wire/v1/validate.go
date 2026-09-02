@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"errors"
@@ -11,35 +11,9 @@ import (
 	"strings"
 )
 
-var (
-	// ErrAgentUnavailable indicates no agent answered the request (no responder,
-	// or the request deadline elapsed). A transport returns it from RoundTrip.
-	ErrAgentUnavailable = errors.New("remote agent unavailable")
-	// ErrNoResponders narrows ErrAgentUnavailable to the case where nothing is
-	// listening on the subject at all, as against one where somebody is and did not
-	// answer in time. It wraps ErrAgentUnavailable, so a caller that does not care
-	// which it was keeps matching on that and needs no change.
-	//
-	// The two want different answers. Nothing listening is settled: the agent is not
-	// there, and waiting longer or asking again will not find it. A silent responder
-	// is an agent that exists and is slow, which a caller may reasonably carry on
-	// without rather than treat as a failure.
-	ErrNoResponders = fmt.Errorf("%w: no subscription interest", ErrAgentUnavailable)
-	// ErrToolImport indicates a remote agent answered but its reply could not be
-	// used (a reply over the size cap, an invalid or unexpected body).
-	ErrToolImport = errors.New("remote tool import failed")
-	// ErrProtocolMismatch indicates a decoded message did not carry the protocol id
-	// the receiving path is contracted for, or a reply was not the expected type.
-	ErrProtocolMismatch = errors.New("unexpected message protocol")
-	// ErrMessageTooLarge indicates a message a sender assembled is over the size cap
-	// and was refused rather than sent. It is separate from the caps applied to what
-	// arrives, because a sender can act on it: an event carrying a large tool result
-	// can be shortened, where a reply that arrived oversized can only be dropped.
-	ErrMessageTooLarge = errors.New("message exceeds the size limit")
-	// ErrStreamUnsupported indicates a request asked for an event stream on a
-	// transport that carries a single reply.
-	ErrStreamUnsupported = errors.New("transport cannot carry an event stream")
-)
+// ErrProtocolMismatch indicates a decoded message did not carry the protocol id
+// the receiving path is contracted for, or a reply was not the expected type.
+var ErrProtocolMismatch = errors.New("unexpected message protocol")
 
 // MaxMessageSize bounds a single a2a body on the wire. It is enforced in the
 // engine on both inbound handler bodies and round-trip replies, before any decode

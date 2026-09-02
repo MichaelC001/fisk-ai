@@ -81,7 +81,7 @@ import (
 	"github.com/choria-io/asyncjobs"
 	"github.com/nats-io/nats.go"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
@@ -214,7 +214,7 @@ type Channel struct {
 
 	client    *asyncjobs.Client
 	router    *asyncjobs.Mux
-	validator *a2a.Validator
+	validator *wire.Validator
 	log       *slog.Logger
 
 	// work hands one job from its handler to Next. It is deliberately unbuffered: a
@@ -255,7 +255,7 @@ func New(opts Options) (*Channel, error) {
 		return nil, err
 	}
 
-	validator, err := a2a.SharedValidator()
+	validator, err := wire.SharedValidator()
 	if err != nil {
 		return nil, fmt.Errorf("compiling the a2a schemas: %w", err)
 	}

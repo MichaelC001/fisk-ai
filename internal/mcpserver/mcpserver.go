@@ -22,8 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 const (

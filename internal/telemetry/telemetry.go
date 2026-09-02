@@ -46,6 +46,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	// The resource is described at the schema the SDK's own detectors use, which is not
 	// the schema the gen_ai keys come from. resource.Merge refuses to merge resources
 	// whose schema URLs differ, so declaring an older one here fails every Setup with a

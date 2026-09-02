@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go/micro"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // Transport carries a reply set in both directions and addresses a cancel to the one
@@ -117,7 +118,7 @@ func (t *Transport) Stream(ctx context.Context, agent string, op a2a.RouteHint, 
 // cancel a task it has not been told was accepted, so opening this before the ack
 // removes the window rather than bounding it.
 func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.TaskWatch, error) {
-	if !a2a.ValidRequestID(request) {
+	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address a cancel", request)
 	}
 
@@ -139,7 +140,7 @@ func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.TaskWatch, e
 // the first question is asked, so an answer cannot arrive before the subscription
 // exists.
 func (t *Transport) WatchElicitReplies(request string, h a2a.Handler) (a2a.TaskWatch, error) {
-	if !a2a.ValidRequestID(request) {
+	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address an answer", request)
 	}
 
@@ -162,7 +163,7 @@ func (t *Transport) WatchElicitReplies(request string, h a2a.Handler) (a2a.TaskW
 // cancel. A broadcast cancel cannot say that, since every instance receives it and
 // almost all of them correctly do nothing.
 func (t *Transport) SendCancel(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
-	if !a2a.ValidRequestID(request) {
+	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address a cancel", request)
 	}
 
@@ -183,7 +184,7 @@ func (t *Transport) SendCancel(ctx context.Context, agent, request string, body 
 // task subscribes, so no responders says the run ended without the answer, which the
 // answering party needs to know. A published answer would be lost silently.
 func (t *Transport) SendElicitReply(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
-	if !a2a.ValidRequestID(request) {
+	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address an answer", request)
 	}
 

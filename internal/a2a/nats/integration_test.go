@@ -14,12 +14,13 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/conns"

@@ -19,7 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -138,10 +138,10 @@ var _ = Describe("the per-kind tool accounting", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-		transport := agenttest.NewFakeTransport(GinkgoTB(), a2a.AgentCard{
+		transport := agenttest.NewFakeTransport(GinkgoTB(), wire.AgentCard{
 			Name:    "weather-svc",
 			Version: "1.0.0",
-			Tools: []a2a.ToolDescriptor{{
+			Tools: []wire.ToolDescriptor{{
 				Name:        "forecast",
 				Description: "get the forecast",
 				InputSchema: json.RawMessage(`{"type":"object"}`),
@@ -221,10 +221,10 @@ var _ = Describe("the per-kind tool accounting", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-		transport := agenttest.NewFakeTransport(GinkgoTB(), a2a.AgentCard{
+		transport := agenttest.NewFakeTransport(GinkgoTB(), wire.AgentCard{
 			Name:    "weather-svc",
 			Version: "1.0.0",
-			Tools: []a2a.ToolDescriptor{{
+			Tools: []wire.ToolDescriptor{{
 				Name:        "forecast",
 				Description: "get the forecast",
 				InputSchema: json.RawMessage(`{"type":"object"}`),

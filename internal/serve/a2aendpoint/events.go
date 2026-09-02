@@ -14,6 +14,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/a2a/transcript"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
@@ -29,7 +30,7 @@ const maxReplayBlocks = 200
 // maxDeltaText is the most fragment text one delta message carries, and the size the
 // coalescing buffer flushes at.
 //
-// ReplyStream refuses a message larger than a2a.MaxMessageSize and does not advance the
+// ReplyStream refuses a message larger than wire.MaxMessageSize and does not advance the
 // sequence when it does, so an oversized delta is dropped, the sequence carries no hole,
 // and the caller assembles text that is silently wrong. A whole block avoids that by
 // trimming, which the reader can see; a trimmed fragment corrupts the text instead.
@@ -37,7 +38,7 @@ const maxReplayBlocks = 200
 // The value is a fraction of the limit so the two move together. A sixty-fourth leaves
 // room for the message header and for JSON escaping, which can cost six bytes for one
 // byte of text.
-const maxDeltaText = a2a.MaxMessageSize / 64
+const maxDeltaText = wire.MaxMessageSize / 64
 
 // deltaFlushWindow is how long buffered fragment text waits for more before it is sent.
 //
@@ -124,12 +125,12 @@ func (e *eventSink) ResumeTranscript(rs *runstate.RunState) {
 	// total would otherwise start a resumed conversation at zero and jump when the turn
 	// ends. It is the whole conversation rather than one call, which is the other
 	// meaning this field carries and which the schema separates.
-	e.send(a2a.NewBlock(a2a.StatusBlock{Phase: a2a.PhaseReplayStart}))
+	e.send(wire.NewBlock(wire.StatusBlock{Phase: wire.PhaseReplayStart}))
 	for _, block := range blocks {
 		e.send(block)
 	}
-	e.send(a2a.NewBlock(a2a.StatusBlock{
-		Phase:     a2a.PhaseReplayEnd,
+	e.send(wire.NewBlock(wire.StatusBlock{
+		Phase:     wire.PhaseReplayEnd,
 		Count:     len(blocks),
 		Truncated: truncated,
 		Usage:     a2a.UsageFromCounters(rs.Counters),
@@ -157,13 +158,13 @@ func (e *eventSink) Message(resp llm.Response, terminal bool) {
 			// this a caller cannot tell the answer from the narration on the way to it,
 			// and renders it twice.
 			text, trimmed := trimmedForWire(block.Text.Text)
-			e.send(a2a.NewBlock(a2a.TextBlock{Text: text, Final: terminal, Index: index, Trimmed: trimmed}))
+			e.send(wire.NewBlock(wire.TextBlock{Text: text, Final: terminal, Index: index, Trimmed: trimmed}))
 		case block.Thinking != nil:
 			// The signature stays local. It is the opaque payload that lets a turn be
 			// replayed to the provider that produced it, it is never replayed across an
 			// agent boundary, and no peer can do anything with the bytes.
 			text, trimmed := trimmedForWire(block.Thinking.Text)
-			e.send(a2a.NewBlock(a2a.ThinkingBlock{Text: text, Index: index, Trimmed: trimmed}))
+			e.send(wire.NewBlock(wire.ThinkingBlock{Text: text, Index: index, Trimmed: trimmed}))
 		}
 	}
 
@@ -172,7 +173,7 @@ func (e *eventSink) Message(resp llm.Response, terminal bool) {
 	}
 
 	e.iteration++
-	e.send(a2a.NewBlock(a2a.StatusBlock{Iteration: e.iteration, Usage: callUsage(resp.Usage)}))
+	e.send(wire.NewBlock(wire.StatusBlock{Iteration: e.iteration, Usage: callUsage(resp.Usage)}))
 }
 
 // StreamDeltas reports whether this caller asked for the fragments of an assistant turn
@@ -263,12 +264,12 @@ func (e *eventSink) MessageDelta(d llm.Delta) {
 // sendDelta publishes one fragment of the block at index, under the id for its kind.
 func (e *eventSink) sendDelta(index, iteration int, kind llm.DeltaKind, text string, final bool) {
 	if kind == llm.DeltaThinking {
-		e.send(a2a.NewBlock(a2a.ThinkingDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
+		e.send(wire.NewBlock(wire.ThinkingDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
 
 		return
 	}
 
-	e.send(a2a.NewBlock(a2a.TextDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
+	e.send(wire.NewBlock(wire.TextDeltaBlock{Index: index, Iteration: iteration, Text: text, Final: final}))
 }
 
 // runeCut is the largest cut of b at or below limit that does not split a rune, since
@@ -295,7 +296,7 @@ func runeCut(b []byte, limit int) int {
 // ToolCall sends what the run is about to do to the world, with the id a result answers
 // and the arguments it was dispatched with.
 func (e *eventSink) ToolCall(t agent.ToolTrace) {
-	e.send(a2a.NewToolCallBlock(t.ID, t.Name, objectInput(t.Input)))
+	e.send(wire.NewToolCallBlock(t.ID, t.Name, objectInput(t.Input)))
 }
 
 // ToolResult sends what a call returned, against the id of the call it answers.
@@ -304,7 +305,7 @@ func (e *eventSink) ToolCall(t agent.ToolTrace) {
 // arguments, a tool that answers later and an aborted run each end without a result, so
 // a caller pairing the two tolerates a call that is never answered.
 func (e *eventSink) ToolResult(t agent.ToolResultTrace) {
-	e.send(a2a.NewToolResultBlock(t.CallID, trimForWire(t.Output), t.IsError))
+	e.send(wire.NewToolResultBlock(t.CallID, trimForWire(t.Output), t.IsError))
 }
 
 // Warn sends what the run raised: a tool stopped on its timeout, a tool the model
@@ -315,7 +316,7 @@ func (e *eventSink) ToolResult(t agent.ToolResultTrace) {
 // something to show. The kind's stable name is sent rather than its value, which is a
 // position in a list.
 func (e *eventSink) Warn(w agent.Warning) {
-	block := a2a.WarningBlock{
+	block := wire.WarningBlock{
 		Kind:   w.Kind.String(),
 		Name:   trimForWire(w.Name),
 		Count:  w.Count,
@@ -325,7 +326,7 @@ func (e *eventSink) Warn(w agent.Warning) {
 		block.Error = trimForWire(w.Err.Error())
 	}
 
-	e.send(a2a.NewBlock(block))
+	e.send(wire.NewBlock(block))
 }
 
 // RemoteHostNotes sends what importing a peer's tools had to say about it: a filter
@@ -361,7 +362,7 @@ func (e *eventSink) SessionRotated(string)  {}
 // send publishes one block, keeping the run going whatever the sink says. A message
 // over the size cap is the one failure this can still provoke after trimming, and it is
 // logged as the event a caller will not see.
-func (e *eventSink) send(block a2a.Block) {
+func (e *eventSink) send(block wire.Block) {
 	err := e.stream.Event(block)
 	if err == nil {
 		return
@@ -378,8 +379,8 @@ func (e *eventSink) send(block a2a.Block) {
 
 // callUsage reports what one model call cost. The call counts are left out: this
 // describes a single call, and the run's totals travel in the terminal message.
-func callUsage(u llm.Usage) *a2a.Usage {
-	return &a2a.Usage{
+func callUsage(u llm.Usage) *wire.Usage {
+	return &wire.Usage{
 		InputTokens:       u.In + u.CacheRead + u.CacheCreate,
 		OutputTokens:      u.Out,
 		CacheReadTokens:   u.CacheRead,
@@ -401,9 +402,9 @@ func objectInput(input json.RawMessage) json.RawMessage {
 	return trimmed
 }
 
-// trimForWire cuts a value to what one message can carry. It is a2a.TrimBlockText
+// trimForWire cuts a value to what one message can carry. It is wire.TrimBlockText
 // under a local name, so this package's call sites read as they did when the bound
 // lived here and the adapter that replays a stored conversation trims identically.
-func trimForWire(s string) string { return a2a.TrimBlockText(s) }
+func trimForWire(s string) string { return wire.TrimBlockText(s) }
 
-func trimmedForWire(s string) (string, bool) { return a2a.TrimmedBlockText(s) }
+func trimmedForWire(s string) (string, bool) { return wire.TrimmedBlockText(s) }

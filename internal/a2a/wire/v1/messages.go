@@ -2,14 +2,12 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // Request is one of the four things a caller asks of an agent: a prompt to run, an answer
@@ -280,7 +278,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	kind, ok := requestKindOf(w.Protocol)
+	kind, ok := RequestKindOf(w.Protocol)
 	if !ok {
 		return fmt.Errorf("%w: %q is not the id of a request", ErrInvalidMessage, w.Protocol)
 	}
@@ -342,7 +340,7 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	kind, ok := blockTypeOf(w.Protocol)
+	kind, ok := BlockTypeOf(w.Protocol)
 	if !ok {
 		return fmt.Errorf("%w: %q is not the id of an event", ErrInvalidMessage, w.Protocol)
 	}
@@ -529,8 +527,8 @@ type ToolDescriptor struct {
 // in a discovery reply. Every field is a claim the serving agent makes about its own
 // tool and never a guarantee, and a nil field asserts nothing.
 //
-// It is a type of this package rather than toolkit.Behavior, which it is built from and
-// converted back to, because this struct's tags are the JSON of the
+// It is a type of this package rather than toolkit.Behavior, which a2a.BehaviorOf
+// converts it to, because this struct's tags are the JSON of the
 // io.choria.fisk-ai.v1.discovery.reply protocol. With toolkit's type here, renaming a
 // tag there would change the wire format of a versioned protocol, and nothing would
 // report it.
@@ -552,53 +550,6 @@ type ToolBehavior struct {
 // no claim omits the property rather than sending an empty object.
 func (b ToolBehavior) IsZero() bool {
 	return b == ToolBehavior{}
-}
-
-// toolBehavior converts a toolkit declaration to the wire shape. A hint outside the
-// three toolkit names travels as no claim, which is what toolkit.Hint reads an
-// unrecognized value as.
-func toolBehavior(b toolkit.Behavior) ToolBehavior {
-	return ToolBehavior{
-		ReadOnly:    wireHint(b.ReadOnly),
-		Destructive: wireHint(b.Destructive),
-		Idempotent:  wireHint(b.Idempotent),
-		OpenWorld:   wireHint(b.OpenWorld),
-	}
-}
-
-// Toolkit converts what a peer claimed back to a toolkit declaration, for an importer
-// building a local tool from a descriptor.
-func (b ToolBehavior) Toolkit() toolkit.Behavior {
-	return toolkit.Behavior{
-		ReadOnly:    toolkitHint(b.ReadOnly),
-		Destructive: toolkitHint(b.Destructive),
-		Idempotent:  toolkitHint(b.Idempotent),
-		OpenWorld:   toolkitHint(b.OpenWorld),
-	}
-}
-
-func wireHint(h toolkit.Hint) *bool {
-	switch h {
-	case toolkit.HintTrue:
-		yes := true
-		return &yes
-	case toolkit.HintFalse:
-		no := false
-		return &no
-	default:
-		return nil
-	}
-}
-
-func toolkitHint(v *bool) toolkit.Hint {
-	switch {
-	case v == nil:
-		return toolkit.HintUnset
-	case *v:
-		return toolkit.HintTrue
-	default:
-		return toolkit.HintFalse
-	}
 }
 
 // AgentCard is an agent's self description: who it is, its version, the model it
@@ -822,7 +773,7 @@ func (r *ElicitRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	kind, ok := elicitKindOf(w.Protocol)
+	kind, ok := ElicitKindOf(w.Protocol)
 	if !ok {
 		return fmt.Errorf("%w: %q is not the id of a question", ErrInvalidMessage, w.Protocol)
 	}
@@ -915,7 +866,7 @@ func (r *ElicitReply) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	answer, ok := elicitAnswerOf(w.Protocol)
+	answer, ok := ElicitAnswerOf(w.Protocol)
 	if !ok {
 		return fmt.Errorf("%w: %q is not the id of an answer", ErrInvalidMessage, w.Protocol)
 	}

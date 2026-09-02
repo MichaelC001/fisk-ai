@@ -11,7 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
@@ -20,16 +20,16 @@ func TestRemoteTools(t *testing.T) {
 	RunSpecs(t, "RemoteTools")
 }
 
-func descriptors(names ...string) []a2a.ToolDescriptor {
-	out := make([]a2a.ToolDescriptor, len(names))
+func descriptors(names ...string) []wire.ToolDescriptor {
+	out := make([]wire.ToolDescriptor, len(names))
 	for i, n := range names {
-		out[i] = a2a.ToolDescriptor{Name: n, Description: n + " tool"}
+		out[i] = wire.ToolDescriptor{Name: n, Description: n + " tool"}
 	}
 
 	return out
 }
 
-func descriptorNames(tools []a2a.ToolDescriptor) []string {
+func descriptorNames(tools []wire.ToolDescriptor) []string {
 	out := make([]string, len(tools))
 	for i, t := range tools {
 		out[i] = t.Name

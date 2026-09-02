@@ -31,17 +31,21 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+
 	// Link the NATS a2a transport in so it registers itself; a2a.NewTransport
 	// resolves the configured transport from the registry, and this is the sole
 	// transport today.
 	_ "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
+
 	// Link the anthropic provider in so it registers itself; llm.NewProvider resolves
 	// the configured provider from the registry, and this is the sole provider today.
 	_ "github.com/choria-io/fisk-ai/internal/llm/anthropic"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
+
 	// Link the file memory backend in so it registers itself; memory.New resolves
 	// the configured backend from the registry, and this is the default backend.
 	_ "github.com/choria-io/fisk-ai/internal/memory/file"
@@ -51,6 +55,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+
 	// Link the file session backend in so it registers itself; runstate.New resolves
 	// the configured backend from the registry.
 	_ "github.com/choria-io/fisk-ai/internal/runstate/file"
@@ -1674,7 +1679,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	case opts.Checkpoint.Enabled:
 		sessionID = opts.Checkpoint.Name
 		if sessionID == "" {
-			sessionID = a2a.NewID()
+			sessionID = wire.NewID()
 		}
 	}
 
@@ -2037,7 +2042,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// Copying it would put two conversations in a listing claiming one token, only one
 		// of which can be continued. The caller is copied, since who asked did not change.
 		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
-			id := a2a.NewID()
+			id := wire.NewID()
 			meta := runstate.MetaRecord{
 				RunID:       id,
 				Created:     time.Now(),

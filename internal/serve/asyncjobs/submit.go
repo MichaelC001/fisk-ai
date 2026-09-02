@@ -13,6 +13,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
@@ -56,7 +57,7 @@ type Job struct {
 	// Budget lowers the limits the run executes under, and may only lower them: the
 	// worker clamps whatever arrives against its own configuration, which stays the
 	// ceiling. Nil leaves them alone.
-	Budget *a2a.Budget
+	Budget *wire.Budget
 
 	// TaskType is the asyncjobs task type the worker handles. Empty uses
 	// config.DefaultJobsTaskType, which is what a worker with no task_type configured
@@ -76,7 +77,7 @@ func NewJob(job Job, opts ...asyncjobs.TaskOpt) (*asyncjobs.Task, error) {
 	if job.Caller == "" {
 		return nil, fmt.Errorf("a job needs a caller name")
 	}
-	if !a2a.ValidIdentityName(job.Caller) {
+	if !wire.ValidIdentityName(job.Caller) {
 		return nil, fmt.Errorf("the caller name %q is not valid (use letters, digits, '-' or '_')", job.Caller)
 	}
 
@@ -85,7 +86,7 @@ func NewJob(job Job, opts ...asyncjobs.TaskOpt) (*asyncjobs.Task, error) {
 		taskType = config.DefaultJobsTaskType
 	}
 
-	req := a2a.NewRequest(job.Prompt)
+	req := wire.NewRequest(job.Prompt)
 	req.Context = job.Context
 	req.Budget = job.Budget
 	req.Conversation = job.Conversation
@@ -130,12 +131,12 @@ func NewJob(job Job, opts ...asyncjobs.TaskOpt) (*asyncjobs.Task, error) {
 }
 
 // ParseAnswer decodes what a worker stored on a task. It unwraps the task and leaves
-// what the message means to a2a.DecodeTerminal, so a failed run comes back as the stored
-// *a2a.ErrorMessage and errors.As reaches its stop reason and code.
+// what the message means to wire.DecodeTerminal, so a failed run comes back as the stored
+// *wire.ErrorMessage and errors.As reaches its stop reason and code.
 //
 // Load the task with the engine's Client.LoadTaskByID, and wait for its
 // TaskStateCompleted.
-func ParseAnswer(task *asyncjobs.Task) (*a2a.Result, error) {
+func ParseAnswer(task *asyncjobs.Task) (*wire.Result, error) {
 	if task == nil {
 		return nil, fmt.Errorf("there is no task to read")
 	}
@@ -150,5 +151,5 @@ func ParseAnswer(task *asyncjobs.Task) (*a2a.Result, error) {
 		return nil, fmt.Errorf("encoding the stored answer: %w", err)
 	}
 
-	return a2a.DecodeTerminal(raw)
+	return wire.DecodeTerminal(raw)
 }

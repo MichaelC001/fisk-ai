@@ -15,6 +15,7 @@ import (
 	"github.com/choria-io/asyncjobs"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -118,7 +119,7 @@ func (c *Channel) handle(ctx context.Context, _ asyncjobs.Logger, task *asyncjob
 
 // intake decides whether a payload can ever be run. The error it returns is a single
 // line, because it becomes the task's LastErr; anything longer is logged here.
-func (c *Channel) intake(task *asyncjobs.Task, log *slog.Logger) (*a2a.Request, error) {
+func (c *Channel) intake(task *asyncjobs.Task, log *slog.Logger) (*wire.Request, error) {
 	if len(task.Payload) > c.maxPayload {
 		return nil, fmt.Errorf("the payload is %d bytes, over the %d byte limit", len(task.Payload), c.maxPayload)
 	}
@@ -131,10 +132,10 @@ func (c *Channel) intake(task *asyncjobs.Task, log *slog.Logger) (*a2a.Request, 
 
 	// A queued job is a prompt and nothing else. The other three kinds of request act on
 	// a conversation somebody is watching, and a queue has nobody waiting on it.
-	req, err := a2a.ExpectProtocol[*a2a.Request](task.Payload, a2a.RequestPromptProtocol)
+	req, err := wire.ExpectProtocol[*wire.Request](task.Payload, wire.RequestPromptProtocol)
 	if err != nil {
 		log.Error("A job payload is not a prompt", "error", err)
-		return nil, fmt.Errorf("the payload is not a %s message", a2a.RequestPromptProtocol)
+		return nil, fmt.Errorf("the payload is not a %s message", wire.RequestPromptProtocol)
 	}
 
 	return req, nil
@@ -190,7 +191,7 @@ func (c *Channel) renew(ctx context.Context, task *asyncjobs.Task, log *slog.Log
 // A drain returns the item so a sibling takes it; a run waiting on an answer that is
 // days away terminates instead, because redelivering only spends the retry budget
 // resuming into the same wait.
-func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Logger) (any, error) {
+func (c *Channel) disposition(req *wire.Request, out serve.Outcome, log *slog.Logger) (any, error) {
 	switch {
 	case out.Crashed:
 		// A panic is deterministic and each redelivery is real model spend.
@@ -240,24 +241,24 @@ func (c *Channel) disposition(req *a2a.Request, out serve.Outcome, log *slog.Log
 	if out.Err != nil {
 		log.Info("Storing the answer of a run that failed", "reason", out.Reason, "stop_reason", reason, "session", out.SessionID)
 
-		msg := a2a.NewError(out.Err.Error())
+		msg := wire.NewError(out.Err.Error())
 		msg.StopReason = reason
 		// What the attempt cost, on the same terms as a run that answered. A job that
 		// died on its token budget, or part way through an expensive turn, is where an
 		// operator most wants the number, and it is the one case that used to store
 		// none.
 		msg.Usage = out.Stats.Usage()
-		a2a.StampReply(&msg.Header, &req.Header, c.identity)
+		wire.StampReply(&msg.Header, &req.Header, c.identity)
 
 		return msg, nil
 	}
 
 	log.Info("Storing an answer", "reason", out.Reason, "stop_reason", reason, "session", out.SessionID)
 
-	msg := a2a.NewResult(reason)
+	msg := wire.NewResult(reason)
 	msg.Text = out.Text
 	msg.Usage = out.Stats.Usage()
-	a2a.StampReply(&msg.Header, &req.Header, c.identity)
+	wire.StampReply(&msg.Header, &req.Header, c.identity)
 
 	return msg, nil
 }
@@ -278,7 +279,7 @@ func deferredIDs(calls []agent.DeferredCall) string {
 // budgetOf carries the limits a request may lower. The server clamps them against the
 // local configuration, which stays the ceiling. A request's call_timeout is dropped:
 // Work has nowhere to put it.
-func budgetOf(req *a2a.Request) serve.Budget {
+func budgetOf(req *wire.Request) serve.Budget {
 	if req.Budget == nil {
 		return serve.Budget{}
 	}

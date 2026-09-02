@@ -19,7 +19,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -37,17 +37,17 @@ func quietLogger() *slog.Logger {
 // stampHeader fills the framing a caller assembles by hand. The message constructors
 // set only the protocol id, and nothing of ours is in a caller's submission path, so a
 // spec builds a message the same way a caller has to.
-func stampHeader(h *a2a.Header) {
-	id := a2a.NewID()
+func stampHeader(h *wire.Header) {
+	id := wire.NewID()
 	h.ID = id
 	h.Request = id
 	h.Conversation = id
 	h.Time = time.Now().UTC()
-	h.Sender = a2a.Identity{Name: "caller"}
+	h.Sender = wire.Identity{Name: "caller"}
 }
 
-func newRequest(prompt string) *a2a.Request {
-	req := a2a.NewRequest(prompt)
+func newRequest(prompt string) *wire.Request {
+	req := wire.NewRequest(prompt)
 	stampHeader(&req.Header)
 
 	return req
@@ -67,7 +67,7 @@ func encode(v any) []byte {
 func testChannel() *Channel {
 	GinkgoHelper()
 
-	validator, err := a2a.NewValidator()
+	validator, err := wire.NewValidator()
 	Expect(err).ToNot(HaveOccurred())
 
 	return &Channel{
@@ -152,7 +152,7 @@ var _ = Describe("Intake", func() {
 	})
 
 	It("Should refuse a message that is not a prompt", func() {
-		res := a2a.NewResult(a2a.StopEndTurn)
+		res := wire.NewResult(wire.StopEndTurn)
 		stampHeader(&res.Header)
 
 		_, err := ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(res)}, ch.log)
@@ -162,14 +162,14 @@ var _ = Describe("Intake", func() {
 	// A queue has nobody waiting on it, so the three kinds of request that act on a
 	// conversation somebody is watching reach it as a mistake.
 	It("Should refuse a request that is not a prompt", func() {
-		read, err := a2a.NewRead("2Ab3Cd4Ef5Gh", 10)
+		read, err := wire.NewRead("2Ab3Cd4Ef5Gh", 10)
 		Expect(err).ToNot(HaveOccurred())
 		stampHeader(&read.Header)
 
 		_, err = ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(read)}, ch.log)
 		Expect(err).To(MatchError(ContainSubstring("is not a io.choria.fisk-ai.v1.request.prompt message")))
 
-		resume := a2a.NewResume("2Ab3Cd4Ef5Gh")
+		resume := wire.NewResume("2Ab3Cd4Ef5Gh")
 		stampHeader(&resume.Header)
 
 		_, err = ch.intake(&asyncjobs.Task{ID: "job1", Payload: encode(resume)}, ch.log)
@@ -185,8 +185,8 @@ var _ = Describe("Intake", func() {
 var _ = Describe("Dispositions", func() {
 	var (
 		ch        *Channel
-		req       *a2a.Request
-		validator *a2a.Validator
+		req       *wire.Request
+		validator *wire.Validator
 	)
 
 	BeforeEach(func() {
@@ -194,7 +194,7 @@ var _ = Describe("Dispositions", func() {
 		req = newRequest("go")
 
 		var err error
-		validator, err = a2a.NewValidator()
+		validator, err = wire.NewValidator()
 		Expect(err).ToNot(HaveOccurred())
 	})
 
@@ -211,16 +211,16 @@ var _ = Describe("Dispositions", func() {
 
 		Expect(err).ToNot(HaveOccurred())
 
-		res, ok := payload.(*a2a.Result)
+		res, ok := payload.(*wire.Result)
 		Expect(ok).To(BeTrue())
-		Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+		Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 		Expect(res.Text).To(Equal("the answer"))
-		Expect(res.Usage).To(Equal(&a2a.Usage{InputTokens: 11, OutputTokens: 22}))
+		Expect(res.Usage).To(Equal(&wire.Usage{InputTokens: 11, OutputTokens: 22}))
 
 		Expect(res.Request).To(Equal(req.Request), "the answer correlates to the request")
 		Expect(res.Conversation).To(Equal(req.Conversation))
 		Expect(res.Sender.Name).To(Equal("worker"))
-		Expect(res.Recipient).To(Equal(&a2a.Identity{Name: "caller"}))
+		Expect(res.Recipient).To(Equal(&wire.Identity{Name: "caller"}))
 		Expect(res.ID).ToNot(BeEmpty())
 
 		Expect(validator.ValidateMessage(res)).To(Succeed(), "the answer is a published contract")
@@ -238,12 +238,12 @@ var _ = Describe("Dispositions", func() {
 
 		Expect(err).ToNot(HaveOccurred())
 
-		msg, ok := payload.(*a2a.ErrorMessage)
+		msg, ok := payload.(*wire.ErrorMessage)
 		Expect(ok).To(BeTrue())
-		Expect(msg.StopReason).To(Equal(a2a.StopMaxIterations))
+		Expect(msg.StopReason).To(Equal(wire.StopMaxIterations))
 		Expect(msg.Err).To(Equal("ran out of iterations"))
 		Expect(msg.Request).To(Equal(req.Request))
-		Expect(msg.Usage).To(Equal(&a2a.Usage{InputTokens: 33, OutputTokens: 44}))
+		Expect(msg.Usage).To(Equal(&wire.Usage{InputTokens: 33, OutputTokens: 44}))
 
 		Expect(validator.ValidateMessage(msg)).To(Succeed())
 	})
@@ -307,7 +307,7 @@ var _ = Describe("Translation", func() {
 		Expect(budgetOf(newRequest("go"))).To(Equal(serve.Budget{}))
 
 		req := newRequest("go")
-		req.Budget = &a2a.Budget{MaxTokens: 10, MaxIterations: 3, CallTimeout: "1m"}
+		req.Budget = &wire.Budget{MaxTokens: 10, MaxIterations: 3, CallTimeout: "1m"}
 		Expect(budgetOf(req)).To(Equal(serve.Budget{MaxTokens: 10, MaxIterations: 3}))
 	})
 })

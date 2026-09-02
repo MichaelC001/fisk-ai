@@ -14,6 +14,8 @@ import (
 	"github.com/choria-io/fisk"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // gatedApp is an application whose only command is confirmation-gated, so building a
@@ -27,7 +29,7 @@ func gatedApp() *fisk.Application {
 
 var _ = Describe("Validator sharing", func() {
 	It("Should hold a client to the validator its caller supplied", func() {
-		v, err := NewValidator()
+		v, err := wire.NewValidator()
 		Expect(err).NotTo(HaveOccurred())
 
 		c, err := NewClient(newFakeTransport(), "caller", WithValidator(v))
@@ -36,7 +38,7 @@ var _ = Describe("Validator sharing", func() {
 	})
 
 	It("Should hold a server to the validator its caller supplied", func() {
-		v, err := NewValidator()
+		v, err := wire.NewValidator()
 		Expect(err).NotTo(HaveOccurred())
 
 		s, err := NewServer(newFakeTransport(), nil, ServerOptions{Identity: "svc", Validator: v})
@@ -59,7 +61,7 @@ var _ = Describe("Validator sharing", func() {
 		Expect(c2.validator).To(BeIdenticalTo(c1.validator))
 		Expect(s.validator).To(BeIdenticalTo(c1.validator))
 
-		shared, err := sharedValidator()
+		shared, err := wire.SharedValidator()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(shared).To(BeIdenticalTo(c1.validator))
 	})
@@ -69,7 +71,7 @@ var _ = Describe("Validator sharing", func() {
 	// exported accessor. Without it each compiles the set again and a serve process
 	// pays for it three times.
 	It("Should hand an outside caller the validator the constructors default to", func() {
-		exported, err := SharedValidator()
+		exported, err := wire.SharedValidator()
 		Expect(err).NotTo(HaveOccurred())
 
 		c, err := NewClient(newFakeTransport(), "caller")
@@ -77,19 +79,19 @@ var _ = Describe("Validator sharing", func() {
 
 		Expect(exported).To(BeIdenticalTo(c.validator))
 
-		again, err := SharedValidator()
+		again, err := wire.SharedValidator()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(again).To(BeIdenticalTo(exported))
 	})
 
 	It("Should leave the shared validator alone when a caller supplies one", func() {
-		v, err := NewValidator()
+		v, err := wire.NewValidator()
 		Expect(err).NotTo(HaveOccurred())
 
 		c, err := NewClient(newFakeTransport(), "caller", WithValidator(v))
 		Expect(err).NotTo(HaveOccurred())
 
-		shared, err := sharedValidator()
+		shared, err := wire.SharedValidator()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(c.validator).NotTo(BeIdenticalTo(shared))
 	})

@@ -14,6 +14,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
@@ -39,7 +40,7 @@ type Channel struct {
 	workers   int
 	held      *sharedTransport
 	stream    a2a.StreamingTransport
-	validator *a2a.Validator
+	validator *wire.Validator
 	log       *slog.Logger
 
 	// elicits is expose.agent.a2a.prompts.elicit: with it off the channel supplies no
@@ -93,7 +94,7 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 		return nil, fmt.Errorf("the %q transport carries a single reply, so it cannot answer prompts; remove expose.agent.a2a.prompts or use a binding that streams", cfg.A2ATransport())
 	}
 
-	validator, err := a2a.SharedValidator()
+	validator, err := wire.SharedValidator()
 	if err != nil {
 		return nil, fmt.Errorf("compiling the a2a schemas: %w", err)
 	}

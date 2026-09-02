@@ -16,7 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 )
 
@@ -29,19 +29,19 @@ func hostedLogger() *slog.Logger {
 // renderingHandler is a client that keeps what it was shown, which is what a terminal
 // does with the same messages.
 type renderingHandler struct {
-	blocks []a2a.Block
+	blocks []wire.Block
 }
 
-func (h *renderingHandler) Block(b a2a.Block) { h.blocks = append(h.blocks, b) }
+func (h *renderingHandler) Block(b wire.Block) { h.blocks = append(h.blocks, b) }
 
-func (h *renderingHandler) Question(_ context.Context, ask *a2a.ElicitRequest) (*a2a.ElicitReply, error) {
-	return a2a.NewNoOperatorReply(ask, "terminal"), nil
+func (h *renderingHandler) Question(_ context.Context, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
+	return wire.NewNoOperatorReply(ask, "terminal"), nil
 }
 
 func (h *renderingHandler) texts() []string {
 	var out []string
 	for _, b := range h.blocks {
-		text, ok := b.Content().(a2a.TextBlock)
+		text, ok := b.Content().(wire.TextBlock)
 		if !ok {
 			continue
 		}
@@ -100,7 +100,7 @@ var _ = Describe("hostAgent", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		out, err := host.client.RunTask(ctx, host.identity, a2a.NewRequest("how many streams are there"), handler)
+		out, err := host.client.RunTask(ctx, host.identity, wire.NewRequest("how many streams are there"), handler)
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(out.Error).To(BeNil())

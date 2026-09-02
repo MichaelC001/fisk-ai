@@ -21,6 +21,7 @@ import (
 	"io"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
@@ -135,7 +136,7 @@ func Example_task() {
 	}
 
 	err = streaming.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.StreamReplier) {
-		var hdr a2a.Header
+		var hdr wire.Header
 		err := json.Unmarshal(body, &hdr)
 		if err != nil {
 			_ = reply.Error("400", err.Error())
@@ -144,11 +145,11 @@ func Example_task() {
 		}
 
 		stream := a2a.NewReplyStream(reply, &hdr, "worker")
-		_ = stream.Ack(a2a.NewAck(true))
-		_ = stream.Event(a2a.NewTextBlock("reading the log"))
-		_ = stream.Event(a2a.NewTextBlock("counting the errors"))
+		_ = stream.Ack(wire.NewAck(true))
+		_ = stream.Event(wire.NewTextBlock("reading the log"))
+		_ = stream.Event(wire.NewTextBlock("counting the errors"))
 
-		res := a2a.NewResult(a2a.StopEndTurn)
+		res := wire.NewResult(wire.StopEndTurn)
 		res.Text = "four errors since midnight"
 		_ = stream.Result(res)
 	})
@@ -167,7 +168,7 @@ func Example_task() {
 		panic(err)
 	}
 
-	out, err := client.RunTask(ctx, "worker", a2a.NewRequest("how many errors today"), &printingHandler{})
+	out, err := client.RunTask(ctx, "worker", wire.NewRequest("how many errors today"), &printingHandler{})
 	if err != nil {
 		panic(err)
 	}
@@ -187,8 +188,8 @@ func Example_task() {
 // waiting, so a gated call fails closed instead of costing the run a whole window.
 type printingHandler struct{}
 
-func (h *printingHandler) Block(b a2a.Block) {
-	text, ok := b.Content().(a2a.TextBlock)
+func (h *printingHandler) Block(b wire.Block) {
+	text, ok := b.Content().(wire.TextBlock)
 	if !ok {
 		return
 	}
@@ -196,6 +197,6 @@ func (h *printingHandler) Block(b a2a.Block) {
 	fmt.Println("event:", text.Text)
 }
 
-func (h *printingHandler) Question(_ context.Context, ask *a2a.ElicitRequest) (*a2a.ElicitReply, error) {
-	return a2a.NewNoOperatorReply(ask, "operator"), nil
+func (h *printingHandler) Question(_ context.Context, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
+	return wire.NewNoOperatorReply(ask, "operator"), nil
 }

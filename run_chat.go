@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/tui"
 )
 
@@ -105,7 +106,7 @@ func (s *chatSession) run(ctx context.Context) error {
 
 // read asks the worker for the conversation so far and draws it.
 func (s *chatSession) read(ctx context.Context) error {
-	req, err := a2a.NewRead(s.conversation, tuiReplay)
+	req, err := wire.NewRead(s.conversation, tuiReplay)
 	if err != nil {
 		return err
 	}
@@ -133,7 +134,7 @@ func (s *chatSession) read(ctx context.Context) error {
 // turn sends one prompt and renders the reply set. It reports whether the session ends
 // here.
 func (s *chatSession) turn(ctx context.Context, prompt string) (bool, error) {
-	req := a2a.NewRequest(prompt)
+	req := wire.NewRequest(prompt)
 	req.ConversationToken = s.conversation
 	req.Force = forceResume
 
@@ -209,7 +210,7 @@ func (s *chatSession) deliverHeld(ctx context.Context, out *a2a.TaskOutcome) {
 // The worker releases a task's slot after it publishes the terminal message, so a client
 // that sends the next request the moment it reads one can be refused for work that has
 // already ended. That is the worker's to fix; until it is, this waits and asks again.
-func (s *chatSession) sendAnswer(ctx context.Context, held *a2a.Answer) error {
+func (s *chatSession) sendAnswer(ctx context.Context, held *wire.Answer) error {
 	for attempt := range 3 {
 		if attempt > 0 {
 			select {
@@ -219,7 +220,7 @@ func (s *chatSession) sendAnswer(ctx context.Context, held *a2a.Answer) error {
 			}
 		}
 
-		req := a2a.NewAnswerRequest(s.conversation, held)
+		req := wire.NewAnswerRequest(s.conversation, held)
 		req.Force = forceResume
 
 		out, err := s.host.client.RunTask(ctx, s.host.identity, req, s.client)
@@ -245,17 +246,17 @@ const answerRetryWait = 250 * time.Millisecond
 // reportStop says when a turn stopped before it was finished. The answer above it reads
 // as a whole one otherwise, which is the difference between a model that answered and a
 // model that ran out of room.
-func (s *chatSession) reportStop(reason a2a.StopReason) {
+func (s *chatSession) reportStop(reason wire.StopReason) {
 	var msg string
 
 	switch reason {
-	case a2a.StopMaxIterations:
+	case wire.StopMaxIterations:
 		msg = "the turn reached its iteration cap before finishing; send a follow-up to steer it"
-	case a2a.StopMaxTokens:
+	case wire.StopMaxTokens:
 		msg = "the model stopped at its output limit, so the answer above is incomplete"
-	case a2a.StopBudgetExhausted:
+	case wire.StopBudgetExhausted:
 		msg = "the conversation reached its token budget before this turn finished"
-	case a2a.StopRefusal:
+	case wire.StopRefusal:
 		msg = "the model declined to answer"
 	default:
 		return
@@ -317,12 +318,12 @@ func (s *chatSession) requestStop() {
 // suspended reports whether the session ended at a boundary it can be continued from,
 // which the view reads to classify its terminal state.
 func (s *chatSession) suspended() bool {
-	return s.outcome != nil && s.outcome.Error != nil && s.outcome.Error.Code == a2a.CodeSuspended
+	return s.outcome != nil && s.outcome.Error != nil && s.outcome.Error.Code == wire.CodeSuspended
 }
 
 // usage is what the conversation has cost, which the terminal message of its last turn
 // reports as a running total rather than as that turn's share.
-func (s *chatSession) usage() *a2a.Usage {
+func (s *chatSession) usage() *wire.Usage {
 	switch {
 	case s.outcome == nil:
 		return nil
@@ -393,7 +394,7 @@ func (s *chatSession) contentExported() bool {
 // a conversation already working, and a turn the worker did not accept.
 func answerNotTaken(code string) bool {
 	switch code {
-	case a2a.CodeCapacity, a2a.CodeConversationBusy, a2a.CodeTurnNotTaken:
+	case wire.CodeCapacity, wire.CodeConversationBusy, wire.CodeTurnNotTaken:
 		return true
 	}
 
@@ -407,7 +408,7 @@ func answerNotTaken(code string) bool {
 // rest are endings the conversation does not continue past here.
 func endsSession(code string) bool {
 	switch code {
-	case a2a.CodeFailed, a2a.CodeCapacity, a2a.CodeConversationBusy, a2a.CodeTurnNotTaken:
+	case wire.CodeFailed, wire.CodeCapacity, wire.CodeConversationBusy, wire.CodeTurnNotTaken:
 		return false
 	}
 

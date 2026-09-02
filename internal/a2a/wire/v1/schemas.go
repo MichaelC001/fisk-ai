@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"bytes"
@@ -15,11 +15,11 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-//go:embed schemas/v1/*.json
+//go:embed schemas/*.json
 var schemaFS embed.FS
 
 const (
-	schemaDir     = "schemas/v1"
+	schemaDir     = "schemas"
 	schemaBaseURL = "https://choria.io/schemas/io.choria.fisk-ai.v1"
 )
 
@@ -194,7 +194,7 @@ func (v *Validator) Validate(data []byte) error {
 		// An event of a kind this build does not name is framing it can still check.
 		// Anything else decides what the message means, so not knowing it is the end
 		// of the matter.
-		_, isEvent := blockTypeOf(probe.Protocol)
+		_, isEvent := BlockTypeOf(probe.Protocol)
 		if !isEvent {
 			return fmt.Errorf("%w: %q", ErrUnknownProtocol, probe.Protocol)
 		}

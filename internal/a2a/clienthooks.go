@@ -6,6 +6,8 @@ package a2a
 
 import (
 	"context"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // ClientHooks are the CLIENT-SIDE hooks: they run in the process that asks an agent for
@@ -209,7 +211,7 @@ type QuestionAskedInfo struct {
 	QuestionID string
 	ToolUseID  string
 	// Kind is the shape of the question: approve, confirm, select or input.
-	Kind ElicitKind
+	Kind wire.ElicitKind
 	// Question is the text to put to a person, for confirm, select and input. An
 	// approve question carries none and uses Display instead.
 	Question string
@@ -245,10 +247,10 @@ type ClientTurnEndInfo struct {
 	// that was.
 	Code string
 	// StopReason is why the run stopped, in the protocol's vocabulary.
-	StopReason StopReason
+	StopReason wire.StopReason
 	// Usage is what the conversation has consumed, as the terminal message reports it.
 	// Nil from an ending that carried none.
-	Usage *Usage
+	Usage *wire.Usage
 	// Err is why the turn ended when no terminal message said: the set could not be
 	// read, or it ended without one, which is ErrIncompleteStream. A canceled run
 	// arrives here as context.Canceled. Nil for every ending the agent reported, which

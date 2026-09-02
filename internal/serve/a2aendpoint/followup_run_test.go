@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -94,7 +95,7 @@ expose:
 
 		// turn sends a request and reads its set to the terminal message, returning the
 		// ack it was accepted with and the answer it ended on.
-		turn := func(req *a2a.Request) (*a2a.Ack, *a2a.Result) {
+		turn := func(req *wire.Request) (*wire.Ack, *wire.Result) {
 			GinkgoHelper()
 
 			stream, serr := client.Task(ctx, "agent1", req)
@@ -102,8 +103,8 @@ expose:
 			DeferCleanup(stream.Close)
 
 			var (
-				ack    *a2a.Ack
-				result *a2a.Result
+				ack    *wire.Ack
+				result *wire.Result
 			)
 
 			for result == nil {
@@ -114,11 +115,11 @@ expose:
 				Expect(nerr).ToNot(HaveOccurred())
 
 				switch m := msg.(type) {
-				case *a2a.Ack:
+				case *wire.Ack:
 					ack = m
-				case *a2a.ErrorMessage:
+				case *wire.ErrorMessage:
 					Fail(fmt.Sprintf("the turn ended in error: %s (%s)", m.Err, m.Code))
-				case *a2a.Result:
+				case *wire.Result:
 					result = m
 				}
 			}
@@ -129,11 +130,11 @@ expose:
 			return ack, result
 		}
 
-		ack, first := turn(a2a.NewRequest("how many streams are there"))
+		ack, first := turn(wire.NewRequest("how many streams are there"))
 		Expect(first.Text).To(Equal("there are three streams"))
 		Expect(ack.ConversationToken).ToNot(BeEmpty())
 
-		echoed, second := turn(a2a.NewFollowUp(ack, "what is the first one called"))
+		echoed, second := turn(wire.NewFollowUp(ack, "what is the first one called"))
 		Expect(second.Text).To(Equal("the first one is ORDERS"))
 		Expect(echoed.ConversationToken).To(Equal(ack.ConversationToken))
 

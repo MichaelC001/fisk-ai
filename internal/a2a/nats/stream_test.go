@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 )
 
@@ -34,15 +35,15 @@ func streamingOver(nc *nats.Conn, identity string) a2a.StreamingTransport {
 }
 
 // taskRequest builds a task request addressed from caller to agent.
-func taskRequest(prompt string) *a2a.Request {
+func taskRequest(prompt string) *wire.Request {
 	GinkgoHelper()
 
-	req := a2a.NewRequest(prompt)
-	req.ID = a2a.NewID()
+	req := wire.NewRequest(prompt)
+	req.ID = wire.NewID()
 	req.Request = req.ID
 	req.Conversation = req.ID
 	req.Time = time.Now().UTC()
-	req.Sender = a2a.Identity{Name: "caller"}
+	req.Sender = wire.Identity{Name: "caller"}
 
 	return req
 }
@@ -91,20 +92,20 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		err := server.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.StreamReplier) {
 			defer GinkgoRecover()
 
-			var hdr a2a.Header
+			var hdr wire.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 
 			stream := a2a.NewReplyStream(reply, &hdr, "svc")
-			Expect(stream.Ack(a2a.NewAck(true))).To(Succeed())
+			Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
 
 			go func() {
 				defer GinkgoRecover()
 
 				for _, text := range []string{"one", "two", "three"} {
-					Expect(stream.Event(a2a.NewTextBlock(text))).To(Succeed())
+					Expect(stream.Event(wire.NewTextBlock(text))).To(Succeed())
 				}
 
-				res := a2a.NewResult(a2a.StopEndTurn)
+				res := wire.NewResult(wire.StopEndTurn)
 				res.Text = "done"
 				Expect(stream.Result(res)).To(Succeed())
 			}()
@@ -121,16 +122,16 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		var protocols []string
 		var sequences []uint64
 		for _, body := range bodies {
-			var hdr a2a.Header
+			var hdr wire.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 			protocols = append(protocols, hdr.Protocol)
 			sequences = append(sequences, hdr.Sequence)
 		}
 
 		Expect(protocols).To(Equal([]string{
-			a2a.AckProtocol,
-			a2a.EventTextProtocol, a2a.EventTextProtocol, a2a.EventTextProtocol,
-			a2a.ResultProtocol,
+			wire.AckProtocol,
+			wire.EventTextProtocol, wire.EventTextProtocol, wire.EventTextProtocol,
+			wire.ResultProtocol,
 		}))
 		Expect(sequences).To(Equal([]uint64{1, 2, 3, 4, 5}))
 	})
@@ -143,10 +144,10 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		err := server.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.StreamReplier) {
 			defer GinkgoRecover()
 
-			var hdr a2a.Header
+			var hdr wire.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 
-			refusal <- a2a.NewReplyStream(reply, &hdr, "svc").Event(a2a.NewTextBlock("nobody is listening"))
+			refusal <- a2a.NewReplyStream(reply, &hdr, "svc").Event(wire.NewTextBlock("nobody is listening"))
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -167,25 +168,25 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		err := server.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, sink a2a.StreamReplier) {
 			defer GinkgoRecover()
 
-			var hdr a2a.Header
+			var hdr wire.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 
 			// A terminal message carrying another request's id, then this set's own. A
 			// reader that took the first would end the read before the answer arrived.
-			foreign := a2a.NewResult(a2a.StopEndTurn)
-			foreign.ID = a2a.NewID()
-			foreign.Request = a2a.NewID()
+			foreign := wire.NewResult(wire.StopEndTurn)
+			foreign.ID = wire.NewID()
+			foreign.Request = wire.NewID()
 			foreign.Conversation = foreign.Request
 			foreign.Sequence = 1
 			foreign.Time = time.Now().UTC()
-			foreign.Sender = a2a.Identity{Name: "svc"}
+			foreign.Sender = wire.Identity{Name: "svc"}
 			foreign.Text = "another task's answer"
 			Expect(sink.Publish(encode(foreign), true)).To(Succeed())
 
 			stream := a2a.NewReplyStream(sink, &hdr, "svc")
-			Expect(stream.Ack(a2a.NewAck(true))).To(Succeed())
+			Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
 
-			res := a2a.NewResult(a2a.StopEndTurn)
+			res := wire.NewResult(wire.StopEndTurn)
 			res.Text = "mine"
 			Expect(stream.Result(res)).To(Succeed())
 		})
@@ -198,7 +199,7 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		bodies := drain(ctx, reader)
 		Expect(bodies).To(HaveLen(2))
 
-		var res a2a.Result
+		var res wire.Result
 		Expect(json.Unmarshal(bodies[1], &res)).To(Succeed())
 		Expect(res.Text).To(Equal("mine"))
 	})
@@ -251,7 +252,7 @@ var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 		sibling := streamingOver(nc, "svc")
 		caller := streamingOver(nc, "caller")
 
-		task := a2a.NewID()
+		task := wire.NewID()
 
 		held := make(chan []byte, 1)
 		watch, err := holder.WatchCancel(task, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.Replier) {
@@ -264,7 +265,7 @@ var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 
 		// The sibling is running a different task, so it must not hear this cancel.
 		heardBySibling := make(chan []byte, 1)
-		other, err := sibling.WatchCancel(a2a.NewID(), func(_ context.Context, _ a2a.Caller, body []byte, _ a2a.Replier) {
+		other, err := sibling.WatchCancel(wire.NewID(), func(_ context.Context, _ a2a.Caller, body []byte, _ a2a.Replier) {
 			heardBySibling <- body
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -273,7 +274,7 @@ var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 		reply, err := caller.SendCancel(ctx, "svc", task, encode(cancelFor(task)))
 		Expect(err).NotTo(HaveOccurred())
 
-		var ack a2a.Ack
+		var ack wire.Ack
 		Expect(json.Unmarshal(reply, &ack)).To(Succeed())
 		Expect(ack.Accepted).To(BeTrue())
 
@@ -286,7 +287,7 @@ var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 		holder := streamingOver(nc, "svc")
 		caller := streamingOver(nc, "caller")
 
-		task := a2a.NewID()
+		task := wire.NewID()
 
 		watch, err := holder.WatchCancel(task, func(context.Context, a2a.Caller, []byte, a2a.Replier) {})
 		Expect(err).NotTo(HaveOccurred())
@@ -303,7 +304,7 @@ var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 		nc := runNATS()
 		holder := streamingOver(nc, "svc")
 
-		watch, err := holder.WatchCancel(a2a.NewID(), func(context.Context, a2a.Caller, []byte, a2a.Replier) {})
+		watch, err := holder.WatchCancel(wire.NewID(), func(context.Context, a2a.Caller, []byte, a2a.Replier) {})
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(watch.Close()).To(Succeed())
@@ -326,34 +327,34 @@ var _ = Describe("Integration: a2a NATS cancel", Label("integration"), func() {
 })
 
 // cancelFor builds a cancel addressed to the named task.
-func cancelFor(task string) *a2a.Cancel {
+func cancelFor(task string) *wire.Cancel {
 	GinkgoHelper()
 
-	msg := a2a.NewCancel()
-	msg.ID = a2a.NewID()
+	msg := wire.NewCancel()
+	msg.ID = wire.NewID()
 	msg.Request = task
 	msg.Conversation = task
 	msg.Time = time.Now().UTC()
-	msg.Sender = a2a.Identity{Name: "caller"}
+	msg.Sender = wire.Identity{Name: "caller"}
 	msg.Reason = "the caller went away"
 
 	return msg
 }
 
 // cancelAck builds the ack answering a cancel body.
-func cancelAck(body []byte) *a2a.Ack {
+func cancelAck(body []byte) *wire.Ack {
 	GinkgoHelper()
 
-	var hdr a2a.Header
+	var hdr wire.Header
 	Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 
-	ack := a2a.NewAck(true)
-	ack.ID = a2a.NewID()
+	ack := wire.NewAck(true)
+	ack.ID = wire.NewID()
 	ack.Request = hdr.Request
 	ack.Conversation = hdr.Conversation
 	ack.Sequence = 1
 	ack.Time = time.Now().UTC()
-	ack.Sender = a2a.Identity{Name: "svc"}
+	ack.Sender = wire.Identity{Name: "svc"}
 
 	return ack
 }
@@ -373,7 +374,7 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		sibling := streamingOver(nc, "svc")
 		caller := streamingOver(nc, "caller")
 
-		task := a2a.NewID()
+		task := wire.NewID()
 
 		answered := make(chan []byte, 1)
 		watch, err := holder.WatchElicitReplies(task, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.Replier) {
@@ -387,7 +388,7 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		// The sibling is running a different task, so an answer to this one must not
 		// reach it: an answer approves what a run does, and it belongs to one run.
 		heardBySibling := make(chan []byte, 1)
-		other, err := sibling.WatchElicitReplies(a2a.NewID(), func(_ context.Context, _ a2a.Caller, body []byte, _ a2a.Replier) {
+		other, err := sibling.WatchElicitReplies(wire.NewID(), func(_ context.Context, _ a2a.Caller, body []byte, _ a2a.Replier) {
 			heardBySibling <- body
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -396,7 +397,7 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		reply, err := caller.SendElicitReply(ctx, "svc", task, encode(answerFor(task, "q1")))
 		Expect(err).NotTo(HaveOccurred())
 
-		var ack a2a.Ack
+		var ack wire.Ack
 		Expect(json.Unmarshal(reply, &ack)).To(Succeed())
 		Expect(ack.Accepted).To(BeTrue())
 
@@ -404,10 +405,10 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		Eventually(answered).Should(Receive(&body))
 		Consistently(heardBySibling, 200*time.Millisecond, 20*time.Millisecond).ShouldNot(Receive())
 
-		var got a2a.ElicitReply
+		var got wire.ElicitReply
 		Expect(json.Unmarshal(body, &got)).To(Succeed())
 		Expect(got.QuestionID).To(Equal("q1"))
-		Expect(got.Choice).To(Equal(a2a.ChoiceOnce))
+		Expect(got.Choice).To(Equal(wire.ChoiceOnce))
 	})
 
 	It("Should not route an answer to a task watching only cancels", func() {
@@ -415,7 +416,7 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		holder := streamingOver(nc, "svc")
 		caller := streamingOver(nc, "caller")
 
-		task := a2a.NewID()
+		task := wire.NewID()
 
 		heard := make(chan []byte, 1)
 		watch, err := holder.WatchCancel(task, func(_ context.Context, _ a2a.Caller, body []byte, _ a2a.Replier) {
@@ -436,7 +437,7 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		holder := streamingOver(nc, "svc")
 		caller := streamingOver(nc, "caller")
 
-		task := a2a.NewID()
+		task := wire.NewID()
 
 		watch, err := holder.WatchElicitReplies(task, func(context.Context, a2a.Caller, []byte, a2a.Replier) {})
 		Expect(err).NotTo(HaveOccurred())
@@ -452,7 +453,7 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 		nc := runNATS()
 		holder := streamingOver(nc, "svc")
 
-		watch, err := holder.WatchElicitReplies(a2a.NewID(), func(context.Context, a2a.Caller, []byte, a2a.Replier) {})
+		watch, err := holder.WatchElicitReplies(wire.NewID(), func(context.Context, a2a.Caller, []byte, a2a.Replier) {})
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(watch.Close()).To(Succeed())
@@ -475,16 +476,16 @@ var _ = Describe("Integration: a2a NATS elicit replies", Label("integration"), f
 })
 
 // answerFor builds an elicit reply answering the named question of the named task.
-func answerFor(task, question string) *a2a.ElicitReply {
+func answerFor(task, question string) *wire.ElicitReply {
 	GinkgoHelper()
 
-	msg := a2a.NewElicitReply(question, a2a.AnswerChoice)
-	msg.Choice = a2a.ChoiceOnce
-	msg.ID = a2a.NewID()
+	msg := wire.NewElicitReply(question, wire.AnswerChoice)
+	msg.Choice = wire.ChoiceOnce
+	msg.ID = wire.NewID()
 	msg.Request = task
 	msg.Conversation = task
 	msg.Time = time.Now().UTC()
-	msg.Sender = a2a.Identity{Name: "caller"}
+	msg.Sender = wire.Identity{Name: "caller"}
 
 	return msg
 }

@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -46,48 +47,48 @@ type lineClient struct {
 }
 
 // Block renders one event of the run.
-func (c *lineClient) Block(block a2a.Block) {
+func (c *lineClient) Block(block wire.Block) {
 	switch b := block.Content().(type) {
-	case a2a.TextBlock:
+	case wire.TextBlock:
 		c.text(b)
 
-	case a2a.ThinkingBlock:
+	case wire.ThinkingBlock:
 		if c.showThinking && b.Text != "" {
 			fmt.Fprintf(os.Stderr, "\n[thinking]\n%s\n", sanitize.ForDisplay(b.Text))
 		}
 
-	case a2a.PromptBlock:
+	case wire.PromptBlock:
 		// Only a replayed conversation carries these: the caller wrote the prompt it
 		// sent itself.
 		fmt.Fprintf(os.Stderr, "\n> %s\n", sanitize.ForDisplay(b.Text))
 
-	case a2a.ToolCallBlock:
+	case wire.ToolCallBlock:
 		fmt.Fprintf(os.Stderr, "-> %s\n", tui.CallLine(b.Name, b.Input))
 
-	case a2a.AgentCallBlock:
+	case wire.AgentCallBlock:
 		fmt.Fprintf(os.Stderr, "-> %s (remote %s)\n", sanitize.ForTerminal(b.Name, 120), sanitize.ForTerminal(b.Task, 120))
 
-	case a2a.ToolResultBlock:
+	case wire.ToolResultBlock:
 		if !c.showToolOutput {
 			return
 		}
 
 		fmt.Fprintf(os.Stderr, "<-\n%s\n", toolResultLine(b.Output, b.IsError).Text)
 
-	case a2a.WarningBlock:
+	case wire.WarningBlock:
 		msg := blockWarningMessage(b)
 		if msg != "" {
 			fmt.Fprintf(os.Stderr, "%s: %s\n", c.warningLead, msg)
 		}
 
-	case a2a.StatusBlock:
+	case wire.StatusBlock:
 		c.status(b)
 	}
 }
 
 // text prints the model's prose: the answer to stdout, and anything it said on the way
 // there to stderr, which is the split a piped run depends on.
-func (c *lineClient) text(b a2a.TextBlock) {
+func (c *lineClient) text(b wire.TextBlock) {
 	if b.Text == "" {
 		return
 	}
@@ -105,12 +106,12 @@ func (c *lineClient) text(b a2a.TextBlock) {
 // status marks a replayed conversation, so what already happened reads as history
 // rather than as a turn arriving now. The progress statuses are for a caller pacing
 // itself and have nothing to show a person.
-func (c *lineClient) status(b a2a.StatusBlock) {
+func (c *lineClient) status(b wire.StatusBlock) {
 	switch b.Phase {
-	case a2a.PhaseReplayStart:
+	case wire.PhaseReplayStart:
 		fmt.Fprintln(os.Stderr, "\n--- resuming ---")
 
-	case a2a.PhaseReplayEnd:
+	case wire.PhaseReplayEnd:
 		if b.Truncated {
 			fmt.Fprintf(os.Stderr, "(showing the last %d of a longer conversation)\n", b.Count)
 		}
@@ -125,7 +126,7 @@ func (c *lineClient) status(b a2a.StatusBlock) {
 // interrupt or a closed input, is answered as no operator: it ends the question at once
 // and fails a gated command closed, where saying nothing would hold the run for a whole
 // window first.
-func (c *lineClient) Question(ctx context.Context, ask *a2a.ElicitRequest) (*a2a.ElicitReply, error) {
+func (c *lineClient) Question(ctx context.Context, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
 	return answerQuestion(ctx, c.prompter, ask, func(msg string) {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
 	})
@@ -139,7 +140,7 @@ func (c *lineClient) Question(ctx context.Context, ask *a2a.ElicitRequest) (*a2a
 // that ends the question at once and fails a gated command closed, where saying nothing
 // would hold the run for a whole window first. Anything else is reported through warn
 // before the same answer is given.
-func answerQuestion(ctx context.Context, prompter toolkit.Prompter, ask *a2a.ElicitRequest, warn func(string)) (*a2a.ElicitReply, error) {
+func answerQuestion(ctx context.Context, prompter toolkit.Prompter, ask *wire.ElicitRequest, warn func(string)) (*wire.ElicitReply, error) {
 	// One question at a time, whichever surface asks it. TaskHandler.Question is
 	// contracted as concurrent and a terminal is not: the full-screen prompter draws
 	// every overlay under one page name, so a second question would replace the first
@@ -161,12 +162,12 @@ func answerQuestion(ctx context.Context, prompter toolkit.Prompter, ask *a2a.Eli
 		warn(fmt.Sprintf("answering the run's question failed: %v", err))
 	}
 
-	return a2a.NewNoOperatorReply(ask, clientSender), nil
+	return wire.NewNoOperatorReply(ask, clientSender), nil
 }
 
-func putQuestion(ctx context.Context, prompter toolkit.Prompter, ask *a2a.ElicitRequest) (*a2a.ElicitReply, error) {
+func putQuestion(ctx context.Context, prompter toolkit.Prompter, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
 	switch ask.Kind {
-	case a2a.ElicitApprove:
+	case wire.ElicitApprove:
 		choice, err := prompter.ApproveCommand(ctx, toolkit.GateRequest{
 			ToolUseID: ask.ToolUseID,
 			Command:   ask.Command,
@@ -177,31 +178,31 @@ func putQuestion(ctx context.Context, prompter toolkit.Prompter, ask *a2a.Elicit
 			return nil, err
 		}
 
-		return a2a.NewApproveReply(ask, clientSender, approveChoice(choice)), nil
+		return wire.NewApproveReply(ask, clientSender, approveChoice(choice)), nil
 
-	case a2a.ElicitConfirm:
+	case wire.ElicitConfirm:
 		confirmed, err := prompter.Confirm(ctx, ask.Question)
 		if err != nil {
 			return nil, err
 		}
 
-		return a2a.NewConfirmReply(ask, clientSender, confirmed), nil
+		return wire.NewConfirmReply(ask, clientSender, confirmed), nil
 
-	case a2a.ElicitSelect:
+	case wire.ElicitSelect:
 		index, err := prompter.Select(ctx, ask.Question, ask.Options)
 		if err != nil {
 			return nil, err
 		}
 
-		return a2a.NewSelectReply(ask, clientSender, index), nil
+		return wire.NewSelectReply(ask, clientSender, index), nil
 
-	case a2a.ElicitInput:
+	case wire.ElicitInput:
 		value, err := prompter.Input(ctx, ask.Question, ask.Default)
 		if err != nil {
 			return nil, err
 		}
 
-		return a2a.NewInputReply(ask, clientSender, value), nil
+		return wire.NewInputReply(ask, clientSender, value), nil
 	}
 
 	return nil, fmt.Errorf("the run asked a %q question, which this client does not know how to put to anybody", ask.Kind)
@@ -258,11 +259,11 @@ func runAsClient(ctx context.Context, stop context.CancelFunc, host *hostedAgent
 	}
 
 	// With nothing to ask, a token on its own continues the run that stopped part way.
-	var req *a2a.Request
+	var req *wire.Request
 	if prompt == "" {
-		req = a2a.NewResume(token)
+		req = wire.NewResume(token)
 	} else {
-		req = a2a.NewRequest(prompt)
+		req = wire.NewRequest(prompt)
 		req.ConversationToken = token
 	}
 
@@ -324,7 +325,7 @@ func ackMaxTokens(out *a2a.TaskOutcome) int64 {
 // the one ending a resume cannot get past: the allowance belongs to the conversation, so
 // the next turn refuses however it is sent and whoever sends it.
 func endedOnBudget(out *a2a.TaskOutcome) bool {
-	return out != nil && out.Error != nil && out.Error.Code == a2a.CodeBudgetExhausted
+	return out != nil && out.Error != nil && out.Error.Code == wire.CodeBudgetExhausted
 }
 
 // deliverHeldAnswers sends what a person answered too late for the run that asked.
@@ -342,7 +343,7 @@ func deliverHeldAnswers(ctx context.Context, host *hostedAgent, token string, ou
 	for _, held := range out.Unsent {
 		fmt.Fprintln(os.Stderr, "your answer arrived after the run gave the question up; sending it now")
 
-		req := a2a.NewAnswerRequest(token, held)
+		req := wire.NewAnswerRequest(token, held)
 		req.Force = forceResume
 
 		sent, err := host.client.RunTask(ctx, host.identity, req, h)
@@ -362,7 +363,7 @@ func deliverHeldAnswers(ctx context.Context, host *hostedAgent, token string, ou
 // no turn is taken and no model is called, so it is answered whatever state the
 // conversation is in.
 func readConversation(ctx context.Context, host *hostedAgent, token string, h a2a.TaskHandler, replay int) error {
-	req, err := a2a.NewRead(token, replay)
+	req, err := wire.NewRead(token, replay)
 	if err != nil {
 		return err
 	}
@@ -458,7 +459,7 @@ func (c *lineClient) report(out *a2a.TaskOutcome) error {
 	printUsage(out.Error.Usage, ackMaxTokens(out))
 
 	switch out.Error.Code {
-	case a2a.CodeSuspended, a2a.CodeDeferred:
+	case wire.CodeSuspended, wire.CodeDeferred:
 		return nil
 	}
 
@@ -468,51 +469,51 @@ func (c *lineClient) report(out *a2a.TaskOutcome) error {
 // endingMessage says what happened and, where there is one, what to do about it. The
 // worker's own message is included because it carries the detail: which tool is
 // waiting, which call was refused, what the model provider said.
-func endingMessage(msg *a2a.ErrorMessage) string {
+func endingMessage(msg *wire.ErrorMessage) string {
 	detail := sanitize.ForTerminal(msg.Err, 400)
 
 	switch msg.Code {
-	case a2a.CodeSuspended:
+	case wire.CodeSuspended:
 		return "the run stopped where it can be resumed: " + detail
 
-	case a2a.CodeDeferred:
+	case wire.CodeDeferred:
 		return "the run is waiting on an answer before it can go on: " + detail
 
-	case a2a.CodeCapacity:
+	case wire.CodeCapacity:
 		return "the agent is already running as much as it will at once; try again shortly"
 
-	case a2a.CodeDraining:
+	case wire.CodeDraining:
 		return "the agent is going out of service and took no work"
 
-	case a2a.CodeConversationBusy:
+	case wire.CodeConversationBusy:
 		return "a turn of this conversation is already running; wait for it to finish"
 
-	case a2a.CodeUnknownConversation:
+	case wire.CodeUnknownConversation:
 		// Never "start a new one": the usual cause is a handle that names a conversation
 		// which does exist, given to an agent that cannot resolve it. A session id is one
 		// way to say that, since only the store it came from can turn it into the token
 		// the agent takes.
 		return "this agent has no conversation by that name; check that the handle is the conversation token, which 'fisk session show' prints, and that it belongs to this agent"
 
-	case a2a.CodeBudgetExhausted:
+	case wire.CodeBudgetExhausted:
 		// The detail carries both numbers and names the key, so what is added here is
 		// only what a person does next. It is a property of the conversation rather than
 		// of this turn, so resuming reaches the same refusal.
 		return "this conversation has used up its token budget and will take no further turn: " + detail
 
-	case a2a.CodeTurnNotTaken:
+	case wire.CodeTurnNotTaken:
 		return "the conversation could not take this turn, so nothing ran: " + detail
 
-	case a2a.CodeCrashed:
+	case wire.CodeCrashed:
 		return "the agent crashed, which is a bug rather than a model or tool failure; the detail is in its log"
 
-	case a2a.CodeNotStarted:
+	case wire.CodeNotStarted:
 		return "the work was taken and never started; send it again"
 
-	case a2a.CodeCanceled:
+	case wire.CodeCanceled:
 		return "the agent stopped the run"
 
-	case a2a.CodeRejected:
+	case wire.CodeRejected:
 		return "the agent refused the work: " + detail
 	}
 
@@ -521,7 +522,7 @@ func endingMessage(msg *a2a.ErrorMessage) string {
 
 // printUsage reports what the turn cost, for the endings that ran. A run that was
 // refused spent nothing and says nothing.
-func printUsage(usage *a2a.Usage, maxTokens int64) {
+func printUsage(usage *wire.Usage, maxTokens int64) {
 	if usage == nil {
 		return
 	}
@@ -544,14 +545,14 @@ func printUsage(usage *a2a.Usage, maxTokens int64) {
 }
 
 // approveChoice maps the operator's three-way answer onto the wire.
-func approveChoice(choice toolkit.ConfirmChoice) a2a.ElicitChoice {
+func approveChoice(choice toolkit.ConfirmChoice) wire.ElicitChoice {
 	switch choice {
 	case toolkit.ConfirmOnce:
-		return a2a.ChoiceOnce
+		return wire.ChoiceOnce
 	case toolkit.ConfirmAlways:
-		return a2a.ChoiceAlways
+		return wire.ChoiceAlways
 	default:
-		return a2a.ChoiceNo
+		return wire.ChoiceNo
 	}
 }
 
@@ -561,7 +562,7 @@ func approveChoice(choice toolkit.ConfirmChoice) a2a.ElicitChoice {
 // A kind this build does not know still says something: the run raised it, and its
 // fields are what the wire carried. Dropping it would hide a run reporting that
 // something went wrong.
-func blockWarningMessage(b a2a.WarningBlock) string {
+func blockWarningMessage(b wire.WarningBlock) string {
 	kind, known := agent.ParseWarningKind(b.Kind)
 	if !known {
 		return unknownWarningMessage(b)
@@ -581,7 +582,7 @@ func blockWarningMessage(b a2a.WarningBlock) string {
 }
 
 // unknownWarningMessage renders a warning from its fields alone.
-func unknownWarningMessage(b a2a.WarningBlock) string {
+func unknownWarningMessage(b wire.WarningBlock) string {
 	parts := []string{sanitize.ForTerminal(b.Kind, 120)}
 
 	if b.Name != "" {

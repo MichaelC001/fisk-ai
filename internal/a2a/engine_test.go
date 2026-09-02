@@ -5,7 +5,6 @@
 package a2a
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,10 +12,12 @@ import (
 	"os"
 
 	"github.com/choria-io/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // discardLogger is a slog logger that drops all output, for tests that build a
@@ -36,49 +37,6 @@ func toolsFor(app *fisk.Application) []toolkit.Tool {
 	return toolkit.Tools(tools)
 }
 
-var _ = Describe("ExpectProtocol", func() {
-	It("Should return the decoded message when the protocol matches", func() {
-		req := NewToolRequest("ping", nil)
-		StampRequest(context.Background(), &req.Header, "me", "you")
-		data, err := json.Marshal(req)
-		Expect(err).NotTo(HaveOccurred())
-
-		msg, err := ExpectProtocol[*ToolRequest](data, ToolRequestProtocol)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(msg.Name).To(Equal("ping"))
-	})
-
-	// The type argument names what the id decodes into, so a call naming another one is
-	// written wrong. It is refused rather than returning a zero value the caller would
-	// read as a message that arrived.
-	It("Should reject a type argument the wanted protocol does not decode into", func() {
-		req := NewToolRequest("ping", nil)
-		StampRequest(context.Background(), &req.Header, "me", "you")
-		data, err := json.Marshal(req)
-		Expect(err).NotTo(HaveOccurred())
-
-		msg, err := ExpectProtocol[*Cancel](data, ToolRequestProtocol)
-		Expect(err).To(MatchError(ErrProtocolMismatch))
-		Expect(err).To(MatchError(ContainSubstring("decodes into *a2a.ToolRequest, not *a2a.Cancel")))
-		Expect(msg).To(BeNil())
-	})
-
-	It("Should reject a message whose protocol is not the one the path carries", func() {
-		req := NewDiscoveryRequest()
-		StampRequest(context.Background(), &req.Header, "me", "you")
-		data, err := json.Marshal(req)
-		Expect(err).NotTo(HaveOccurred())
-
-		_, err = ExpectProtocol[*ToolRequest](data, ToolRequestProtocol)
-		Expect(err).To(MatchError(ErrProtocolMismatch))
-	})
-
-	It("Should reject an undecodable body", func() {
-		_, err := ExpectProtocol[*ToolRequest]([]byte(`{"protocol":"nope"}`), ToolRequestProtocol)
-		Expect(err).To(MatchError(ErrProtocolMismatch))
-	})
-})
-
 var _ = Describe("buildCard", func() {
 	It("Should describe the agent and its tools", func() {
 		app := fisk.New("app", "an app")
@@ -88,7 +46,7 @@ var _ = Describe("buildCard", func() {
 		Expect(card.Name).To(Equal("svc"))
 		Expect(card.Version).To(Equal("v1"))
 		Expect(card.Model).To(Equal("opus"), "so a caller can see what answers its prompt")
-		Expect(card.Protocols).To(ConsistOf(ProtocolNamespace))
+		Expect(card.Protocols).To(ConsistOf(wire.ProtocolNamespace))
 		Expect(card.Tools).To(HaveLen(1))
 		Expect(card.Tools[0].Name).To(Equal("ping"))
 		Expect(card.Tools[0].InputSchema).NotTo(BeEmpty())
@@ -101,7 +59,7 @@ var _ = Describe("buildCard", func() {
 
 		card := buildCard(ServerOptions{Identity: "svc", Version: "v1"}, toolsFor(app))
 		Expect(card.Tools).To(HaveLen(1))
-		Expect(card.Tools[0].Behavior.Toolkit()).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
+		Expect(BehaviorOf(card.Tools[0].Behavior)).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
 	})
 
 	// An agent that takes no prompts calls no model, and a card naming one would say

@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 // StopReason is the neutral reason a task finished, carried by Result and
 // ErrorMessage.

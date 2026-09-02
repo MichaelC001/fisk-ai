@@ -11,8 +11,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/a2a/transcript"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -47,19 +47,19 @@ var _ = Describe("Transcript", func() {
 		blocks := turns.Blocks()
 		Expect(blocks).To(HaveLen(5))
 
-		types := make([]a2a.BlockType, len(blocks))
+		types := make([]wire.BlockType, len(blocks))
 		for i, b := range blocks {
 			types[i] = b.Type()
 		}
-		Expect(types).To(Equal([]a2a.BlockType{
-			a2a.BlockPrompt, a2a.BlockThinking, a2a.BlockToolCall, a2a.BlockToolResult, a2a.BlockText,
+		Expect(types).To(Equal([]wire.BlockType{
+			wire.BlockPrompt, wire.BlockThinking, wire.BlockToolCall, wire.BlockToolResult, wire.BlockText,
 		}))
 
-		Expect(blocks[0].Content().(a2a.PromptBlock).Text).To(Equal("how many streams are there"))
-		call := blocks[2].Content().(a2a.ToolCallBlock)
+		Expect(blocks[0].Content().(wire.PromptBlock).Text).To(Equal("how many streams are there"))
+		call := blocks[2].Content().(wire.ToolCallBlock)
 		Expect(call.Name).To(Equal("stream_ls"))
 		Expect(string(call.Input)).To(Equal(`{"all":true}`))
-		Expect(blocks[3].Content().(a2a.ToolResultBlock).Output).To(Equal("ORDERS\nEVENTS\nJOBS"))
+		Expect(blocks[3].Content().(wire.ToolResultBlock).Output).To(Equal("ORDERS\nEVENTS\nJOBS"))
 	})
 
 	// A run dispatches its tools one at a time and sends each result behind the call it
@@ -85,10 +85,10 @@ var _ = Describe("Transcript", func() {
 		blocks := transcript.Of(rs).Blocks()
 		Expect(blocks).To(HaveLen(4))
 
-		Expect(blocks[0].Content().(a2a.ToolCallBlock).Name).To(Equal("first"))
-		Expect(blocks[1].Content().(a2a.ToolResultBlock).Output).To(Equal("first answered"))
-		Expect(blocks[2].Content().(a2a.ToolCallBlock).Name).To(Equal("second"))
-		Expect(blocks[3].Content().(a2a.ToolResultBlock).Output).To(Equal("second answered"))
+		Expect(blocks[0].Content().(wire.ToolCallBlock).Name).To(Equal("first"))
+		Expect(blocks[1].Content().(wire.ToolResultBlock).Output).To(Equal("first answered"))
+		Expect(blocks[2].Content().(wire.ToolCallBlock).Name).To(Equal("second"))
+		Expect(blocks[3].Content().(wire.ToolResultBlock).Output).To(Equal("second answered"))
 	})
 
 	// A follow-up typed while the previous turn's results were still being appended folds
@@ -111,7 +111,7 @@ var _ = Describe("Transcript", func() {
 		Expect(turns).To(HaveLen(2))
 		Expect(turns[0]).To(HaveLen(2))
 		Expect(turns[1]).To(HaveLen(1))
-		Expect(turns[1][0].Content().(a2a.PromptBlock).Text).To(Equal("actually, never mind"))
+		Expect(turns[1][0].Content().(wire.PromptBlock).Text).To(Equal("actually, never mind"))
 	})
 
 	// A live run marks the text of the message that ended a turn, so a client can tell the
@@ -119,7 +119,7 @@ var _ = Describe("Transcript", func() {
 	// every answer as narration.
 	It("Should mark the answer of each turn", func() {
 		blocks := transcript.Of(conversation()).Blocks()
-		Expect(blocks[4].Content().(a2a.TextBlock).Final).To(BeTrue())
+		Expect(blocks[4].Content().(wire.TextBlock).Final).To(BeTrue())
 
 		// A turn that called a tool meant to continue, so its text is narration however the
 		// journal stored the results.
@@ -133,7 +133,7 @@ var _ = Describe("Transcript", func() {
 		}
 
 		narration := transcript.Of(rs).Blocks()
-		Expect(narration[0].Content().(a2a.TextBlock).Final).To(BeFalse())
+		Expect(narration[0].Content().(wire.TextBlock).Final).To(BeFalse())
 	})
 
 	// A thinking signature is the provider payload that lets a turn be replayed to the
@@ -141,7 +141,7 @@ var _ = Describe("Transcript", func() {
 	// reader can do anything with the bytes, and they leave the process that holds them.
 	It("Should drop the thinking signature", func() {
 		blocks := transcript.Of(conversation()).Blocks()
-		thinking := blocks[1].Content().(a2a.ThinkingBlock)
+		thinking := blocks[1].Content().(wire.ThinkingBlock)
 
 		Expect(thinking.Text).To(Equal("list them first"))
 		Expect(thinking.Signature).To(BeEmpty())
@@ -153,13 +153,13 @@ var _ = Describe("Transcript", func() {
 	// without advancing the sequence and leave the caller a hole it cannot see.
 	It("Should trim what will not fit", func() {
 		rs := conversation()
-		huge := strings.Repeat("x", a2a.MaxBlockText*2)
+		huge := strings.Repeat("x", wire.MaxBlockText*2)
 		rs.Messages[2].Content[0].ToolResult.Content = huge
 
 		blocks := transcript.Of(rs).Blocks()
-		output := blocks[3].Content().(a2a.ToolResultBlock).Output
+		output := blocks[3].Content().(wire.ToolResultBlock).Output
 
-		Expect(output).To(Equal(a2a.TrimBlockText(huge)))
+		Expect(output).To(Equal(wire.TrimBlockText(huge)))
 		Expect(len(output)).To(BeNumerically("<", len(huge)))
 	})
 
@@ -177,7 +177,7 @@ var _ = Describe("Transcript", func() {
 		last := turns[len(turns)-1]
 
 		Expect(last).To(HaveLen(1))
-		Expect(last[0].Content().(a2a.ToolCallBlock).ID).To(Equal("toolu_2"))
+		Expect(last[0].Content().(wire.ToolCallBlock).ID).To(Equal("toolu_2"))
 	})
 
 	// A caller asking for the last so many blocks gets whole turns, because a result
@@ -188,14 +188,14 @@ var _ = Describe("Transcript", func() {
 		blocks, truncated := turns.Tail(1)
 		Expect(truncated).To(BeTrue())
 		Expect(blocks).To(HaveLen(1), "the last turn is the answer")
-		Expect(blocks[0].Type()).To(Equal(a2a.BlockText))
+		Expect(blocks[0].Type()).To(Equal(wire.BlockText))
 
 		// One block short of a turn boundary takes the whole turn it lands in, and the turn
 		// holding a result holds the call it answers, so a tail never opens on a result.
 		blocks, truncated = turns.Tail(2)
 		Expect(truncated).To(BeTrue())
 		Expect(blocks).To(HaveLen(4))
-		Expect(blocks[0].Type()).To(Equal(a2a.BlockThinking))
+		Expect(blocks[0].Type()).To(Equal(wire.BlockThinking))
 
 		blocks, truncated = turns.Tail(3)
 		Expect(truncated).To(BeTrue())

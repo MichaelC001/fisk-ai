@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -28,35 +29,35 @@ import (
 // did when the vocabulary lived here. It belongs to the protocol rather than to this
 // endpoint, since a client decides what to do about an ending it did not produce.
 const (
-	codeRejected   = a2a.CodeRejected
-	codeCapacity   = a2a.CodeCapacity
-	codeDuplicate  = a2a.CodeDuplicate
-	codeDraining   = a2a.CodeDraining
-	codeFailed     = a2a.CodeFailed
-	codeCrashed    = a2a.CodeCrashed
-	codeNotStarted = a2a.CodeNotStarted
-	codeDeferred   = a2a.CodeDeferred
-	codeSuspended  = a2a.CodeSuspended
-	codeCanceled   = a2a.CodeCanceled
+	codeRejected   = wire.CodeRejected
+	codeCapacity   = wire.CodeCapacity
+	codeDuplicate  = wire.CodeDuplicate
+	codeDraining   = wire.CodeDraining
+	codeFailed     = wire.CodeFailed
+	codeCrashed    = wire.CodeCrashed
+	codeNotStarted = wire.CodeNotStarted
+	codeDeferred   = wire.CodeDeferred
+	codeSuspended  = wire.CodeSuspended
+	codeCanceled   = wire.CodeCanceled
 
 	// The three endings a follow-up turn has that a first prompt does not, each with a
 	// different answer for the caller: send the prompt as a first turn instead, send it
 	// again once the conversation is free, and send it again once whatever the
 	// conversation is waiting on has been answered.
-	codeUnknownConversation = a2a.CodeUnknownConversation
-	codeConversationBusy    = a2a.CodeConversationBusy
-	codeTurnNotTaken        = a2a.CodeTurnNotTaken
+	codeUnknownConversation = wire.CodeUnknownConversation
+	codeConversationBusy    = wire.CodeConversationBusy
+	codeTurnNotTaken        = wire.CodeTurnNotTaken
 
 	// The ending a conversation has once, permanently: its token allowance is spent, so
 	// no caller gets a further turn out of it.
-	codeBudgetExhausted = a2a.CodeBudgetExhausted
+	codeBudgetExhausted = wire.CodeBudgetExhausted
 
 	// The endings an answer has. Each is permanent: the call it named is not one this
 	// conversation can take an answer for, so sending it again reaches the same
 	// answer.
-	codeUnknownCall     = a2a.CodeUnknownCall
-	codeAlreadyAnswered = a2a.CodeAlreadyAnswered
-	codeAnswerTooLarge  = a2a.CodeAnswerTooLarge
+	codeUnknownCall     = wire.CodeUnknownCall
+	codeAlreadyAnswered = wire.CodeAlreadyAnswered
+	codeAnswerTooLarge  = wire.CodeAnswerTooLarge
 )
 
 // task is one accepted request: the reply set it answers on, the cancel addressed to
@@ -69,7 +70,7 @@ const (
 // while the run is in progress.
 type task struct {
 	ch     *Channel
-	req    *a2a.Request
+	req    *wire.Request
 	stream *a2a.ReplyStream
 	watch  a2a.TaskWatch
 	log    *slog.Logger
@@ -145,14 +146,14 @@ func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, re
 	// declares nothing on a first turn and decides per turn afterwards.
 	token := req.ConversationToken
 	if token == "" {
-		token = a2a.NewID()
+		token = wire.NewID()
 	}
 
 	// A follow-up is a prompt that adds a turn to a conversation it names. A prompt
 	// carrying no token opens a conversation instead, and the other three kinds add no
 	// turn at all: calling an answered question a turn would report every one of them as
 	// a turn that was not taken.
-	followUp := req.Kind == a2a.RequestPrompt && req.ConversationToken != ""
+	followUp := req.Kind == wire.RequestPrompt && req.ConversationToken != ""
 
 	t := &task{
 		ch:       c,
@@ -213,7 +214,7 @@ func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, re
 	// The ack carries the token on every acceptance, the minted one on a first turn and
 	// the one it accepted on a follow-up, so a caller reads back which conversation it is
 	// on rather than assuming its token was understood.
-	accept := a2a.NewAck(true)
+	accept := wire.NewAck(true)
 	accept.ConversationToken = t.token
 	accept.MaxTokens = t.effectiveMaxTokens()
 
@@ -247,7 +248,7 @@ func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, re
 // A caller that wants the conversation and then wants it continued sends two messages,
 // since the two are different operations and one message cannot be both.
 func (t *task) reads() bool {
-	return t.req.Kind == a2a.RequestRead
+	return t.req.Kind == wire.RequestRead
 }
 
 // serveRead answers a read: the conversation as blocks, and a result that reports what
@@ -265,7 +266,7 @@ func (c *Channel) serveRead(ctx context.Context, t *task) {
 		return
 	}
 
-	accept := a2a.NewAck(true)
+	accept := wire.NewAck(true)
 	accept.ConversationToken = t.token
 	accept.MaxTokens = t.effectiveMaxTokens()
 
@@ -299,7 +300,7 @@ func (c *Channel) serveRead(ctx context.Context, t *task) {
 
 	t.log.Info("Read a stored conversation back", "session", t.session, "asked", t.req.Replay)
 
-	res := a2a.NewResult(a2a.StopEndTurn)
+	res := wire.NewResult(wire.StopEndTurn)
 	res.Usage = a2a.UsageFromCounters(rs.Counters)
 
 	t.finish(func() error { return t.stream.Result(res) })
@@ -307,9 +308,9 @@ func (c *Channel) serveRead(ctx context.Context, t *task) {
 
 // intake decides whether a body can be run at all. Its error reaches the caller, so it
 // names what is wrong with the request and nothing about this worker.
-func (c *Channel) intake(body []byte) (*a2a.Request, error) {
-	if len(body) > a2a.MaxMessageSize {
-		return nil, fmt.Errorf("the request is %d bytes, over the %d byte limit", len(body), a2a.MaxMessageSize)
+func (c *Channel) intake(body []byte) (*wire.Request, error) {
+	if len(body) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("the request is %d bytes, over the %d byte limit", len(body), wire.MaxMessageSize)
 	}
 
 	err := c.validator.Validate(body)
@@ -317,12 +318,12 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 		return nil, fmt.Errorf("the request is not a valid v1 message: %w", err)
 	}
 
-	req, err := a2a.ExpectOneProtocol[*a2a.Request](body, a2a.RequestProtocols())
+	req, err := wire.ExpectOneProtocol[*wire.Request](body, wire.RequestProtocols())
 	if err != nil {
 		return nil, fmt.Errorf("this path carries requests: %w", err)
 	}
 
-	if req.Kind == a2a.RequestAnswer {
+	if req.Kind == wire.RequestAnswer {
 		err = checkAnswer(req)
 		if err != nil {
 			return nil, err
@@ -338,14 +339,14 @@ func (c *Channel) intake(body []byte) (*a2a.Request, error) {
 //
 // Everything here is about the message; whether the call it names is one this conversation
 // is waiting on is the run's to answer, since only the journal knows.
-func checkAnswer(req *a2a.Request) error {
+func checkAnswer(req *wire.Request) error {
 	a := req.Answer
 	if a.ToolUseID == "" {
 		return fmt.Errorf("the answer names no tool call")
 	}
 
 	switch a.Kind {
-	case a2a.ElicitApprove, a2a.ElicitConfirm, a2a.ElicitSelect, a2a.ElicitInput:
+	case wire.ElicitApprove, wire.ElicitConfirm, wire.ElicitSelect, wire.ElicitInput:
 	default:
 		return fmt.Errorf("%q is not a question this agent asks", a.Kind)
 	}
@@ -354,12 +355,12 @@ func checkAnswer(req *a2a.Request) error {
 	// tool and an answer of the wrong shape would reach the model as one the operator
 	// never gave.
 	switch {
-	case a.Answer == a2a.AnswerNoOperator:
-	case a.Kind == a2a.ElicitApprove && a.Answer != a2a.AnswerChoice:
+	case a.Answer == wire.AnswerNoOperator:
+	case a.Kind == wire.ElicitApprove && a.Answer != wire.AnswerChoice:
 		return fmt.Errorf("an approval is answered with a choice, not with %q", a.Answer)
-	case a.Kind == a2a.ElicitConfirm && a.Answer != a2a.AnswerConfirmed:
+	case a.Kind == wire.ElicitConfirm && a.Answer != wire.AnswerConfirmed:
 		return fmt.Errorf("a confirmation is answered with confirmed, not with %q", a.Answer)
-	case (a.Kind == a2a.ElicitSelect || a.Kind == a2a.ElicitInput) && a.Answer != a2a.AnswerValue:
+	case (a.Kind == wire.ElicitSelect || a.Kind == wire.ElicitInput) && a.Answer != wire.AnswerValue:
 		return fmt.Errorf("a %s question is answered with a value, not with %q", a.Kind, a.Answer)
 	}
 
@@ -467,7 +468,7 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	checkpoint := agent.Checkpoint{ResumeID: t.session, CreateIfMissing: true, ConversationToken: t.token}
 
 	switch {
-	case t.req.Kind == a2a.RequestAnswer:
+	case t.req.Kind == wire.RequestAnswer:
 		// An answer resumes the conversation and adds no turn to it. A call that
 		// deferred takes the answer as its result, since it is never dispatched again;
 		// an approval needs nothing here, the resume dispatching the call it guards and
@@ -477,7 +478,7 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 	case t.followUp:
 		checkpoint = agent.Checkpoint{ResumeID: t.session, FollowUp: true, Force: t.req.Force}
 
-	case t.req.Kind == a2a.RequestResume:
+	case t.req.Kind == wire.RequestResume:
 		// Continue a run that stopped part way, which is what a caller sends after a
 		// suspend and what the terminal's own resume has always done.
 		checkpoint = agent.Checkpoint{ResumeID: t.session, Force: t.req.Force}
@@ -522,7 +523,7 @@ func (t *task) work(caller a2a.Caller) *serve.Work {
 func (t *task) answerFor() *agent.DeferredAnswer {
 	a := t.req.Answer
 
-	if a.Kind == a2a.ElicitApprove {
+	if a.Kind == wire.ElicitApprove {
 		if t.prompter != nil {
 			t.prompter.hold(a.ToolUseID, approvalFrom(a))
 		}
@@ -545,15 +546,15 @@ func (t *task) answerFor() *agent.DeferredAnswer {
 
 // approvalFrom reads an approval out of an answer. Anything that is not an explicit
 // yes is a refusal, which is the direction the gate defaults in.
-func approvalFrom(a *a2a.Answer) toolkit.ConfirmChoice {
-	if a.Answer != a2a.AnswerChoice {
+func approvalFrom(a *wire.Answer) toolkit.ConfirmChoice {
+	if a.Answer != wire.AnswerChoice {
 		return toolkit.ConfirmNo
 	}
 
 	switch a.Choice {
-	case a2a.ChoiceAlways:
+	case wire.ChoiceAlways:
 		return toolkit.ConfirmAlways
-	case a2a.ChoiceOnce:
+	case wire.ChoiceOnce:
 		return toolkit.ConfirmOnce
 	default:
 		return toolkit.ConfirmNo
@@ -561,17 +562,17 @@ func approvalFrom(a *a2a.Answer) toolkit.ConfirmChoice {
 }
 
 // renderAnswer produces the result the tool that asked would have returned.
-func renderAnswer(a *a2a.Answer) (string, error) {
-	if a.Answer == a2a.AnswerNoOperator {
+func renderAnswer(a *wire.Answer) (string, error) {
+	if a.Answer == wire.AnswerNoOperator {
 		return builtin.NoAnswerResult(questionTool(a.Kind), "the caller has no operator to answer on its behalf")
 	}
 
 	switch a.Kind {
-	case a2a.ElicitConfirm:
+	case wire.ElicitConfirm:
 		return builtin.ConfirmResult(a.Confirmed, "")
-	case a2a.ElicitSelect:
+	case wire.ElicitSelect:
 		return builtin.SelectResult(a.Value, "")
-	case a2a.ElicitInput:
+	case wire.ElicitInput:
 		return builtin.InputResult(a.Value, "")
 	default:
 		return "", fmt.Errorf("%q has no result shape", a.Kind)
@@ -580,11 +581,11 @@ func renderAnswer(a *a2a.Answer) (string, error) {
 
 // questionTool names the built-in that asks each kind of question, which is what says
 // the shape its result takes.
-func questionTool(kind a2a.ElicitKind) string {
+func questionTool(kind wire.ElicitKind) string {
 	switch kind {
-	case a2a.ElicitConfirm:
+	case wire.ElicitConfirm:
 		return builtin.AskHumanConfirmName
-	case a2a.ElicitSelect:
+	case wire.ElicitSelect:
 		return builtin.AskHumanSelectName
 	default:
 		return builtin.AskHumanInputName
@@ -673,8 +674,8 @@ func (t *task) handleCancel(_ context.Context, _ a2a.Caller, body []byte, reply 
 
 	t.log.Info("A caller asked a run to stop", "reason", msg.Reason)
 
-	ack := a2a.NewAck(true)
-	a2a.StampReply(&ack.Header, &msg.Header, t.ch.identity)
+	ack := wire.NewAck(true)
+	wire.StampReply(&ack.Header, &msg.Header, t.ch.identity)
 
 	data, err := json.Marshal(ack)
 	if err != nil {
@@ -693,9 +694,9 @@ func (t *task) handleCancel(_ context.Context, _ a2a.Caller, body []byte, reply 
 // inboundCancel holds a cancel to the same cap, schema and protocol rule as a request.
 // The subject carries the request id, so anything else arriving there is refused rather
 // than acted on.
-func (c *Channel) inboundCancel(body []byte) (*a2a.Cancel, error) {
-	if len(body) > a2a.MaxMessageSize {
-		return nil, fmt.Errorf("the cancel is %d bytes, over the %d byte limit", len(body), a2a.MaxMessageSize)
+func (c *Channel) inboundCancel(body []byte) (*wire.Cancel, error) {
+	if len(body) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("the cancel is %d bytes, over the %d byte limit", len(body), wire.MaxMessageSize)
 	}
 
 	err := c.validator.Validate(body)
@@ -703,9 +704,9 @@ func (c *Channel) inboundCancel(body []byte) (*a2a.Cancel, error) {
 		return nil, fmt.Errorf("the cancel is not a valid v1 message: %w", err)
 	}
 
-	cancel, err := a2a.ExpectProtocol[*a2a.Cancel](body, a2a.CancelProtocol)
+	cancel, err := wire.ExpectProtocol[*wire.Cancel](body, wire.CancelProtocol)
 	if err != nil {
-		return nil, fmt.Errorf("the cancel path carries %s messages: %w", a2a.CancelProtocol, err)
+		return nil, fmt.Errorf("the cancel path carries %s messages: %w", wire.CancelProtocol, err)
 	}
 
 	return cancel, nil
@@ -813,7 +814,7 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 // terminal message that ends the set.
 func (t *task) refuse(code, reason string) {
 	t.terminateWith(func() error {
-		refusal := a2a.NewAck(false)
+		refusal := wire.NewAck(false)
 		refusal.Reason = reason
 
 		return t.stream.Ack(refusal)
@@ -887,7 +888,7 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 	if code == "" {
 		t.log.Info("Answering a prompt", "session", t.session, "reason", out.Reason)
 
-		res := a2a.NewResult(a2a.StopReasonFor(out.Reason))
+		res := wire.NewResult(a2a.StopReasonFor(out.Reason))
 		res.Text = trimForWire(out.Text)
 		res.Usage = out.Stats.Usage()
 		res.TraceID = traceOf(out)
@@ -898,7 +899,7 @@ func (t *task) send(out serve.Outcome, code, reason string) error {
 
 	t.log.Info("Ending a run", "session", t.session, "code", code, "reason", reason)
 
-	msg := a2a.NewError(trimForWire(reason))
+	msg := wire.NewError(trimForWire(reason))
 	msg.Code = code
 	msg.StopReason = terminalStopReason(out, code)
 	// What the run spent before it ended. A suspended one did the work of a turn and
@@ -960,14 +961,14 @@ func (t *task) end() {
 // terminalStopReason is the neutral reason a failed task carries. A run that reached
 // one of its own reports it; one that was refused, canceled or never started reports
 // what happened to it instead.
-func terminalStopReason(out serve.Outcome, code string) a2a.StopReason {
+func terminalStopReason(out serve.Outcome, code string) wire.StopReason {
 	switch {
 	case code == codeCanceled:
-		return a2a.StopCanceled
+		return wire.StopCanceled
 	case out.Reason != "":
 		return a2a.StopReasonFor(out.Reason)
 	default:
-		return a2a.StopError
+		return wire.StopError
 	}
 }
 
@@ -995,7 +996,7 @@ func (t *task) effectiveMaxTokens() int64 {
 // budgetOf carries the limits a request may lower. The server clamps them against the
 // local configuration, which stays the ceiling. A request's call_timeout is dropped:
 // Work has nowhere to put it.
-func budgetOf(req *a2a.Request) serve.Budget {
+func budgetOf(req *wire.Request) serve.Budget {
 	if req.Budget == nil {
 		return serve.Budget{}
 	}
@@ -1009,7 +1010,7 @@ func budgetOf(req *a2a.Request) serve.Budget {
 // callerOf reports who asked, keeping what the transport vouches for apart from what
 // the body claims. On a binding that authenticates nobody the name is the sender's own
 // claim and Verified is false, which records it as the unverified thing it is.
-func callerOf(caller a2a.Caller, req *a2a.Request) serve.Caller {
+func callerOf(caller a2a.Caller, req *wire.Request) serve.Caller {
 	if caller.Verified {
 		return serve.Caller{Name: caller.Name, Verified: true}
 	}
@@ -1019,7 +1020,7 @@ func callerOf(caller a2a.Caller, req *a2a.Request) serve.Caller {
 
 // callerName is what a log line calls the caller: the verified principal when there is
 // one, the body's claim when there is not, and "unknown" when the body claims nothing.
-func callerName(caller a2a.Caller, req *a2a.Request) string {
+func callerName(caller a2a.Caller, req *wire.Request) string {
 	c := callerOf(caller, req)
 	if c.Name == "" {
 		return "unknown"

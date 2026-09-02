@@ -5,6 +5,7 @@
 package a2a
 
 import (
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
@@ -14,18 +15,18 @@ import (
 //
 // It lives here rather than in each channel that answers over this protocol, since
 // two copies would let one endpoint call a suspended run something the other does not.
-func StopReasonFor(reason runstate.TerminalReason) StopReason {
+func StopReasonFor(reason runstate.TerminalReason) wire.StopReason {
 	switch reason {
 	case runstate.ReasonCompleted:
-		return StopEndTurn
+		return wire.StopEndTurn
 	case runstate.ReasonBudget:
-		return StopBudgetExhausted
+		return wire.StopBudgetExhausted
 	case runstate.ReasonMaxIterations:
-		return StopMaxIterations
+		return wire.StopMaxIterations
 	case runstate.ReasonSuspended:
-		return StopSuspended
+		return wire.StopSuspended
 	default:
-		return StopError
+		return wire.StopError
 	}
 }
 
@@ -35,8 +36,8 @@ func StopReasonFor(reason runstate.TerminalReason) StopReason {
 // It carries no call counts on purpose: LlmCalls and ToolCalls are restored beside
 // these and describe the conversation, while this is sent to seed a caller's running
 // total, where a call count from before the caller arrived would read as this turn's.
-func UsageFromCounters(c runstate.Counters) *Usage {
-	return &Usage{
+func UsageFromCounters(c runstate.Counters) *wire.Usage {
+	return &wire.Usage{
 		InputTokens:       c.InTokens + c.CacheReadTokens + c.CacheCreateTokens,
 		OutputTokens:      c.OutTokens,
 		CacheReadTokens:   c.CacheReadTokens,

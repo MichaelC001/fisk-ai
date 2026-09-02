@@ -18,9 +18,11 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/choria-io/fisk"
+	"github.com/segmentio/ksuid"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
-	"github.com/segmentio/ksuid"
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
@@ -121,10 +123,10 @@ func (r *rotateRecorder) SessionRotated(prevID string) { r.prevIDs = append(r.pr
 // stubInvoker is a canned a2a.RemoteInvoker for driving a RemoteTool through the
 // runner without a transport: every call returns the same reply.
 type stubInvoker struct {
-	reply *a2a.ToolReply
+	reply *wire.ToolReply
 }
 
-func (s stubInvoker) InvokeTool(context.Context, string, string, json.RawMessage) (*a2a.ToolReply, error) {
+func (s stubInvoker) InvokeTool(context.Context, string, string, json.RawMessage) (*wire.ToolReply, error) {
 	return s.reply, nil
 }
 
@@ -415,8 +417,8 @@ var _ = Describe("runner", func() {
 
 		It("dispatches a remote tool: reports the dispatch, counts it, and traces the agent", func() {
 			ev := &captureEvents{}
-			desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
-			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
+			desc := wire.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
+			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: wire.NewToolReply("ok", false)})
 			Expect(err).NotTo(HaveOccurred())
 
 			r := &runner{stats: &RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"nats_info": rt})}

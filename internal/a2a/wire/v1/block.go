@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"encoding/json"
@@ -26,7 +26,7 @@ const (
 
 	// BlockTextDelta and BlockThinkingDelta carry a fragment of a text block and of a
 	// thinking block. They take the underscore form tool_call and tool_result use,
-	// since blockTypeOf refuses a suffix carrying a dot of its own.
+	// since BlockTypeOf refuses a suffix carrying a dot of its own.
 	BlockTextDelta     BlockType = "text_delta"
 	BlockThinkingDelta BlockType = "thinking_delta"
 )
@@ -318,15 +318,17 @@ func EventProtocolFor(t BlockType) string {
 	return EventProtocol + "." + string(t)
 }
 
-// blockTypeOf is the block an event id carries, and false for an id outside the event
-// family. A type this build does not name still reports true: the id says a block is
+// BlockTypeOf is the block an event id carries, and false for an id outside the event
+// family. It is the inverse of EventProtocolFor.
+//
+// A type this build does not name still reports true: the id says a block is
 // what arrived, which is what decides how to read the message, and UnknownBlock is
 // what carries one nobody here can render.
 //
 // A suffix carrying a dot of its own is refused. Nothing mints one, so it is a peer
 // naming something else entirely, and reading it as the type before the dot would be
 // this build deciding what somebody else's id meant.
-func blockTypeOf(protocol string) (BlockType, bool) {
+func BlockTypeOf(protocol string) (BlockType, bool) {
 	suffix, found := strings.CutPrefix(protocol, EventProtocol+".")
 	if !found || suffix == "" || strings.Contains(suffix, ".") {
 		return "", false

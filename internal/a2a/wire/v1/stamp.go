@@ -2,13 +2,10 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
-	"context"
 	"time"
-
-	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // StampRequest fills in the framing fields the v1 header schema requires beyond the protocol
@@ -21,9 +18,9 @@ import (
 // is set to zero: the transport reply inbox correlates the answer.
 //
 // A recipient names who the message is for, and an empty one leaves whatever the header already
-// carried. The trace context comes from the span ctx carries, so a receiver's spans join this
-// one's trace, and it is empty when nothing is tracing.
-func StampRequest(ctx context.Context, h *Header, sender string, recipient string) {
+// carried. The traceparent is the W3C trace context a receiver joins its spans to, and an empty
+// one leaves the field off.
+func StampRequest(h *Header, sender string, recipient string, traceparent string) {
 	id := NewID()
 
 	// A request tag the caller set is kept, so a caller holds the tag its own task
@@ -48,7 +45,7 @@ func StampRequest(ctx context.Context, h *Header, sender string, recipient strin
 	h.Sequence = 0
 	h.Time = time.Now().UTC()
 	h.Sender = Identity{Name: sender}
-	h.TraceParent = telemetry.TraceContextFrom(ctx).TraceParent
+	h.TraceParent = traceparent
 	if recipient != "" {
 		h.Recipient = &Identity{Name: recipient}
 	}

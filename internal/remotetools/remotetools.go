@@ -21,6 +21,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	_ "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
@@ -40,7 +41,7 @@ type HostImport struct {
 	RTT        time.Duration
 	Discovered int
 	Version    string
-	Kept       []a2a.ToolDescriptor
+	Kept       []wire.ToolDescriptor
 	Tools      []*functool.Tool
 	Skipped    []string
 	// IgnoredIncludeTags is set when the host's include filter used tags, which
@@ -245,7 +246,7 @@ func resolveRemoteTools(taken map[string]bool, imports []HostImport, invoker a2a
 // cannot be honored (discovery carries no tags) and is reported via the returned
 // bool so the caller can warn; a tag-based exclude is rejected at config parse
 // time and so cannot appear here.
-func filterDescriptors(tools []a2a.ToolDescriptor, host config.RemoteToolHost) ([]a2a.ToolDescriptor, bool, error) {
+func filterDescriptors(tools []wire.ToolDescriptor, host config.RemoteToolHost) ([]wire.ToolDescriptor, bool, error) {
 	kept := tools
 	ignoredIncludeTags := false
 
@@ -273,7 +274,7 @@ func filterDescriptors(tools []a2a.ToolDescriptor, host config.RemoteToolHost) (
 
 // matchDescriptors returns the descriptors whose name matches any of the
 // patterns.
-func matchDescriptors(tools []a2a.ToolDescriptor, patterns []string) ([]a2a.ToolDescriptor, error) {
+func matchDescriptors(tools []wire.ToolDescriptor, patterns []string) ([]wire.ToolDescriptor, error) {
 	res := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
@@ -283,7 +284,7 @@ func matchDescriptors(tools []a2a.ToolDescriptor, patterns []string) ([]a2a.Tool
 		res = append(res, re)
 	}
 
-	var out []a2a.ToolDescriptor
+	var out []wire.ToolDescriptor
 	for _, t := range tools {
 		for _, re := range res {
 			if re.MatchString(t.Name) {
@@ -298,13 +299,13 @@ func matchDescriptors(tools []a2a.ToolDescriptor, patterns []string) ([]a2a.Tool
 
 // subtractDescriptors returns the descriptors in tools that are not in remove,
 // compared by name.
-func subtractDescriptors(tools, remove []a2a.ToolDescriptor) []a2a.ToolDescriptor {
+func subtractDescriptors(tools, remove []wire.ToolDescriptor) []wire.ToolDescriptor {
 	removed := make(map[string]bool, len(remove))
 	for _, t := range remove {
 		removed[t.Name] = true
 	}
 
-	var out []a2a.ToolDescriptor
+	var out []wire.ToolDescriptor
 	for _, t := range tools {
 		if !removed[t.Name] {
 			out = append(out, t)

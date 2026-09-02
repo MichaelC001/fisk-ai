@@ -7,7 +7,7 @@ package agent
 import (
 	"time"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
@@ -99,18 +99,18 @@ func (s *RunStats) CountToolKind(kind toolkit.Kind) {
 	s.ToolCallsByKind[kind]++
 }
 
-// Usage reports what the run consumed as the a2a.Usage a channel sends back. A nil
+// Usage reports what the run consumed as the wire.Usage a channel sends back. A nil
 // RunStats returns nil: the run never got far enough to consume anything.
 //
 // The input total is assembled rather than copied. InTokens is the uncached
 // remainder, with the cached input counted separately, so reporting it alone would
 // hand a caller a fraction of what it was billed for and no way to tell.
-func (s *RunStats) Usage() *a2a.Usage {
+func (s *RunStats) Usage() *wire.Usage {
 	if s == nil {
 		return nil
 	}
 
-	return &a2a.Usage{
+	return &wire.Usage{
 		InputTokens:       s.InTokens + s.CacheReadTokens + s.CacheCreateTokens,
 		OutputTokens:      s.OutTokens,
 		CacheReadTokens:   s.CacheReadTokens,

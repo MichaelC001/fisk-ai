@@ -11,6 +11,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // TaskHandler is what a caller does with a task while it runs: render what the agent
@@ -26,21 +28,21 @@ import (
 // at once and fails the gated call closed, where silence costs the run a whole window
 // first.
 type TaskHandler interface {
-	Block(Block)
-	Question(context.Context, *ElicitRequest) (*ElicitReply, error)
+	Block(wire.Block)
+	Question(context.Context, *wire.ElicitRequest) (*wire.ElicitReply, error)
 }
 
 // TaskOutcome is how one task ended and what the caller learned on the way.
 type TaskOutcome struct {
 	// Ack is the acceptance, which carries the conversation token this turn ran under.
 	// A caller keeps that token to add another turn.
-	Ack *Ack
+	Ack *wire.Ack
 	// Result is the answer, set when the run answered.
-	Result *Result
+	Result *wire.Result
 	// Error is the ending that was not an answer, set when it was not. Exactly one of
 	// Result and Error is set for a task that ended; both are nil for one whose set
 	// could not be read, which comes back beside the error return.
-	Error *ErrorMessage
+	Error *wire.ErrorMessage
 	// Gaps is how many event messages the sequence numbers say never arrived. The
 	// stream is advisory and the answer is in the terminal message, so a gap is
 	// reported rather than treated as a failure.
@@ -48,7 +50,7 @@ type TaskOutcome struct {
 	// Unsent holds what a person answered that could not be delivered, because the run
 	// had given the question up by the time they answered. It is the answer they typed,
 	// in the shape a later request carries, so a caller can offer to send it on one.
-	Unsent []*Answer
+	Unsent []*wire.Answer
 }
 
 // Answer delivers an answer to a question a task asked and reports what the run said.
@@ -57,12 +59,12 @@ type TaskOutcome struct {
 // is not the one running that task. A refusal in the ack means the question is gone,
 // which a caller reads the same way. Either way what the person typed is not lost, it
 // is sent on a request of its own instead.
-func (c *Client) Answer(ctx context.Context, agent, request string, reply *ElicitReply) (*Ack, error) {
+func (c *Client) Answer(ctx context.Context, agent, request string, reply *wire.ElicitReply) (*wire.Ack, error) {
 	if c.stream == nil {
 		return nil, fmt.Errorf("%w: an answer is addressed to a running task", ErrStreamUnsupported)
 	}
-	if !ValidRequestID(request) {
-		return nil, fmt.Errorf("%w: %q is not a valid request id", ErrInvalidMessage, request)
+	if !wire.ValidRequestID(request) {
+		return nil, fmt.Errorf("%w: %q is not a valid request id", wire.ErrInvalidMessage, request)
 	}
 
 	StampRequest(ctx, &reply.Header, c.sender, agent)
@@ -85,8 +87,8 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 
 	c.wire.recv(OpElicit, agent, request, raw)
 
-	if len(raw) > MaxMessageSize {
-		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
+	if len(raw) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, wire.MaxMessageSize)
 	}
 
 	err = c.validator.Validate(raw)
@@ -94,7 +96,7 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 		return nil, fmt.Errorf("invalid answer reply: %w", err)
 	}
 
-	return ExpectProtocol[*Ack](raw, AckProtocol)
+	return wire.ExpectProtocol[*wire.Ack](raw, wire.AckProtocol)
 }
 
 // RunTask sends a request and drives the reply set to its end, rendering what arrives
@@ -111,7 +113,7 @@ func (c *Client) Answer(ctx context.Context, agent, request string, reply *Elici
 // error here: it ended, and how it ended is in TaskOutcome.Error. The outcome comes
 // back beside such an error rather than nil, since a person answering when the set died
 // leaves an answer in Unsent that a caller can still deliver.
-func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h TaskHandler) (*TaskOutcome, error) {
+func (c *Client) RunTask(ctx context.Context, agent string, req *wire.Request, h TaskHandler) (*TaskOutcome, error) {
 	// The one hook that can stop a task, fired before anything is sent so a denial costs
 	// nothing and a rewrite is what the agent receives, journals and answers. A request
 	// carrying no prompt submits nothing: a resume, a read and an answer all skip it.
@@ -152,7 +154,7 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 	var (
 		wg     sync.WaitGroup
 		mu     sync.Mutex
-		unsent []*Answer
+		unsent []*wire.Answer
 	)
 
 	// endErr is why the set stopped when no terminal message arrived, read by the
@@ -203,16 +205,16 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 		}
 
 		switch m := msg.(type) {
-		case *Ack:
+		case *wire.Ack:
 			// A refusing ack is followed by the terminal message that says why, so it
 			// is recorded and the set is read to its end either way.
 			out.Ack = m
 			c.reportAck(ctx, agent, req, m, stream.Request())
 
-		case *Event:
+		case *wire.Event:
 			h.Block(m.Block)
 
-		case *ElicitRequest:
+		case *wire.ElicitRequest:
 			c.hooks.fireQuestionAsked(ctx, QuestionAskedInfo{
 				Agent:      agent,
 				Request:    stream.Request(),
@@ -261,13 +263,13 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 				mu.Unlock()
 			}()
 
-		case *Result:
+		case *wire.Result:
 			out.Result = m
 			out.Gaps = stream.Gaps()
 
 			return out, nil
 
-		case *ErrorMessage:
+		case *wire.ErrorMessage:
 			out.Error = m
 			out.Gaps = stream.Gaps()
 
@@ -282,7 +284,7 @@ func (c *Client) RunTask(ctx context.Context, agent string, req *Request, h Task
 // Whether a conversation is opening or continuing is the request's question rather than
 // the ack's: a token the caller sent names a conversation it already had, and a token
 // only the ack carries is one the agent has just issued.
-func (c *Client) reportAck(ctx context.Context, agent string, req *Request, ack *Ack, request string) {
+func (c *Client) reportAck(ctx context.Context, agent string, req *wire.Request, ack *wire.Ack, request string) {
 	if !ack.Accepted {
 		c.hooks.fireTurnRefused(ctx, TurnRefusedInfo{Agent: agent, Request: request, Reason: ack.Reason})
 
@@ -333,7 +335,7 @@ func (c *Client) reportTurnEnd(ctx context.Context, agent string, out *TaskOutco
 // with nobody to ask all end with neither.
 type questionOutcome struct {
 	answered bool
-	held     *Answer
+	held     *wire.Answer
 }
 
 // answerQuestion puts one question to the handler and delivers the answer, saying that
@@ -342,8 +344,8 @@ type questionOutcome struct {
 // What it reports is what happened to the question, so a caller can tell an answered
 // one from a question given up on, and it returns what could not be delivered so a
 // person's decision survives the run having moved on under them.
-func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask *ElicitRequest, h TaskHandler) questionOutcome {
-	reply, err := c.waitForAnswer(ctx, agent, request, ask, func() (*ElicitReply, error) {
+func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask *wire.ElicitRequest, h TaskHandler) questionOutcome {
+	reply, err := c.waitForAnswer(ctx, agent, request, ask, func() (*wire.ElicitReply, error) {
 		return h.Question(ctx, ask)
 	})
 	// Nobody answered: the set ended under the question, the run was canceled, or the
@@ -362,14 +364,14 @@ func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask 
 	// the question or the caller's context ended under them: delivering that later would
 	// decline a gated command on behalf of a person who decided nothing, and delivering
 	// it to a question that is already gone changes nothing either way.
-	if reply.Answer == AnswerNoOperator {
+	if reply.Answer == wire.AnswerNoOperator {
 		return questionOutcome{}
 	}
 
 	// The run is not there to hear it. What the person typed is worth keeping: it goes
 	// on a request of its own, where the answer names the call rather than the question,
 	// since a resumed run mints a new question id.
-	held, buildErr := NewAnswer(ask, reply)
+	held, buildErr := wire.NewAnswer(ask, reply)
 	if buildErr != nil {
 		return questionOutcome{}
 	}
@@ -383,9 +385,9 @@ func (c *Client) answerQuestion(ctx context.Context, agent, request string, ask 
 // A question whose agent takes no such replies (no window, or one that refuses the
 // reply) is simply waited on: the answer is either inside the window or too late, and
 // too late is what Unsent is for.
-func (c *Client) waitForAnswer(ctx context.Context, agent, request string, ask *ElicitRequest, get func() (*ElicitReply, error)) (*ElicitReply, error) {
+func (c *Client) waitForAnswer(ctx context.Context, agent, request string, ask *wire.ElicitRequest, get func() (*wire.ElicitReply, error)) (*wire.ElicitReply, error) {
 	type answered struct {
-		reply *ElicitReply
+		reply *wire.ElicitReply
 		err   error
 	}
 
@@ -423,7 +425,7 @@ func (c *Client) waitForAnswer(ctx context.Context, agent, request string, ask *
 			// question that outlived one, and the wait it hands over to keeps the caller's
 			// context: a prompter that cannot be canceled through ctx would otherwise be
 			// the only thing that could end the turn.
-			ack, err := c.Answer(ctx, agent, request, NewWaitingAck(ask, c.sender))
+			ack, err := c.Answer(ctx, agent, request, wire.NewWaitingAck(ask, c.sender))
 			if err != nil || (ack != nil && !ack.Accepted) {
 				select {
 				case got := <-done:
