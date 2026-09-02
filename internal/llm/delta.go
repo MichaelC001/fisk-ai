@@ -44,8 +44,8 @@ type Delta struct {
 	//
 	// A backend that merged or dropped a block while assembling the Response would
 	// leave every consumer misaligned with no error raised. For the Anthropic backend
-	// it holds because MessageToNeutral appends one neutral block per Anthropic block,
-	// in order.
+	// it holds because its codec appends one neutral block per Anthropic block, in
+	// order.
 	Index int
 
 	// Text is this fragment's text, to be appended to the text already delivered for

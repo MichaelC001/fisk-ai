@@ -25,10 +25,10 @@ func TestAnthropicCodec(t *testing.T) {
 // roundTrip converts a message to the neutral model and back, returning the
 // re-encoded Anthropic message.
 func roundTrip(mp sdk.MessageParam) sdk.MessageParam {
-	neutral, err := MessageToNeutral(mp)
+	neutral, err := messageToNeutral(mp)
 	Expect(err).NotTo(HaveOccurred())
 
-	back, err := MessageToAnthropic(neutral)
+	back, err := messageToAnthropic(neutral)
 	Expect(err).NotTo(HaveOccurred())
 
 	return back
@@ -88,7 +88,7 @@ var _ = Describe("Anthropic codec", func() {
 
 			// The opaque fields must survive inside the neutral form, not just the
 			// re-encoding: signatures and encrypted server content are load-bearing.
-			neutral, err := MessageToNeutral(assistant)
+			neutral, err := messageToNeutral(assistant)
 			Expect(err).NotTo(HaveOccurred())
 			blob, err := json.Marshal(neutral)
 			Expect(err).NotTo(HaveOccurred())
@@ -102,7 +102,7 @@ var _ = Describe("Anthropic codec", func() {
 				sdk.NewThinkingBlock("sig-opaque-123", "reasoning"),
 			}}
 
-			neutral, err := MessageToNeutral(mp)
+			neutral, err := messageToNeutral(mp)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(neutral.Content).To(HaveLen(1))
 			Expect(neutral.Content[0].Thinking).NotTo(BeNil())
@@ -118,7 +118,7 @@ var _ = Describe("Anthropic codec", func() {
 				sdk.NewToolUseBlock("tu_1", map[string]any{"path": "/tmp"}, "shell"),
 			}}
 
-			neutral, err := MessageToNeutral(mp)
+			neutral, err := messageToNeutral(mp)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(neutral.Content[0].Text.Text).To(Equal("hello"))
 			Expect(neutral.Content[1].ToolUse.ID).To(Equal("tu_1"))
@@ -126,7 +126,7 @@ var _ = Describe("Anthropic codec", func() {
 			Expect(string(neutral.Content[1].ToolUse.Input)).To(Equal(`{"path":"/tmp"}`))
 
 			result := sdk.NewUserMessage(sdk.NewToolResultBlock("tu_1", "the output", true))
-			rn, err := MessageToNeutral(result)
+			rn, err := messageToNeutral(result)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rn.Role).To(Equal(llm.RoleUser))
 			Expect(rn.Content[0].ToolResult).NotTo(BeNil())
@@ -148,7 +148,7 @@ var _ = Describe("Anthropic codec", func() {
 			want, err := json.Marshal(mp)
 			Expect(err).NotTo(HaveOccurred())
 
-			neutral, err := MessageToNeutral(mp)
+			neutral, err := messageToNeutral(mp)
 			Expect(err).NotTo(HaveOccurred())
 
 			// It is carried opaquely, and the references are inside the preserved JSON.
@@ -157,7 +157,7 @@ var _ = Describe("Anthropic codec", func() {
 			Expect(pb.Kind).To(Equal("tool_search_tool_result"))
 			Expect(bytes.Contains(pb.Raw, []byte("Grep"))).To(BeTrue())
 
-			back, err := MessageToAnthropic(neutral)
+			back, err := messageToAnthropic(neutral)
 			Expect(err).NotTo(HaveOccurred())
 
 			// The reconstructed union must carry the references again, not the
@@ -196,7 +196,7 @@ var _ = Describe("Anthropic codec", func() {
 		})
 	})
 
-	Describe("ResponseToNeutral", func() {
+	Describe("responseToNeutral", func() {
 		It("maps stop reason and usage tiers", func() {
 			// Decoded from JSON so the SDK response union carries the internal state
 			// ToParam relies on, exactly as a real API response would.
@@ -214,7 +214,7 @@ var _ = Describe("Anthropic codec", func() {
 			var msg sdk.Message
 			Expect(json.Unmarshal([]byte(raw), &msg)).To(Succeed())
 
-			resp, err := ResponseToNeutral(&msg)
+			resp, err := responseToNeutral(&msg)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.StopReason).To(Equal(llm.StopMaxTokens))
 			Expect(resp.Usage).To(Equal(llm.Usage{In: 100, Out: 8, CacheRead: 40, CacheCreate: 12}))
@@ -237,7 +237,7 @@ var _ = Describe("Anthropic codec", func() {
 			var msg sdk.Message
 			Expect(json.Unmarshal([]byte(raw), &msg)).To(Succeed())
 
-			resp, err := ResponseToNeutral(&msg)
+			resp, err := responseToNeutral(&msg)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.ID).To(Equal("msg_01ABC"))
 			Expect(resp.Model).To(Equal("claude-sonnet-5-20260101"))
@@ -253,7 +253,7 @@ var _ = Describe("Anthropic codec", func() {
 			var msg sdk.Message
 			Expect(json.Unmarshal([]byte(raw), &msg)).To(Succeed())
 
-			resp, err := ResponseToNeutral(&msg)
+			resp, err := responseToNeutral(&msg)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.ID).To(BeEmpty())
 			Expect(resp.Model).To(BeEmpty())

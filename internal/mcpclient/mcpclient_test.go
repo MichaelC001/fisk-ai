@@ -47,7 +47,7 @@ var _ = Describe("Sessions", func() {
 			Dialer:   servers.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 		return sessions
 	}
@@ -448,7 +448,7 @@ var _ = Describe("Sessions", func() {
 
 					<-start
 
-					Expect(sessions.Close()).To(Succeed())
+					Expect(sessions.Close(ctx)).To(Succeed())
 				}()
 
 				close(start)
@@ -524,7 +524,7 @@ var _ = Describe("Sessions", func() {
 			served := servers.served()
 			Expect(served).To(HaveLen(2))
 
-			Expect(sessions.Close()).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
 
 			for _, session := range served {
 				Eventually(ended(session)).Should(BeClosed())
@@ -538,8 +538,8 @@ var _ = Describe("Sessions", func() {
 			})
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(sessions.Close()).To(Succeed())
-			Expect(sessions.Close()).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
 
 			err = sessions.Use(ctx, "docs", func(*mcp.ClientSession) error { return nil })
 			Expect(err).To(MatchError(ContainSubstring("are closed")))
@@ -568,7 +568,7 @@ var _ = Describe("Sessions", func() {
 				},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+			DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 			written := recorder.written()
 			Expect(written).ToNot(BeEmpty())
@@ -617,7 +617,7 @@ var _ = Describe("Sessions", func() {
 				},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+			DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 			var params string
 			Eventually(initialize).Should(Receive(&params))

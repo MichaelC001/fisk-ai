@@ -21,10 +21,9 @@ type stubStore struct{}
 func (stubStore) Info() Info                                           { return Info{Backend: "stub"} }
 func (stubStore) List(context.Context) ([]Item, error)                 { return nil, nil }
 func (stubStore) Read(context.Context, string) (string, string, error) { return "", "", ErrNotExist }
-func (stubStore) Write(context.Context, string, string, string, bool) error {
-	return nil
-}
-func (stubStore) Delete(context.Context, string) (bool, error) { return false, nil }
+func (stubStore) Create(context.Context, string, string, string) error { return nil }
+func (stubStore) Update(context.Context, string, string, string) error { return nil }
+func (stubStore) Delete(context.Context, string) (bool, error)         { return false, nil }
 
 // The fake backend is registered once for the whole test binary so New has
 // something to dispatch to without linking a real backend in. Register panics on

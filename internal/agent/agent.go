@@ -1300,7 +1300,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			if err != nil {
 				return res, err
 			}
-			defer sessions.Close()
+			// The close waits for every stdio child however the run ended: the CLI
+			// process exits soon after Run returns, so a close cut short by a canceled
+			// run would leave the children it started behind.
+			defer func() { _ = sessions.Close(context.WithoutCancel(ctx)) }()
 		}
 
 		// The import walks the server list the sessions carry, not cfg.MCPClients, so a
@@ -1320,11 +1323,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// The names the remote import settled on are never written into taken, so the
 		// naming pass is given both lookups. The names this import settles on are added to
 		// taken below, which keeps it the whole set of claimed names.
-		mcpTools, mcpByName, mcpImports, err = mcpclient.ImportForRun(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+		var imported mcpclient.Imported
+		imported, err = mcpclient.Import(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+		mcpImports = imported.Servers
 
-		// ImportForRun returns the per-server outcomes with its error as well as without
-		// one, so the notes are reported before the error is: an operator deciding whether
-		// to set an alias or drop a filter needs the skipped tools and round trips that came
+		// Import returns the per-server outcomes with its error as well as without one,
+		// so the notes are reported before the error is: an operator deciding whether to
+		// set an alias or drop a filter needs the skipped tools and round trips that came
 		// back with the failure, not the failure alone.
 		reporter, ok := events.(MCPServerReporter)
 		if ok {
@@ -1334,6 +1339,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if err != nil {
 			return res, err
 		}
+
+		mcpTools = imported.Tools
+		mcpByName = imported.ByName
 
 		for name := range mcpByName {
 			taken[name] = true
@@ -1617,8 +1625,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// are built together from one list, so neither can name a tool the other does not.
 	// The source is what the runner reads before each model call, and a configured MCP
 	// server reporting that its tool list changed is what publishes to it.
-	toolSet := NewToolSet(deferrable, builtinTools, toolSearchAllowed)
-	toolSrc := NewToolSource(toolSet)
+	set := newToolSet(deferrable, builtinTools, toolSearchAllowed)
+	toolSrc := newToolSource(set)
 
 	// A server can tell its session that its tool list changed at any point in the run.
 	// The rebuild happens on that session's goroutine, so the advisory it raises is
@@ -1653,7 +1661,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// the set moves, and reports it once for the run, so a set that already crossed
 	// here is not reported a second time.
 	toolSearchWarned := false
-	if w := toolSearchDegradation(len(toolSet.defs), caps, cfg.ToolSearchEnabled()); w != nil {
+	if w := toolSearchDegradation(len(set.defs), caps, cfg.ToolSearchEnabled()); w != nil {
 		events.Warn(*w)
 		toolSearchWarned = true
 	}
@@ -1671,7 +1679,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		Remote:      len(remoteTools),
 		MCP:         len(mcpTools),
 		Custom:      len(customByName),
-		Deferred:    toolSet.search,
+		Deferred:    set.search,
 	})
 
 	messages := []llm.Message{
@@ -1710,13 +1718,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// has to cross the threshold. A set that moves mid-run re-decides it per call
 	// without rewriting this.
 	runSpan.SetMaxTokens(maxOutputTokens)
-	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSet.search)
+	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), set.search)
 
 	// checkpointing was resolved above the NATS dial (the session store it gates
 	// depends on that connection); interactive was resolved at the top, where the root
 	// span needed it.
 	info := RunInfo{
-		Tools:           len(toolSet.defs),
+		Tools:           len(set.defs),
 		ThinkingEnabled: cfg.ThinkingEnabled(),
 		ConfirmTools:    confirmTools,
 		ConfirmTags:     confirmTags,
@@ -1893,7 +1901,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// captures the configuration the run began with, and ToolsDiff compares one
 		// run's start to another's. A set that moves during the run does not
 		// retroactively change what was written down.
-		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolSet.defs)
+		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, set.defs)
 		if err != nil {
 			return res, err
 		}
@@ -2188,7 +2196,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// which is what a restored in-flight batch dispatches against before the first
 		// call of this run.
 		toolSrc:          toolSrc,
-		set:              toolSet,
+		set:              set,
 		queuedWarnings:   mcpWarnings,
 		toolSearchWarned: toolSearchWarned,
 		confirmTags:      confirmTags,

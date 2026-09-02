@@ -19,12 +19,12 @@ import (
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
-// Transport carries a reply set in both directions and addresses a cancel to the one
-// process running a task, so a program asserting for the capability at startup finds
-// it here. It names its subjects too, on the optional describing interface.
+// The transport carries a reply set in both directions and addresses a cancel to the
+// one process running a task, so a program asserting for the capability at startup
+// finds it here. It names its subjects too, on the optional describing interface.
 var (
-	_ a2a.StreamingTransport = (*Transport)(nil)
-	_ a2a.DescribedTransport = (*Transport)(nil)
+	_ a2a.StreamingTransport = (*transport)(nil)
+	_ a2a.DescribedTransport = (*transport)(nil)
 )
 
 // DescribeTasks names the subject a task request arrives on and the pattern a cancel
@@ -34,7 +34,7 @@ var (
 //
 // The answers line appears only for a worker that asks its callers questions. On one
 // that does not, the subject is a place to publish where nothing is listening.
-func (t *Transport) DescribeTasks(identity string, elicits bool) []a2a.DescLine {
+func (t *transport) DescribeTasks(identity string, elicits bool) []a2a.DescLine {
 	lines := []a2a.DescLine{
 		{Label: "Requests", Value: TaskSubject(identity)},
 		{Label: "Cancels", Value: CancelSubject(identity, "*")},
@@ -55,7 +55,7 @@ func (t *Transport) DescribeTasks(identity string, elicits bool) []a2a.DescLine 
 // has to drop a message belonging to another set before deciding the set has ended;
 // nothing else in the body is looked at, and the meaning of every message is still
 // the engine's to dispatch.
-func (t *Transport) Stream(ctx context.Context, agent string, op a2a.RouteHint, body []byte) (a2a.Reader, error) {
+func (t *transport) Stream(ctx context.Context, agent string, op a2a.RouteHint, body []byte) (a2a.Reader, error) {
 	subject, err := t.subject(agent, op)
 	if err != nil {
 		return nil, err
@@ -117,7 +117,7 @@ func (t *Transport) Stream(ctx context.Context, agent string, op a2a.RouteHint, 
 // nobody if it is sent before the subscription exists, and a caller has no reason to
 // cancel a task it has not been told was accepted, so opening this before the ack
 // removes the window rather than bounding it.
-func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.TaskWatch, error) {
+func (t *transport) WatchCancel(request string, h a2a.Handler) (a2a.TaskWatch, error) {
 	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address a cancel", request)
 	}
@@ -139,7 +139,7 @@ func (t *Transport) WatchCancel(request string, h a2a.Handler) (a2a.TaskWatch, e
 // task's rather than the service's. It is opened when the task is accepted, not when
 // the first question is asked, so an answer cannot arrive before the subscription
 // exists.
-func (t *Transport) WatchElicitReplies(request string, h a2a.Handler) (a2a.TaskWatch, error) {
+func (t *transport) WatchElicitReplies(request string, h a2a.Handler) (a2a.TaskWatch, error) {
 	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address an answer", request)
 	}
@@ -162,7 +162,7 @@ func (t *Transport) WatchElicitReplies(request string, h a2a.Handler) (a2a.TaskW
 // never-accepted, not-yet-started or already-finished task from one that received the
 // cancel. A broadcast cancel cannot say that, since every instance receives it and
 // almost all of them correctly do nothing.
-func (t *Transport) SendCancel(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
+func (t *transport) SendCancel(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
 	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address a cancel", request)
 	}
@@ -183,7 +183,7 @@ func (t *Transport) SendCancel(ctx context.Context, agent, request string, body 
 // It is a request rather than a publish for the reason a cancel is: only the running
 // task subscribes, so no responders says the run ended without the answer, which the
 // answering party needs to know. A published answer would be lost silently.
-func (t *Transport) SendElicitReply(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
+func (t *transport) SendElicitReply(ctx context.Context, agent, request string, body []byte) ([]byte, error) {
 	if !wire.ValidRequestID(request) {
 		return nil, fmt.Errorf("%q is not a valid request id, so it cannot address an answer", request)
 	}
@@ -201,7 +201,7 @@ func (t *Transport) SendElicitReply(ctx context.Context, agent, request string, 
 // requestTask sends body to one running task's own subject and returns what it
 // answered. what names the message for the errors, since an operator reading one
 // needs to know whether their cancel or their answer went nowhere.
-func (t *Transport) requestTask(ctx context.Context, subject string, body []byte, what string) ([]byte, error) {
+func (t *transport) requestTask(ctx context.Context, subject string, body []byte, what string) ([]byte, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, t.timeout)

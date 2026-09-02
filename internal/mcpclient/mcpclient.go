@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -155,14 +156,14 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 	for _, server := range opts.Servers {
 		_, dup := s.entries[server.Name]
 		if dup {
-			_ = s.Close()
+			_ = s.closeOpened(ctx)
 			return nil, fmt.Errorf("mcp server %q is configured more than once", server.Name)
 		}
 
 		e := &entry{server: server, secrets: serverSecrets(server, opts.LookupEnv)}
 		err := s.open(ctx, e)
 		if err != nil {
-			_ = s.Close()
+			_ = s.closeOpened(ctx)
 			return nil, err
 		}
 
@@ -171,6 +172,15 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 	}
 
 	return s, nil
+}
+
+// closeOpened ends the sessions a failed Connect had already opened. It waits however
+// long the children take rather than under the caller's context, which is often
+// already expired: the server that failed took its whole startup timeout to do it, and
+// a caller told the connect failed is entitled to a process with no children left in
+// it.
+func (s *Sessions) closeOpened(ctx context.Context) error {
+	return s.Close(context.WithoutCancel(ctx))
 }
 
 // Names are the configured server names, in the order they were configured.
@@ -274,10 +284,18 @@ func (s *Sessions) secrets(name string) []string {
 	return e.secrets
 }
 
-// Close ends every session, which closes the stdin of each stdio child and gives
-// it the SDK's terminate window to exit before it is signaled. It is idempotent,
-// and every session is closed even when one of them reports a failure.
-func (s *Sessions) Close() error {
+// Close ends every session, which closes the stdin of each stdio child and gives it
+// the SDK's terminate window to exit before it is signaled. It is idempotent, and
+// every session is closed even when one of them reports a failure.
+//
+// The sessions are closed at the same time and ctx limits how long Close waits for
+// them to finish. A stdio child that ignores its stdin closing costs the SDK's whole
+// terminate window, three waits of five seconds, and closing one server after another
+// would make a process serving several pay that once per server. When ctx ends first,
+// Close returns naming the servers it did not see finish; those closes carry on and
+// reap their children, so a caller whose process is about to exit passes a context
+// that does not end.
+func (s *Sessions) Close(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -290,20 +308,53 @@ func (s *Sessions) Close() error {
 	}
 	s.mu.Unlock()
 
-	var errs []error
+	type closed struct {
+		name string
+		err  error
+	}
+
+	done := make(chan closed, len(entries))
+	pending := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		// Waiting on the entry lock is what stops a session opened by a concurrent
-		// replacement from outliving Close: that replacement either sees the closed
-		// flag and refuses, or completes and is closed here.
-		e.mu.Lock()
-		if e.session != nil {
-			err := e.session.Close()
-			if err != nil {
-				errs = append(errs, redacted(fmt.Errorf("closing the session with mcp server %q: %w", e.server.Name, err), e.secrets))
+		pending[e.server.Name] = true
+
+		go func(e *entry) {
+			// Waiting on the entry lock stops a session opened by a concurrent
+			// replacement from outliving Close: that replacement either sees the closed
+			// flag and refuses, or completes and is closed here.
+			e.mu.Lock()
+			defer e.mu.Unlock()
+
+			if e.session == nil {
+				done <- closed{name: e.server.Name}
+				return
 			}
+
+			err := e.session.Close()
 			e.session = nil
+			if err != nil {
+				err = redacted(fmt.Errorf("closing the session with mcp server %q: %w", e.server.Name, err), e.secrets)
+			}
+
+			done <- closed{name: e.server.Name, err: err}
+		}(e)
+	}
+
+	var errs []error
+	for len(pending) > 0 {
+		select {
+		case c := <-done:
+			delete(pending, c.name)
+			if c.err != nil {
+				errs = append(errs, c.err)
+			}
+
+		case <-ctx.Done():
+			names := slices.Sorted(maps.Keys(pending))
+			errs = append(errs, fmt.Errorf("the sessions with mcp servers %s were still closing: %w", strings.Join(names, ", "), ctx.Err()))
+
+			return errors.Join(errs...)
 		}
-		e.mu.Unlock()
 	}
 
 	return errors.Join(errs...)

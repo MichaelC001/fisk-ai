@@ -77,19 +77,19 @@ const maxEntryOverhead = 2*maxDescriptionBytes + 64
 // entry at write time. It is exported so a backend can size its store against it.
 const MaxEntryBytes = MaxContentBytes + maxEntryOverhead
 
-// ErrExists is returned by Write when overwrite is false and the key is already
-// present, so the create-guard reports a collision the model can reason about
-// rather than silently clobbering an existing memory.
+// ErrExists is returned by Create when the key is already present, so the
+// create-guard reports a collision the model can reason about rather than silently
+// clobbering an existing memory.
 var ErrExists = errors.New("memory key already exists")
 
 // ErrNotExist is returned by Read when the key is not present.
 var ErrNotExist = errors.New("memory key does not exist")
 
-// ErrStale is returned by Write with overwrite true when the backend enforces
-// read-before-update and the scope knows no revision for the key, or the key has
-// changed since it was read. It lets the model reason about a lost-update conflict (read the current
-// value and retry) rather than silently clobbering a concurrent change. Only a
-// backend that can check this atomically returns it; the file backend does not.
+// ErrStale is returned by Update when the backend enforces read-before-update and
+// the scope knows no revision for the key, or the key has changed since it was read.
+// It lets the model reason about a lost-update conflict (read the current value and
+// retry) rather than silently clobbering a concurrent change. Only a backend that can
+// check this atomically returns it; the file backend does not.
 var ErrStale = errors.New("memory changed since it was read")
 
 // Item is a single memory as surfaced by List: the key and its one-line
@@ -133,11 +133,16 @@ type Store interface {
 	List(ctx context.Context) ([]Item, error)
 	// Read returns the description and body of key, or ErrNotExist if absent.
 	Read(ctx context.Context, key string) (description, content string, err error)
-	// Write stores content under key with the given description. With overwrite
-	// false it creates the key and returns ErrExists if it already exists; with
-	// overwrite true it replaces any existing value. Both paths are atomic to a
-	// concurrent reader.
-	Write(ctx context.Context, key, description, content string, overwrite bool) error
+	// Create stores content under key with the given description, returning
+	// ErrExists when the key is already present. The existence check and the write
+	// are one atomic step, so two processes creating the same key cannot both
+	// succeed.
+	Create(ctx context.Context, key, description, content string) error
+	// Update replaces what key holds with content and the given description, and
+	// writes the key when it holds nothing yet. A backend enforcing
+	// read-before-update returns ErrStale when the key was not read first or changed
+	// since it was read. The write is atomic to a concurrent reader.
+	Update(ctx context.Context, key, description, content string) error
 	// Delete removes key. It is idempotent: deleting an absent key is not an
 	// error, and existed reports whether a value was actually removed.
 	Delete(ctx context.Context, key string) (existed bool, err error)

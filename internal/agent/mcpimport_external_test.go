@@ -162,7 +162,7 @@ func connectMCP(t testing.TB, fake *mcpFakeServers, servers ...config.MCPServer)
 		Dialer:   fake.dialer(),
 	})
 	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+	DeferCleanup(func() { Expect(sessions.Close(context.Background())).To(Succeed()) })
 
 	return sessions
 }

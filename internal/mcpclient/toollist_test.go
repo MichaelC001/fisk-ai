@@ -86,7 +86,7 @@ var _ = Describe("Tool list changes", func() {
 			Dialer:   servers.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 		return sessions
 	}

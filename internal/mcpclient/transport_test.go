@@ -242,7 +242,7 @@ var _ = Describe("Transports", func() {
 				CredentialEnvNames: []string{"FISK_MCPCLIENT_OPERATOR_SECRET"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+			DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 			env := map[string]string{}
 			err = sessions.Use(ctx, "docs", func(session *mcp.ClientSession) error {
@@ -304,7 +304,7 @@ var _ = Describe("Transports", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(tools).To(Equal([]string{"environment"}))
 
-			Expect(sessions.Close()).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
 
 			Eventually(func() error {
 				_, err := os.Stat(marker)

@@ -34,8 +34,8 @@ func ValidateWrite(key, description, content string) (normalizedDescription stri
 }
 
 // CheckCapacity reports whether a store already holding count entries may accept
-// a new key. A backend calls it from its create path (overwrite off) with its
-// current entry count so the shared cap and its message stay in one place.
+// a new key. A backend calls it from Create with its current entry count so the
+// shared cap and its message stay in one place.
 func CheckCapacity(count int) error {
 	if count >= MaxEntries {
 		return fmt.Errorf("memory is full: %d entries, limit is %d; delete an entry before creating another", count, MaxEntries)

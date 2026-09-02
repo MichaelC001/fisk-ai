@@ -88,9 +88,9 @@ linked in by adding a second blank import there.
 2. Write a codec that converts every neutral block kind to and from the wire format,
    in both directions, including `ProviderBlock` (preserve `Raw` faithfully) and
    `ThinkingBlock.Signature`. `internal/llm/anthropic/codec.go` and `tools.go` are
-   the reference: `MessageToNeutral`/`MessageToAnthropic`, `ResponseToNeutral`,
-   `ToolDefTo...`, `ToolUseToNeutral`, `ToolResultTo.../From...`, and a
-   `stopReasonToNeutral` mapping.
+   the reference: `messageToNeutral`/`messageToAnthropic`, `responseToNeutral`,
+   `toolDefToAnthropic`, and a `stopReasonToNeutral` mapping. They are unexported,
+   since a codec is reached through the `Provider` it backs.
 3. Register in `init` with `llm.Register(ProviderName, factory, credentialEnvNames)`.
    The factory takes `llm.Config` (API key, base URL, timeout, middlewares) and
    returns a constructed `Provider`; construction failures surface as an error so an

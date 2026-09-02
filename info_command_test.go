@@ -124,7 +124,7 @@ var _ = Describe("MCP servers", func() {
 	discover := func(claimed mcpclient.ClaimedNames, entries ...config.MCPServer) []mcpclient.ServerImport {
 		GinkgoHelper()
 
-		return mcpclient.DiscoverForInfo(ctx, mcpclient.Options{
+		return mcpclient.Inspect(ctx, mcpclient.Options{
 			Servers:  entries,
 			Identity: "fisk-info",
 			Version:  "0.0.1",

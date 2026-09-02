@@ -69,11 +69,11 @@ func (q *warnQueue) drain() []Warning {
 // the server is made once however many runs are listening, since the sessions list
 // the server and hand the same descriptors to all of them.
 type liveMCPTools struct {
-	src      *ToolSource
+	src      *toolSource
 	caller   mcpclient.Caller
 	warnings *warnQueue
 
-	// deferrable tools either side of the MCP ones, in the order NewToolSet is given
+	// deferrable tools either side of the MCP ones, in the order newToolSet is given
 	// them: the application's and the peers' before, the caller's custom tools after.
 	before []toolkit.Tool
 	after  []toolkit.Tool
@@ -105,7 +105,7 @@ type liveMCPTools struct {
 // assembled from, and what it was at the start of the run.
 type liveMCPSetup struct {
 	// Source is where a rebuilt set is published.
-	Source *ToolSource
+	Source *toolSource
 	// Caller reaches the servers, for the tools a rebuild builds to call through.
 	Caller mcpclient.Caller
 	// Warnings carries the advisory to the run goroutine.
@@ -196,7 +196,7 @@ func (l *liveMCPTools) changed(change mcpclient.ToolListChange) {
 	l.tools[server] = imported.Tools
 	l.skipped[server] = imported.Skipped
 
-	l.src.Publish(NewToolSet(l.deferrable(), l.builtins, l.toolSearchAllowed))
+	l.src.publish(newToolSet(l.deferrable(), l.builtins, l.toolSearchAllowed))
 	l.warnings.add(Warning{Kind: WarnMCPToolsChanged, Name: server, Params: moved})
 }
 

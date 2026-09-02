@@ -128,11 +128,16 @@ func ElicitSubject(identity, request string) string {
 // operator's mistake at construction.
 type options struct{}
 
-// Transport implements a2a.Transport over core NATS request-reply. It borrows the
+// transport implements a2a.Transport over core NATS request-reply. It borrows the
 // NATS connection from the shared Provider (it never closes it) and, on the serving
 // side, registers a micro service whose endpoints map the discovery and tool
 // subjects onto a2a handlers.
-type Transport struct {
+//
+// It is reached through the registry alone, as a2a.Transport: a caller holding a
+// *nats.Conn builds one by handing conns.New(conns.WithNats(nc)) to
+// a2a.NewTransport, and every method here answers one of a2a's own interfaces, so
+// naming the concrete type buys nothing.
+type transport struct {
 	nc       *nats.Conn
 	identity string
 	timeout  time.Duration
@@ -180,14 +185,14 @@ func newTransport(cfg a2a.TransportConfig) (a2a.Transport, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	return &Transport{nc: nc, identity: cfg.Identity, timeout: timeout, log: log, onFault: cfg.OnFault}, nil
+	return &transport{nc: nc, identity: cfg.Identity, timeout: timeout, log: log, onFault: cfg.OnFault}, nil
 }
 
 // fault reports that this transport has stopped serving for a reason nobody asked
 // for. It logs whatever happens and calls back only when the stop was not this
 // process's own doing, since micro pushes its done handler from Stop and every drain
 // calls Stop.
-func (t *Transport) fault(err error) {
+func (t *transport) fault(err error) {
 	if t.stopping.Load() {
 		t.log.Debug("The a2a micro service stopped", "identity", t.identity)
 		return
@@ -209,7 +214,7 @@ func (t *Transport) fault(err error) {
 // an elapsed wait says how long this agent waited and which bound it was, since an
 // operator seeing only "unavailable" looks for a dead worker when the answer is that
 // the peer needed longer than the caller allows.
-func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
+func (t *transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
 	subject, err := t.subject(agent, op)
 	if err != nil {
 		return nil, err
@@ -247,7 +252,7 @@ func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHin
 // client's pending buffer, and past its limits micro stops the whole service, taking
 // every path of this identity off the air. The engine refuses a call it has no slot
 // for rather than holding the goroutine. The micro service is created on first use.
-func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
+func (t *transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 	return t.serve(op, func(ctx context.Context, caller a2a.Caller, body []byte, r replier) {
 		h(ctx, caller, body, r)
 	})
@@ -256,7 +261,7 @@ func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 // ServeReplySet registers h the way Serve does and hands it the same replier, which
 // carries the reply set methods as well. Every path of this transport can answer with
 // a set, so the two differ only in what the handler is given.
-func (t *Transport) ServeReplySet(op a2a.RouteHint, h a2a.ReplySetHandler) error {
+func (t *transport) ServeReplySet(op a2a.RouteHint, h a2a.ReplySetHandler) error {
 	return t.serve(op, func(ctx context.Context, caller a2a.Caller, body []byte, r replier) {
 		h(ctx, caller, body, r)
 	})
@@ -264,7 +269,7 @@ func (t *Transport) ServeReplySet(op a2a.RouteHint, h a2a.ReplySetHandler) error
 
 // serve is the registration both serve methods share, differing only in which
 // interface they hand the replier over as.
-func (t *Transport) serve(op a2a.RouteHint, h func(context.Context, a2a.Caller, []byte, replier)) error {
+func (t *transport) serve(op a2a.RouteHint, h func(context.Context, a2a.Caller, []byte, replier)) error {
 	subject, err := t.subject(t.identity, op)
 	if err != nil {
 		return err
@@ -298,7 +303,7 @@ func (t *Transport) serve(op a2a.RouteHint, h func(context.Context, a2a.Caller, 
 
 // Describe returns the discovery and tool subjects the identity is reached on, for
 // CLI display.
-func (t *Transport) Describe(identity string) []a2a.DescLine {
+func (t *transport) Describe(identity string) []a2a.DescLine {
 	return []a2a.DescLine{
 		{Label: "Discovery", Value: DiscoverySubject(identity)},
 		{Label: "Tools", Value: ToolSubject(identity)},
@@ -310,7 +315,7 @@ func (t *Transport) Describe(identity string) []a2a.DescLine {
 //
 // The stop is recorded before it is asked for, since micro pushes its done handler
 // from Stop and this is the one stop that is not a fault.
-func (t *Transport) Close() error {
+func (t *transport) Close() error {
 	t.stopping.Store(true)
 
 	if t.svc != nil {
@@ -323,7 +328,7 @@ func (t *Transport) Close() error {
 // service lazily registers the micro service that backs the serving endpoints. It
 // is created only when the transport is used to serve, so a client-only transport
 // registers nothing.
-func (t *Transport) service() (micro.Service, error) {
+func (t *transport) service() (micro.Service, error) {
 	if t.svc != nil {
 		return t.svc, nil
 	}
@@ -355,7 +360,7 @@ func (t *Transport) service() (micro.Service, error) {
 }
 
 // subject maps a route hint to the NATS subject for the given identity.
-func (t *Transport) subject(identity string, op a2a.RouteHint) (string, error) {
+func (t *transport) subject(identity string, op a2a.RouteHint) (string, error) {
 	switch op {
 	case a2a.OpDiscovery:
 		return DiscoverySubject(identity), nil
@@ -391,7 +396,7 @@ func endpointName(op a2a.RouteHint) (string, error) {
 // It names the per-task paths as well as the served ones, which subject() does not,
 // because those are the ones an operator most wants to subscribe to and neither is
 // registered as an endpoint.
-func (t *Transport) Subject(op a2a.RouteHint, agent, request string) string {
+func (t *transport) Subject(op a2a.RouteHint, agent, request string) string {
 	switch op {
 	case a2a.OpDiscovery:
 		return DiscoverySubject(agent)

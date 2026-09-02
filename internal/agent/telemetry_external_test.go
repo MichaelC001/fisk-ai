@@ -1646,7 +1646,7 @@ var _ = Describe("Agent telemetry", func() {
 		tel, exp := capturingTelemetry(telemetry.ContentCapture{})
 
 		store := agenttest.NewFakeMemoryStore(GinkgoTB())
-		Expect(store.Write(context.Background(), "deploy-notes", "how the deploy works", "body", false)).To(Succeed())
+		Expect(store.Create(context.Background(), "deploy-notes", "how the deploy works", "body")).To(Succeed())
 
 		_, err := agent.Run(context.Background(), agent.Options{
 			Config:      cfg,
@@ -1778,7 +1778,7 @@ var _ = Describe("Agent telemetry", func() {
 
 		store := agenttest.NewFakeMemoryStore(GinkgoTB())
 		for _, key := range []string{"deploy-notes", "api-conventions", "oncall"} {
-			Expect(store.Write(context.Background(), key, "a description", "body", false)).To(Succeed())
+			Expect(store.Create(context.Background(), key, "a description", "body")).To(Succeed())
 		}
 
 		_, err := agent.Run(context.Background(), agent.Options{

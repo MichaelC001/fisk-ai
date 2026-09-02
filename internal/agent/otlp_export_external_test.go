@@ -75,7 +75,7 @@ func exportRun(rx *agenttest.OTLPReceiver, capture config.TelemetryCaptureConfig
 	provider := tel.Provider
 
 	store := agenttest.NewFakeMemoryStore(GinkgoTB())
-	Expect(store.Write(context.Background(), "deploy-notes", "how the deploy works", "body", false)).To(Succeed())
+	Expect(store.Create(context.Background(), "deploy-notes", "how the deploy works", "body")).To(Succeed())
 
 	responses := o.responses
 	if len(responses) == 0 {

@@ -17,24 +17,24 @@ import (
 	"github.com/choria-io/fisk-ai/internal/memory"
 )
 
-var _ = Describe("fileStore", func() {
+var _ = Describe("FileStore", func() {
 	var (
 		ctx   context.Context
 		dir   string
 		store memory.Store
 	)
 
-	// create writes a new memory with the create-guard (overwrite off), the common
-	// case in these specs.
+	// create writes a new memory under the create-guard, the common case in these
+	// specs.
 	create := func(key, description, content string) error {
-		return store.Write(ctx, key, description, content, false)
+		return store.Create(ctx, key, description, content)
 	}
 
 	BeforeEach(func() {
 		ctx = context.Background()
 		dir = GinkgoT().TempDir()
 		var err error
-		store, err = newFileStore(filepath.Join(dir, "mem"))
+		store, err = NewFileStore(filepath.Join(dir, "mem"))
 		Expect(err).ToNot(HaveOccurred())
 	})
 
@@ -62,17 +62,17 @@ var _ = Describe("fileStore", func() {
 		Expect(content).To(Equal("one"))
 	})
 
-	It("Should replace an existing key when overwrite is set", func() {
+	It("Should replace an existing key on update", func() {
 		Expect(create("k", "first", "one")).To(Succeed())
-		Expect(store.Write(ctx, "k", "second", "two", true)).To(Succeed())
+		Expect(store.Update(ctx, "k", "second", "two")).To(Succeed())
 
 		desc, content, _ := store.Read(ctx, "k")
 		Expect(desc).To(Equal("second"))
 		Expect(content).To(Equal("two"))
 	})
 
-	It("Should create with overwrite set when the key is absent", func() {
-		Expect(store.Write(ctx, "fresh", "d", "c", true)).To(Succeed())
+	It("Should write an absent key on update", func() {
+		Expect(store.Update(ctx, "fresh", "d", "c")).To(Succeed())
 		_, content, err := store.Read(ctx, "fresh")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(content).To(Equal("c"))
@@ -127,7 +127,7 @@ var _ = Describe("fileStore", func() {
 		})
 
 		It("Should ignore files whose name is not a valid key and non-md files", func() {
-			fs := store.(*fileStore)
+			fs := store.(*FileStore)
 			Expect(os.WriteFile(filepath.Join(fs.dir, "notes.txt"), []byte("x"), 0o600)).To(Succeed())
 			Expect(os.WriteFile(filepath.Join(fs.dir, ".hidden.md"), []byte("x"), 0o600)).To(Succeed())
 			Expect(create("real", "d", "c")).To(Succeed())
@@ -143,7 +143,7 @@ var _ = Describe("fileStore", func() {
 		var evilTarget string
 
 		BeforeEach(func() {
-			fs := store.(*fileStore)
+			fs := store.(*FileStore)
 			evilTarget = filepath.Join(dir, "secret")
 			Expect(os.WriteFile(evilTarget, []byte("top secret"), 0o600)).To(Succeed())
 			Expect(os.Symlink(evilTarget, filepath.Join(fs.dir, "evil.md"))).To(Succeed())

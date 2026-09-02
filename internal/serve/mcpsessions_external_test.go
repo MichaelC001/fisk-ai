@@ -265,7 +265,7 @@ var _ = Describe("Shared MCP sessions", func() {
 			Dialer:   fake.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 		return sessions
 	}

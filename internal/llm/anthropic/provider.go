@@ -154,7 +154,7 @@ func (p *Provider) Call(ctx context.Context, req llm.Request) (*llm.Response, er
 		return nil, classify(badRequestHint(err, req))
 	}
 
-	resp, err := ResponseToNeutral(msg)
+	resp, err := responseToNeutral(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +216,7 @@ func (p *Provider) buildParams(req llm.Request) (sdk.MessageNewParams, error) {
 
 	tools := make([]sdk.ToolUnionParam, 0, len(req.Tools)+1)
 	for _, td := range req.Tools {
-		tools = append(tools, ToolDefToAnthropic(td))
+		tools = append(tools, toolDefToAnthropic(td))
 	}
 	if req.ToolSearch {
 		tools = append(tools, toolSearchTool())
@@ -239,7 +239,7 @@ func (p *Provider) buildParams(req llm.Request) (sdk.MessageNewParams, error) {
 			m = withoutThinking(m)
 		}
 
-		mp, err := MessageToAnthropic(m)
+		mp, err := messageToAnthropic(m)
 		if err != nil {
 			return sdk.MessageNewParams{}, fmt.Errorf("message %d: %w", i, err)
 		}

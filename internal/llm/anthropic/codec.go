@@ -17,10 +17,10 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-// MessageToNeutral converts an Anthropic message into the neutral model. Named
+// messageToNeutral converts an Anthropic message into the neutral model. Named
 // block kinds decompose into their neutral form; every other block is preserved
 // verbatim as a ProviderBlock so nothing is lost.
-func MessageToNeutral(mp sdk.MessageParam) (llm.Message, error) {
+func messageToNeutral(mp sdk.MessageParam) (llm.Message, error) {
 	out := llm.Message{Role: llm.Role(mp.Role)}
 
 	for i, block := range mp.Content {
@@ -34,8 +34,8 @@ func MessageToNeutral(mp sdk.MessageParam) (llm.Message, error) {
 	return out, nil
 }
 
-// MessageToAnthropic converts a neutral message back into an Anthropic message.
-func MessageToAnthropic(m llm.Message) (sdk.MessageParam, error) {
+// messageToAnthropic converts a neutral message back into an Anthropic message.
+func messageToAnthropic(m llm.Message) (sdk.MessageParam, error) {
 	out := sdk.MessageParam{Role: sdk.MessageParamRole(m.Role)}
 
 	for i, block := range m.Content {
@@ -49,11 +49,11 @@ func MessageToAnthropic(m llm.Message) (sdk.MessageParam, error) {
 	return out, nil
 }
 
-// ResponseToNeutral converts an Anthropic response into the neutral model. The
+// responseToNeutral converts an Anthropic response into the neutral model. The
 // assistant content is folded through the same block codec as a stored message
 // (via ToParam) so a response and a journaled turn share one representation.
-func ResponseToNeutral(msg *sdk.Message) (llm.Response, error) {
-	content, err := MessageToNeutral(msg.ToParam())
+func responseToNeutral(msg *sdk.Message) (llm.Response, error) {
+	content, err := messageToNeutral(msg.ToParam())
 	if err != nil {
 		return llm.Response{}, err
 	}

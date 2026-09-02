@@ -34,7 +34,7 @@ var _ = Describe("FakeMemoryStore", func() {
 	})
 
 	It("Should read back what was written", func() {
-		Expect(store.Write(ctx, "notes", "some notes", "the body", false)).To(Succeed())
+		Expect(store.Create(ctx, "notes", "some notes", "the body")).To(Succeed())
 
 		description, content, err := store.Read(ctx, "notes")
 		Expect(err).ToNot(HaveOccurred())
@@ -47,10 +47,10 @@ var _ = Describe("FakeMemoryStore", func() {
 		Expect(err).To(MatchError(memory.ErrNotExist))
 	})
 
-	It("Should refuse to overwrite unless asked to", func() {
-		Expect(store.Write(ctx, "notes", "first", "one", false)).To(Succeed())
-		Expect(store.Write(ctx, "notes", "second", "two", false)).To(MatchError(memory.ErrExists))
-		Expect(store.Write(ctx, "notes", "second", "two", true)).To(Succeed())
+	It("Should refuse a create over an existing key and take the update", func() {
+		Expect(store.Create(ctx, "notes", "first", "one")).To(Succeed())
+		Expect(store.Create(ctx, "notes", "second", "two")).To(MatchError(memory.ErrExists))
+		Expect(store.Update(ctx, "notes", "second", "two")).To(Succeed())
 
 		description, content, err := store.Read(ctx, "notes")
 		Expect(err).ToNot(HaveOccurred())
@@ -59,8 +59,8 @@ var _ = Describe("FakeMemoryStore", func() {
 	})
 
 	It("Should list every memory by key", func() {
-		Expect(store.Write(ctx, "zebra", "last", "z", false)).To(Succeed())
-		Expect(store.Write(ctx, "alpha", "first", "a", false)).To(Succeed())
+		Expect(store.Create(ctx, "zebra", "last", "z")).To(Succeed())
+		Expect(store.Create(ctx, "alpha", "first", "a")).To(Succeed())
 
 		items, err := store.List(ctx)
 		Expect(err).ToNot(HaveOccurred())
@@ -71,7 +71,7 @@ var _ = Describe("FakeMemoryStore", func() {
 	})
 
 	It("Should report whether a delete removed anything", func() {
-		Expect(store.Write(ctx, "notes", "some notes", "the body", false)).To(Succeed())
+		Expect(store.Create(ctx, "notes", "some notes", "the body")).To(Succeed())
 
 		removed, err := store.Delete(ctx, "notes")
 		Expect(err).ToNot(HaveOccurred())
@@ -117,7 +117,7 @@ var _ = Describe("FakeMemoryStore", func() {
 				for j := 0; j < each; j++ {
 					key := fmt.Sprintf("run-%d-%d", i, j)
 
-					Expect(store.Write(ctx, key, "written", "body", false)).To(Succeed())
+					Expect(store.Create(ctx, key, "written", "body")).To(Succeed())
 
 					_, _, err := store.Read(ctx, key)
 					Expect(err).ToNot(HaveOccurred())

@@ -53,10 +53,16 @@ func (f *fakeStore) Read(_ context.Context, key string) (string, string, error) 
 	return v.description, v.content, nil
 }
 
-func (f *fakeStore) Write(_ context.Context, key, description, content string, overwrite bool) error {
-	if _, ok := f.values[key]; ok && !overwrite {
+func (f *fakeStore) Create(_ context.Context, key, description, content string) error {
+	_, ok := f.values[key]
+	if ok {
 		return memory.ErrExists
 	}
+	f.values[key] = fakeValue{description: description, content: content}
+	return nil
+}
+
+func (f *fakeStore) Update(_ context.Context, key, description, content string) error {
 	f.values[key] = fakeValue{description: description, content: content}
 	return nil
 }
@@ -154,7 +160,7 @@ var _ = Describe("Memory tools", func() {
 		})
 
 		It("Should refuse to overwrite by default and name the existing description", func() {
-			Expect(store.Write(ctx, "k", "existing summary", "old", false)).To(Succeed())
+			Expect(store.Create(ctx, "k", "existing summary", "old")).To(Succeed())
 
 			out, err := call("memory_write", `{"key":"k","description":"d","content":"new"}`)
 			Expect(err).ToNot(HaveOccurred())
@@ -165,7 +171,7 @@ var _ = Describe("Memory tools", func() {
 		})
 
 		It("Should replace when overwrite is set", func() {
-			Expect(store.Write(ctx, "k", "old", "old", false)).To(Succeed())
+			Expect(store.Create(ctx, "k", "old", "old")).To(Succeed())
 
 			out, err := call("memory_write", `{"key":"k","description":"d","content":"new","overwrite":true}`)
 			Expect(err).ToNot(HaveOccurred())
@@ -176,7 +182,7 @@ var _ = Describe("Memory tools", func() {
 
 	Describe("memory_read", func() {
 		It("Should return the description and content of an existing memory", func() {
-			Expect(store.Write(ctx, "k", "d", "c", false)).To(Succeed())
+			Expect(store.Create(ctx, "k", "d", "c")).To(Succeed())
 
 			out, err := call("memory_read", `{"key":"k"}`)
 			Expect(err).ToNot(HaveOccurred())
@@ -194,7 +200,7 @@ var _ = Describe("Memory tools", func() {
 		})
 
 		It("Should always include content on a hit, even when empty", func() {
-			Expect(store.Write(ctx, "k", "d", "", false)).To(Succeed())
+			Expect(store.Create(ctx, "k", "d", "")).To(Succeed())
 
 			out, err := call("memory_read", `{"key":"k"}`)
 			Expect(err).ToNot(HaveOccurred())
@@ -206,8 +212,8 @@ var _ = Describe("Memory tools", func() {
 
 	Describe("memory_list", func() {
 		It("Should list stored memories sorted by key", func() {
-			Expect(store.Write(ctx, "b", "second", "x", false)).To(Succeed())
-			Expect(store.Write(ctx, "a", "first", "y", false)).To(Succeed())
+			Expect(store.Create(ctx, "b", "second", "x")).To(Succeed())
+			Expect(store.Create(ctx, "a", "first", "y")).To(Succeed())
 
 			out, err := call("memory_list", `{}`)
 			Expect(err).ToNot(HaveOccurred())
@@ -220,7 +226,7 @@ var _ = Describe("Memory tools", func() {
 
 	Describe("memory_delete", func() {
 		It("Should report deleted true when a memory was removed", func() {
-			Expect(store.Write(ctx, "k", "d", "c", false)).To(Succeed())
+			Expect(store.Create(ctx, "k", "d", "c")).To(Succeed())
 
 			out, err := call("memory_delete", `{"key":"k"}`)
 			Expect(err).ToNot(HaveOccurred())

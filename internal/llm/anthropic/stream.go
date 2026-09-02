@@ -23,7 +23,7 @@ var _ llm.StreamingProvider = (*Provider)(nil)
 // per-call timeout, reports each text and thinking fragment to fn as the model
 // writes it, and returns the same neutral Response Call returns for the same
 // Request. It renders the request with buildParams and decodes the assembled
-// message with ResponseToNeutral, so the two call paths differ only in how the
+// message with responseToNeutral, so the two call paths differ only in how the
 // message arrives.
 //
 // A stream that ends without message_stop is an error. The SDK reports none for a
@@ -114,7 +114,7 @@ func (p *Provider) CallStream(ctx context.Context, req llm.Request, fn func(llm.
 		fn(llm.Delta{Kind: streaming[idx], Index: int(idx), Final: true})
 	}
 
-	resp, err := ResponseToNeutral(&msg)
+	resp, err := responseToNeutral(&msg)
 	if err != nil {
 		return nil, err
 	}

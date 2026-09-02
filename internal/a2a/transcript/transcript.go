@@ -43,23 +43,23 @@ func (t Turns) Blocks() []wire.Block {
 	return out
 }
 
-// Tail is the most recent blocks of the conversation, at least max of them where the
+// Tail is the most recent blocks of the conversation, at least n of them where the
 // conversation holds that many, rounded outwards so that no turn is cut in half. It
 // reports whether anything older was left behind.
 //
-// A max of zero returns nothing, which is what a caller that asked for no history
-// gets. A negative max returns everything.
-func (t Turns) Tail(max int) (blocks []wire.Block, truncated bool) {
-	if max == 0 {
+// An n of zero returns nothing, which is what a caller that asked for no history
+// gets. A negative n returns everything.
+func (t Turns) Tail(n int) (blocks []wire.Block, truncated bool) {
+	if n == 0 {
 		return nil, len(t) > 0
 	}
-	if max < 0 {
+	if n < 0 {
 		return t.Blocks(), false
 	}
 
 	first := len(t)
 	held := 0
-	for first > 0 && held < max {
+	for first > 0 && held < n {
 		first--
 		held += len(t[first])
 	}
