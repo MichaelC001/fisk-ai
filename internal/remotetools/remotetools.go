@@ -96,7 +96,7 @@ func DiscoverForInfo(ctx context.Context, cfg *config.Config, taken map[string]b
 	}
 	defer provider.Close()
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), provider, a2a.TransportConfig{Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{Resources: provider, Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
 	if err != nil {
 		return nil, err
 	}

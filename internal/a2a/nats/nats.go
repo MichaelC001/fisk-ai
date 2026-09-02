@@ -131,10 +131,16 @@ type Transport struct {
 	stopping atomic.Bool
 }
 
-// newTransport is the registered factory. It borrows the Provider's NATS
-// connection and returns an error when none was provisioned, so a misconfigured
-// wiring fails loudly rather than dereferencing a nil connection.
-func newTransport(p *conns.Provider, cfg a2a.TransportConfig) (a2a.Transport, error) {
+// newTransport is the registered factory. It reads a *conns.Provider out of
+// cfg.Resources and borrows its NATS connection, returning an error when the
+// resources are of another type or carry no connection, so a misconfigured wiring
+// fails loudly rather than dereferencing a nil connection.
+func newTransport(cfg a2a.TransportConfig) (a2a.Transport, error) {
+	p, ok := cfg.Resources.(*conns.Provider)
+	if !ok {
+		return nil, fmt.Errorf("a2a NATS transport requires a *conns.Provider in TransportConfig.Resources, got %T", cfg.Resources)
+	}
+
 	nc := p.Nats()
 	if nc == nil {
 		return nil, fmt.Errorf("a2a NATS transport requires a NATS connection but none was provisioned")
@@ -228,6 +234,23 @@ func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHin
 // every path of this identity off the air. The engine refuses a call it has no slot
 // for rather than holding the goroutine. The micro service is created on first use.
 func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
+	return t.serve(op, func(ctx context.Context, caller a2a.Caller, body []byte, r replier) {
+		h(ctx, caller, body, r)
+	})
+}
+
+// ServeReplySet registers h the way Serve does and hands it the same replier, which
+// carries the reply set methods as well. Every path of this transport can answer with
+// a set, so the two differ only in what the handler is given.
+func (t *Transport) ServeReplySet(op a2a.RouteHint, h a2a.ReplySetHandler) error {
+	return t.serve(op, func(ctx context.Context, caller a2a.Caller, body []byte, r replier) {
+		h(ctx, caller, body, r)
+	})
+}
+
+// serve is the registration both serve methods share, differing only in which
+// interface they hand the replier over as.
+func (t *Transport) serve(op a2a.RouteHint, h func(context.Context, a2a.Caller, []byte, replier)) error {
 	subject, err := t.subject(t.identity, op)
 	if err != nil {
 		return err

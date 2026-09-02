@@ -24,7 +24,7 @@ var _ = Describe("Integration: caller context", Label("integration"), func() {
 
 		nc := runNATS()
 
-		transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: "svc"})
+		transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: "svc"})
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(transport.Close)
 

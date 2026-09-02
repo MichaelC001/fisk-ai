@@ -53,7 +53,7 @@ func discoverAction(_ *fisk.ParseContext) error {
 	}
 	defer provider.Close()
 
-	transport, err := a2a.NewTransport(config.A2ATransportName, provider, a2a.TransportConfig{Identity: sender, Timeout: wait})
+	transport, err := a2a.NewTransport(config.A2ATransportName, a2a.TransportConfig{Resources: provider, Identity: sender, Timeout: wait})
 	if err != nil {
 		return err
 	}

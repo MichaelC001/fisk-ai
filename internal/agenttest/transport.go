@@ -72,7 +72,10 @@ type TransportFault struct {
 // separate-package interface audit, failing to compile if the interface stops being
 // implementable from outside its own package. A tool call needs the reply set, since
 // that is how a served call says it is still working.
-var _ a2a.ReplySetTransport = (*FakeTransport)(nil)
+var (
+	_ a2a.ReplySetTransport  = (*FakeTransport)(nil)
+	_ a2a.DescribedTransport = (*FakeTransport)(nil)
+)
 
 // NewFakeTransport returns a transport that answers discovery with card. Tool calls
 // answer with a success reply carrying "ok"; use SetToolReply to change it.
@@ -292,16 +295,30 @@ func (t *FakeTransport) Serve(a2a.RouteHint, a2a.Handler) error {
 	return nil
 }
 
-// ServeCalls reports how many times Serve was called. Run never serves through a
-// borrowed transport, so a test asserts this stays zero.
+// ServeReplySet implements a2a.ReplySetTransport on the same terms as Serve, and is
+// counted with it: the fake answers no inbound request through either.
+func (t *FakeTransport) ServeReplySet(a2a.RouteHint, a2a.ReplySetHandler) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.serveCalls++
+	return nil
+}
+
+// ServeCalls reports how many times Serve or ServeReplySet was called. Run never
+// serves through a borrowed transport, so a test asserts this stays zero.
 func (t *FakeTransport) ServeCalls() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.serveCalls
 }
 
-// Describe implements a2a.Transport with no address lines.
+// Describe implements a2a.DescribedTransport with no address lines, so a spec reading
+// a banner built over this fake gets the endpoint's own rows and nothing else.
 func (t *FakeTransport) Describe(string) []a2a.DescLine { return nil }
+
+// DescribeTasks implements a2a.DescribedTransport with no address lines. The fake is
+// a client transport and carries no task path.
+func (t *FakeTransport) DescribeTasks(string, bool) []a2a.DescLine { return nil }
 
 // Close implements a2a.Transport. Run never closes a borrowed transport, so this is
 // recorded for a test to assert it was not reached rather than releasing anything.

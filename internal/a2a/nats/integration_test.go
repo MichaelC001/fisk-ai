@@ -51,7 +51,7 @@ func runNATS() *nats.Conn {
 func serveOver(nc *nats.Conn, identity string, tools []toolkit.Tool) *a2a.Server {
 	GinkgoHelper()
 
-	transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: identity})
+	transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: identity})
 	Expect(err).NotTo(HaveOccurred())
 
 	srv, err := a2a.NewServer(transport, tools, a2a.ServerOptions{Identity: identity, Version: "v1", LogOutput: io.Discard})
@@ -65,7 +65,7 @@ func serveOver(nc *nats.Conn, identity string, tools []toolkit.Tool) *a2a.Server
 func clientOver(nc *nats.Conn, sender string, timeout time.Duration) *a2a.Client {
 	GinkgoHelper()
 
-	transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: sender, Timeout: timeout})
+	transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: sender, Timeout: timeout})
 	Expect(err).NotTo(HaveOccurred())
 
 	client, err := a2a.NewClient(transport, sender)

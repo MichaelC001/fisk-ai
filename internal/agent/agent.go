@@ -1179,7 +1179,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		transport := opts.A2ATransport
 		if transport == nil {
 			transportName := cfg.A2ATransport()
-			transport, err = a2a.NewTransport(transportName, natsConns, a2a.TransportConfig{Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
+			transport, err = a2a.NewTransport(transportName, a2a.TransportConfig{Resources: natsConns, Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
 			if err != nil {
 				return res, err
 			}

@@ -46,7 +46,7 @@ var _ = Describe("The prompt channel", func() {
 	}
 
 	BeforeEach(func() {
-		transport, err := a2a.NewTransport(config.A2ATransportName, provider, a2a.TransportConfig{Identity: "caller1", Timeout: 2 * time.Second})
+		transport, err := a2a.NewTransport(config.A2ATransportName, a2a.TransportConfig{Resources: provider, Identity: "caller1", Timeout: 2 * time.Second})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(transport.Close)
 

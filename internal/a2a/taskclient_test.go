@@ -19,6 +19,11 @@ import (
 // heldTransport is a StreamingTransport whose reply set stops before its terminal
 // message until the test releases it, which is how a real worker behaves while it holds
 // a question open: nothing else arrives until somebody answers.
+//
+// The task client reaches it by asserting for the interface, so the assertion is what
+// makes a missing method a build failure rather than a run whose questions go nowhere.
+var _ StreamingTransport = (*heldTransport)(nil)
+
 type heldTransport struct {
 	prefix   func(req *Header) [][]byte
 	terminal func(req *Header) []byte
@@ -55,10 +60,11 @@ func (t *heldTransport) sentRequests() []*Request {
 func (t *heldTransport) RoundTrip(context.Context, string, RouteHint, []byte) ([]byte, error) {
 	return nil, nil
 }
-func (t *heldTransport) Serve(RouteHint, Handler) error        { return nil }
-func (t *heldTransport) Describe(string) []DescLine            { return nil }
-func (t *heldTransport) DescribeTasks(string, bool) []DescLine { return nil }
-func (t *heldTransport) Close() error                          { return nil }
+func (t *heldTransport) Serve(RouteHint, Handler) error                 { return nil }
+func (t *heldTransport) ServeReplySet(RouteHint, ReplySetHandler) error { return nil }
+func (t *heldTransport) Describe(string) []DescLine                     { return nil }
+func (t *heldTransport) DescribeTasks(string, bool) []DescLine          { return nil }
+func (t *heldTransport) Close() error                                   { return nil }
 
 func (t *heldTransport) WatchCancel(string, Handler) (TaskWatch, error) {
 	return nil, fmt.Errorf("the held transport does not serve")

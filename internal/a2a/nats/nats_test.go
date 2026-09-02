@@ -56,14 +56,29 @@ var _ = Describe("endpointName", func() {
 
 var _ = Describe("newTransport", func() {
 	It("Should fail when the provider carries no NATS connection", func() {
-		tr, err := newTransport(conns.New(), a2a.TransportConfig{Identity: "svc"})
+		tr, err := newTransport(a2a.TransportConfig{Resources: conns.New(), Identity: "svc"})
 		Expect(err).To(MatchError(ContainSubstring("requires a NATS connection")))
+		Expect(tr).To(BeNil())
+	})
+
+	// The resources are untyped so that a binding over another substrate links no NATS,
+	// which puts the check here rather than on the compiler. A wiring that hands over
+	// the wrong thing, or nothing, has to say so at construction.
+	It("Should fail when the resources are not a conns.Provider", func() {
+		tr, err := newTransport(a2a.TransportConfig{Resources: "not a provider", Identity: "svc"})
+		Expect(err).To(MatchError(ContainSubstring("requires a *conns.Provider in TransportConfig.Resources, got string")))
+		Expect(tr).To(BeNil())
+	})
+
+	It("Should fail when no resources were supplied at all", func() {
+		tr, err := newTransport(a2a.TransportConfig{Identity: "svc"})
+		Expect(err).To(MatchError(ContainSubstring("requires a *conns.Provider in TransportConfig.Resources, got <nil>")))
 		Expect(tr).To(BeNil())
 	})
 
 	It("Should reject unknown transport options strictly", func() {
 		p := conns.New(conns.WithNats(&nats.Conn{}))
-		_, err := newTransport(p, a2a.TransportConfig{Identity: "svc", Options: json.RawMessage(`{"nope":true}`)})
+		_, err := newTransport(a2a.TransportConfig{Resources: p, Identity: "svc", Options: json.RawMessage(`{"nope":true}`)})
 		Expect(err).To(MatchError(ContainSubstring("decoding nats transport options")))
 	})
 

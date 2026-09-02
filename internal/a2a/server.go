@@ -169,7 +169,7 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 	// A tool call is answered as a reply set, so a binding that cannot carry one cannot
 	// serve tools at all. It is refused here rather than per call, so a program learns
 	// it at startup rather than from the first peer.
-	_, streams := transport.(ReplySetTransport)
+	replySets, streams := transport.(ReplySetTransport)
 	if !streams {
 		return nil, fmt.Errorf("%w: serving tools needs a transport that carries a reply set", ErrStreamUnsupported)
 	}
@@ -200,7 +200,7 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 		return s, nil
 	}
 
-	err = transport.Serve(OpTool, s.handleTool)
+	err = replySets.ServeReplySet(OpTool, s.handleTool)
 	if err != nil {
 		return nil, fmt.Errorf("registering tool handler: %w", err)
 	}
@@ -219,9 +219,15 @@ func (s *Server) ExposedTools() []string {
 }
 
 // Describe returns the transport-neutral lines describing how this server is
-// reached, for display.
+// reached, for display. A transport that does not implement DescribedTransport has
+// no addresses to name, and the answer is empty.
 func (s *Server) Describe() []DescLine {
-	return s.transport.Describe(s.identity)
+	described, ok := s.transport.(DescribedTransport)
+	if !ok {
+		return nil
+	}
+
+	return described.Describe(s.identity)
 }
 
 // Stop releases the transport's resources. It does not close the shared
@@ -306,7 +312,7 @@ func (s *Server) handleDiscovery(_ context.Context, _ Caller, body []byte, reply
 // whole service off the air. A caller is waiting on the other end, so being told at
 // once that this agent is at capacity is worth more than a place in a queue it cannot
 // see.
-func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, reply Replier) {
+func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, reply StreamReplier) {
 	msg, err := s.inbound(body, ToolRequestProtocol)
 	if err != nil {
 		_ = reply.Error("400", err.Error())
@@ -345,14 +351,7 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 	// Every answer travels as a reply set, refusals included, so a caller reads one
 	// shape whatever happened. The stream is built before the first decision because
 	// each of them answers through it.
-	sr, streams := reply.(StreamReplier)
-	if !streams {
-		log.Error("Refusing tool call: this transport cannot carry a reply set", "tool", tr.Name)
-		_ = reply.Error("500", "this agent's transport cannot carry a tool reply set")
-		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeError, Failed: true})
-		return
-	}
-	stream := NewReplyStream(sr, &tr.Header, s.identity)
+	stream := NewReplyStream(reply, &tr.Header, s.identity)
 
 	if !ok {
 		log.Warn("Rejecting unknown tool call", "tool", tr.Name)

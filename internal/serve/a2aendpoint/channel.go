@@ -119,7 +119,7 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 		inFlight:   make(map[string]*task),
 	}
 
-	err = held.transport.Serve(a2a.OpTask, c.handle)
+	err = stream.ServeReplySet(a2a.OpTask, c.handle)
 	if err != nil {
 		return nil, fmt.Errorf("registering the task handler: %w", err)
 	}
@@ -144,9 +144,10 @@ func (c *Channel) Heading() string { return "Answering prompts over a2a" }
 // Describe returns the addresses a peer sends a prompt to and addresses a cancel under,
 // the one it answers questions on when this channel asks any, and how many prompts it
 // runs at once. The transport supplies the addresses, so a later binding describes
-// itself in its own terms and this endpoint never builds one.
+// itself in its own terms and this endpoint never builds one; a binding that names no
+// addresses leaves the worker count as the only row.
 func (c *Channel) Describe() []serve.DescLine {
-	tasks := c.stream.DescribeTasks(c.identity, c.elicits)
+	tasks := taskLines(c.stream, c.identity, c.elicits)
 
 	lines := make([]serve.DescLine, 0, len(tasks)+1)
 	for _, l := range tasks {

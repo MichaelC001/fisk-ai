@@ -69,7 +69,7 @@ func newService(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 	svc := &Service{
 		held:     held,
 		withheld: builtin.WithheldFromA2A(cfg),
-		describe: describeService(held.transport.Describe(cfg.Identity), concurrency, callTimeout),
+		describe: describeService(transportLines(held.transport, cfg.Identity), concurrency, callTimeout),
 	}
 
 	svc.srv, err = a2a.NewServer(held.transport, toolkit.Tools(tools), a2a.ServerOptions{

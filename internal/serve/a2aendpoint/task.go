@@ -128,7 +128,7 @@ func (t *task) suspendRequested() bool { return t.stopped() || t.ch.draining() }
 // there is no reply set to end. Every refusal after it is an ack that says no followed
 // by a terminal message, because the ack does not close the set and a caller holding
 // only a refusing ack would wait for a terminal message to its own deadline.
-func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, reply a2a.Replier) {
+func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, reply a2a.StreamReplier) {
 	req, err := c.intake(body)
 	if err != nil {
 		c.log.Warn("Refusing a prompt", "error", err, "caller", caller.Name, "caller_verified", caller.Verified)
@@ -137,16 +137,8 @@ func (c *Channel) handle(ctx context.Context, caller a2a.Caller, body []byte, re
 		return
 	}
 
-	sink, ok := reply.(a2a.StreamReplier)
-	if !ok {
-		c.log.Error("The transport declared it streams but supplied a single-reply sink", "request", req.Request)
-		_ = reply.Error("500", "this worker cannot stream a reply set for the request")
-
-		return
-	}
-
 	log := c.log.With("request", req.Request, "caller", callerName(caller, req))
-	stream := a2a.NewReplyStream(sink, &req.Header, c.identity)
+	stream := a2a.NewReplyStream(reply, &req.Header, c.identity)
 
 	// A request carrying a token continues the conversation that token names; one
 	// carrying none starts a conversation and is handed a token for it. So a caller

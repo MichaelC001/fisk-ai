@@ -107,10 +107,11 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 	// through it and may do so before this function returns.
 	held := &sharedTransport{faults: make(chan error, 1)}
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), opts.Conns, a2a.TransportConfig{
-		Identity: cfg.Identity,
-		Logger:   opts.Logger,
-		OnFault:  held.fault,
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{
+		Resources: opts.Conns,
+		Identity:  cfg.Identity,
+		Logger:    opts.Logger,
+		OnFault:   held.fault,
 	})
 	if err != nil {
 		return nil, err
@@ -208,6 +209,29 @@ type sharedTransport struct {
 	// and the transport may report the same stop through more than one handler.
 	faults    chan error
 	faultOnce sync.Once
+}
+
+// transportLines asks the transport how identity is reached. Describing an address is
+// optional, so a binding that implements a2a.DescribedTransport names its own and one
+// that does not leaves the banner section with only the endpoint's own rows.
+func transportLines(t a2a.Transport, identity string) []a2a.DescLine {
+	described, ok := t.(a2a.DescribedTransport)
+	if !ok {
+		return nil
+	}
+
+	return described.Describe(identity)
+}
+
+// taskLines asks the transport where tasks and their cancels are addressed, on the
+// same terms as transportLines.
+func taskLines(t a2a.StreamingTransport, identity string, elicits bool) []a2a.DescLine {
+	described, ok := t.(a2a.DescribedTransport)
+	if !ok {
+		return nil
+	}
+
+	return described.DescribeTasks(identity, elicits)
 }
 
 func (s *sharedTransport) Close() error {

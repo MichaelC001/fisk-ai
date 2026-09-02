@@ -85,7 +85,7 @@ expose:
 			Eventually(served, 10*time.Second).Should(Receive(Succeed()))
 		})
 
-		transport, err := a2a.NewTransport("nats", provider, a2a.TransportConfig{Identity: "caller1", Timeout: 5 * time.Second})
+		transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: provider, Identity: "caller1", Timeout: 5 * time.Second})
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(transport.Close)
 

@@ -192,9 +192,10 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 		return nil, err
 	}
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), broker.Conns(), a2a.TransportConfig{
-		Identity: identity,
-		Logger:   opts.Logger,
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{
+		Resources: broker.Conns(),
+		Identity:  identity,
+		Logger:    opts.Logger,
 	})
 	if err != nil {
 		broker.Close()
@@ -240,10 +241,11 @@ func dialAgent(ctx context.Context, cfg *config.Config, natsContext string, logg
 		return nil, err
 	}
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), provider, a2a.TransportConfig{
-		Identity: clientSender,
-		Timeout:  cfg.A2ARequestTimeout(),
-		Logger:   logger,
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{
+		Resources: provider,
+		Identity:  clientSender,
+		Timeout:   cfg.A2ARequestTimeout(),
+		Logger:    logger,
 	})
 	if err != nil {
 		provider.Close()

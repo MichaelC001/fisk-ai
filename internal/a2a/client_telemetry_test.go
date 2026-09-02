@@ -22,15 +22,20 @@ import (
 )
 
 // stubTransport answers a tool request with a canned reply, or fails the round trip.
+// The client reaches Stream by asserting for ReplySetTransport, so the assertion is
+// what keeps a missing method a build failure rather than a silently round-tripped call.
+var _ ReplySetTransport = (*stubTransport)(nil)
+
 type stubTransport struct {
 	output  string
 	isError bool
 	err     error
 }
 
-func (t *stubTransport) Close() error                   { return nil }
-func (t *stubTransport) Serve(RouteHint, Handler) error { return nil }
-func (t *stubTransport) Describe(string) []DescLine     { return nil }
+func (t *stubTransport) Close() error                                   { return nil }
+func (t *stubTransport) Serve(RouteHint, Handler) error                 { return nil }
+func (t *stubTransport) ServeReplySet(RouteHint, ReplySetHandler) error { return nil }
+func (t *stubTransport) Describe(string) []DescLine                     { return nil }
 
 func (t *stubTransport) RoundTrip(_ context.Context, _ string, _ RouteHint, body []byte) ([]byte, error) {
 	if t.err != nil {

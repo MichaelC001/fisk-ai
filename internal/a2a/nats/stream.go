@@ -20,8 +20,11 @@ import (
 
 // Transport carries a reply set in both directions and addresses a cancel to the one
 // process running a task, so a program asserting for the capability at startup finds
-// it here.
-var _ a2a.StreamingTransport = (*Transport)(nil)
+// it here. It names its subjects too, on the optional describing interface.
+var (
+	_ a2a.StreamingTransport = (*Transport)(nil)
+	_ a2a.DescribedTransport = (*Transport)(nil)
+)
 
 // DescribeTasks names the subject a task request arrives on and the pattern a cancel
 // is addressed under, for the banner of a worker that serves tasks. The cancel line

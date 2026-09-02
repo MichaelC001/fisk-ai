@@ -18,6 +18,12 @@ import (
 // scriptedTransport is a StreamingTransport whose reply set is written by the test.
 // Stream hands back a reader over script, stamped to answer whatever request it was
 // given, so the engine's half of a task can be driven with no wire.
+//
+// The assertion keeps that claim honest: AcceptStream and the task client reach this
+// fake by asserting for the interface, and without it a method added to
+// StreamingTransport would turn those assertions false rather than failing to build.
+var _ StreamingTransport = (*scriptedTransport)(nil)
+
 type scriptedTransport struct {
 	// script builds the reply set for a request header. Nil yields an empty set.
 	script func(req *Header) [][]byte
@@ -34,10 +40,11 @@ type scriptedTransport struct {
 func (t *scriptedTransport) RoundTrip(context.Context, string, RouteHint, []byte) ([]byte, error) {
 	return nil, nil
 }
-func (t *scriptedTransport) Serve(RouteHint, Handler) error        { return nil }
-func (t *scriptedTransport) Describe(string) []DescLine            { return nil }
-func (t *scriptedTransport) DescribeTasks(string, bool) []DescLine { return nil }
-func (t *scriptedTransport) Close() error                          { return nil }
+func (t *scriptedTransport) Serve(RouteHint, Handler) error                 { return nil }
+func (t *scriptedTransport) ServeReplySet(RouteHint, ReplySetHandler) error { return nil }
+func (t *scriptedTransport) Describe(string) []DescLine                     { return nil }
+func (t *scriptedTransport) DescribeTasks(string, bool) []DescLine          { return nil }
+func (t *scriptedTransport) Close() error                                   { return nil }
 
 func (t *scriptedTransport) Stream(_ context.Context, _ string, _ RouteHint, body []byte) (Reader, error) {
 	var hdr Header

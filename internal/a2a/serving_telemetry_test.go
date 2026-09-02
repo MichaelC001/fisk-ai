@@ -75,7 +75,7 @@ var _ = Describe("Serving telemetry", func() {
 		wantTrace := trace.SpanContextFromContext(callerCtx).TraceID()
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(callerCtx, "ping"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(callerCtx, "ping"), rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 		callerSpan.Finish(telemetry.RemoteAgentOutcome{})
 
@@ -99,7 +99,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 
 		Eventually(func() int { return len(exp.GetSpans()) }).Should(BeNumerically(">=", 1))
@@ -124,7 +124,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, body, rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, body, rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 
 		var reply ToolReply
@@ -144,7 +144,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "missing"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "missing"), rep)
 		Expect(rep.responded.Load()).To(BeTrue())
 
 		got := servedSpan(exp)
@@ -167,7 +167,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 
 		var reply ToolReply

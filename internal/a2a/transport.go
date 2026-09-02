@@ -31,11 +31,18 @@ const (
 	OpElicit
 )
 
-// Transport is the pluggable binding the a2a engine rides on. One implementation
-// exists per wire binding (NATS today, Choria services later); it is selected from
-// the registry by name and constructed from a shared conns.Provider. The engine
-// owns all message validation and the concurrency bound; a Transport only moves bytes
-// and keeps the routing paths separate.
+// Transport is the pluggable binding the a2a engine uses to move bytes. One
+// implementation exists per wire binding (NATS today, Choria services and HTTP
+// later); it is selected from the registry by name and constructed from a
+// TransportConfig carrying whatever its substrate needs. The engine owns all message
+// validation and the concurrency bound; a Transport only moves bytes and keeps the
+// routing paths separate.
+//
+// The three methods here are what every binding must write. Carrying a reply set and
+// naming an address for display sit on interfaces of their own. A binding that serves
+// tool calls implements ReplySetTransport, since every tool answer is a set; a binding
+// with no address worth showing leaves DescribedTransport alone, and the banner carries
+// no rows for it.
 type Transport interface {
 	// RoundTrip sends body to agent on the op path and returns the raw reply. It
 	// returns ErrAgentUnavailable when no agent answers or the deadline elapses. The
@@ -48,12 +55,33 @@ type Transport interface {
 	// so a busy engine refuses rather than holding the path. It may be called once per
 	// op.
 	Serve(op RouteHint, h Handler) error
+	// Close releases the transport's own resources (e.g. its service registration).
+	// It does not close the connection resources it was built from, which the caller
+	// owns.
+	Close() error
+}
+
+// DescribedTransport is the optional interface a Transport implements when it can say
+// how an identity is reached: a NATS binding names its subjects, an HTTP one its URLs.
+//
+// It is optional so that writing a binding does not start with writing banner rows. A
+// transport that does not implement it is served and called exactly as one that does,
+// and the banner carries no addresses for it. A binding that wants CLI integration
+// implements both methods, returning nil from the one that has nothing to say.
+type DescribedTransport interface {
 	// Describe returns transport-neutral {label, value} lines describing how the
 	// named identity is reached, for display by the CLI (e.g. the NATS subjects).
 	Describe(identity string) []DescLine
-	// Close releases the transport's own resources (e.g. its service registration).
-	// It does not close the shared conns.Provider, which the caller owns.
-	Close() error
+
+	// DescribeTasks returns the {label, value} lines describing where tasks reach the
+	// named identity and where their cancels are addressed, for display beside
+	// Describe's lines. A binding that is no StreamingTransport carries no tasks and
+	// returns nil.
+	//
+	// elicits says whether the surface puts questions to its callers. With it false
+	// the answer address is left out, since a caller publishing there would reach a
+	// run that asks nothing and every question would be refused before it was asked.
+	DescribeTasks(identity string, elicits bool) []DescLine
 }
 
 // SubjectNamer is the optional interface a Transport implements when its addresses are
@@ -84,6 +112,15 @@ type ReplySetTransport interface {
 
 	// Stream sends body and returns a Reader over the reply set it produces.
 	Stream(ctx context.Context, agent string, op RouteHint, body []byte) (Reader, error)
+
+	// ServeReplySet registers h for inbound messages on the op path, on the same
+	// terms as Serve, and hands it a StreamReplier so it can answer with a set.
+	//
+	// It is a second method rather than a StreamReplier passed to Serve because
+	// Serve belongs to Transport, and a binding that answers one message per request
+	// has no StreamReplier to hand over. A path is served through one of the two, not
+	// both.
+	ServeReplySet(op RouteHint, h ReplySetHandler) error
 }
 
 // StreamingTransport is a ReplySetTransport that can also carry a task: the reply set
@@ -123,17 +160,6 @@ type StreamingTransport interface {
 	// ErrAgentUnavailable when nothing answers, which is how the answering party
 	// learns the run it was answering has ended.
 	SendElicitReply(ctx context.Context, agent, request string, body []byte) ([]byte, error)
-
-	// DescribeTasks returns the {label, value} lines describing how tasks reach the
-	// named identity and where their cancels are addressed, for display beside
-	// Describe's lines. It is here rather than on Describe because a binding that
-	// cannot carry a reply set has no task path to describe, and a surface that serves
-	// tasks must not have to know what a subject is to print one.
-	//
-	// elicits says whether the surface puts questions to its callers. With it false
-	// the answer address is left out, since a caller publishing there would reach a
-	// run that asks nothing and every question would be refused before it was asked.
-	DescribeTasks(identity string, elicits bool) []DescLine
 }
 
 // TaskWatch is one running task's claim on a class of messages addressed to it:
@@ -185,6 +211,10 @@ type Caller struct {
 // that authenticates nobody is the zero value.
 type Handler func(ctx context.Context, caller Caller, body []byte, reply Replier)
 
+// ReplySetHandler is Handler for a path served through ServeReplySet: it is invoked
+// on the same terms and answers through a StreamReplier rather than a Replier.
+type ReplySetHandler func(ctx context.Context, caller Caller, body []byte, reply StreamReplier)
+
 // Replier is the reply side of one inbound request, the transport-neutral form of
 // a NATS micro request's reply. It targets only the reply inbox the transport
 // supplied for this request, never an identity taken from the message body, and is
@@ -199,9 +229,9 @@ type Replier interface {
 	Error(code, description string) error
 }
 
-// StreamReplier is the reply side of a request on a StreamingTransport. Every
-// Replier such a transport supplies implements it, so a handler reaches it by type
-// assertion on the Replier it was given.
+// StreamReplier is the reply side of a request served through ServeReplySet. A
+// handler registered there is handed one, so it never asserts for the methods it
+// needs and a binding that forgot to supply them does not compile.
 type StreamReplier interface {
 	Replier
 

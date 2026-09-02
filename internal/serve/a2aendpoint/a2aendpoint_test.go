@@ -247,7 +247,7 @@ var _ = Describe("A2A endpoint", func() {
 
 				DeferCleanup(closeAll, built)
 
-				transport, err := a2a.NewTransport(config.A2ATransportName, provider, a2a.TransportConfig{Identity: "caller1", Timeout: 5 * time.Second})
+				transport, err := a2a.NewTransport(config.A2ATransportName, a2a.TransportConfig{Resources: provider, Identity: "caller1", Timeout: 5 * time.Second})
 				Expect(err).ToNot(HaveOccurred())
 				DeferCleanup(transport.Close)
 

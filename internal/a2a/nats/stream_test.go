@@ -23,7 +23,7 @@ import (
 func streamingOver(nc *nats.Conn, identity string) a2a.StreamingTransport {
 	GinkgoHelper()
 
-	transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: identity, Timeout: time.Second})
+	transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: identity, Timeout: time.Second})
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(transport.Close)
 
@@ -88,16 +88,13 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 
 		// The served side is what phase 3 builds; here it is the handler itself, driving a
 		// ReplyStream the way an admitted task will.
-		err := server.Serve(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.Replier) {
+		err := server.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.StreamReplier) {
 			defer GinkgoRecover()
 
 			var hdr a2a.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 
-			sink, ok := reply.(a2a.StreamReplier)
-			Expect(ok).To(BeTrue(), "a streaming transport supplies a stream replier")
-
-			stream := a2a.NewReplyStream(sink, &hdr, "svc")
+			stream := a2a.NewReplyStream(reply, &hdr, "svc")
 			Expect(stream.Ack(a2a.NewAck(true))).To(Succeed())
 
 			go func() {
@@ -143,16 +140,13 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		server := streamingOver(nc, "svc")
 
 		refusal := make(chan error, 1)
-		err := server.Serve(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.Replier) {
+		err := server.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.StreamReplier) {
 			defer GinkgoRecover()
 
 			var hdr a2a.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
 
-			sink, ok := reply.(a2a.StreamReplier)
-			Expect(ok).To(BeTrue())
-
-			refusal <- a2a.NewReplyStream(sink, &hdr, "svc").Event(a2a.NewTextBlock("nobody is listening"))
+			refusal <- a2a.NewReplyStream(reply, &hdr, "svc").Event(a2a.NewTextBlock("nobody is listening"))
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -170,12 +164,11 @@ var _ = Describe("Integration: a2a NATS reply set", Label("integration"), func()
 		server := streamingOver(nc, "svc")
 		caller := streamingOver(nc, "caller")
 
-		err := server.Serve(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, reply a2a.Replier) {
+		err := server.ServeReplySet(a2a.OpTask, func(_ context.Context, _ a2a.Caller, body []byte, sink a2a.StreamReplier) {
 			defer GinkgoRecover()
 
 			var hdr a2a.Header
 			Expect(json.Unmarshal(body, &hdr)).To(Succeed())
-			sink := reply.(a2a.StreamReplier)
 
 			// A terminal message carrying another request's id, then this set's own. A
 			// reader that took the first would end the read before the answer arrived.
