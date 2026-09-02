@@ -78,6 +78,10 @@ func (t Turns) Tail(max int) (blocks []wire.Block, truncated bool) {
 // Text is trimmed to what one block carries, so a replayed tool result that a live one
 // would have trimmed is trimmed the same way rather than exceeding the message cap and
 // being dropped.
+//
+// A nil run returns nil, which is the same answer a run holding no messages gives: a
+// caller that looked for a stored run and found none renders an empty conversation
+// rather than checking first.
 func Of(rs *runstate.RunState) Turns {
 	if rs == nil {
 		return nil

@@ -120,10 +120,21 @@ const resumeReminder = "This session was suspended and has now resumed. Tool res
 // the caller validates before calling Run. FollowUp says what a resume does with the
 // prompt it was given.
 type Checkpoint struct {
-	Enabled  bool
-	Name     string
+	// Enabled journals this run, so a suspension or a crash leaves something to resume
+	// from. Result reports the session id it ran under.
+	Enabled bool
+	// Name is the id to create the session under, for a caller that wants to name its
+	// own runs and find them again. Empty mints one. It is read only with Enabled: a
+	// resume is already named by ResumeID.
+	Name string
+	// ResumeID is the id of a stored session to continue, and it is what makes a run a
+	// resume. It is mutually exclusive with Enabled.
 	ResumeID string
-	Force    bool
+	// Force resumes a session whose stored configuration has drifted from the one this
+	// run carries, which is otherwise refused as ErrConfigDrift. It covers drift alone:
+	// a changed provider is refused with it set, since a conversation cannot be folded
+	// coherently across providers.
+	Force bool
 
 	// CreateIfMissing makes ResumeID name a run rather than ask for one, and Run
 	// answers for that name whichever of three states the store is in: no session is
@@ -226,24 +237,52 @@ type DeferredAnswer struct {
 // Options is everything Run needs to execute a run. Config is already parsed so
 // Run does no file IO; the caller owns flags, signals and rendering.
 type Options struct {
-	Config     *config.Config
+	// Config is the parsed configuration the run reads everything from: the identity,
+	// the model, the tools, and every harness setting. It must not be nil, and Run
+	// refuses a nil one rather than crashing on the first field it reads.
+	Config *config.Config
+	// ConfigFile is the path Config was read from, quoted in the errors and advisories
+	// that ask an operator to change a setting, and recorded on the trace file's session
+	// line. Empty leaves the path out of those messages, which is what a Config built in
+	// process wants: there is no file to send anyone to.
 	ConfigFile string
-	Prompt     []string
+	// Prompt is the run's task, joined into the first user turn. Empty asks the model to
+	// assist the user, which is what an interactive run starts on before its operator has
+	// typed anything. On a resume it is discarded unless Checkpoint.FollowUp delivers it
+	// as a new turn.
+	Prompt []string
 
 	// Version is the caller's own build version. It identifies this client to the
 	// MCP servers the run connects to and is written to the trace file's session
 	// line. Empty sends no version to a server and omits the field from the trace.
 	Version string
 
+	// APIKey and BaseURL are the credential and endpoint the model provider is built
+	// with, overriding what the environment and the configuration would give it. Empty
+	// leaves each to the provider's own resolution. BaseURL is validated before the
+	// provider is built, so a malformed one names the option rather than failing at the
+	// first call. Both are read only on the registry path: an injected Provider was
+	// built by the caller, who addressed and credentialed it already.
 	APIKey  string
 	BaseURL string
 	// HTTPDebugOut, when non-nil, receives a dump of every Anthropic API request and
 	// response body. The caller owns the writer's lifecycle (for example a file it
 	// opens and closes); os.Stderr reproduces the old stderr-dump behavior.
 	HTTPDebugOut io.Writer
-	TraceFile    string
-	Verbose      bool
+	// TraceFile is where the run writes its JSON trace of model calls and tool calls.
+	// Empty writes none. Run creates and closes the file itself, and a write that fails
+	// reaches the caller as an advisory rather than ending the run. The trace is written
+	// only where Run builds the provider: an injected Provider carries whatever request
+	// hooks its builder gave it, as HTTPDebugOut does.
+	TraceFile string
+	// Verbose emits an Events.LLMRequest summary before each model call, so a caller
+	// showing an operator what the run is doing can show the request as well as the
+	// reply. It changes what is reported and nothing about what is sent.
+	Verbose bool
 
+	// Checkpoint carries the resumable-run options: journaling a new run, resuming a
+	// stored one, and what a resume does with the prompt and with a call the stored
+	// conversation deferred. The zero value journals nothing, which is a one-shot run.
 	Checkpoint Checkpoint
 
 	// ClaimedBy names this worker in the claim a resume writes to the journal, for a
@@ -801,6 +840,9 @@ func runErrorClass(err error, reachedRunner bool) telemetry.ErrorClass {
 // non-nil even on error so the caller can always print the stats. The context
 // governs cancellation; a graceful suspend is requested via opts.SuspendRequested.
 //
+// opts.Config and events are both required. Run refuses a nil Config, and refuses a nil
+// events, before anything runs.
+//
 // A panic on the run goroutine is recovered and returned as a *PanicError, so one
 // nil dereference cannot take down a long-lived server and every sibling run; the
 // stack is delivered to events (Events.Panicked), never on the returned error. See
@@ -808,6 +850,17 @@ func runErrorClass(err error, reachedRunner bool) telemetry.ErrorClass {
 func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prompter) (res *Result, err error) {
 	cfg := opts.Config
 	res = &Result{}
+
+	// cfg is read from the first span onwards and events from the first advisory, so a
+	// nil either way is dereferenced long before the run ends. The panic barrier catches
+	// that and returns a *PanicError, which tells a caller the agent crashed when what
+	// happened is that they left a required field empty.
+	switch {
+	case cfg == nil:
+		return res, fmt.Errorf("Options.Config is required: it is the parsed configuration a run reads its identity, model and tools from")
+	case events == nil:
+		return res, fmt.Errorf("events is required: a run reports its narration, tool traces and advisories through it, so a caller that wants none passes a sink that discards them")
+	}
 
 	// activeRunner is nil until the runner is constructed; the panic barrier reads it to
 	// report the session the run ended on, which the normal path sets only after the

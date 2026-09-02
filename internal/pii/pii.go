@@ -80,6 +80,10 @@ var DefaultChecks = []string{
 // MaxTextBytes is the largest text a Scan accepts. Anything longer is an error rather
 // than a truncated scan, since a scan of the first part of a value is a scan that missed
 // the rest of it.
+//
+// It is ferret-scan's own input limit rather than a number of this package's, so an
+// upgrade of that dependency moves it. A caller sizing its own chunks names this
+// constant rather than writing the number, and the next build follows the dependency.
 const MaxTextBytes = redact.MaxInputBytes
 
 // Options configures a Scanner.
@@ -114,7 +118,8 @@ type Result struct {
 	// Text is the text with each value found replaced by a placeholder naming its type.
 	// It is the original text when nothing was found.
 	Text string
-	// Types counts the findings by type.
+	// Types counts the findings by type. The map belongs to the caller: Scan builds a
+	// fresh one for every result, so a caller may add to it or hand it on.
 	Types map[string]int
 	// Count is how many values were found.
 	Count int
@@ -205,9 +210,17 @@ func (s *Scanner) Scan(ctx context.Context, text string) (Result, error) {
 		return Result{}, fmt.Errorf("scanning for personal data: %w", err)
 	}
 
+	// The counts go into a map of ours on both paths, so Result.Types is the caller's
+	// whatever the scan found. ferret-scan copies its own snapshot on the way out of
+	// AuditRecord today; that is its decision to revisit, and this package promises
+	// ownership on the field rather than inheriting it from a dependency.
+	first := res.AuditRecord().FindingsByType
+	counts := make(map[string]int, len(first))
+	maps.Copy(counts, first)
+
 	out := Result{
 		Text:  res.Redacted,
-		Types: res.AuditRecord().FindingsByType,
+		Types: counts,
 		Count: len(res.Findings()),
 	}
 
@@ -218,14 +231,9 @@ func (s *Scanner) Scan(ctx context.Context, text string) (Result, error) {
 
 	out.Text = redacted
 	out.Count += count
-
-	// AuditRecord's map is the engine's to keep, so the merged counts go in one of ours.
-	merged := make(map[string]int, len(out.Types)+len(types))
-	maps.Copy(merged, out.Types)
 	for name, n := range types {
-		merged[name] += n
+		counts[name] += n
 	}
-	out.Types = merged
 
 	return out, nil
 }

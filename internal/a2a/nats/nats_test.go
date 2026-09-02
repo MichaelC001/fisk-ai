@@ -31,6 +31,31 @@ var _ = Describe("Subjects", func() {
 	It("Should put the request id in the cancel subject, so only the worker running it hears", func() {
 		Expect(CancelSubject("orders-db", "2abc_1")).To(Equal("choria.fisk-ai.cancel.orders-db.2abc_1"))
 	})
+
+	// An identity carrying a subject token would shape a subject somebody else listens
+	// on, so the per-task builders answer with a subject NATS refuses instead.
+	It("Should answer an invalid identity with a subject that cannot be used", func() {
+		for _, identity := range []string{"orders.db", "orders>", "*", ""} {
+			Expect(CancelSubject(identity, "2abc_1")).To(BeEmpty())
+			Expect(ElicitSubject(identity, "2abc_1")).To(BeEmpty())
+		}
+	})
+
+	It("Should refuse to subscribe or publish on the subject an invalid identity produces", func() {
+		nc := &nats.Conn{}
+
+		_, err := nc.Subscribe(CancelSubject("orders.db", "2abc_1"), func(*nats.Msg) {})
+		Expect(err).To(MatchError(nats.ErrBadSubject))
+
+		Expect(nc.Publish(ElicitSubject("orders.db", "2abc_1"), nil)).To(MatchError(nats.ErrBadSubject))
+	})
+
+	// A worker describing what it serves names a pattern rather than one task's
+	// subject, so the request tag is passed through whatever it holds.
+	It("Should carry a wildcard request tag through, for the pattern an operator writes a permission against", func() {
+		Expect(CancelSubject("orders-db", "*")).To(Equal("choria.fisk-ai.cancel.orders-db.*"))
+		Expect(ElicitSubject("orders-db", "*")).To(Equal("choria.fisk-ai.elicit.orders-db.*"))
+	})
 })
 
 var _ = Describe("endpointName", func() {

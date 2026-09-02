@@ -40,6 +40,7 @@ import (
 	"github.com/nats-io/nats.go/micro"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 )
 
@@ -92,20 +93,33 @@ func TaskSubject(identity string) string {
 // cancels addressed to it. The request id is part of the address, so NATS routes a
 // cancel to exactly the worker that can act on it and no sibling hears it at all.
 //
-// Both tokens must pass their own validity rule before this is used to subscribe or
-// to send; a token carrying a '.' or a '>' would shape a different subject.
+// This checks the identity with wire.ValidIdentityName and returns "" for one it
+// rejects, which nats.Conn refuses to
+// subscribe to or publish on: a name carrying a '.' or a '>' would otherwise shape a
+// subject somebody else listens on, and a caller that never checked the return would
+// address it. The request tag is passed through, since a caller describing what it
+// serves builds the pattern with "*" in that position; the transport calls
+// wire.ValidRequestID on a real one before it subscribes or sends.
 func CancelSubject(identity, request string) string {
+	if !wire.ValidIdentityName(identity) {
+		return ""
+	}
+
 	return fmt.Sprintf("%s.cancel.%s.%s", SubjectPrefix, identity, request)
 }
 
 // ElicitSubject is the subject the one process running the named task listens on for
 // the answers to its questions. The request id is part of the address for the same
-// reason a cancel's is, and the token rules are the same.
+// reason a cancel's is, and an invalid identity returns "" on the same terms.
 //
 // It is a subject of its own rather than a second use of the cancel subject, so an
 // operator can grant answering a question and stopping a task separately: an answer
 // can approve a confirmation-gated command, where a cancel only ends the run.
 func ElicitSubject(identity, request string) string {
+	if !wire.ValidIdentityName(identity) {
+		return ""
+	}
+
 	return fmt.Sprintf("%s.elicit.%s.%s", SubjectPrefix, identity, request)
 }
 

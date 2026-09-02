@@ -15,6 +15,16 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
+// LocksRuns reports whether this build excludes a second process from a run that is
+// already open. It is true here: Open takes an exclusive flock on a per-run lock file,
+// so a second opener is refused with runstate.ErrLocked and CheckHeld's structural
+// answer rests on the kernel.
+//
+// A caller reads it to tell that answer from an unconditional one. Where it is false
+// the store still opens, still answers held, and excludes nobody, so whoever cannot
+// tolerate two writers on one run arranges exclusion elsewhere or declines to run.
+const LocksRuns = true
+
 // fileLock is an advisory flock on a per-run lock file. The kernel releases it
 // automatically when the process exits, so a crashed run leaves no stale lock.
 type fileLock struct {

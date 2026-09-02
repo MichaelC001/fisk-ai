@@ -148,7 +148,10 @@ var _ = Describe("Content builders", func() {
 			Expect(c.JSON).ToNot(ContainSubstring("secret"))
 
 			p := partsOf(Default, decode(Default, c.JSON)[0])[0]
-			Expect(p["type"]).To(Equal(partProviderBlock))
+			// The literal rather than the constant: this token is emitted telemetry, and
+			// a rename that only moved the constant would leave a reader parsing for the
+			// old one with every spec green.
+			Expect(p["type"]).To(Equal("fisk.provider_block"))
 			Expect(p["kind"]).To(Equal("tool_search_tool_result"))
 			Expect(p["omitted"]).To(BeTrue())
 		})

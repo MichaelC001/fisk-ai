@@ -71,6 +71,11 @@ type Options struct {
 // client and is the only place the SDK is spoken on the call path: it renders a
 // neutral Request to MessageNewParams, issues the call under a per-call timeout,
 // and converts the reply back to the neutral model.
+//
+// It is safe for concurrent use, which llm.Provider requires of an implementation.
+// Both fields are written by NewProvider and by nothing after it, and the SDK client
+// is itself safe for concurrent use, so a process serving many runs builds one Provider
+// and hands it to all of them. serve.Options.Provider takes it on those terms.
 type Provider struct {
 	client  sdk.Client
 	timeout time.Duration

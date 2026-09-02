@@ -11,6 +11,16 @@ import (
 	"os"
 )
 
+// LocksRuns reports whether this build excludes a second process from a run that is
+// already open. It is false here: this platform has no flock, so the lock file is
+// opened and nobody is excluded. Two processes can hold one run open at once, and
+// CheckHeld answers held to both.
+//
+// A caller reads it to tell that answer from the unix one, where the kernel is behind
+// it. Whoever cannot tolerate two writers on one run arranges exclusion elsewhere or
+// declines to run.
+const LocksRuns = false
+
 // fileLock is a best-effort marker on platforms without flock. It does not
 // prevent concurrent access; those platforms rely on the operator not resuming a
 // run twice.

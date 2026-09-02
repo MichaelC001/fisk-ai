@@ -17,6 +17,11 @@
 // report reaches the multiplexer, a report can be superseded by a newer one before it is
 // sent, and a delivery that fails is dropped: a supervisor that went away must not
 // affect the conversation it was watching.
+//
+// A report is delivered by running the multiplexer's own CLI, so Detect looks the binary
+// up on PATH where the environment does not name it, and each state change starts a short
+// lived process, which is the integration herdr documents. A program that must spawn
+// nothing calls Detect only where a multiplexer is expected.
 package multiplex
 
 // StateReporter is told what a run is doing, so a multiplexer hosting it can show its
@@ -71,6 +76,13 @@ var detectors = []func(env func(string) string, agent string) *reporter{
 // rather than the name of this program: somebody watching six panes is watching six
 // agents, and being told each of them is fisk-ai tells them nothing. Empty falls back to
 // the program's own name.
+//
+// Detect runs exec.LookPath and then a process. Where the environment names a pane but
+// no binary to report through, it searches PATH for the multiplexer's CLI and claims
+// nothing when it is not installed. A reporter it returns has already posted an idle
+// report, and its worker delivers that report by running the CLI once: a process that
+// has just started is waiting on the person who started it, and the pane says so from
+// the moment it is claimed.
 func Detect(env func(string) string, agent string) StateReporter {
 	for _, detect := range detectors {
 		r := detect(env, agent)
