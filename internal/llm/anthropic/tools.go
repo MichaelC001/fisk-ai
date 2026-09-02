@@ -5,8 +5,6 @@
 package anthropic
 
 import (
-	"fmt"
-
 	sdk "github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -28,12 +26,12 @@ const ProviderName = "anthropic"
 // changes only if that registry changes.
 const SemconvProviderName = "anthropic"
 
-// ToolDefToAnthropic renders a neutral tool definition as an Anthropic custom
+// toolDefToAnthropic renders a neutral tool definition as an Anthropic custom
 // tool. defer_loading is emitted unconditionally, including a present false, so
 // the rendered tool is a pure function of the neutral value rather than varying
 // with its zero state. False is the API default, so a present false and an
 // omitted field request the same thing: send the tool directly.
-func ToolDefToAnthropic(td llm.ToolDef) sdk.ToolUnionParam {
+func toolDefToAnthropic(td llm.ToolDef) sdk.ToolUnionParam {
 	return sdk.ToolUnionParam{OfTool: &sdk.ToolParam{
 		Type:         sdk.ToolTypeCustom,
 		Name:         td.Name,
@@ -74,38 +72,4 @@ func toolInputSchema(schema map[string]any) sdk.ToolInputSchemaParam {
 	out.ExtraFields = extra
 
 	return out
-}
-
-// ToolUseToNeutral converts an Anthropic tool_use block into the neutral model,
-// so a tool kind is handed a request in neutral terms.
-func ToolUseToNeutral(use sdk.ToolUseBlock) llm.ToolUseBlock {
-	return llm.ToolUseBlock{ID: use.ID, Name: use.Name, Input: use.Input}
-}
-
-// ToolResultToAnthropic renders a neutral tool result as the Anthropic
-// tool_result content block that answers the matching tool_use.
-func ToolResultToAnthropic(tr llm.ToolResultBlock) sdk.ContentBlockParamUnion {
-	return sdk.NewToolResultBlock(tr.ToolUseID, tr.Content, tr.IsError)
-}
-
-// ToolResultFromAnthropic converts an Anthropic tool_result content block into
-// the neutral model, for the journal emit boundary. Every tool result this
-// codebase produces is a single text block, so a result of any other shape is an
-// error rather than a lossy best-effort.
-func ToolResultFromAnthropic(block sdk.ContentBlockParamUnion) (llm.ToolResultBlock, error) {
-	r := block.OfToolResult
-	if r == nil {
-		return llm.ToolResultBlock{}, fmt.Errorf("content block is not a tool_result")
-	}
-
-	content := ""
-	switch {
-	case len(r.Content) == 0:
-	case len(r.Content) == 1 && r.Content[0].OfText != nil:
-		content = r.Content[0].OfText.Text
-	default:
-		return llm.ToolResultBlock{}, fmt.Errorf("tool_result content is not a single text block")
-	}
-
-	return llm.ToolResultBlock{ToolUseID: r.ToolUseID, Content: content, IsError: r.IsError.Or(false)}, nil
 }

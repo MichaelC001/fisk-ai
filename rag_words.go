@@ -112,7 +112,7 @@ func runKnowledgeWords(_ *fisk.ParseContext) (int, error) {
 
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return 0, err
+		return 0, knowledgeAdvice(err)
 	}
 	defer store.Close()
 

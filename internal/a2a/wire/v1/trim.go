@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 // MaxBlockText bounds the text of one block on a reply set.
 //

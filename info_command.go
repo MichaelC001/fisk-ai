@@ -110,7 +110,7 @@ func infoAction(_ *fisk.ParseContext) error {
 	// Discover the configured MCP servers best-effort, for the same reason the remote
 	// hosts are: a server that will not answer is reported with its error and the rest
 	// of the configuration is still shown. Nothing is connected when none are declared.
-	mcpImports := mcpclient.DiscoverForInfo(ctx, mcpclient.Options{
+	mcpImports := mcpclient.Inspect(ctx, mcpclient.Options{
 		Servers:            cfg.MCPClients,
 		Identity:           cfg.Identity,
 		Version:            version,

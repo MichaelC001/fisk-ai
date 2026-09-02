@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/nats-io/nats.go"
 
@@ -90,6 +91,13 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 		return nil, err
 	}
 
+	// A worker built from a configuration file is run by an operator reading its
+	// progress on stderr, so a caller that supplied no logger gets one here.
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
 	ch, err := New(Options{
 		Conn:             provider.Nats(),
 		Queue:            cfg.JobsQueue(),
@@ -98,7 +106,7 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 		Concurrency:      workers,
 		MaxPayload:       cfg.JobsMaxPayload(),
 		SuspendRequested: opts.SuspendRequested,
-		Logger:           opts.Logger,
+		Logger:           logger,
 	})
 	if err != nil {
 		provider.Close()

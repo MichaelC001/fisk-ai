@@ -71,6 +71,11 @@ type Options struct {
 // client and is the only place the SDK is spoken on the call path: it renders a
 // neutral Request to MessageNewParams, issues the call under a per-call timeout,
 // and converts the reply back to the neutral model.
+//
+// It is safe for concurrent use, which llm.Provider requires of an implementation.
+// Both fields are written by NewProvider and by nothing after it, and the SDK client
+// is itself safe for concurrent use, so a process serving many runs builds one Provider
+// and hands it to all of them. serve.Options.Provider takes it on those terms.
 type Provider struct {
 	client  sdk.Client
 	timeout time.Duration
@@ -149,7 +154,7 @@ func (p *Provider) Call(ctx context.Context, req llm.Request) (*llm.Response, er
 		return nil, classify(badRequestHint(err, req))
 	}
 
-	resp, err := ResponseToNeutral(msg)
+	resp, err := responseToNeutral(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +216,7 @@ func (p *Provider) buildParams(req llm.Request) (sdk.MessageNewParams, error) {
 
 	tools := make([]sdk.ToolUnionParam, 0, len(req.Tools)+1)
 	for _, td := range req.Tools {
-		tools = append(tools, ToolDefToAnthropic(td))
+		tools = append(tools, toolDefToAnthropic(td))
 	}
 	if req.ToolSearch {
 		tools = append(tools, toolSearchTool())
@@ -234,7 +239,7 @@ func (p *Provider) buildParams(req llm.Request) (sdk.MessageNewParams, error) {
 			m = withoutThinking(m)
 		}
 
-		mp, err := MessageToAnthropic(m)
+		mp, err := messageToAnthropic(m)
 		if err != nil {
 			return sdk.MessageNewParams{}, fmt.Errorf("message %d: %w", i, err)
 		}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -56,6 +57,10 @@ const (
 	notDeferredNote     = "That answer is not one this thread is waiting on, so I have not acted on it."
 	alreadyAnsweredNote = "That question already had an answer, so I carried on from the first one."
 	lostThreadNote      = "I no longer have a record of this thread. Mention me again and I will start a fresh one."
+	modelBusyNote       = "The model I use is busy right now. Mention me again in a minute and I will pick this up."
+	modelUnusableNote   = "My model provider turned me away, and it will turn away the next attempt too. Whoever runs me needs to check my credentials and my model name."
+	threadTooLongNote   = "This thread has grown past what I can hold in one go. Start a new thread and I will carry on there."
+	threadWorkingNote   = "I am already working on something in this thread. Wait for that to finish and mention me again."
 )
 
 // ending is what a turn's status message says now that the run has reported, and the emoji
@@ -147,6 +152,18 @@ func failureNote(err error) string {
 
 	case errors.Is(err, agent.ErrConversationNotFound):
 		return lostThreadNote
+
+	case errors.Is(err, llm.ErrRateLimited), errors.Is(err, llm.ErrOverloaded):
+		return modelBusyNote
+
+	case errors.Is(err, llm.ErrAuthentication), errors.Is(err, llm.ErrModelNotFound):
+		return modelUnusableNote
+
+	case errors.Is(err, llm.ErrContextLengthExceeded):
+		return threadTooLongNote
+
+	case errors.Is(err, runstate.ErrLocked):
+		return threadWorkingNote
 
 	default:
 		return failedNote

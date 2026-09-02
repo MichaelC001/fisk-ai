@@ -22,6 +22,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	natstransport "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -242,12 +243,12 @@ var _ = Describe("A2A endpoint", func() {
 		// agent that only takes prompts still has to answer it or a peer cannot tell it
 		// from an agent that is not there.
 		Describe("Discovery", func() {
-			discover := func(built []serve.Endpoint) a2a.AgentCard {
+			discover := func(built []serve.Endpoint) wire.AgentCard {
 				GinkgoHelper()
 
 				DeferCleanup(closeAll, built)
 
-				transport, err := a2a.NewTransport(config.A2ATransportName, provider, a2a.TransportConfig{Identity: "caller1", Timeout: 5 * time.Second})
+				transport, err := a2a.NewTransport(config.A2ATransportName, a2a.TransportConfig{Resources: provider, Identity: "caller1", Timeout: 5 * time.Second})
 				Expect(err).ToNot(HaveOccurred())
 				DeferCleanup(transport.Close)
 
@@ -270,7 +271,7 @@ var _ = Describe("A2A endpoint", func() {
 				card := discover(built)
 				Expect(card.Name).To(Equal("agent1"))
 				Expect(card.Tools).To(BeEmpty(), "it serves none to peers")
-				Expect(card.Protocols).To(ConsistOf(a2a.ProtocolNamespace))
+				Expect(card.Protocols).To(ConsistOf(wire.ProtocolNamespace))
 			})
 
 			// Registering the route twice would not fail: micro subscribes again on the

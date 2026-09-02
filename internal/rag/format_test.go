@@ -112,6 +112,47 @@ var _ = Describe("Index format gate", func() {
 		})
 	})
 
+	// Indexes in the field are pinned at 1 and at 2, and the pin is past both. A build
+	// that pinned 1 read an index at 2 as later than itself and refused every command
+	// against it.
+	Describe("an index pinned at a generation this build has passed", func() {
+		DescribeTable("is refused with the version it carries", func(pinned int) {
+			buildIndex()
+			pinFormatVersion(dbPath, pinned)
+
+			_, err := Open(cfg, "", Options{})
+			Expect(err).To(MatchError(ErrFormatTooOld))
+			Expect(err.Error()).To(ContainSubstring("its format_version is " + strconv.Itoa(pinned)))
+			Expect(err.Error()).To(ContainSubstring("this build writes " + strconv.Itoa(formatVersion)))
+
+			_, err = OpenWriter(cfg, "", Options{})
+			Expect(err).To(MatchError(ErrFormatTooOld))
+		},
+			Entry("the first released generation", 1),
+			Entry("the generation the lowered pin stranded", 2),
+		)
+
+		// The refusal names discarding and rebuilding, so that has to work from here.
+		It("is discarded by Destroy, leaving a rebuildable store", func() {
+			buildIndex()
+			pinFormatVersion(dbPath, 2)
+
+			removed, err := Destroy(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(removed).To(Equal(dbPath))
+
+			Expect(buildIndex()).To(Equal(2))
+
+			w, err := OpenWriter(cfg, "", Options{})
+			Expect(err).ToNot(HaveOccurred())
+			defer w.Close()
+
+			st, err := w.Stats(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(st.Meta.FormatVersion).To(Equal(formatVersion))
+		})
+	})
+
 	// A schema can gain an object without any column changing, and such an index has
 	// the right pinned format and the right columns. Reporting zero counts from a
 	// table that does not exist, as though they had been measured, is the failure the
@@ -137,8 +178,8 @@ var _ = Describe("Index format gate", func() {
 			Expect(err.Error()).To(ContainSubstring(storeD))
 			Expect(err.Error()).To(ContainSubstring("chunks_fts_exact"))
 			Expect(err.Error()).To(ContainSubstring("chunks_vocab"))
-			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
-			Expect(err.Error()).To(ContainSubstring("knowledge index"))
+			Expect(err.Error()).To(ContainSubstring("nothing migrates it"))
+			Expect(err.Error()).To(ContainSubstring("discarded and rebuilt from the documents"))
 		})
 
 		// A writer could create the missing table, but the rows already in chunks would
@@ -146,13 +187,13 @@ var _ = Describe("Index format gate", func() {
 		It("is refused by a writer rather than repaired underneath the existing rows", func() {
 			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
-			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
+			Expect(err.Error()).To(ContainSubstring("discarded and rebuilt from the documents"))
 		})
 
-		// The refusal names a command, so that command has to work against the state
-		// it is named for: a message naming a fix that also refuses is worse than one
-		// naming none.
-		It("is discarded by the command the refusal names, leaving a rebuildable store", func() {
+		// The refusal names discarding and rebuilding as the fix, so that has to work
+		// against the state it is named for: a message naming a fix that also refuses is
+		// worse than one naming none.
+		It("is discarded by Destroy, leaving a rebuildable store", func() {
 			removed, err := Destroy(cfg, "")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(removed).To(Equal(dbPath))
@@ -180,10 +221,11 @@ var _ = Describe("Index format gate", func() {
 			pinFormatVersion(dbPath, formatVersion+1)
 		})
 
-		It("is refused by a reader, naming the upgrade rather than a rebuild", func() {
+		It("is refused by a reader, carrying both version numbers", func() {
 			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
-			Expect(err.Error()).To(ContainSubstring("upgrade fisk-ai"))
+			Expect(err.Error()).To(ContainSubstring("index format_version=" + strconv.Itoa(formatVersion+1)))
+			Expect(err.Error()).To(ContainSubstring("this build supports up to " + strconv.Itoa(formatVersion)))
 		})
 
 		// The writer read the manifest nowhere at all before the gate, so an older
@@ -191,6 +233,31 @@ var _ = Describe("Index format gate", func() {
 		It("is refused by a writer", func() {
 			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
+		})
+
+		// Lowering the format pin puts every index in the field into this state, and a
+		// caller that reached for a newer build would find none: the build moved back
+		// rather than the index forward. Discarding has to work from here, or the index
+		// can only be removed by hand.
+		It("is discarded by Destroy, leaving a rebuildable store", func() {
+			removed, err := Destroy(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(removed).To(Equal(dbPath))
+
+			exists, err := StoreExists(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(exists).To(BeFalse())
+
+			Expect(buildIndex()).To(Equal(2))
+
+			r, err := Open(cfg, "", Options{})
+			Expect(err).ToNot(HaveOccurred())
+			defer r.Close()
+
+			res, err := r.Search(ctx, "backpressure buffer", 5)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.Status).To(Equal(StatusOK))
+			Expect(res.Hits).ToNot(BeEmpty())
 		})
 	})
 

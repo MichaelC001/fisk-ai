@@ -25,16 +25,21 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
-// The part types of the GenAI messages schemas. providerBlock is not one of them: it
-// is this package's own marker for a block the neutral model preserves without
-// understanding, kept in the document so the shape of a turn survives while the
-// payload does not. See toParts.
+// The part types of the GenAI messages schemas.
 const (
 	partText             = "text"
 	partReasoning        = "reasoning"
 	partToolCall         = "tool_call"
 	partToolCallResponse = "tool_call_response"
-	partProviderBlock    = "provider_block"
+
+	// partProviderBlock is this package's own marker for a block the neutral model
+	// preserves without understanding, kept in the document so the shape of a turn
+	// survives while the payload does not. See toParts.
+	//
+	// The conventions define no such type, so the token names fisk-ai in the emitted
+	// JSON and a reader can tell it from a part the spec defines. The fisk.* attribute
+	// keys are namespaced for the same reason.
+	partProviderBlock = "fisk.provider_block"
 )
 
 // roleTool is the conventions' role for a message carrying tool results. The neutral
@@ -43,6 +48,18 @@ const (
 const roleTool = "tool"
 
 // message is one entry of an input or output messages document.
+//
+// The document carries no version of its own, and cannot: the conventions define
+// gen_ai.input.messages and its siblings as a bare JSON array of these objects, so
+// there is nowhere to put one that a GenAI-aware reader would not choke on. The keys
+// are imported from the semconv package at their use site in internal/telemetry, so a
+// key the conventions rename fails the build; these bodies are hand-encoded, so a shape
+// the conventions change reaches a backend as a document it misparses without saying so.
+//
+// What dates a document is the build that wrote it: service.version on the resource
+// is this binary's version, and the conventions revision it encodes to is the semconv
+// package that build imported. A reader chasing a document that will not parse reads
+// that pair rather than looking for a version in the JSON.
 type message struct {
 	Role  string `json:"role"`
 	Parts []part `json:"parts"`
@@ -514,10 +531,10 @@ func fitText(s string, budget int) (string, bool) {
 // looking at. n is the original length, omitted when it is not known.
 func marker(n int) string {
 	if n == 0 {
-		return "[truncated by fisk-ai; raise telemetry.capture.max_bytes]"
+		return "[truncated; raise telemetry.capture.max_bytes]"
 	}
 
-	return "...[truncated by fisk-ai: " + strconv.Itoa(n) + " bytes; raise telemetry.capture.max_bytes]"
+	return "...[truncated: " + strconv.Itoa(n) + " bytes; raise telemetry.capture.max_bytes]"
 }
 
 // truncateEncoded returns the longest prefix of s whose encoded form fits budget, and

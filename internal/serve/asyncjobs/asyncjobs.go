@@ -71,9 +71,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,7 +81,7 @@ import (
 	"github.com/choria-io/asyncjobs"
 	"github.com/nats-io/nats.go"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
@@ -102,6 +102,11 @@ const (
 	// renewing.
 	minRenewInterval = 250 * time.Millisecond
 )
+
+// errProcessorStopped is the fault reported when the engine's processor returned
+// without an error and without anything asking it to stop. The channel can claim no
+// further job after it, so the server ends rather than running on.
+var errProcessorStopped = errors.New("the queue processor stopped without being asked")
 
 // Options configures a Channel.
 type Options struct {
@@ -124,17 +129,10 @@ type Options struct {
 	// written back to the task. It is normally the configured agent identity.
 	Identity string
 
-	// Concurrency is how many jobs the engine may have in flight, which is how many
-	// runs happen at once. It should equal the concurrency of the Server this channel
-	// is given to, and the way to be sure is to read it back with the Concurrency
-	// method rather than write the number twice.
-	//
-	// What goes wrong when they disagree is not lease expiry: renewal starts at handler
-	// entry, before the work is handed over, so an item claimed and waiting for a slot
-	// keeps its lease for as long as it waits. It is hoarding. A queue's concurrency
-	// bounds every worker on it together, so claims held against work this process
-	// cannot start are claims another process could have run, and the job sits looking
-	// active while nothing happens to it.
+	// Concurrency is how many jobs the engine may claim at once, which is how many
+	// runs happen at once. The server reads it back through the Concurrency method and
+	// sizes this channel's slot budget from it rather than from its own configured
+	// default.
 	Concurrency int
 
 	// SuspendRequested is handed to every run and polled at a loop boundary, so a
@@ -147,7 +145,8 @@ type Options struct {
 	MaxPayload int
 
 	// Logger receives structured progress, and the engine's own logging is bridged
-	// into it so a worker's output is one format. Nil builds a text logger on stderr.
+	// into it so a worker's output is one format. Nil discards both, since a library
+	// that reached for a default logger would write to an embedder's stderr uninvited.
 	Logger *slog.Logger
 }
 
@@ -168,18 +167,20 @@ func (o *Options) validate() error {
 		return fmt.Errorf("an identity is required: it is the sender of every answer this channel writes back")
 	}
 	if o.Concurrency <= 0 {
-		return fmt.Errorf("concurrency must be greater than zero and must equal the server's")
+		return fmt.Errorf("concurrency must be greater than zero")
 	}
 
 	return nil
 }
 
-// A queue claims work before a run starts and holds a connection, so it is both of the
-// optional shapes a channel can have. Declaring them is what makes a change to either
-// contract a compile error here rather than a channel the server silently stops asking.
+// A queue claims work before a run starts, holds a connection, and has a processor that
+// can stop without being asked, so it is three of the optional shapes a channel can
+// have. Declaring them makes a change to any of those contracts a compile error here
+// rather than a channel the server silently stops asking.
 var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
+	_ serve.FaultingEndpoint  = (*Channel)(nil)
 )
 
 // SessionFor is the journal a job runs in, derived from the serving identity and the task
@@ -214,7 +215,7 @@ type Channel struct {
 
 	client    *asyncjobs.Client
 	router    *asyncjobs.Mux
-	validator *a2a.Validator
+	validator *wire.Validator
 	log       *slog.Logger
 
 	// work hands one job from its handler to Next. It is deliberately unbuffered: a
@@ -228,6 +229,11 @@ type Channel struct {
 	procStop  context.CancelFunc
 	procDone  chan struct{}
 	procErr   error
+
+	// faults carries the report that the processor stopped without being asked. It is
+	// buffered by one and written at most once, by the goroutine start launches, since
+	// Serve reads it once and the first fault is what ends the worker.
+	faults chan error
 
 	closeOnce sync.Once
 	shutdown  chan struct{}
@@ -255,14 +261,14 @@ func New(opts Options) (*Channel, error) {
 		return nil, err
 	}
 
-	validator, err := a2a.NewValidator()
+	validator, err := wire.SharedValidator()
 	if err != nil {
 		return nil, fmt.Errorf("compiling the a2a schemas: %w", err)
 	}
 
 	log := opts.Logger
 	if log == nil {
-		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
+		log = slog.New(slog.DiscardHandler)
 	}
 	log = log.With("channel", "asyncjobs/"+opts.Queue)
 
@@ -311,6 +317,7 @@ func New(opts Options) (*Channel, error) {
 		log:         log,
 		work:        make(chan *serve.Work),
 		procDone:    make(chan struct{}),
+		faults:      make(chan error, 1),
 		shutdown:    make(chan struct{}),
 	}
 
@@ -337,17 +344,31 @@ func New(opts Options) (*Channel, error) {
 // Name identifies the channel in the server's logs.
 func (c *Channel) Name() string { return c.name }
 
-// Concurrency is how many jobs this channel may have in flight, and therefore the
-// value serve.Options.Concurrency must be set to. See Options.Concurrency for what
-// goes wrong when the two disagree.
+// Concurrency is how many jobs this channel may have in flight, which the server takes
+// as this channel's slot budget. See Options.Concurrency.
 func (c *Channel) Concurrency() int { return c.concurrency }
+
+// Faults reports that the engine's processor stopped for a reason nobody asked for,
+// leaving this channel unable to claim another job. Serve drains what is in flight and
+// returns the error, so the worker exits non-zero and a supervisor restarts it.
+//
+// Close ends the channel after a fault, as on every other path. The server's drain
+// calls it; a caller pulling Next itself reads this and calls it. A caller that reads
+// neither leaves Next blocked for the life of the process, since a faulted processor
+// closes nothing Next selects on.
+//
+// Close cancels the processor's context, so a drain and a stop each end the processor
+// without a fault.
+func (c *Channel) Faults() <-chan error { return c.faults }
 
 // Next blocks until a job is available and returns it as work.
 //
 // It starts the engine's processor on its first call, so nothing is claimed before
-// the server is ready to run it. It returns serve.ErrChannelDone once the processor
-// has stopped, which is what keeps the server from waiting on a channel that can
-// never produce work again.
+// the server is ready to run it. It returns serve.ErrChannelDone once Close has
+// stopped the processor, which is what keeps the server from waiting on a channel that
+// can never produce work again. A processor that stopped without being asked arrives on
+// Faults instead, and Next goes on blocking until Close, which is how the server reads
+// that fault before its puller exits and returns the error from Serve.
 func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 	c.start()
 
@@ -422,6 +443,29 @@ func (c *Channel) start() {
 			if c.procErr != nil {
 				c.log.Error("The work queue processor stopped", "error", c.procErr)
 			}
+
+			// Close closes shutdown before it cancels the processor's context, so a
+			// processor that has returned while shutdown is still open stopped for a
+			// reason nobody here asked for. Reporting a drain would exit a worker
+			// non-zero for shutting down cleanly.
+			select {
+			case <-c.shutdown:
+				return
+			default:
+			}
+
+			err := c.procErr
+			if err == nil {
+				err = errProcessorStopped
+			}
+
+			c.faults <- err
+
+			// The server reads Faults on a goroutine of its own and answers a fault by
+			// draining, which is what closes shutdown here. Closing procDone before that
+			// would end the puller while the fault was still in flight, and Serve returns
+			// nil when its channels have all ended and no fault has reached it.
+			<-c.shutdown
 		}()
 	})
 }

@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -44,23 +45,23 @@ var _ = Describe("The events adapter", func() {
 	BeforeEach(func() {
 		sink = &collectingSink{}
 
-		req := a2a.NewRequest("do the thing")
+		req := wire.NewRequest("do the thing")
 		req.ID = "req1"
 		req.Request = "req1"
 		req.Conversation = "req1"
-		req.Sender = a2a.Identity{Name: "caller1"}
+		req.Sender = wire.Identity{Name: "caller1"}
 
 		events = &eventSink{stream: a2a.NewReplyStream(sink, &req.Header, "agent1"), log: quietLogger()}
 	})
 
 	// blocks decodes what the sink received, so a spec asserts on the wire form rather
 	// than on the values it handed over.
-	blocks := func() []a2a.Block {
+	blocks := func() []wire.Block {
 		GinkgoHelper()
 
-		out := make([]a2a.Block, 0, len(sink.sent))
+		out := make([]wire.Block, 0, len(sink.sent))
 		for _, body := range sink.sent {
-			var ev a2a.Event
+			var ev wire.Event
 			Expect(json.Unmarshal(body, &ev)).To(Succeed())
 			out = append(out, ev.Block)
 		}
@@ -75,10 +76,10 @@ var _ = Describe("The events adapter", func() {
 		}}, true)
 
 		Expect(blocks()).To(HaveLen(2))
-		thinking := blocks()[0].Content().(a2a.ThinkingBlock)
+		thinking := blocks()[0].Content().(wire.ThinkingBlock)
 		Expect(thinking.Text).To(Equal("considering"))
 		Expect(thinking.Signature).To(BeEmpty(), "the provider payload stays local")
-		Expect(blocks()[1].Content().(a2a.TextBlock).Text).To(Equal("the answer"))
+		Expect(blocks()[1].Content().(wire.TextBlock).Text).To(Equal("the answer"))
 	})
 
 	// A tool call reaches the wire once. The model's own tool-use content is skipped
@@ -97,7 +98,7 @@ var _ = Describe("The events adapter", func() {
 			Usage:   llm.Usage{In: 10, Out: 5, CacheRead: 90},
 		}, false)
 
-		status := blocks()[1].Content().(a2a.StatusBlock)
+		status := blocks()[1].Content().(wire.StatusBlock)
 		Expect(status.Iteration).To(Equal(1))
 		Expect(status.Usage.InputTokens).To(Equal(int64(100)), "cached input is part of what the call consumed")
 		Expect(status.Usage.OutputTokens).To(Equal(int64(5)))
@@ -113,12 +114,12 @@ var _ = Describe("The events adapter", func() {
 		events.ToolCall(agent.ToolTrace{ID: "toolu_1", Name: "backup", Input: json.RawMessage(`{"target":"orders"}`)})
 		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: "backed up", IsError: false})
 
-		call := blocks()[0].Content().(a2a.ToolCallBlock)
+		call := blocks()[0].Content().(wire.ToolCallBlock)
 		Expect(call.ID).To(Equal("toolu_1"))
 		Expect(call.Name).To(Equal("backup"))
 		Expect(string(call.Input)).To(Equal(`{"target":"orders"}`))
 
-		result := blocks()[1].Content().(a2a.ToolResultBlock)
+		result := blocks()[1].Content().(wire.ToolResultBlock)
 		Expect(result.CallID).To(Equal("toolu_1"))
 		Expect(result.Output).To(Equal("backed up"))
 	})
@@ -131,7 +132,7 @@ var _ = Describe("The events adapter", func() {
 			sink.sent = nil
 			events.ToolCall(agent.ToolTrace{ID: "toolu_1", Name: "backup", Input: json.RawMessage(input)})
 
-			Expect(blocks()[0].Content().(a2a.ToolCallBlock).Input).To(BeEmpty(), "input %q", input)
+			Expect(blocks()[0].Content().(wire.ToolCallBlock).Input).To(BeEmpty(), "input %q", input)
 		}
 	})
 
@@ -139,21 +140,21 @@ var _ = Describe("The events adapter", func() {
 	// event dropped for size would leave no gap for a caller to notice. Trimming keeps
 	// the event and says what happened to the rest.
 	It("Should trim a tool result that would not fit", func() {
-		oversized := strings.Repeat("x", a2a.MaxMessageSize)
+		oversized := strings.Repeat("x", wire.MaxMessageSize)
 		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: oversized})
 
 		Expect(sink.sent).To(HaveLen(1))
-		output := blocks()[0].Content().(a2a.ToolResultBlock).Output
-		Expect(len(output)).To(BeNumerically("<", a2a.MaxMessageSize))
+		output := blocks()[0].Content().(wire.ToolResultBlock).Output
+		Expect(len(output)).To(BeNumerically("<", wire.MaxMessageSize))
 		// The bound belongs to the wire rather than to this sink, so what is asserted
 		// here is that the sink applies it, not what it cuts to.
-		Expect(output).To(Equal(a2a.TrimBlockText(oversized)))
+		Expect(output).To(Equal(wire.TrimBlockText(oversized)))
 	})
 
 	It("Should cut on a rune boundary", func() {
-		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: strings.Repeat("é", a2a.MaxBlockText)})
+		events.ToolResult(agent.ToolResultTrace{CallID: "toolu_1", Output: strings.Repeat("é", wire.MaxBlockText)})
 
-		output := blocks()[0].Content().(a2a.ToolResultBlock).Output
+		output := blocks()[0].Content().(wire.ToolResultBlock).Output
 		Expect(strings.ContainsRune(output, '�')).To(BeFalse(), "half a rune reaches a caller as a replacement character")
 	})
 
@@ -164,7 +165,7 @@ var _ = Describe("The events adapter", func() {
 		events.Warn(agent.Warning{Kind: agent.WarnToolTimeout, Name: "stream_rm", Err: errors.New("after 30s")})
 
 		Expect(sink.sent).To(HaveLen(1))
-		warning := blocks()[0].Content().(a2a.WarningBlock)
+		warning := blocks()[0].Content().(wire.WarningBlock)
 		Expect(warning.Kind).To(Equal("tool_timeout"))
 		Expect(warning.Name).To(Equal("stream_rm"))
 		Expect(warning.Error).To(Equal("after 30s"))
@@ -189,14 +190,14 @@ var _ = Describe("The events adapter", func() {
 			sent := blocks()
 			Expect(sent).To(HaveLen(6))
 
-			opening := sent[0].Content().(a2a.StatusBlock)
-			Expect(opening.Phase).To(Equal(a2a.PhaseReplayStart))
+			opening := sent[0].Content().(wire.StatusBlock)
+			Expect(opening.Phase).To(Equal(wire.PhaseReplayStart))
 
-			Expect(sent[1].Content().(a2a.PromptBlock).Text).To(Equal("how many streams"))
-			Expect(sent[2].Content().(a2a.TextBlock).Text).To(Equal("three"))
+			Expect(sent[1].Content().(wire.PromptBlock).Text).To(Equal("how many streams"))
+			Expect(sent[2].Content().(wire.TextBlock).Text).To(Equal("three"))
 
-			closing := sent[5].Content().(a2a.StatusBlock)
-			Expect(closing.Phase).To(Equal(a2a.PhaseReplayEnd))
+			closing := sent[5].Content().(wire.StatusBlock)
+			Expect(closing.Phase).To(Equal(wire.PhaseReplayEnd))
 			Expect(closing.Count).To(Equal(4))
 			Expect(closing.Truncated).To(BeFalse())
 		})
@@ -208,7 +209,7 @@ var _ = Describe("The events adapter", func() {
 			events.ResumeTranscript(stored())
 
 			sent := blocks()
-			closing := sent[len(sent)-1].Content().(a2a.StatusBlock)
+			closing := sent[len(sent)-1].Content().(wire.StatusBlock)
 			Expect(closing.Count).To(Equal(2))
 			Expect(closing.Truncated).To(BeTrue())
 		})
@@ -245,22 +246,22 @@ var _ = Describe("The events adapter", func() {
 
 		sent := blocks()
 		Expect(sent).To(HaveLen(2), "the tool-use block is left to ToolCall")
-		Expect(sent[0].Content().(a2a.ThinkingBlock).Index).To(Equal(0))
-		Expect(sent[1].Content().(a2a.TextBlock).Index).To(Equal(2), "a block that never reaches the wire still counts")
+		Expect(sent[0].Content().(wire.ThinkingBlock).Index).To(Equal(0))
+		Expect(sent[1].Content().(wire.TextBlock).Index).To(Equal(2), "a block that never reaches the wire still counts")
 	})
 
 	// A caller holding fragments of a trimmed block has the more complete copy of it, the
 	// fragments never having been capped in aggregate, so it is told which block was cut.
 	It("Should mark a block whose text was cut", func() {
 		events.Message(llm.Response{Content: []llm.ContentBlock{
-			{Text: &llm.TextBlock{Text: strings.Repeat("x", a2a.MaxBlockText+1)}},
+			{Text: &llm.TextBlock{Text: strings.Repeat("x", wire.MaxBlockText+1)}},
 			{Thinking: &llm.ThinkingBlock{Text: "considering"}},
 		}}, false)
 
 		sent := blocks()
-		Expect(sent[0].Content().(a2a.TextBlock).Trimmed).To(BeTrue())
-		Expect(sent[0].Content().(a2a.TextBlock).Text).To(Equal(a2a.TrimBlockText(strings.Repeat("x", a2a.MaxBlockText+1))))
-		Expect(sent[1].Content().(a2a.ThinkingBlock).Trimmed).To(BeFalse(), "nothing was cut from it")
+		Expect(sent[0].Content().(wire.TextBlock).Trimmed).To(BeTrue())
+		Expect(sent[0].Content().(wire.TextBlock).Text).To(Equal(wire.TrimBlockText(strings.Repeat("x", wire.MaxBlockText+1))))
+		Expect(sent[1].Content().(wire.ThinkingBlock).Trimmed).To(BeFalse(), "nothing was cut from it")
 	})
 
 	Describe("Streaming an assistant turn as it is written", func() {
@@ -277,7 +278,7 @@ var _ = Describe("The events adapter", func() {
 
 			var out strings.Builder
 			for _, block := range blocks() {
-				delta, ok := block.Content().(a2a.TextDeltaBlock)
+				delta, ok := block.Content().(wire.TextDeltaBlock)
 				if ok && delta.Index == index {
 					out.WriteString(delta.Text)
 				}
@@ -335,7 +336,7 @@ var _ = Describe("The events adapter", func() {
 				events.MessageDelta(fragment(0, "yz", false))
 
 				Expect(sink.sent).To(HaveLen(1))
-				delta := blocks()[0].Content().(a2a.TextDeltaBlock)
+				delta := blocks()[0].Content().(wire.TextDeltaBlock)
 				Expect(delta.Text).To(HaveLen(maxDeltaText))
 				Expect(delta.Final).To(BeFalse())
 				Expect(deltaText(0)).To(Equal(strings.Repeat("x", maxDeltaText-1)+"y"), "the byte over the limit is still held")
@@ -360,7 +361,7 @@ var _ = Describe("The events adapter", func() {
 				events.MessageDelta(fragment(0, "answer", true))
 
 				Expect(sink.sent).To(HaveLen(1))
-				delta := blocks()[0].Content().(a2a.TextDeltaBlock)
+				delta := blocks()[0].Content().(wire.TextDeltaBlock)
 				Expect(delta.Text).To(Equal("the answer"))
 				Expect(delta.Final).To(BeTrue())
 			})
@@ -373,8 +374,8 @@ var _ = Describe("The events adapter", func() {
 
 				sent := blocks()
 				Expect(sent).To(HaveLen(2))
-				Expect(sent[1].Content().(a2a.TextDeltaBlock).Text).To(BeEmpty())
-				Expect(sent[1].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+				Expect(sent[1].Content().(wire.TextDeltaBlock).Text).To(BeEmpty())
+				Expect(sent[1].Content().(wire.TextDeltaBlock).Final).To(BeTrue())
 			})
 
 			// A caller assembling text out of fragments cannot notice a missing one, so a
@@ -385,10 +386,10 @@ var _ = Describe("The events adapter", func() {
 
 				Expect(sink.sent).To(HaveLen(3))
 				for _, body := range sink.sent {
-					Expect(len(body)).To(BeNumerically("<", a2a.MaxMessageSize))
+					Expect(len(body)).To(BeNumerically("<", wire.MaxMessageSize))
 				}
 				Expect(deltaText(0)).To(Equal(written), "nothing is lost to the split")
-				Expect(blocks()[2].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+				Expect(blocks()[2].Content().(wire.TextDeltaBlock).Final).To(BeTrue())
 			})
 
 			It("Should split on a rune boundary", func() {
@@ -397,7 +398,7 @@ var _ = Describe("The events adapter", func() {
 
 				Expect(deltaText(0)).To(Equal(written))
 				for _, block := range blocks() {
-					Expect(strings.ContainsRune(block.Content().(a2a.TextDeltaBlock).Text, '�')).To(BeFalse())
+					Expect(strings.ContainsRune(block.Content().(wire.TextDeltaBlock).Text, '�')).To(BeFalse())
 				}
 			})
 
@@ -410,7 +411,7 @@ var _ = Describe("The events adapter", func() {
 				events.MessageDelta(fragment(0, strings.Repeat("\x80", maxDeltaText+1), true))
 
 				Expect(len(sink.sent)).To(BeNumerically(">", 1))
-				Expect(blocks()[len(sink.sent)-1].Content().(a2a.TextDeltaBlock).Final).To(BeTrue())
+				Expect(blocks()[len(sink.sent)-1].Content().(wire.TextDeltaBlock).Final).To(BeTrue())
 			})
 
 			// A caller reconciles its buffer against the whole block, so the block never
@@ -425,16 +426,16 @@ var _ = Describe("The events adapter", func() {
 					{Text: &llm.TextBlock{Text: "the answer"}},
 				}}, true)
 
-				types := make([]a2a.BlockType, 0, len(sink.sent))
+				types := make([]wire.BlockType, 0, len(sink.sent))
 				for _, block := range blocks() {
 					types = append(types, block.Type())
 				}
 
-				Expect(types).To(Equal([]a2a.BlockType{
-					a2a.BlockThinkingDelta,
-					a2a.BlockTextDelta,
-					a2a.BlockThinking,
-					a2a.BlockText,
+				Expect(types).To(Equal([]wire.BlockType{
+					wire.BlockThinkingDelta,
+					wire.BlockTextDelta,
+					wire.BlockThinking,
+					wire.BlockText,
 				}))
 			})
 
@@ -447,9 +448,9 @@ var _ = Describe("The events adapter", func() {
 				events.MessageDelta(fragment(0, "the answer", true))
 
 				sent := blocks()
-				Expect(sent[0].Content().(a2a.TextDeltaBlock).Iteration).To(Equal(1))
-				Expect(sent[2].Content().(a2a.StatusBlock).Iteration).To(Equal(1), "the fragments and the status block count the same call")
-				Expect(sent[3].Content().(a2a.TextDeltaBlock).Iteration).To(Equal(2))
+				Expect(sent[0].Content().(wire.TextDeltaBlock).Iteration).To(Equal(1))
+				Expect(sent[2].Content().(wire.StatusBlock).Iteration).To(Equal(1), "the fragments and the status block count the same call")
+				Expect(sent[3].Content().(wire.TextDeltaBlock).Iteration).To(Equal(2))
 			})
 
 			// A block left open by a call that ended without closing it would otherwise
@@ -461,7 +462,7 @@ var _ = Describe("The events adapter", func() {
 
 				sent := blocks()
 				Expect(sent).To(HaveLen(3), "the whole block, the status block that ends the call, and the fragment after it")
-				Expect(sent[2].Content().(a2a.TextDeltaBlock).Text).To(Equal("the answer"))
+				Expect(sent[2].Content().(wire.TextDeltaBlock).Text).To(Equal("the answer"))
 			})
 
 			// A provider bounds its own indexes, but this sink sees fragments alone.
@@ -484,7 +485,7 @@ var _ = Describe("The events adapter", func() {
 			It("Should send a reasoning fragment as a thinking delta", func() {
 				events.MessageDelta(llm.Delta{Kind: llm.DeltaThinking, Index: 0, Text: "considering", Final: true})
 
-				delta := blocks()[0].Content().(a2a.ThinkingDeltaBlock)
+				delta := blocks()[0].Content().(wire.ThinkingDeltaBlock)
 				Expect(delta.Text).To(Equal("considering"))
 				Expect(delta.Final).To(BeTrue())
 			})
@@ -504,7 +505,7 @@ var _ = Describe("The events adapter", func() {
 		events.Message(llm.Response{Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "there are three"}}}}, true)
 
 		sent := blocks()
-		Expect(sent[0].Content().(a2a.TextBlock).Final).To(BeFalse())
-		Expect(sent[len(sent)-1].Content().(a2a.TextBlock).Final).To(BeTrue())
+		Expect(sent[0].Content().(wire.TextBlock).Final).To(BeFalse())
+		Expect(sent[len(sent)-1].Content().(wire.TextBlock).Final).To(BeTrue())
 	})
 })

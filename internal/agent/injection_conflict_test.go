@@ -48,6 +48,25 @@ var _ = Describe("injected store precedence", func() {
 		Expect(err.Error()).NotTo(ContainSubstring("connecting to NATS"))
 	})
 
+	// An embedder that built its configuration in Go read no file, so the refusal names
+	// the setting without a file to change it in.
+	It("Should name no configuration file when the caller read none", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		cfg := agenttest.Config(GinkgoTB(), app)
+		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true, Backend: "jetstream"}
+
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			MemoryStore: agenttest.NewFakeMemoryStore(GinkgoTB()),
+		}, agenttest.NewRecordingEvents(), agenttest.NewScriptedPrompter(GinkgoTB()))
+
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring(`harness.memory.backend selects "jetstream"`)))
+		Expect(err.Error()).NotTo(ContainSubstring(`in ""`))
+	})
+
 	// The store the configuration asked for is accepted rather than refused for having
 	// been injected at all. It is the case a host sharing one store across many runs is
 	// in, and the reason the rule compares backends instead of refusing on presence.

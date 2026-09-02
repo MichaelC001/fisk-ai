@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
@@ -22,7 +23,7 @@ type RemoteInvoker interface {
 	// InvokeTool calls tool on agent with the given input and returns its reply. A
 	// failed or denied call is reported in-band on the reply (IsError set); a Go
 	// error means the call could not be made or answered.
-	InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (*ToolReply, error)
+	InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (*wire.ToolReply, error)
 }
 
 // NewRemoteTool builds a remote function tool from a discovered descriptor.
@@ -45,7 +46,7 @@ type RemoteInvoker interface {
 // about the peer's tool: it reaches the model as part of the tool's description and
 // nothing else, since a remote tool can never itself be served on (see functool.New),
 // so this agent never republishes it as its own.
-func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteInvoker) (*functool.Tool, error) {
+func NewRemoteTool(localName, agent string, desc wire.ToolDescriptor, invoker RemoteInvoker) (*functool.Tool, error) {
 	schema := map[string]any{"type": "object"}
 	if len(desc.InputSchema) > 0 {
 		if err := json.Unmarshal(desc.InputSchema, &schema); err != nil {
@@ -96,6 +97,6 @@ func NewRemoteTool(localName, agent string, desc ToolDescriptor, invoker RemoteI
 		Schema:      schema,
 		Handler:     handler,
 		Remote:      &functool.RemoteSpec{Agent: agent},
-		Behavior:    desc.Behavior.Resolve(),
+		Behavior:    BehaviorOf(desc.Behavior).Resolve(),
 	})
 }

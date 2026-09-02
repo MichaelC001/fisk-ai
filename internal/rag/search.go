@@ -316,7 +316,7 @@ func (s *Store) embedQueryVector(ctx context.Context, query string) ([]float32, 
 		return nil, degradeKind(err, DegradeEmbeddings), err
 	}
 	if dim != meta.Dimension {
-		return nil, DegradeNone, fmt.Errorf("%w: model %q now emits dimension %d but the index was built at %d; run 'fisk-ai knowledge index --reindex'", ErrDimensionMismatch, s.emb.Model(), dim, meta.Dimension)
+		return nil, DegradeNone, fmt.Errorf("%w: model %q now emits dimension %d but the index was built at %d", ErrDimensionMismatch, s.emb.Model(), dim, meta.Dimension)
 	}
 
 	qv, err := s.emb.EmbedQuery(ctx, query)
@@ -552,12 +552,13 @@ func degradeSummary(kind DegradeKind) string {
 	}
 }
 
-// DegradeNote is the sentence a caller shows to explain a degraded query, including
-// the fix where there is one to name.
+// DegradeNote is the sentence a caller shows to explain a degraded query. It names the
+// condition and the tier the query fell back to, leaving the remedy to the caller, who
+// knows what a person in front of this agent can run.
 func DegradeNote(kind DegradeKind) string {
 	switch kind {
 	case DegradeIndexMeta:
-		return "the knowledge index metadata could not be read, so this query used the lexical tier only; run: fisk-ai knowledge doctor"
+		return "the knowledge index metadata could not be read, so this query used the lexical tier only"
 	case DegradeTimeout:
 		return "the embeddings server did not respond in time, so this query used the lexical tier only"
 	case DegradeCanceled:

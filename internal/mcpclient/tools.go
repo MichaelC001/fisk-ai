@@ -110,7 +110,7 @@ type ServerImport struct {
 	Skipped []SkippedTool
 }
 
-// Import discovers, filters, names and builds the tools of every connected
+// importServers discovers, filters, names and builds the tools of every connected
 // server, in the order they were configured. A server that cannot be listed is
 // recorded in its own outcome rather than stopping the others, so a caller decides
 // whether to fail on it or report it. Listing a server is given that entry's
@@ -124,7 +124,7 @@ type ServerImport struct {
 //
 // Every tool is named "<alias>_<tool>", so a name depends only on the server it
 // came from and nothing is renamed when another server's tool list changes.
-func Import(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]ServerImport, error) {
+func importServers(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]ServerImport, error) {
 	if !claimed.built {
 		return nil, errClaimedNamesUnbuilt
 	}
@@ -147,45 +147,56 @@ func Import(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]Se
 	return out, nil
 }
 
-// ImportForRun imports every connected server for an agent run and returns the
-// tools in server order, a name-keyed dispatch map, and the per-server outcomes so
-// the caller can report round trip times and skipped tools. It is strict: a server
-// that could not be listed and a name collision both fail the call, since the
-// prompt may depend on tools that are not there.
+// Imported carries what a run gets from its MCP servers: the tools to offer the model,
+// the map a call is dispatched through, and one outcome per server to report.
+type Imported struct {
+	// Tools are the built tools, in the order the servers were configured and, within
+	// a server, the order it advertised them.
+	Tools []*functool.Tool
+	// ByName holds the same tools keyed by the model-facing name each answers to.
+	ByName map[string]*functool.Tool
+	// Servers is one outcome per configured server, carrying its round trip time and
+	// the tools it advertised that were left out.
+	Servers []ServerImport
+}
+
+// Import imports every connected server for an agent run. It is strict: a server
+// that could not be listed and a name collision both fail the call, since the prompt
+// may depend on tools that are not there. Servers is filled whether or not it
+// returns an error, so a caller reports the round trips and the skipped tools that
+// came back with the failure.
 //
 // The sessions stay owned by the caller, which must keep them open for the run and
 // close them afterwards.
-func ImportForRun(ctx context.Context, sessions *Sessions, claimed ClaimedNames) ([]*functool.Tool, map[string]*functool.Tool, []ServerImport, error) {
-	imports, err := Import(ctx, sessions, claimed)
+func Import(ctx context.Context, sessions *Sessions, claimed ClaimedNames) (Imported, error) {
+	imports, err := importServers(ctx, sessions, claimed)
 
 	for i := range imports {
 		if imports[i].Err != nil {
-			return nil, nil, imports, fmt.Errorf("importing tools from mcp server %q: %w", imports[i].Server.Name, imports[i].Err)
+			return Imported{Servers: imports}, fmt.Errorf("importing tools from mcp server %q: %w", imports[i].Server.Name, imports[i].Err)
 		}
 	}
 
 	if err != nil {
-		return nil, nil, imports, err
+		return Imported{Servers: imports}, err
 	}
 
-	var tools []*functool.Tool
-	byName := map[string]*functool.Tool{}
+	out := Imported{ByName: map[string]*functool.Tool{}, Servers: imports}
 	for i := range imports {
 		for _, tool := range imports[i].Tools {
-			tools = append(tools, tool)
-			byName[tool.Name()] = tool
+			out.Tools = append(out.Tools, tool)
+			out.ByName[tool.Name()] = tool
 		}
 	}
 
-	return tools, byName, imports, nil
+	return out, nil
 }
 
-// DiscoverForInfo connects every configured server and imports its tools for a
-// command that inspects a configuration rather than running it, such as fisk info.
-// It is the lenient counterpart of ImportForRun and names every tool through the
-// same pass, so the names it reports are the names a run would give the model.
-// claimed carries both of the lookups a run keeps its claimed names in, for that
-// reason.
+// Inspect connects every configured server and imports its tools for a command that
+// reads a configuration rather than running it, such as fisk info. It is the lenient
+// counterpart of Import and names every tool through the same pass, so the names it
+// reports are the names a run would give the model. claimed carries both of the
+// lookups a run keeps its claimed names in, for that reason.
 //
 // Nothing here is fatal. A server that cannot be started, reached or listed comes
 // back as its own outcome carrying the error, and the servers configured after it
@@ -201,7 +212,7 @@ func ImportForRun(ctx context.Context, sessions *Sessions, claimed ClaimedNames)
 //
 // An empty server list connects to nothing, and claimed names that were not built
 // with NewClaimedNames fail every server before anything is connected.
-func DiscoverForInfo(ctx context.Context, opts Options, claimed ClaimedNames) []ServerImport {
+func Inspect(ctx context.Context, opts Options, claimed ClaimedNames) []ServerImport {
 	if len(opts.Servers) == 0 {
 		return nil
 	}
@@ -237,8 +248,10 @@ func DiscoverForInfo(ctx context.Context, opts Options, claimed ClaimedNames) []
 		out = append(out, imported)
 
 		// The close error describes tearing down a session whose tools have already been
-		// read, which has nothing to say to someone reading a configuration.
-		_ = sessions.Close()
+		// read, which has nothing to say to someone reading a configuration. It waits
+		// however long the child takes rather than under ctx, so a canceled inspection
+		// still leaves no stdio child behind.
+		_ = sessions.Close(context.WithoutCancel(ctx))
 	}
 
 	return out
@@ -269,9 +282,9 @@ type ToolListChange struct {
 // Every other server's tools and the caller's own are its own business and are not
 // touched here.
 //
-// It differs from Import in what a name collision costs. Import returns one, because
-// at the start of a run nothing has happened yet and a run that cannot offer the
-// tools its prompt names is better refused. Here the conversation is under way, and
+// It differs from Import in what a name collision costs. Import returns an error,
+// because at the start of a run nothing has happened yet and a run that cannot offer
+// the tools its prompt names is better refused. Here the conversation is under way, and
 // the collision is a third party's edit to its own tool list, so the colliding tool
 // is left out and recorded in Skipped rather than ending the run. Every other reason
 // a tool is skipped is recorded as it is at run start.
@@ -389,7 +402,7 @@ func buildServerTools(server config.MCPServer, kept []*mcp.Tool, claimed Claimed
 			continue
 		}
 
-		tool, err := NewTool(name, server.Name, desc, caller)
+		tool, err := newTool(name, server.Name, desc, caller)
 		if err != nil {
 			skipped = append(skipped, SkippedTool{Name: desc.Name, Reason: err.Error()})
 			continue
@@ -548,7 +561,7 @@ func subtractTools(tools, remove []*mcp.Tool) []*mcp.Tool {
 	return out
 }
 
-// NewTool builds a function tool from a descriptor an MCP server advertised.
+// newTool builds a function tool from a descriptor an MCP server advertised.
 // localName is the alias-prefixed name the model is given; the descriptor's own
 // name is what the server is called with.
 //
@@ -581,7 +594,7 @@ func subtractTools(tools, remove []*mcp.Tool) []*mcp.Tool {
 // which already says whatever the server says about the tool, and no client or peer
 // is told it either, since an MCP tool can never itself be served on (see
 // functool.New).
-func NewTool(localName string, server string, desc *mcp.Tool, caller Caller) (*functool.Tool, error) {
+func newTool(localName string, server string, desc *mcp.Tool, caller Caller) (*functool.Tool, error) {
 	if desc.Name == "" {
 		return nil, fmt.Errorf("mcp server %q advertises a tool with no name", server)
 	}
@@ -649,11 +662,11 @@ func NewTool(localName string, server string, desc *mcp.Tool, caller Caller) (*f
 		Schema:      schema,
 		Handler:     handler,
 		MCP:         &functool.MCPSpec{Server: server},
-		Behavior:    BehaviorFromAnnotations(desc.Annotations).Resolve(),
+		Behavior:    behaviorFromAnnotations(desc.Annotations).Resolve(),
 	})
 }
 
-// BehaviorFromAnnotations maps the annotations an MCP server declares for a tool
+// behaviorFromAnnotations maps the annotations an MCP server declares for a tool
 // onto the neutral behavior every tool kind carries. Nil annotations declare
 // nothing, which is the answer a server that said nothing should get.
 //
@@ -666,9 +679,9 @@ func NewTool(localName string, server string, desc *mcp.Tool, caller Caller) (*f
 // records the same limitation from the serving side.
 //
 // What it returns is the server's claim as it arrived. Pass it through
-// Behavior.Resolve before handing it to functool.New, as NewTool does, so a server
+// Behavior.Resolve before handing it to functool.New, as newTool does, so a server
 // that contradicts itself cannot make its own tool vanish.
-func BehaviorFromAnnotations(annotations *mcp.ToolAnnotations) toolkit.Behavior {
+func behaviorFromAnnotations(annotations *mcp.ToolAnnotations) toolkit.Behavior {
 	if annotations == nil {
 		return toolkit.Behavior{}
 	}

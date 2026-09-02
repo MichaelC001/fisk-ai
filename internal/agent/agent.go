@@ -31,17 +31,21 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+
 	// Link the NATS a2a transport in so it registers itself; a2a.NewTransport
 	// resolves the configured transport from the registry, and this is the sole
 	// transport today.
 	_ "github.com/choria-io/fisk-ai/internal/a2a/nats"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
+
 	// Link the anthropic provider in so it registers itself; llm.NewProvider resolves
 	// the configured provider from the registry, and this is the sole provider today.
 	_ "github.com/choria-io/fisk-ai/internal/llm/anthropic"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
+
 	// Link the file memory backend in so it registers itself; memory.New resolves
 	// the configured backend from the registry, and this is the default backend.
 	_ "github.com/choria-io/fisk-ai/internal/memory/file"
@@ -51,6 +55,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+
 	// Link the file session backend in so it registers itself; runstate.New resolves
 	// the configured backend from the registry.
 	_ "github.com/choria-io/fisk-ai/internal/runstate/file"
@@ -115,10 +120,21 @@ const resumeReminder = "This session was suspended and has now resumed. Tool res
 // the caller validates before calling Run. FollowUp says what a resume does with the
 // prompt it was given.
 type Checkpoint struct {
-	Enabled  bool
-	Name     string
+	// Enabled journals this run, so a suspension or a crash leaves something to resume
+	// from. Result reports the session id it ran under.
+	Enabled bool
+	// Name is the id to create the session under, for a caller that wants to name its
+	// own runs and find them again. Empty mints one. It is read only with Enabled: a
+	// resume is already named by ResumeID.
+	Name string
+	// ResumeID is the id of a stored session to continue, and it is what makes a run a
+	// resume. It is mutually exclusive with Enabled.
 	ResumeID string
-	Force    bool
+	// Force resumes a session whose stored configuration has drifted from the one this
+	// run carries, which is otherwise refused as ErrConfigDrift. It covers drift alone:
+	// a changed provider is refused with it set, since a conversation cannot be folded
+	// coherently across providers.
+	Force bool
 
 	// CreateIfMissing makes ResumeID name a run rather than ask for one, and Run
 	// answers for that name whichever of three states the store is in: no session is
@@ -221,24 +237,52 @@ type DeferredAnswer struct {
 // Options is everything Run needs to execute a run. Config is already parsed so
 // Run does no file IO; the caller owns flags, signals and rendering.
 type Options struct {
-	Config     *config.Config
+	// Config is the parsed configuration the run reads everything from: the identity,
+	// the model, the tools, and every harness setting. It must not be nil, and Run
+	// refuses a nil one rather than crashing on the first field it reads.
+	Config *config.Config
+	// ConfigFile is the path Config was read from, quoted in the errors and advisories
+	// that ask an operator to change a setting, and recorded on the trace file's session
+	// line. Empty leaves the path out of those messages, which is what a Config built in
+	// process wants: there is no file to send anyone to.
 	ConfigFile string
-	Prompt     []string
+	// Prompt is the run's task, joined into the first user turn. Empty asks the model to
+	// assist the user, which is what an interactive run starts on before its operator has
+	// typed anything. On a resume it is discarded unless Checkpoint.FollowUp delivers it
+	// as a new turn.
+	Prompt []string
 
 	// Version is the caller's own build version. It identifies this client to the
 	// MCP servers the run connects to and is written to the trace file's session
 	// line. Empty sends no version to a server and omits the field from the trace.
 	Version string
 
+	// APIKey and BaseURL are the credential and endpoint the model provider is built
+	// with, overriding what the environment and the configuration would give it. Empty
+	// leaves each to the provider's own resolution. BaseURL is validated before the
+	// provider is built, so a malformed one names the option rather than failing at the
+	// first call. Both are read only on the registry path: an injected Provider was
+	// built by the caller, who addressed and credentialed it already.
 	APIKey  string
 	BaseURL string
 	// HTTPDebugOut, when non-nil, receives a dump of every Anthropic API request and
 	// response body. The caller owns the writer's lifecycle (for example a file it
 	// opens and closes); os.Stderr reproduces the old stderr-dump behavior.
 	HTTPDebugOut io.Writer
-	TraceFile    string
-	Verbose      bool
+	// TraceFile is where the run writes its JSON trace of model calls and tool calls.
+	// Empty writes none. Run creates and closes the file itself, and a write that fails
+	// reaches the caller as an advisory rather than ending the run. The trace is written
+	// only where Run builds the provider: an injected Provider carries whatever request
+	// hooks its builder gave it, as HTTPDebugOut does.
+	TraceFile string
+	// Verbose emits an Events.LLMRequest summary before each model call, so a caller
+	// showing an operator what the run is doing can show the request as well as the
+	// reply. It changes what is reported and nothing about what is sent.
+	Verbose bool
 
+	// Checkpoint carries the resumable-run options: journaling a new run, resuming a
+	// stored one, and what a resume does with the prompt and with a call the stored
+	// conversation deferred. The zero value journals nothing, which is a one-shot run.
 	Checkpoint Checkpoint
 
 	// ClaimedBy names this worker in the claim a resume writes to the journal, for a
@@ -526,6 +570,15 @@ type DeferredCall struct {
 // named is not here, and a new one is where its prompt has to go.
 var ErrConversationNotFound = errors.New("conversation not found")
 
+// ErrConfigDrift reports that a resume was refused because the configuration changed
+// in a way a stored conversation does not survive. The error lists what changed.
+//
+// Options.Checkpoint.Force overrides it, so a caller that offers its user that choice
+// matches this and says how its own interface takes it. Nothing else Run returns is
+// overridable, which is why this one is separated: a CLI naming its flag against any
+// other refusal would be offering a way out that does not exist.
+var ErrConfigDrift = errors.New("the configuration changed since the session was saved")
+
 // PanicError is the error Run returns when it recovered a panic on its run goroutine.
 // It reports that the run crashed rather than reaching a terminal outcome, so a caller
 // (a job system) tells a crash from an outcome with errors.As and requeues or escalates
@@ -541,7 +594,7 @@ type PanicError struct {
 // the outcomes it would otherwise be confused with (a model refusal, a tool failure, a
 // budget cap). It carries no stack.
 func (e *PanicError) Error() string {
-	return "internal error: fisk-ai crashed (a bug, not a model or tool failure); please report it"
+	return "internal error: the agent crashed (a bug, not a model or tool failure); please report it"
 }
 
 // Value returns the recovered panic value, for a caller that wants to inspect or
@@ -787,6 +840,9 @@ func runErrorClass(err error, reachedRunner bool) telemetry.ErrorClass {
 // non-nil even on error so the caller can always print the stats. The context
 // governs cancellation; a graceful suspend is requested via opts.SuspendRequested.
 //
+// opts.Config and events are both required. Run refuses a nil Config, and refuses a nil
+// events, before anything runs.
+//
 // A panic on the run goroutine is recovered and returned as a *PanicError, so one
 // nil dereference cannot take down a long-lived server and every sibling run; the
 // stack is delivered to events (Events.Panicked), never on the returned error. See
@@ -794,6 +850,17 @@ func runErrorClass(err error, reachedRunner bool) telemetry.ErrorClass {
 func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prompter) (res *Result, err error) {
 	cfg := opts.Config
 	res = &Result{}
+
+	// cfg is read from the first span onwards and events from the first advisory, so a
+	// nil either way is dereferenced long before the run ends. The panic barrier catches
+	// that and returns a *PanicError, which tells a caller the agent crashed when what
+	// happened is that they left a required field empty.
+	switch {
+	case cfg == nil:
+		return res, fmt.Errorf("Options.Config is required: it is the parsed configuration a run reads its identity, model and tools from")
+	case events == nil:
+		return res, fmt.Errorf("events is required: a run reports its narration, tool traces and advisories through it, so a caller that wants none passes a sink that discards them")
+	}
 
 	// activeRunner is nil until the runner is constructed; the panic barrier reads it to
 	// report the session the run ended on, which the normal path sets only after the
@@ -1096,6 +1163,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			declared := cfg.MemoryBackendDeclared()
 			running := opts.MemoryStore.Info().Backend
 			if declared != "" && declared != running {
+				if opts.ConfigFile == "" {
+					return res, fmt.Errorf("Options.MemoryStore runs on the %q backend but harness.memory.backend selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.memory.backend to %q", running, declared, running)
+				}
 				return res, fmt.Errorf("Options.MemoryStore runs on the %q backend but harness.memory.backend in %q selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.memory.backend to %q", running, opts.ConfigFile, declared, running)
 			}
 			memStore = opts.MemoryStore
@@ -1179,7 +1249,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		transport := opts.A2ATransport
 		if transport == nil {
 			transportName := cfg.A2ATransport()
-			transport, err = a2a.NewTransport(transportName, natsConns, a2a.TransportConfig{Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
+			transport, err = a2a.NewTransport(transportName, a2a.TransportConfig{Resources: natsConns, Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
 			if err != nil {
 				return res, err
 			}
@@ -1230,7 +1300,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			if err != nil {
 				return res, err
 			}
-			defer sessions.Close()
+			// The close waits for every stdio child however the run ended: the CLI
+			// process exits soon after Run returns, so a close cut short by a canceled
+			// run would leave the children it started behind.
+			defer func() { _ = sessions.Close(context.WithoutCancel(ctx)) }()
 		}
 
 		// The import walks the server list the sessions carry, not cfg.MCPClients, so a
@@ -1250,11 +1323,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// The names the remote import settled on are never written into taken, so the
 		// naming pass is given both lookups. The names this import settles on are added to
 		// taken below, which keeps it the whole set of claimed names.
-		mcpTools, mcpByName, mcpImports, err = mcpclient.ImportForRun(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+		var imported mcpclient.Imported
+		imported, err = mcpclient.Import(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
+		mcpImports = imported.Servers
 
-		// ImportForRun returns the per-server outcomes with its error as well as without
-		// one, so the notes are reported before the error is: an operator deciding whether
-		// to set an alias or drop a filter needs the skipped tools and round trips that came
+		// Import returns the per-server outcomes with its error as well as without one,
+		// so the notes are reported before the error is: an operator deciding whether to
+		// set an alias or drop a filter needs the skipped tools and round trips that came
 		// back with the failure, not the failure alone.
 		reporter, ok := events.(MCPServerReporter)
 		if ok {
@@ -1264,6 +1339,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if err != nil {
 			return res, err
 		}
+
+		mcpTools = imported.Tools
+		mcpByName = imported.ByName
 
 		for name := range mcpByName {
 			taken[name] = true
@@ -1332,10 +1410,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// tools. Checking only the application tools would abort a run whose sole tools are
 	// native (e.g. knowledge_search), imported, or injected by the caller.
 	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(mcpTools)+len(opts.CustomTools) == 0 {
-		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients in %q", opts.ConfigFile)
+		in := ""
+		if opts.ConfigFile != "" {
+			in = fmt.Sprintf(" in %q", opts.ConfigFile)
 		}
-		return res, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
+		if cfg.ApplicationPath == "" {
+			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients%s", in)
+		}
+		return res, fmt.Errorf("no tools available after filtering; check include/exclude%s", in)
 	}
 
 	// The confirm gate enforces confirmation tags: a tool carrying ai:confirm (always
@@ -1428,7 +1510,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	provider := opts.Provider
 	if provider == nil {
 		if opts.BaseURL != "" {
-			if err := sanitize.BaseURL("--base-url / ANTHROPIC_BASE_URL", opts.BaseURL); err != nil {
+			if err := sanitize.BaseURL("Options.BaseURL", opts.BaseURL); err != nil {
 				return res, err
 			}
 		}
@@ -1543,8 +1625,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// are built together from one list, so neither can name a tool the other does not.
 	// The source is what the runner reads before each model call, and a configured MCP
 	// server reporting that its tool list changed is what publishes to it.
-	toolSet := NewToolSet(deferrable, builtinTools, toolSearchAllowed)
-	toolSrc := NewToolSource(toolSet)
+	set := newToolSet(deferrable, builtinTools, toolSearchAllowed)
+	toolSrc := newToolSource(set)
 
 	// A server can tell its session that its tool list changed at any point in the run.
 	// The rebuild happens on that session's goroutine, so the advisory it raises is
@@ -1579,7 +1661,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// the set moves, and reports it once for the run, so a set that already crossed
 	// here is not reported a second time.
 	toolSearchWarned := false
-	if w := toolSearchDegradation(len(toolSet.defs), caps, cfg.ToolSearchEnabled()); w != nil {
+	if w := toolSearchDegradation(len(set.defs), caps, cfg.ToolSearchEnabled()); w != nil {
 		events.Warn(*w)
 		toolSearchWarned = true
 	}
@@ -1597,7 +1679,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		Remote:      len(remoteTools),
 		MCP:         len(mcpTools),
 		Custom:      len(customByName),
-		Deferred:    toolSet.search,
+		Deferred:    set.search,
 	})
 
 	messages := []llm.Message{
@@ -1636,13 +1718,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// has to cross the threshold. A set that moves mid-run re-decides it per call
 	// without rewriting this.
 	runSpan.SetMaxTokens(maxOutputTokens)
-	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), toolSet.search)
+	runSpan.SetFeatures(thinking == llm.ThinkingOn, cfg.PromptCacheEnabled(), set.search)
 
 	// checkpointing was resolved above the NATS dial (the session store it gates
 	// depends on that connection); interactive was resolved at the top, where the root
 	// span needed it.
 	info := RunInfo{
-		Tools:           len(toolSet.defs),
+		Tools:           len(set.defs),
 		ThinkingEnabled: cfg.ThinkingEnabled(),
 		ConfirmTools:    confirmTools,
 		ConfirmTags:     confirmTags,
@@ -1674,7 +1756,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	case opts.Checkpoint.Enabled:
 		sessionID = opts.Checkpoint.Name
 		if sessionID == "" {
-			sessionID = a2a.NewID()
+			sessionID = wire.NewID()
 		}
 	}
 
@@ -1698,6 +1780,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			declared := cfg.SessionBackendDeclared()
 			running := opts.SessionStore.Info().Backend
 			if declared != "" && declared != running {
+				if opts.ConfigFile == "" {
+					return res, fmt.Errorf("Options.SessionStore runs on the %q backend but harness.sessions.backend selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.sessions.backend to %q", running, declared, running)
+				}
 				return res, fmt.Errorf("Options.SessionStore runs on the %q backend but harness.sessions.backend in %q selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.sessions.backend to %q", running, opts.ConfigFile, declared, running)
 			}
 			store = opts.SessionStore
@@ -1816,7 +1901,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// captures the configuration the run began with, and ToolsDiff compares one
 		// run's start to another's. A set that moves during the run does not
 		// retroactively change what was written down.
-		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, toolSet.defs)
+		fp, err := computeFingerprint(cfg, provider.Capabilities().Provider, system, set.defs)
 		if err != nil {
 			return res, err
 		}
@@ -1844,7 +1929,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// coherently, so --force (which is for configuration drift) must not cross
 			// it. Checked before the forceable drift so the message is unambiguous.
 			if rs.Fingerprint.Provider != fp.Provider {
-				return res, fmt.Errorf("cannot resume %q: it was started with provider %q but the current configuration uses %q; a run cannot change provider, and --force does not apply",
+				return res, fmt.Errorf("cannot resume %q: it was started with provider %q but the current configuration uses %q; a run cannot change provider",
 					sessionID, rs.Fingerprint.Provider, fp.Provider)
 			}
 			// Drift the resume must refuse, which is every part of the configuration that
@@ -1857,8 +1942,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			blocking := rs.Fingerprint.BlockingDiff(fp)
 			toolDrift := rs.Fingerprint.ToolsDiff(fp)
 			if len(blocking) > 0 && !opts.Checkpoint.Force {
-				return res, fmt.Errorf("cannot resume %q, the configuration changed since it was saved:\n  %s\nre-run against the original configuration, or pass --force to continue with the current one",
-					sessionID, strings.Join(blocking, "\n  "))
+				return res, fmt.Errorf("%w: cannot resume %q:\n  %s\nre-run against the original configuration",
+					ErrConfigDrift, sessionID, strings.Join(blocking, "\n  "))
 			}
 
 			j, err := store.Open(ctx, sessionID)
@@ -2037,7 +2122,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// Copying it would put two conversations in a listing claiming one token, only one
 		// of which can be continued. The caller is copied, since who asked did not change.
 		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
-			id := a2a.NewID()
+			id := wire.NewID()
 			meta := runstate.MetaRecord{
 				RunID:       id,
 				Created:     time.Now(),
@@ -2111,7 +2196,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// which is what a restored in-flight batch dispatches against before the first
 		// call of this run.
 		toolSrc:          toolSrc,
-		set:              toolSet,
+		set:              set,
 		queuedWarnings:   mcpWarnings,
 		toolSearchWarned: toolSearchWarned,
 		confirmTags:      confirmTags,

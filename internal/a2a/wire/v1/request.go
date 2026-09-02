@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import "strings"
 
@@ -77,8 +77,9 @@ func IsRequestProtocol(protocol string) bool {
 	return strings.HasPrefix(protocol, RequestProtocol+".")
 }
 
-// requestKindOf is the kind an id names, and false for anything else.
-func requestKindOf(protocol string) (RequestKind, bool) {
+// RequestKindOf is the kind an id names, and false for anything else. It is the inverse
+// of RequestProtocolFor.
+func RequestKindOf(protocol string) (RequestKind, bool) {
 	kind, ok := requestKinds[protocol]
 
 	return kind, ok

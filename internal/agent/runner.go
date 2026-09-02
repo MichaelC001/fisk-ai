@@ -59,7 +59,7 @@ type runner struct {
 	// before each model call rather than resolved once before the loop, so a set
 	// published during the run reaches the model from the next call. Under fisk serve
 	// one source backs every hosted run.
-	toolSrc *ToolSource
+	toolSrc *toolSource
 
 	// set is the snapshot the current model call was made with: the definitions that
 	// call carried, and the single dispatch registry every tool call in the reply
@@ -75,7 +75,7 @@ type runner struct {
 	// strand a call the model has already made. A resumed run's restored batch answers
 	// a call made before this process started, so it runs against the set the run
 	// began with.
-	set         *ToolSet
+	set         *toolSet
 	confirmTags []string
 	gate        *ConfirmGate
 
@@ -1006,7 +1006,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		// This call's tools, taken once. What the request offers and what the batch
 		// answering it dispatches against are then the same set, so a set published
 		// while that batch runs applies from the next call.
-		r.set = r.toolSrc.Snapshot()
+		r.set = r.toolSrc.snapshot()
 		r.reportQueuedWarnings()
 		r.warnToolSearchDegraded()
 

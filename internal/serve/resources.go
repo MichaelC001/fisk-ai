@@ -178,7 +178,11 @@ func NewResources(ctx context.Context, cfg *config.Config, opts ResourceOptions)
 		cfg.A2AEnabled()
 
 	if needsNats && opts.Conns == nil && cfg.NatsContext == "" {
-		return nil, fmt.Errorf("%w: nats_context is required in %q: the session store, memory store, remote tools or served tools this configuration selects are reached over NATS", ErrInvalidOptions, opts.ConfigFile)
+		in := ""
+		if opts.ConfigFile != "" {
+			in = fmt.Sprintf(" in %q", opts.ConfigFile)
+		}
+		return nil, fmt.Errorf("%w: nats_context is required%s: the session store, memory store, remote tools or served tools this configuration selects are reached over NATS", ErrInvalidOptions, in)
 	}
 
 	// The provider is built first because it contacts nothing: a provider this build
@@ -384,9 +388,11 @@ func (r *Resources) Close() error {
 	var errs []error
 
 	// First, since a stdio child gets a terminate window to exit in and nothing else
-	// here is waiting on it.
+	// here is waiting on it. The close waits for every child rather than under a
+	// deadline: this runs as the process shuts down, and a child left behind outlives
+	// it.
 	if r.MCPSessions != nil {
-		err := r.MCPSessions.Close()
+		err := r.MCPSessions.Close(context.Background())
 		if err != nil {
 			errs = append(errs, fmt.Errorf("closing the mcp sessions: %w", err))
 		}

@@ -175,6 +175,73 @@ var _ = Describe("New", func() {
 		spec.Behavior = toolkit.Behavior{ReadOnly: toolkit.HintTrue, OpenWorld: toolkit.HintFalse}
 		Expect(mustNew(spec).Behavior()).To(Equal(spec.Behavior))
 	})
+
+	It("Should accept every kind the toolkit declares", func() {
+		for _, kind := range []toolkit.Kind{toolkit.KindUnknown, toolkit.KindApplication, toolkit.KindBuiltin, toolkit.KindRemote, toolkit.KindCustom, toolkit.KindMCP} {
+			spec := base()
+			spec.Kind = kind
+			_, err := New(spec)
+			Expect(err).ToNot(HaveOccurred())
+		}
+	})
+
+	// A caller's own tool leaves Kind alone, so the zero value has to build and to be
+	// accounted as the custom tool it is.
+	It("Should build a spec that declares no kind and account it as custom", func() {
+		spec := base()
+		Expect(spec.Kind).To(Equal(toolkit.KindUnknown))
+		Expect(mustNew(spec).Describe(nil).Kind).To(Equal(toolkit.KindCustom))
+	})
+
+	It("Should reject a kind outside the toolkit's set, whose calls would be accounted as unknown", func() {
+		spec := base()
+		spec.Kind = toolkit.Kind(99)
+		_, err := New(spec)
+		Expect(err).To(MatchError(ContainSubstring("is not a toolkit.Kind")))
+	})
+})
+
+// The schema a Spec carries is the author's own map and every serving surface hands it
+// to a third party, so a consumer editing what it was given must not change what the
+// next caller is advertised.
+var _ = Describe("Schema ownership", func() {
+	nested := func() map[string]any {
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+			},
+			"required": []any{"path"},
+			"tags":     []string{"read"},
+		}
+	}
+
+	scribble := func(schema map[string]any) {
+		schema["type"] = "array"
+		schema["properties"].(map[string]any)["path"].(map[string]any)["type"] = "number"
+		schema["required"].([]any)[0] = "other"
+		schema["tags"].([]string)[0] = "write"
+	}
+
+	It("Should hand InputSchema out as a copy, through the nested objects and arrays", func() {
+		own := nested()
+		tool := mustNew(Spec{Name: "n", Description: "d", Schema: own, Handler: okHandler})
+
+		scribble(tool.InputSchema())
+
+		Expect(tool.InputSchema()).To(Equal(nested()))
+		Expect(own).To(Equal(nested()))
+	})
+
+	It("Should hand the definition's schema out as a copy on the same terms", func() {
+		own := nested()
+		tool := mustNew(Spec{Name: "n", Description: "d", Schema: own, Handler: okHandler})
+
+		scribble(tool.Definition(false).InputSchema)
+
+		Expect(tool.Definition(false).InputSchema).To(Equal(nested()))
+		Expect(own).To(Equal(nested()))
+	})
 })
 
 var _ = Describe("ModelDescription", func() {

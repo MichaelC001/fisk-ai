@@ -11,11 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"regexp"
 	"runtime"
 	"time"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
@@ -90,12 +90,20 @@ type ServerOptions struct {
 	// because it is protocol timing an operator has nothing to decide with, and a test
 	// that would otherwise wait a real interval needs it short.
 	KeepaliveInterval time.Duration
-	// LogOutput is the sink for the default Logger; nil means os.Stderr. It is
-	// ignored when Logger is supplied.
+	// LogOutput is the sink for the default Logger. It is ignored when Logger is
+	// supplied.
 	LogOutput io.Writer
-	// Logger receives structured progress; nil builds a text logger over
-	// LogOutput.
+	// Logger receives structured progress. Nil builds a text logger over LogOutput,
+	// and with LogOutput nil as well the server logs nowhere, since a library that
+	// reached for a default logger would write to an embedder's stderr uninvited.
 	Logger *slog.Logger
+
+	// Validator holds every message this server reads to the embedded schemas. A
+	// Validator compiles around three dozen JSON schemas, so a program hosting several
+	// agents builds one with NewValidator and passes it to each server and client. Nil
+	// uses a package-level Validator built on first use and shared with every other
+	// server and client that supplied none.
+	Validator *wire.Validator
 	// Telemetry, when non-nil, receives a span per served call and is put on the
 	// context a tool runs under, so a served tool that opens spans of its own is not
 	// silent.
@@ -130,11 +138,12 @@ func (o *ServerOptions) applyDefaults() {
 	if o.KeepaliveInterval <= 0 {
 		o.KeepaliveInterval = KeepaliveInterval
 	}
-	if o.LogOutput == nil {
-		o.LogOutput = os.Stderr
-	}
 	if o.Logger == nil {
-		o.Logger = slog.New(slog.NewTextHandler(o.LogOutput, nil))
+		if o.LogOutput == nil {
+			o.Logger = slog.New(slog.DiscardHandler)
+		} else {
+			o.Logger = slog.New(slog.NewTextHandler(o.LogOutput, nil))
+		}
 	}
 }
 
@@ -143,12 +152,15 @@ func (o *ServerOptions) applyDefaults() {
 // producer side of the protocol. It owns all message validation and the
 // concurrency bound, refusing a call it has no slot for; the Transport only carries
 // bytes and keeps the discovery and tool paths separate.
+//
+// It is safe for concurrent use: its fields are set at construction and read after
+// it, which is what lets one transport dispatch calls to it from several goroutines.
 type Server struct {
 	opts      ServerOptions
 	identity  string
 	byName    map[string]toolkit.Tool
-	card      AgentCard
-	validator *Validator
+	card      wire.AgentCard
+	validator *wire.Validator
 	sem       chan struct{}
 	transport Transport
 }
@@ -169,21 +181,25 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 	// A tool call is answered as a reply set, so a binding that cannot carry one cannot
 	// serve tools at all. It is refused here rather than per call, so a program learns
 	// it at startup rather than from the first peer.
-	_, streams := transport.(ReplySetTransport)
+	replySets, streams := transport.(ReplySetTransport)
 	if !streams {
 		return nil, fmt.Errorf("%w: serving tools needs a transport that carries a reply set", ErrStreamUnsupported)
 	}
 
-	validator, err := NewValidator()
-	if err != nil {
-		return nil, fmt.Errorf("building message validator: %w", err)
+	if opts.Validator == nil {
+		validator, err := wire.SharedValidator()
+		if err != nil {
+			return nil, fmt.Errorf("building message validator: %w", err)
+		}
+
+		opts.Validator = validator
 	}
 
 	s := &Server{
 		opts:      opts,
 		identity:  opts.Identity,
 		byName:    make(map[string]toolkit.Tool, len(tools)),
-		validator: validator,
+		validator: opts.Validator,
 		sem:       make(chan struct{}, opts.Concurrency),
 		transport: transport,
 	}
@@ -191,7 +207,7 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 	exposed := s.selectExposed(tools)
 	s.card = buildCard(opts, exposed)
 
-	err = transport.Serve(OpDiscovery, s.handleDiscovery)
+	err := transport.Serve(OpDiscovery, s.handleDiscovery)
 	if err != nil {
 		return nil, fmt.Errorf("registering discovery handler: %w", err)
 	}
@@ -200,7 +216,7 @@ func NewServer(transport Transport, tools []toolkit.Tool, opts ServerOptions) (*
 		return s, nil
 	}
 
-	err = transport.Serve(OpTool, s.handleTool)
+	err = replySets.ServeReplySet(OpTool, s.handleTool)
 	if err != nil {
 		return nil, fmt.Errorf("registering tool handler: %w", err)
 	}
@@ -219,9 +235,15 @@ func (s *Server) ExposedTools() []string {
 }
 
 // Describe returns the transport-neutral lines describing how this server is
-// reached, for display.
+// reached, for display. A transport that does not implement DescribedTransport has
+// no addresses to name, and the answer is empty.
 func (s *Server) Describe() []DescLine {
-	return s.transport.Describe(s.identity)
+	described, ok := s.transport.(DescribedTransport)
+	if !ok {
+		return nil
+	}
+
+	return described.Describe(s.identity)
 }
 
 // Stop releases the transport's resources. It does not close the shared
@@ -281,16 +303,16 @@ func (s *Server) selectExposed(tools []toolkit.Tool) []toolkit.Tool {
 // handleDiscovery answers a discovery request with the agent card. The discovery
 // path carries only discovery requests, so any other message is rejected.
 func (s *Server) handleDiscovery(_ context.Context, _ Caller, body []byte, reply Replier) {
-	msg, err := s.inbound(body, DiscoveryRequestProtocol)
+	msg, err := s.inbound(body, wire.DiscoveryRequestProtocol)
 	if err != nil {
 		_ = reply.Error("400", err.Error())
 		return
 	}
-	dr := msg.(*DiscoveryRequest)
+	dr := msg.(*wire.DiscoveryRequest)
 
-	out := &DiscoveryReply{AgentCard: s.card}
-	out.Protocol = DiscoveryReplyProtocol
-	StampReply(&out.Header, &dr.Header, s.identity)
+	out := &wire.DiscoveryReply{AgentCard: s.card}
+	out.Protocol = wire.DiscoveryReplyProtocol
+	wire.StampReply(&out.Header, &dr.Header, s.identity)
 
 	s.respond(reply, out)
 }
@@ -306,13 +328,13 @@ func (s *Server) handleDiscovery(_ context.Context, _ Caller, body []byte, reply
 // whole service off the air. A caller is waiting on the other end, so being told at
 // once that this agent is at capacity is worth more than a place in a queue it cannot
 // see.
-func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, reply Replier) {
-	msg, err := s.inbound(body, ToolRequestProtocol)
+func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, reply StreamReplier) {
+	msg, err := s.inbound(body, wire.ToolRequestProtocol)
 	if err != nil {
 		_ = reply.Error("400", err.Error())
 		return
 	}
-	tr := msg.(*ToolRequest)
+	tr := msg.(*wire.ToolRequest)
 
 	// Two names for who is calling, kept apart. The sender is the body's own claim and
 	// is worth logging because it is what a caller meant to say; the caller is what the
@@ -345,14 +367,7 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 	// Every answer travels as a reply set, refusals included, so a caller reads one
 	// shape whatever happened. The stream is built before the first decision because
 	// each of them answers through it.
-	sr, streams := reply.(StreamReplier)
-	if !streams {
-		log.Error("Refusing tool call: this transport cannot carry a reply set", "tool", tr.Name)
-		_ = reply.Error("500", "this agent's transport cannot carry a tool reply set")
-		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeError, Failed: true})
-		return
-	}
-	stream := NewReplyStream(sr, &tr.Header, s.identity)
+	stream := NewReplyStream(reply, &tr.Header, s.identity)
 
 	if !ok {
 		log.Warn("Rejecting unknown tool call", "tool", tr.Name)
@@ -368,14 +383,14 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 	case s.sem <- struct{}{}:
 	default:
 		log.Warn("Refusing tool call: every slot is in use", "tool", tool.Name(), "concurrency", s.opts.Concurrency)
-		s.refuse(stream, log, capacityMessage(tool.Name(), s.identity, s.opts.Concurrency), CodeCapacity)
+		s.refuse(stream, log, capacityMessage(tool.Name(), s.identity, s.opts.Concurrency), wire.CodeCapacity)
 		span.Finish(telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeCapacity, Failed: true})
 		return
 	}
 
 	// Accepted on the serving goroutine, so the caller knows it has a worker before
 	// anything long starts and can tell this from a peer that never received it.
-	err = stream.Ack(NewAck(true))
+	err = stream.Ack(wire.NewAck(true))
 	if err != nil {
 		<-s.sem
 		log.Error("Acknowledging the tool call failed", "tool", tool.Name(), "error", err)
@@ -422,7 +437,7 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 		}
 
 		out := resultToToolResult(res.result, res.err)
-		err := stream.ToolReply(&ToolReply{ToolResult: *out})
+		err := stream.ToolReply(&wire.ToolReply{ToolResult: *out})
 		if err != nil {
 			log.Error("Sending the tool reply failed", "error", err)
 		}
@@ -438,7 +453,7 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 // reply carries what a caller acts on. Both are needed because the ack ends nothing,
 // and the code is on the reply because an ack has no room for one.
 func (s *Server) refuse(stream *ReplyStream, log *slog.Logger, reason, code string) {
-	refusal := NewAck(false)
+	refusal := wire.NewAck(false)
 	refusal.Reason = reason
 
 	err := stream.Ack(refusal)
@@ -447,7 +462,7 @@ func (s *Server) refuse(stream *ReplyStream, log *slog.Logger, reason, code stri
 		return
 	}
 
-	err = stream.ToolReply(&ToolReply{ToolResult: ToolResult{IsError: true, Output: reason}, Code: code})
+	err = stream.ToolReply(&wire.ToolReply{ToolResult: wire.ToolResult{IsError: true, Output: reason}, Code: code})
 	if err != nil {
 		log.Error("Refusing the tool call failed", "error", err)
 	}
@@ -485,7 +500,7 @@ func (s *Server) awaitTool(done <-chan toolOutcome, stream *ReplyStream, log *sl
 				continue
 			}
 
-			err := stream.Event(NewBlock(StatusBlock{Phase: PhaseRunningTool}))
+			err := stream.Event(wire.NewBlock(wire.StatusBlock{Phase: PhaseRunningTool}))
 			if err != nil {
 				log.Warn("Sending a keepalive failed; the call continues", "error", err)
 				alive = false
@@ -504,7 +519,7 @@ func capacityMessage(tool, identity string, concurrency int) string {
 
 // servedOutcome maps a served call's reply onto the span outcome, using the same
 // vocabulary a local tool call reports so the two are comparable on one key.
-func servedOutcome(out *ToolResult) telemetry.ServedToolOutcome {
+func servedOutcome(out *wire.ToolResult) telemetry.ServedToolOutcome {
 	o := telemetry.ServedToolOutcome{Outcome: telemetry.ToolOutcomeExecuted}
 
 	if out.IsError {
@@ -525,9 +540,9 @@ func servedOutcome(out *ToolResult) telemetry.ServedToolOutcome {
 // inbound size-caps, validates and decodes a request body and confirms it is the
 // protocol the receiving path is contracted to carry. The size cap runs first,
 // before any decode or allocation.
-func (s *Server) inbound(body []byte, want string) (any, error) {
-	if len(body) > MaxMessageSize {
-		return nil, fmt.Errorf("request exceeds %d bytes", MaxMessageSize)
+func (s *Server) inbound(body []byte, want string) (wire.Message, error) {
+	if len(body) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("request exceeds %d bytes", wire.MaxMessageSize)
 	}
 
 	err := s.validator.Validate(body)
@@ -535,7 +550,7 @@ func (s *Server) inbound(body []byte, want string) (any, error) {
 		return nil, fmt.Errorf("invalid request: %w", err)
 	}
 
-	return ExpectProtocol(body, want)
+	return wire.ExpectProtocol[wire.Message](body, want)
 }
 
 // respond marshals a reply and sends it through the request's Replier. The reply
@@ -556,12 +571,12 @@ func (s *Server) respond(reply Replier, msg any) {
 }
 
 // buildCard assembles an agent card from the exposed tools.
-func buildCard(opts ServerOptions, tools []toolkit.Tool) AgentCard {
-	card := AgentCard{
+func buildCard(opts ServerOptions, tools []toolkit.Tool) wire.AgentCard {
+	card := wire.AgentCard{
 		Name:      opts.Identity,
 		Version:   versionOrDev(opts.Version),
 		Model:     opts.Model,
-		Protocols: []string{ProtocolNamespace},
+		Protocols: []string{wire.ProtocolNamespace},
 		// Read off the resolved provider rather than a configuration, so a veto or an
 		// endpoint that was refused does not leave the card promising an export nobody
 		// will make. Both are nil-safe.
@@ -570,11 +585,11 @@ func buildCard(opts ServerOptions, tools []toolkit.Tool) AgentCard {
 	}
 
 	for _, t := range tools {
-		card.Tools = append(card.Tools, ToolDescriptor{
+		card.Tools = append(card.Tools, wire.ToolDescriptor{
 			Name:        t.Name(),
 			Description: t.ModelDescription(),
 			InputSchema: marshalSchema(t.InputSchema()),
-			Behavior:    toolkit.BehaviorOf(t),
+			Behavior:    toolBehavior(toolkit.BehaviorOf(t)),
 		})
 	}
 
@@ -602,25 +617,25 @@ func commandOf(t toolkit.Tool) string {
 // A nil outcome with no error is a tool kind misbehaving rather than a reachable
 // state, but this runs on a goroutine serving a remote caller, where a nil
 // dereference would take the process down; it is reported as an error instead.
-func resultToToolResult(result *toolkit.Outcome, err error) *ToolResult {
+func resultToToolResult(result *toolkit.Outcome, err error) *wire.ToolResult {
 	switch {
 	// A tool that answers later cannot be served: the answer would arrive against a
 	// session this path does not have, long after the peer stopped waiting. The
 	// caller is told the surface cannot carry the call rather than being handed the
 	// tool's own account of what it is waiting for, which would read as a promise.
 	case err != nil && errors.Is(err, toolkit.ErrDeferredResult):
-		return &ToolResult{IsError: true, Output: toolkit.ServedDeferralRefusal}
+		return &wire.ToolResult{IsError: true, Output: toolkit.ServedDeferralRefusal}
 	case err != nil:
-		return &ToolResult{IsError: true, Output: err.Error()}
+		return &wire.ToolResult{IsError: true, Output: err.Error()}
 	case result == nil:
-		return &ToolResult{IsError: true, Output: "tool returned no result"}
+		return &wire.ToolResult{IsError: true, Output: "tool returned no result"}
 	case result.Exec == nil:
-		return &ToolResult{Output: result.Output}
+		return &wire.ToolResult{Output: result.Output}
 	}
 
-	return &ToolResult{
+	return &wire.ToolResult{
 		Output: result.Output,
-		Exec: &ExecResult{
+		Exec: &wire.ExecResult{
 			Command:   result.Exec.Command,
 			ExitCode:  result.Exec.ExitCode,
 			Truncated: result.Exec.Truncated,
@@ -644,7 +659,7 @@ func marshalSchema(schema map[string]any) json.RawMessage {
 }
 
 // senderName returns the sender identity of a header for logging, or "unknown".
-func senderName(h *Header) string {
+func senderName(h *wire.Header) string {
 	if h.Sender.Name == "" {
 		return "unknown"
 	}

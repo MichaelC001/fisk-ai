@@ -104,7 +104,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			body := strings.Repeat("x", memory.MaxContentBytes)
-			Expect(s.Write(ctx, "big", "d", body, false)).To(Succeed())
+			Expect(s.Create(ctx, "big", "d", body)).To(Succeed())
 
 			_, content, err := s.Read(ctx, "big")
 			Expect(err).ToNot(HaveOccurred())
@@ -116,7 +116,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 		var store memory.Store
 
 		create := func(key, description, content string) error {
-			return store.Write(ctx, key, description, content, false)
+			return store.Create(ctx, key, description, content)
 		}
 
 		BeforeEach(func() {
@@ -140,9 +140,9 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			Expect(create("k", "d", "b")).To(MatchError(memory.ErrExists))
 		})
 
-		It("Should overwrite with overwrite true", func() {
+		It("Should replace a stored memory on update", func() {
 			Expect(create("k", "d", "b")).To(Succeed())
-			Expect(store.Write(ctx, "k", "d2", "b2", true)).To(Succeed())
+			Expect(store.Update(ctx, "k", "d2", "b2")).To(Succeed())
 
 			desc, content, err := store.Read(ctx, "k")
 			Expect(err).ToNot(HaveOccurred())
@@ -221,7 +221,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			b, err := newStoreFor("agent-b", `{"bucket":"shared"}`)
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(a.Write(ctx, "k", "from a", "x", false)).To(Succeed())
+			Expect(a.Create(ctx, "k", "from a", "x")).To(Succeed())
 
 			_, _, err = b.Read(ctx, "k")
 			Expect(err).To(MatchError(memory.ErrNotExist))
@@ -242,7 +242,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			b, err := newStoreFor("agent-b", `{"bucket":"shared","prefix":"team"}`)
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(a.Write(ctx, "k", "shared", "x", false)).To(Succeed())
+			Expect(a.Create(ctx, "k", "shared", "x")).To(Succeed())
 
 			desc, _, err := b.Read(ctx, "k")
 			Expect(err).ToNot(HaveOccurred())
@@ -252,7 +252,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 		It("Should store keys flat under an explicit empty prefix", func() {
 			s, err := newStoreFor("agent-a", `{"bucket":"shared","prefix":""}`)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(s.Write(ctx, "flatkey", "d", "b", false)).To(Succeed())
+			Expect(s.Create(ctx, "flatkey", "d", "b")).To(Succeed())
 
 			// The raw KV key is the memory key verbatim, with no namespace prefix.
 			kv, err := js.KeyValue(ctx, "shared")
@@ -277,11 +277,11 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 		BeforeEach(func() {
 			createBucket(jetstream.KeyValueConfig{Bucket: "mem", History: 1})
 			store = freshStore()
-			Expect(store.Write(ctx, "k", "d", "b", false)).To(Succeed())
+			Expect(store.Create(ctx, "k", "d", "b")).To(Succeed())
 		})
 
 		It("Should refuse an overwrite of a key not read in this run", func() {
-			err := freshStore().Write(ctx, "k", "d2", "b2", true)
+			err := freshStore().Update(ctx, "k", "d2", "b2")
 			Expect(err).To(MatchError(memory.ErrStale))
 		})
 
@@ -289,12 +289,12 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			s := freshStore()
 			_, _, err := s.Read(ctx, "k")
 			Expect(err).ToNot(HaveOccurred())
-			Expect(s.Write(ctx, "k", "d2", "b2", true)).To(Succeed())
+			Expect(s.Update(ctx, "k", "d2", "b2")).To(Succeed())
 		})
 
 		It("Should allow overwriting a key it just created without a read", func() {
 			// store created "k" in BeforeEach, so it already holds authority for it.
-			Expect(store.Write(ctx, "k", "d2", "b2", true)).To(Succeed())
+			Expect(store.Update(ctx, "k", "d2", "b2")).To(Succeed())
 		})
 
 		It("Should not grant overwrite authority from List", func() {
@@ -303,7 +303,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(items).ToNot(BeEmpty())
 
-			err = s.Write(ctx, "k", "d2", "b2", true)
+			err = s.Update(ctx, "k", "d2", "b2")
 			Expect(err).To(MatchError(memory.ErrStale))
 		})
 
@@ -318,7 +318,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			_, err = kv.Put(ctx, "agent.k", []byte("changed"))
 			Expect(err).ToNot(HaveOccurred())
 
-			err = s.Write(ctx, "k", "d2", "b2", true)
+			err = s.Update(ctx, "k", "d2", "b2")
 			Expect(err).To(MatchError(memory.ErrStale))
 		})
 
@@ -327,9 +327,9 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			_, _, err := s.Read(ctx, "k")
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(s.Write(ctx, "k", "d2", "b2", true)).To(Succeed())
+			Expect(s.Update(ctx, "k", "d2", "b2")).To(Succeed())
 			// No re-read: the successful write carried the new revision forward.
-			Expect(s.Write(ctx, "k", "d3", "b3", true)).To(Succeed())
+			Expect(s.Update(ctx, "k", "d3", "b3")).To(Succeed())
 		})
 
 		It("Should require a read again after deleting and re-creating", func() {
@@ -342,8 +342,8 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			Expect(existed).To(BeTrue())
 
 			// Re-create grants fresh authority, so the following overwrite succeeds.
-			Expect(s.Write(ctx, "k", "d2", "b2", false)).To(Succeed())
-			Expect(s.Write(ctx, "k", "d3", "b3", true)).To(Succeed())
+			Expect(s.Create(ctx, "k", "d2", "b2")).To(Succeed())
+			Expect(s.Update(ctx, "k", "d3", "b3")).To(Succeed())
 		})
 	})
 
@@ -362,7 +362,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			shared, err = newStoreFor("agent", `{"bucket":"mem"}`)
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(shared.Write(ctx, "k", "d", "b", false)).To(Succeed())
+			Expect(shared.Create(ctx, "k", "d", "b")).To(Succeed())
 		})
 
 		It("Should not let one run's read authorize another run's overwrite", func() {
@@ -372,7 +372,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			_, _, err := shared.Read(reader, "k")
 			Expect(err).ToNot(HaveOccurred())
 
-			err = shared.Write(other, "k", "d2", "b2", true)
+			err = shared.Update(other, "k", "d2", "b2")
 			Expect(err).To(MatchError(memory.ErrStale))
 		})
 
@@ -382,7 +382,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			_, _, err := shared.Read(run, "k")
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(shared.Write(run, "k", "d2", "b2", true)).To(Succeed())
+			Expect(shared.Update(run, "k", "d2", "b2")).To(Succeed())
 		})
 
 		// A turn is a run, so without the revisions the next turn of one conversation
@@ -397,7 +397,7 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			second := memory.NewScope()
 			second.Seed(first.Snapshot())
 
-			Expect(shared.Write(memory.WithScope(ctx, second), "k", "d2", "b2", true)).To(Succeed())
+			Expect(shared.Update(memory.WithScope(ctx, second), "k", "d2", "b2")).To(Succeed())
 		})
 
 		// The seed is optimistic and never authoritative: a writer that moved the key in
@@ -411,12 +411,12 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			mover := memory.WithScope(ctx, memory.NewScope())
 			_, _, err = shared.Read(mover, "k")
 			Expect(err).ToNot(HaveOccurred())
-			Expect(shared.Write(mover, "k", "d2", "b2", true)).To(Succeed())
+			Expect(shared.Update(mover, "k", "d2", "b2")).To(Succeed())
 
 			second := memory.NewScope()
 			second.Seed(first.Snapshot())
 
-			err = shared.Write(memory.WithScope(ctx, second), "k", "d3", "b3", true)
+			err = shared.Update(memory.WithScope(ctx, second), "k", "d3", "b3")
 			Expect(err).To(MatchError(memory.ErrStale))
 		})
 
@@ -424,9 +424,9 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 			creator := memory.WithScope(ctx, memory.NewScope())
 			other := memory.WithScope(ctx, memory.NewScope())
 
-			Expect(shared.Write(creator, "fresh", "d", "b", false)).To(Succeed())
+			Expect(shared.Create(creator, "fresh", "d", "b")).To(Succeed())
 
-			err := shared.Write(other, "fresh", "d2", "b2", true)
+			err := shared.Update(other, "fresh", "d2", "b2")
 			Expect(err).To(MatchError(memory.ErrStale))
 		})
 	})
@@ -437,12 +437,12 @@ var _ = Describe("Integration: jetstream memory", Label("integration"), func() {
 
 			seed, err := newStoreFor("agent", `{"bucket":"mem"}`)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(seed.Write(ctx, "k", "d", "b", false)).To(Succeed())
+			Expect(seed.Create(ctx, "k", "d", "b")).To(Succeed())
 
 			blind, err := newStoreFor("agent", `{"bucket":"mem","no_require_read_before_update":true}`)
 			Expect(err).ToNot(HaveOccurred())
 			// No read of "k", but the guard is off, so the overwrite still lands.
-			Expect(blind.Write(ctx, "k", "d2", "b2", true)).To(Succeed())
+			Expect(blind.Update(ctx, "k", "d2", "b2")).To(Succeed())
 
 			desc, _, err := blind.Read(ctx, "k")
 			Expect(err).ToNot(HaveOccurred())

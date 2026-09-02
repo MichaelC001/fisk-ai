@@ -14,14 +14,21 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // heldTransport is a StreamingTransport whose reply set stops before its terminal
 // message until the test releases it, which is how a real worker behaves while it holds
 // a question open: nothing else arrives until somebody answers.
+//
+// The task client reaches it by asserting for the interface, so the assertion is what
+// makes a missing method a build failure rather than a run whose questions go nowhere.
+var _ StreamingTransport = (*heldTransport)(nil)
+
 type heldTransport struct {
-	prefix   func(req *Header) [][]byte
-	terminal func(req *Header) []byte
+	prefix   func(req *wire.Header) [][]byte
+	terminal func(req *wire.Header) []byte
 	release  chan struct{}
 
 	// refuse makes every answer fail as though the run had ended under the person
@@ -37,28 +44,29 @@ type heldTransport struct {
 	failAfter error
 
 	mu      sync.Mutex
-	answers []*ElicitReply
+	answers []*wire.ElicitReply
 	// requests is every request the client actually sent, so a spec can tell a prompt
 	// that was rewritten from one that was not, and a task that was never sent at all.
-	requests []*Request
+	requests []*wire.Request
 }
 
 // sentRequests returns what the client sent, which a spec reads while the loop may still
 // be running.
-func (t *heldTransport) sentRequests() []*Request {
+func (t *heldTransport) sentRequests() []*wire.Request {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	return append([]*Request(nil), t.requests...)
+	return append([]*wire.Request(nil), t.requests...)
 }
 
 func (t *heldTransport) RoundTrip(context.Context, string, RouteHint, []byte) ([]byte, error) {
 	return nil, nil
 }
-func (t *heldTransport) Serve(RouteHint, Handler) error        { return nil }
-func (t *heldTransport) Describe(string) []DescLine            { return nil }
-func (t *heldTransport) DescribeTasks(string, bool) []DescLine { return nil }
-func (t *heldTransport) Close() error                          { return nil }
+func (t *heldTransport) Serve(RouteHint, Handler) error                 { return nil }
+func (t *heldTransport) ServeReplySet(RouteHint, ReplySetHandler) error { return nil }
+func (t *heldTransport) Describe(string) []DescLine                     { return nil }
+func (t *heldTransport) DescribeTasks(string, bool) []DescLine          { return nil }
+func (t *heldTransport) Close() error                                   { return nil }
 
 func (t *heldTransport) WatchCancel(string, Handler) (TaskWatch, error) {
 	return nil, fmt.Errorf("the held transport does not serve")
@@ -73,13 +81,13 @@ func (t *heldTransport) SendCancel(context.Context, string, string, []byte) ([]b
 }
 
 func (t *heldTransport) Stream(_ context.Context, _ string, _ RouteHint, body []byte) (Reader, error) {
-	var hdr Header
+	var hdr wire.Header
 	err := json.Unmarshal(body, &hdr)
 	if err != nil {
 		return nil, err
 	}
 
-	var req Request
+	var req wire.Request
 	err = json.Unmarshal(body, &req)
 	if err != nil {
 		return nil, err
@@ -101,7 +109,7 @@ func (t *heldTransport) Stream(_ context.Context, _ string, _ RouteHint, body []
 // SendElicitReply records what the client answered, and answers the way a worker does:
 // an accepted ack, or a refusal for a question it is no longer holding.
 func (t *heldTransport) SendElicitReply(_ context.Context, _, _ string, body []byte) ([]byte, error) {
-	var reply ElicitReply
+	var reply wire.ElicitReply
 	err := json.Unmarshal(body, &reply)
 	if err != nil {
 		return nil, err
@@ -115,8 +123,8 @@ func (t *heldTransport) SendElicitReply(_ context.Context, _, _ string, body []b
 		return nil, ErrAgentUnavailable
 	}
 
-	ack := NewAck(true)
-	StampReply(&ack.Header, &reply.Header, "svc")
+	ack := wire.NewAck(true)
+	wire.StampReply(&ack.Header, &reply.Header, "svc")
 	ack.Sequence = 1
 
 	return encodeMessage(ack), nil
@@ -124,11 +132,11 @@ func (t *heldTransport) SendElicitReply(_ context.Context, _, _ string, body []b
 
 // sentAnswers returns what the client sent, which a spec reads while the loop may still
 // be running.
-func (t *heldTransport) sentAnswers() []*ElicitReply {
+func (t *heldTransport) sentAnswers() []*wire.ElicitReply {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	return append([]*ElicitReply(nil), t.answers...)
+	return append([]*wire.ElicitReply(nil), t.answers...)
 }
 
 // heldReader yields its prefix, then waits for the release before the terminal message,
@@ -179,10 +187,10 @@ func (r *heldReader) Close() error { return nil }
 // scriptedHandler renders into a slice and answers questions with what the spec set.
 type scriptedHandler struct {
 	mu     sync.Mutex
-	blocks []Block
+	blocks []wire.Block
 
 	// answer is what a question is answered with, after taking pause to decide.
-	answer func(*ElicitRequest) *ElicitReply
+	answer func(*wire.ElicitRequest) *wire.ElicitReply
 	pause  time.Duration
 	asked  chan struct{}
 
@@ -191,14 +199,14 @@ type scriptedHandler struct {
 	ignoreCtx bool
 }
 
-func (h *scriptedHandler) Block(b Block) {
+func (h *scriptedHandler) Block(b wire.Block) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.blocks = append(h.blocks, b)
 }
 
-func (h *scriptedHandler) Question(ctx context.Context, ask *ElicitRequest) (*ElicitReply, error) {
+func (h *scriptedHandler) Question(ctx context.Context, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
 	if h.asked != nil {
 		close(h.asked)
 	}
@@ -216,17 +224,17 @@ func (h *scriptedHandler) Question(ctx context.Context, ask *ElicitRequest) (*El
 	}
 
 	if h.answer == nil {
-		return NewNoOperatorReply(ask, "caller1"), nil
+		return wire.NewNoOperatorReply(ask, "caller1"), nil
 	}
 
 	return h.answer(ask), nil
 }
 
-func (h *scriptedHandler) rendered() []Block {
+func (h *scriptedHandler) rendered() []wire.Block {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	return append([]Block(nil), h.blocks...)
+	return append([]wire.Block(nil), h.blocks...)
 }
 
 var _ = Describe("RunTask", func() {
@@ -242,22 +250,22 @@ var _ = Describe("RunTask", func() {
 		transport = &heldTransport{release: make(chan struct{})}
 		handler = &scriptedHandler{asked: make(chan struct{})}
 
-		transport.prefix = func(req *Header) [][]byte {
+		transport.prefix = func(req *wire.Header) [][]byte {
 			seq := uint64(0)
-			stamp := func(hdr *Header) {
-				StampReply(hdr, req, "svc")
+			stamp := func(hdr *wire.Header) {
+				wire.StampReply(hdr, req, "svc")
 				seq++
 				hdr.Sequence = seq
 			}
 
-			ack := NewAck(true)
+			ack := wire.NewAck(true)
 			ack.ConversationToken = "tok-1"
 			stamp(&ack.Header)
 
-			ev := NewEvent(NewTextBlock("working on it"))
+			ev := wire.NewEvent(wire.NewTextBlock("working on it"))
 			stamp(&ev.Header)
 
-			ask := NewElicitRequest(ElicitApprove, "q-1")
+			ask := wire.NewElicitRequest(wire.ElicitApprove, "q-1")
 			ask.ToolUseID = "toolu_1"
 			ask.Command = "stream rm"
 			ask.Display = "stream rm ORDERS"
@@ -267,10 +275,10 @@ var _ = Describe("RunTask", func() {
 			return [][]byte{encodeMessage(ack), encodeMessage(ev), encodeMessage(ask)}
 		}
 
-		transport.terminal = func(req *Header) []byte {
-			res := NewResult(StopEndTurn)
+		transport.terminal = func(req *wire.Header) []byte {
+			res := wire.NewResult(wire.StopEndTurn)
 			res.Text = "removed"
-			StampReply(&res.Header, req, "svc")
+			wire.StampReply(&res.Header, req, "svc")
 			res.Sequence = 9
 
 			return encodeMessage(res)
@@ -282,12 +290,12 @@ var _ = Describe("RunTask", func() {
 	})
 
 	run := func(ctx context.Context) (*TaskOutcome, error) {
-		return client.RunTask(ctx, "svc", NewRequest("remove the stream"), handler)
+		return client.RunTask(ctx, "svc", wire.NewRequest("remove the stream"), handler)
 	}
 
 	It("Should render the blocks, answer the question and return the result", func() {
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		// The worker holds the set open until the answer reaches it, as a real one does.
@@ -306,11 +314,11 @@ var _ = Describe("RunTask", func() {
 
 		Expect(out.Ack.Accepted).To(BeTrue())
 		Expect(handler.rendered()).To(HaveLen(1))
-		Expect(handler.rendered()[0].Content().(TextBlock).Text).To(Equal("working on it"))
+		Expect(handler.rendered()[0].Content().(wire.TextBlock).Text).To(Equal("working on it"))
 
 		answers := transport.sentAnswers()
-		Expect(answers[len(answers)-1].Answer).To(Equal(AnswerChoice))
-		Expect(answers[len(answers)-1].Choice).To(Equal(ChoiceOnce))
+		Expect(answers[len(answers)-1].Answer).To(Equal(wire.AnswerChoice))
+		Expect(answers[len(answers)-1].Choice).To(Equal(wire.ChoiceOnce))
 	})
 
 	// The window is what the worker holds a question for, and it restarts when the
@@ -318,14 +326,14 @@ var _ = Describe("RunTask", func() {
 	// question after one window, however fast the person is after that.
 	It("Should say the question is still on screen while somebody decides", func() {
 		handler.pause = 250 * time.Millisecond
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		go func() {
 			Eventually(func() bool {
 				for _, a := range transport.sentAnswers() {
-					if a.Answer == AnswerChoice {
+					if a.Answer == wire.AnswerChoice {
 						return true
 					}
 				}
@@ -342,7 +350,7 @@ var _ = Describe("RunTask", func() {
 		// A 90ms window acks every 30ms, so a 250ms decision is held open by several.
 		var waiting int
 		for _, a := range transport.sentAnswers() {
-			if a.Answer == AnswerWaiting {
+			if a.Answer == wire.AnswerWaiting {
 				waiting++
 			}
 		}
@@ -351,15 +359,15 @@ var _ = Describe("RunTask", func() {
 		// And they stop: the answer is the last thing sent, since one arriving after it
 		// reaches a question the worker has finished with.
 		last := transport.sentAnswers()
-		Expect(last[len(last)-1].Answer).To(Equal(AnswerChoice))
+		Expect(last[len(last)-1].Answer).To(Equal(wire.AnswerChoice))
 	})
 
 	// A person who was away answers a question the run gave up on. What they typed is
 	// kept, in the shape a later request carries, rather than thrown away.
 	It("Should hold an answer the run would not take", func() {
 		transport.refuse = true
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		go func() {
@@ -372,8 +380,8 @@ var _ = Describe("RunTask", func() {
 
 		Expect(out.Unsent).To(HaveLen(1))
 		Expect(out.Unsent[0].ToolUseID).To(Equal("toolu_1"), "an answer sent later names the call, not the question")
-		Expect(out.Unsent[0].Kind).To(Equal(ElicitApprove))
-		Expect(out.Unsent[0].Choice).To(Equal(ChoiceOnce))
+		Expect(out.Unsent[0].Kind).To(Equal(wire.ElicitApprove))
+		Expect(out.Unsent[0].Choice).To(Equal(wire.ChoiceOnce))
 	})
 
 	// A no-operator reply is what a handler produces when it has nobody to ask, which
@@ -382,8 +390,8 @@ var _ = Describe("RunTask", func() {
 	// delivering it to a question already gone changes nothing either way.
 	It("Should not hold an answer nobody gave", func() {
 		transport.refuse = true
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewNoOperatorReply(ask, "caller1")
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewNoOperatorReply(ask, "caller1")
 		}
 
 		go func() {
@@ -402,8 +410,8 @@ var _ = Describe("RunTask", func() {
 	It("Should not end the turn while a question nobody has answered is on screen", func() {
 		client.idle = 200 * time.Millisecond
 		handler.pause = 500 * time.Millisecond
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		// The waiting acks are answers on the wire too, so the set is held open until the
@@ -411,7 +419,7 @@ var _ = Describe("RunTask", func() {
 		go func() {
 			Eventually(func() bool {
 				for _, a := range transport.sentAnswers() {
-					if a.Answer == AnswerChoice {
+					if a.Answer == wire.AnswerChoice {
 						return true
 					}
 				}
@@ -432,8 +440,8 @@ var _ = Describe("RunTask", func() {
 	It("Should give the agent a whole window from the answer, not what was left of one", func() {
 		client.idle = 400 * time.Millisecond
 		handler.pause = 300 * time.Millisecond
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		// The agent speaks again 250ms after the answer, which is past the window the
@@ -441,7 +449,7 @@ var _ = Describe("RunTask", func() {
 		go func() {
 			Eventually(func() bool {
 				for _, a := range transport.sentAnswers() {
-					if a.Answer == AnswerChoice {
+					if a.Answer == wire.AnswerChoice {
 						return true
 					}
 				}
@@ -464,8 +472,8 @@ var _ = Describe("RunTask", func() {
 	It("Should bound the read again once the answer has gone", func() {
 		client.idle = 150 * time.Millisecond
 		handler.pause = 250 * time.Millisecond
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		// The set is never released, so nothing follows the answer.
@@ -473,15 +481,15 @@ var _ = Describe("RunTask", func() {
 		Expect(err).To(MatchError(ErrAgentUnavailable))
 
 		answers := transport.sentAnswers()
-		Expect(answers[len(answers)-1].Answer).To(Equal(AnswerChoice))
+		Expect(answers[len(answers)-1].Answer).To(Equal(wire.AnswerChoice))
 	})
 
 	It("Should end the turn when the agent goes quiet with no question outstanding", func() {
 		client.idle = 150 * time.Millisecond
 
-		transport.prefix = func(req *Header) [][]byte {
-			ack := NewAck(true)
-			StampReply(&ack.Header, req, "svc")
+		transport.prefix = func(req *wire.Header) [][]byte {
+			ack := wire.NewAck(true)
+			wire.StampReply(&ack.Header, req, "svc")
 			ack.Sequence = 1
 
 			return [][]byte{encodeMessage(ack)}
@@ -497,8 +505,8 @@ var _ = Describe("RunTask", func() {
 	It("Should leave a question on screen when the set ends under it", func() {
 		transport.refuse = true
 		handler.pause = 200 * time.Millisecond
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		// The terminal message is already there, so the set ends while somebody is still
@@ -511,7 +519,7 @@ var _ = Describe("RunTask", func() {
 
 		Expect(out.Unsent).To(HaveLen(1))
 		Expect(out.Unsent[0].ToolUseID).To(Equal("toolu_1"))
-		Expect(out.Unsent[0].Choice).To(Equal(ChoiceOnce))
+		Expect(out.Unsent[0].Choice).To(Equal(wire.ChoiceOnce))
 	})
 
 	// The ending this item is for. A set that cannot be read is the error return, and the
@@ -521,8 +529,8 @@ var _ = Describe("RunTask", func() {
 		transport.refuse = true
 		transport.failAfter = fmt.Errorf("the subscription is gone")
 		handler.pause = 200 * time.Millisecond
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 
 		close(transport.release)
@@ -561,8 +569,8 @@ var _ = Describe("RunTask", func() {
 	// and it keeps the ending it has always had.
 	It("Should not hold the turn open for a handler with nobody to ask", func() {
 		transport.refuse = true
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewNoOperatorReply(ask, "caller1")
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewNoOperatorReply(ask, "caller1")
 		}
 
 		close(transport.release)
@@ -576,10 +584,10 @@ var _ = Describe("RunTask", func() {
 
 	// A terminal error is how a run ended, not a failure to read the set.
 	It("Should return an ending that was not an answer", func() {
-		transport.terminal = func(req *Header) []byte {
-			msg := NewError("the run suspended and left a resumable session")
+		transport.terminal = func(req *wire.Header) []byte {
+			msg := wire.NewError("the run suspended and left a resumable session")
 			msg.Code = "suspended"
-			StampReply(&msg.Header, req, "svc")
+			wire.StampReply(&msg.Header, req, "svc")
 			msg.Sequence = 9
 
 			return encodeMessage(msg)

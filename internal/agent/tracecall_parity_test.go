@@ -15,6 +15,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
@@ -90,8 +91,8 @@ var _ = Describe("runner.traceCall parity", func() {
 
 	It("Should trace a remote tool naming its agent, under the remote kind, and pass no dependencies", func() {
 		ev := &captureEvents{}
-		desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
-		rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
+		desc := wire.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
+		rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: wire.NewToolReply("ok", false)})
 		Expect(err).NotTo(HaveOccurred())
 		r := newRunner(ev, map[string]toolkit.Tool{"nats_info": rt})
 		use := llm.ToolUseBlock{ID: "t1", Name: "nats_info"}

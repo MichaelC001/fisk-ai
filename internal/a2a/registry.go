@@ -11,8 +11,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/choria-io/fisk-ai/internal/conns"
 )
 
 // TransportConfig configures a transport at construction. Identity is this agent's
@@ -25,6 +23,17 @@ type TransportConfig struct {
 	Identity string
 	Timeout  time.Duration
 	Options  json.RawMessage
+
+	// Resources carries whatever a binding needs to reach its substrate: the NATS
+	// transport reads a *conns.Provider out of it, an HTTP one would read a base URL
+	// and a client. It is untyped because this package names no substrate. A binding
+	// asserts for what it needs and returns an error when it is absent or of another
+	// type, so a wiring mistake fails at construction.
+	//
+	// It is untyped rather than a *conns.Provider so that a binding over HTTP or gRPC
+	// does not link NATS to satisfy a parameter it ignores. Anything the caller
+	// established here is borrowed: the caller closes it, and the Transport must not.
+	Resources any
 
 	// Logger receives what the binding notices about its own health. Nil discards it,
 	// since a library that reached for a default logger would write to an embedder's
@@ -42,15 +51,14 @@ type TransportConfig struct {
 	OnFault func(error)
 }
 
-// Factory constructs a Transport from the shared connection Provider and the
-// per-transport configuration. It is registered under a transport name with
-// RegisterTransport. The Provider is borrowed: the caller established it and closes
-// it, so the Transport must never close it.
+// Factory constructs a Transport from the per-transport configuration. It is
+// registered under a transport name with RegisterTransport.
 //
-// An implementation must decode its Options block strictly (reject unknown keys)
-// and surface a construction failure (bad options, a missing connection) as an
-// error rather than deferring it to the first call.
-type Factory func(p *conns.Provider, cfg TransportConfig) (Transport, error)
+// An implementation reads its substrate out of cfg.Resources, decodes its Options
+// block strictly (reject unknown keys) and surfaces a construction failure (bad
+// options, resources of the wrong type, a missing connection) as an error rather
+// than deferring it to the first call.
+type Factory func(cfg TransportConfig) (Transport, error)
 
 var (
 	registryMu sync.Mutex
@@ -83,6 +91,11 @@ func RegisterTransport(name string, factory Factory) {
 // Transports returns the names of every transport linked into this build, sorted.
 // A caller can show it so an operator sees which transports are available without
 // triggering an unknown-transport error.
+//
+// It is exported for a transport author, whose init registers a name: a test in the
+// transport's own package asserts that importing the package registered that name,
+// which is what internal/a2a/nats does. NewTransport lists the same names in its
+// unknown-transport error.
 func Transports() []string {
 	registryMu.Lock()
 	defer registryMu.Unlock()
@@ -96,12 +109,12 @@ func Transports() []string {
 	return names
 }
 
-// NewTransport constructs the named transport over the shared Provider. It returns
+// NewTransport constructs the named transport over the resources in cfg. It returns
 // an error for an unknown transport (most often because its package was not
 // imported into this build; the error lists the transports that are linked in) or
 // a construction failure, so an operator's mistake surfaces up front rather than on
 // the first call.
-func NewTransport(name string, p *conns.Provider, cfg TransportConfig) (Transport, error) {
+func NewTransport(name string, cfg TransportConfig) (Transport, error) {
 	registryMu.Lock()
 	factory, ok := registry[name]
 	registryMu.Unlock()
@@ -110,5 +123,5 @@ func NewTransport(name string, p *conns.Provider, cfg TransportConfig) (Transpor
 		return nil, fmt.Errorf("unknown a2a transport %q: known transports are %v", name, Transports())
 	}
 
-	return factory(p, cfg)
+	return factory(cfg)
 }

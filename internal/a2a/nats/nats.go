@@ -40,6 +40,7 @@ import (
 	"github.com/nats-io/nats.go/micro"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 )
 
@@ -92,20 +93,33 @@ func TaskSubject(identity string) string {
 // cancels addressed to it. The request id is part of the address, so NATS routes a
 // cancel to exactly the worker that can act on it and no sibling hears it at all.
 //
-// Both tokens must pass their own validity rule before this is used to subscribe or
-// to send; a token carrying a '.' or a '>' would shape a different subject.
+// This checks the identity with wire.ValidIdentityName and returns "" for one it
+// rejects, which nats.Conn refuses to
+// subscribe to or publish on: a name carrying a '.' or a '>' would otherwise shape a
+// subject somebody else listens on, and a caller that never checked the return would
+// address it. The request tag is passed through, since a caller describing what it
+// serves builds the pattern with "*" in that position; the transport calls
+// wire.ValidRequestID on a real one before it subscribes or sends.
 func CancelSubject(identity, request string) string {
+	if !wire.ValidIdentityName(identity) {
+		return ""
+	}
+
 	return fmt.Sprintf("%s.cancel.%s.%s", SubjectPrefix, identity, request)
 }
 
 // ElicitSubject is the subject the one process running the named task listens on for
 // the answers to its questions. The request id is part of the address for the same
-// reason a cancel's is, and the token rules are the same.
+// reason a cancel's is, and an invalid identity returns "" on the same terms.
 //
 // It is a subject of its own rather than a second use of the cancel subject, so an
 // operator can grant answering a question and stopping a task separately: an answer
 // can approve a confirmation-gated command, where a cancel only ends the run.
 func ElicitSubject(identity, request string) string {
+	if !wire.ValidIdentityName(identity) {
+		return ""
+	}
+
 	return fmt.Sprintf("%s.elicit.%s.%s", SubjectPrefix, identity, request)
 }
 
@@ -114,11 +128,16 @@ func ElicitSubject(identity, request string) string {
 // operator's mistake at construction.
 type options struct{}
 
-// Transport implements a2a.Transport over core NATS request-reply. It borrows the
+// transport implements a2a.Transport over core NATS request-reply. It borrows the
 // NATS connection from the shared Provider (it never closes it) and, on the serving
 // side, registers a micro service whose endpoints map the discovery and tool
 // subjects onto a2a handlers.
-type Transport struct {
+//
+// It is reached through the registry alone, as a2a.Transport: a caller holding a
+// *nats.Conn builds one by handing conns.New(conns.WithNats(nc)) to
+// a2a.NewTransport, and every method here answers one of a2a's own interfaces, so
+// naming the concrete type buys nothing.
+type transport struct {
 	nc       *nats.Conn
 	identity string
 	timeout  time.Duration
@@ -131,10 +150,16 @@ type Transport struct {
 	stopping atomic.Bool
 }
 
-// newTransport is the registered factory. It borrows the Provider's NATS
-// connection and returns an error when none was provisioned, so a misconfigured
-// wiring fails loudly rather than dereferencing a nil connection.
-func newTransport(p *conns.Provider, cfg a2a.TransportConfig) (a2a.Transport, error) {
+// newTransport is the registered factory. It reads a *conns.Provider out of
+// cfg.Resources and borrows its NATS connection, returning an error when the
+// resources are of another type or carry no connection, so a misconfigured wiring
+// fails loudly rather than dereferencing a nil connection.
+func newTransport(cfg a2a.TransportConfig) (a2a.Transport, error) {
+	p, ok := cfg.Resources.(*conns.Provider)
+	if !ok {
+		return nil, fmt.Errorf("a2a NATS transport requires a *conns.Provider in TransportConfig.Resources, got %T", cfg.Resources)
+	}
+
 	nc := p.Nats()
 	if nc == nil {
 		return nil, fmt.Errorf("a2a NATS transport requires a NATS connection but none was provisioned")
@@ -160,14 +185,14 @@ func newTransport(p *conns.Provider, cfg a2a.TransportConfig) (a2a.Transport, er
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	return &Transport{nc: nc, identity: cfg.Identity, timeout: timeout, log: log, onFault: cfg.OnFault}, nil
+	return &transport{nc: nc, identity: cfg.Identity, timeout: timeout, log: log, onFault: cfg.OnFault}, nil
 }
 
 // fault reports that this transport has stopped serving for a reason nobody asked
 // for. It logs whatever happens and calls back only when the stop was not this
 // process's own doing, since micro pushes its done handler from Stop and every drain
 // calls Stop.
-func (t *Transport) fault(err error) {
+func (t *transport) fault(err error) {
 	if t.stopping.Load() {
 		t.log.Debug("The a2a micro service stopped", "identity", t.identity)
 		return
@@ -189,7 +214,7 @@ func (t *Transport) fault(err error) {
 // an elapsed wait says how long this agent waited and which bound it was, since an
 // operator seeing only "unavailable" looks for a dead worker when the answer is that
 // the peer needed longer than the caller allows.
-func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
+func (t *transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHint, body []byte) ([]byte, error) {
 	subject, err := t.subject(agent, op)
 	if err != nil {
 		return nil, err
@@ -227,7 +252,24 @@ func (t *Transport) RoundTrip(ctx context.Context, agent string, op a2a.RouteHin
 // client's pending buffer, and past its limits micro stops the whole service, taking
 // every path of this identity off the air. The engine refuses a call it has no slot
 // for rather than holding the goroutine. The micro service is created on first use.
-func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
+func (t *transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
+	return t.serve(op, func(ctx context.Context, caller a2a.Caller, body []byte, r replier) {
+		h(ctx, caller, body, r)
+	})
+}
+
+// ServeReplySet registers h the way Serve does and hands it the same replier, which
+// carries the reply set methods as well. Every path of this transport can answer with
+// a set, so the two differ only in what the handler is given.
+func (t *transport) ServeReplySet(op a2a.RouteHint, h a2a.ReplySetHandler) error {
+	return t.serve(op, func(ctx context.Context, caller a2a.Caller, body []byte, r replier) {
+		h(ctx, caller, body, r)
+	})
+}
+
+// serve is the registration both serve methods share, differing only in which
+// interface they hand the replier over as.
+func (t *transport) serve(op a2a.RouteHint, h func(context.Context, a2a.Caller, []byte, replier)) error {
 	subject, err := t.subject(t.identity, op)
 	if err != nil {
 		return err
@@ -261,7 +303,7 @@ func (t *Transport) Serve(op a2a.RouteHint, h a2a.Handler) error {
 
 // Describe returns the discovery and tool subjects the identity is reached on, for
 // CLI display.
-func (t *Transport) Describe(identity string) []a2a.DescLine {
+func (t *transport) Describe(identity string) []a2a.DescLine {
 	return []a2a.DescLine{
 		{Label: "Discovery", Value: DiscoverySubject(identity)},
 		{Label: "Tools", Value: ToolSubject(identity)},
@@ -273,7 +315,7 @@ func (t *Transport) Describe(identity string) []a2a.DescLine {
 //
 // The stop is recorded before it is asked for, since micro pushes its done handler
 // from Stop and this is the one stop that is not a fault.
-func (t *Transport) Close() error {
+func (t *transport) Close() error {
 	t.stopping.Store(true)
 
 	if t.svc != nil {
@@ -286,7 +328,7 @@ func (t *Transport) Close() error {
 // service lazily registers the micro service that backs the serving endpoints. It
 // is created only when the transport is used to serve, so a client-only transport
 // registers nothing.
-func (t *Transport) service() (micro.Service, error) {
+func (t *transport) service() (micro.Service, error) {
 	if t.svc != nil {
 		return t.svc, nil
 	}
@@ -299,7 +341,7 @@ func (t *Transport) service() (micro.Service, error) {
 	svc, err := micro.AddService(t.nc, micro.Config{
 		Name:        t.identity,
 		Version:     microServiceVersion,
-		Description: "fisk-ai a2a tool server",
+		Description: "a2a protocol endpoint for this agent",
 		QueueGroup:  t.identity,
 		ErrorHandler: func(_ micro.Service, e *micro.NATSError) {
 			t.fault(fmt.Errorf("a2a service error on %q: %s", e.Subject, e.Description))
@@ -318,7 +360,7 @@ func (t *Transport) service() (micro.Service, error) {
 }
 
 // subject maps a route hint to the NATS subject for the given identity.
-func (t *Transport) subject(identity string, op a2a.RouteHint) (string, error) {
+func (t *transport) subject(identity string, op a2a.RouteHint) (string, error) {
 	switch op {
 	case a2a.OpDiscovery:
 		return DiscoverySubject(identity), nil
@@ -354,7 +396,7 @@ func endpointName(op a2a.RouteHint) (string, error) {
 // It names the per-task paths as well as the served ones, which subject() does not,
 // because those are the ones an operator most wants to subscribe to and neither is
 // registered as an endpoint.
-func (t *Transport) Subject(op a2a.RouteHint, agent, request string) string {
+func (t *transport) Subject(op a2a.RouteHint, agent, request string) string {
 	switch op {
 	case a2a.OpDiscovery:
 		return DiscoverySubject(agent)

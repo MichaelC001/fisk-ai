@@ -18,33 +18,39 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // stubTransport answers a tool request with a canned reply, or fails the round trip.
+// The client reaches Stream by asserting for ReplySetTransport, so the assertion is
+// what keeps a missing method a build failure rather than a silently round-tripped call.
+var _ ReplySetTransport = (*stubTransport)(nil)
+
 type stubTransport struct {
 	output  string
 	isError bool
 	err     error
 }
 
-func (t *stubTransport) Close() error                   { return nil }
-func (t *stubTransport) Serve(RouteHint, Handler) error { return nil }
-func (t *stubTransport) Describe(string) []DescLine     { return nil }
+func (t *stubTransport) Close() error                                   { return nil }
+func (t *stubTransport) Serve(RouteHint, Handler) error                 { return nil }
+func (t *stubTransport) ServeReplySet(RouteHint, ReplySetHandler) error { return nil }
+func (t *stubTransport) Describe(string) []DescLine                     { return nil }
 
 func (t *stubTransport) RoundTrip(_ context.Context, _ string, _ RouteHint, body []byte) ([]byte, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
 
-	var req ToolRequest
+	var req wire.ToolRequest
 	err := json.Unmarshal(body, &req)
 	if err != nil {
 		return nil, err
 	}
 
-	reply := NewToolReply(t.output, t.isError)
-	StampReply(&reply.Header, &req.Header, "peer")
+	reply := wire.NewToolReply(t.output, t.isError)
+	wire.StampReply(&reply.Header, &req.Header, "peer")
 
 	return json.Marshal(reply)
 }
@@ -57,18 +63,18 @@ func (t *stubTransport) Stream(_ context.Context, _ string, _ RouteHint, body []
 		return nil, t.err
 	}
 
-	var req ToolRequest
+	var req wire.ToolRequest
 	err := json.Unmarshal(body, &req)
 	if err != nil {
 		return nil, err
 	}
 
-	ack := NewAck(true)
-	StampReply(&ack.Header, &req.Header, "peer")
+	ack := wire.NewAck(true)
+	wire.StampReply(&ack.Header, &req.Header, "peer")
 	ack.Sequence = 1
 
-	reply := NewToolReply(t.output, t.isError)
-	StampReply(&reply.Header, &req.Header, "peer")
+	reply := wire.NewToolReply(t.output, t.isError)
+	wire.StampReply(&reply.Header, &req.Header, "peer")
 	reply.Sequence = 2
 
 	set := make([][]byte, 0, 2)
@@ -127,7 +133,7 @@ func attrOf(stub tracetest.SpanStub, key string) (string, bool) {
 var _ = Describe("Client telemetry", func() {
 	var ctx context.Context
 
-	invoke := func(t *stubTransport) (*telemetry.Provider, *tracetest.InMemoryExporter, *ToolReply, error) {
+	invoke := func(t *stubTransport) (*telemetry.Provider, *tracetest.InMemoryExporter, *wire.ToolReply, error) {
 		GinkgoHelper()
 
 		tel, exp := recordingTelemetry()

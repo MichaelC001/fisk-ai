@@ -10,6 +10,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // TaskStream is a caller's view of one task's reply set: an ack, then the events the
@@ -20,7 +22,7 @@ import (
 // It is not safe for concurrent use.
 type TaskStream struct {
 	reader    Reader
-	validator *Validator
+	validator *wire.Validator
 	request   string
 	seq       uint64
 	gaps      uint64
@@ -184,11 +186,11 @@ func (t *TaskStream) read(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// Next returns the next message of the set, one of *Ack, *Event, *Result or
-// *ErrorMessage, and io.EOF once the terminal message has been returned. A terminal
-// failure arrives as an *ErrorMessage value rather than as the error, so the error
-// return means the set could not be read at all.
-func (t *TaskStream) Next(ctx context.Context) (any, error) {
+// Next returns the next message of the set, one of *Ack, *Event, *ElicitRequest,
+// *Result or *ErrorMessage, and io.EOF once the terminal message has been returned. A
+// terminal failure arrives as an *ErrorMessage value rather than as the error, so the
+// error return means the set could not be read at all.
+func (t *TaskStream) Next(ctx context.Context) (wire.Message, error) {
 	if t.done {
 		return nil, io.EOF
 	}
@@ -200,8 +202,8 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 
 	t.wire.recv(OpTask, t.agent, t.request, body)
 
-	if len(body) > MaxMessageSize {
-		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
+	if len(body) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, wire.MaxMessageSize)
 	}
 
 	err = t.validator.Validate(body)
@@ -209,26 +211,21 @@ func (t *TaskStream) Next(ctx context.Context) (any, error) {
 		return nil, fmt.Errorf("invalid message in the reply set: %w", err)
 	}
 
-	msg, err := Decode(body)
+	msg, err := wire.Decode(body)
 	if err != nil {
 		return nil, err
 	}
 
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return nil, fmt.Errorf("%w: message carries no header", ErrProtocolMismatch)
-	}
-
-	t.countGap(hdr.Sequence)
+	t.countGap(msg.MessageHeader().Sequence)
 
 	switch m := msg.(type) {
-	case *Ack, *Event, *ElicitRequest:
+	case *wire.Ack, *wire.Event, *wire.ElicitRequest:
 		return m, nil
-	case *Result, *ErrorMessage:
+	case *wire.Result, *wire.ErrorMessage:
 		t.done = true
 		return m, nil
 	default:
-		return nil, fmt.Errorf("%w: %q does not belong in a reply set", ErrProtocolMismatch, hdr.Protocol)
+		return nil, fmt.Errorf("%w: %q does not belong in a reply set", wire.ErrProtocolMismatch, msg.MessageHeader().Protocol)
 	}
 }
 
@@ -263,7 +260,7 @@ func (t *TaskStream) countGap(seq uint64) {
 // It refuses a transport that cannot carry a reply set, which the client asserted
 // once when it was built, so the refusal names the binding rather than arriving as a
 // task that answers nothing.
-func (c *Client) Task(ctx context.Context, agent string, req *Request) (*TaskStream, error) {
+func (c *Client) Task(ctx context.Context, agent string, req *wire.Request) (*TaskStream, error) {
 	if c.stream == nil {
 		return nil, fmt.Errorf("%w: a task needs a streaming transport", ErrStreamUnsupported)
 	}
@@ -289,12 +286,12 @@ func (c *Client) Task(ctx context.Context, agent string, req *Request) (*TaskStr
 // answered. ErrAgentUnavailable means nothing is running that task there, which
 // separates a never-accepted, not-yet-started or already-finished task from one that
 // received the cancel.
-func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ack, error) {
+func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*wire.Ack, error) {
 	if c.stream == nil {
 		return nil, fmt.Errorf("%w: a cancel is addressed to a task", ErrStreamUnsupported)
 	}
-	if !ValidRequestID(request) {
-		return nil, fmt.Errorf("%w: %q is not a valid request id", ErrInvalidMessage, request)
+	if !wire.ValidRequestID(request) {
+		return nil, fmt.Errorf("%w: %q is not a valid request id", wire.ErrInvalidMessage, request)
 	}
 
 	// Fired before the cancel goes rather than after it is acked, so a caller learns
@@ -303,7 +300,7 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 	// through the reply set as usual.
 	c.hooks.fireCancelRequested(ctx, CancelRequestedInfo{Agent: agent, Request: request, Reason: reason})
 
-	msg := NewCancel()
+	msg := wire.NewCancel()
 	msg.Reason = reason
 	StampRequest(ctx, &msg.Header, c.sender, agent)
 
@@ -325,8 +322,8 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 
 	c.wire.recv(OpCancel, agent, request, reply)
 
-	if len(reply) > MaxMessageSize {
-		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
+	if len(reply) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrMessageTooLarge, wire.MaxMessageSize)
 	}
 
 	err = c.validator.Validate(reply)
@@ -334,10 +331,5 @@ func (c *Client) Cancel(ctx context.Context, agent, request, reason string) (*Ac
 		return nil, fmt.Errorf("invalid cancel reply: %w", err)
 	}
 
-	decoded, err := ExpectProtocol(reply, AckProtocol)
-	if err != nil {
-		return nil, err
-	}
-
-	return decoded.(*Ack), nil
+	return wire.ExpectProtocol[*wire.Ack](reply, wire.AckProtocol)
 }

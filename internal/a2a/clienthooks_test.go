@@ -13,6 +13,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // hookRecorder keeps the order the hooks fired in, and what the last of each carried.
@@ -121,22 +123,22 @@ var _ = Describe("ClientHooks", func() {
 		handler = &scriptedHandler{asked: make(chan struct{})}
 		rec = &hookRecorder{}
 
-		transport.prefix = func(req *Header) [][]byte {
+		transport.prefix = func(req *wire.Header) [][]byte {
 			seq := uint64(0)
-			stamp := func(hdr *Header) {
-				StampReply(hdr, req, "svc")
+			stamp := func(hdr *wire.Header) {
+				wire.StampReply(hdr, req, "svc")
 				seq++
 				hdr.Sequence = seq
 			}
 
-			ack := NewAck(true)
+			ack := wire.NewAck(true)
 			ack.ConversationToken = "tok-1"
 			stamp(&ack.Header)
 
-			ev := NewEvent(NewTextBlock("working on it"))
+			ev := wire.NewEvent(wire.NewTextBlock("working on it"))
 			stamp(&ev.Header)
 
-			ask := NewElicitRequest(ElicitApprove, "q-1")
+			ask := wire.NewElicitRequest(wire.ElicitApprove, "q-1")
 			ask.ToolUseID = "toolu_1"
 			ask.Command = "stream rm"
 			ask.Display = "stream rm ORDERS"
@@ -146,18 +148,18 @@ var _ = Describe("ClientHooks", func() {
 			return [][]byte{encodeMessage(ack), encodeMessage(ev), encodeMessage(ask)}
 		}
 
-		transport.terminal = func(req *Header) []byte {
-			res := NewResult(StopEndTurn)
+		transport.terminal = func(req *wire.Header) []byte {
+			res := wire.NewResult(wire.StopEndTurn)
 			res.Text = "removed"
-			res.Usage = &Usage{InputTokens: 12, OutputTokens: 3}
-			StampReply(&res.Header, req, "svc")
+			res.Usage = &wire.Usage{InputTokens: 12, OutputTokens: 3}
+			wire.StampReply(&res.Header, req, "svc")
 			res.Sequence = 9
 
 			return encodeMessage(res)
 		}
 
-		handler.answer = func(ask *ElicitRequest) *ElicitReply {
-			return NewApproveReply(ask, "caller1", ChoiceOnce)
+		handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+			return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 		}
 	})
 
@@ -183,7 +185,7 @@ var _ = Describe("ClientHooks", func() {
 		releaseOnAnswer()
 
 		client := newClient(rec.hooks(nil))
-		out, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+		out, err := client.RunTask(context.Background(), "svc", wire.NewRequest("remove the stream"), handler)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out.Result).ToNot(BeNil())
 
@@ -206,7 +208,7 @@ var _ = Describe("ClientHooks", func() {
 		releaseOnAnswer()
 
 		client := newClient(rec.hooks(nil))
-		req := NewRequest("remove the stream")
+		req := wire.NewRequest("remove the stream")
 		_, err := client.RunTask(context.Background(), "svc", req, handler)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -219,7 +221,7 @@ var _ = Describe("ClientHooks", func() {
 
 		Expect(rec.asked.QuestionID).To(Equal("q-1"))
 		Expect(rec.asked.ToolUseID).To(Equal("toolu_1"), "so a caller can pair it with the call it drew")
-		Expect(rec.asked.Kind).To(Equal(ElicitApprove))
+		Expect(rec.asked.Kind).To(Equal(wire.ElicitApprove))
 		Expect(rec.asked.Display).To(Equal("stream rm ORDERS"))
 
 		Expect(rec.answered.QuestionID).To(Equal("q-1"))
@@ -228,7 +230,7 @@ var _ = Describe("ClientHooks", func() {
 
 		Expect(rec.ended.Answered).To(BeTrue())
 		Expect(rec.ended.Code).To(BeEmpty(), "an answer has no terminal code")
-		Expect(rec.ended.StopReason).To(Equal(StopEndTurn))
+		Expect(rec.ended.StopReason).To(Equal(wire.StopEndTurn))
 		Expect(rec.ended.Usage).ToNot(BeNil())
 		Expect(rec.ended.Usage.InputTokens).To(Equal(int64(12)))
 	})
@@ -239,7 +241,7 @@ var _ = Describe("ClientHooks", func() {
 		releaseOnAnswer()
 
 		client := newClient(rec.hooks(nil))
-		req := NewRequest("and the other one")
+		req := wire.NewRequest("and the other one")
 		req.ConversationToken = "tok-existing"
 		_, err := client.RunTask(context.Background(), "svc", req, handler)
 		Expect(err).ToNot(HaveOccurred())
@@ -252,19 +254,19 @@ var _ = Describe("ClientHooks", func() {
 
 	Describe("A refused turn", func() {
 		BeforeEach(func() {
-			transport.prefix = func(req *Header) [][]byte {
-				ack := NewAck(false)
+			transport.prefix = func(req *wire.Header) [][]byte {
+				ack := wire.NewAck(false)
 				ack.Reason = "the agent is already running as much as it will at once"
-				StampReply(&ack.Header, req, "svc")
+				wire.StampReply(&ack.Header, req, "svc")
 				ack.Sequence = 1
 
 				return [][]byte{encodeMessage(ack)}
 			}
 
-			transport.terminal = func(req *Header) []byte {
-				msg := NewError("no free slot")
-				msg.Code = CodeCapacity
-				StampReply(&msg.Header, req, "svc")
+			transport.terminal = func(req *wire.Header) []byte {
+				msg := wire.NewError("no free slot")
+				msg.Code = wire.CodeCapacity
+				wire.StampReply(&msg.Header, req, "svc")
 				msg.Sequence = 2
 
 				return encodeMessage(msg)
@@ -275,7 +277,7 @@ var _ = Describe("ClientHooks", func() {
 
 		It("Should report the refusal and not an acceptance", func() {
 			client := newClient(rec.hooks(nil))
-			out, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+			out, err := client.RunTask(context.Background(), "svc", wire.NewRequest("remove the stream"), handler)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(out.Error).ToNot(BeNil())
 
@@ -287,7 +289,7 @@ var _ = Describe("ClientHooks", func() {
 			// The ending still reports, carrying the code that says whether another
 			// attempt is worth making.
 			Expect(rec.ended.Answered).To(BeFalse())
-			Expect(rec.ended.Code).To(Equal(CodeCapacity))
+			Expect(rec.ended.Code).To(Equal(wire.CodeCapacity))
 		})
 	})
 
@@ -297,12 +299,12 @@ var _ = Describe("ClientHooks", func() {
 		It("Should report the end of a set that stopped early", func() {
 			transport.endEarly = true
 			close(transport.release)
-			handler.answer = func(ask *ElicitRequest) *ElicitReply {
-				return NewApproveReply(ask, "caller1", ChoiceOnce)
+			handler.answer = func(ask *wire.ElicitRequest) *wire.ElicitReply {
+				return wire.NewApproveReply(ask, "caller1", wire.ChoiceOnce)
 			}
 
 			client := newClient(rec.hooks(nil))
-			out, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+			out, err := client.RunTask(context.Background(), "svc", wire.NewRequest("remove the stream"), handler)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(out.Result).To(BeNil())
 			Expect(out.Error).To(BeNil())
@@ -324,7 +326,7 @@ var _ = Describe("ClientHooks", func() {
 			}()
 
 			client := newClient(rec.hooks(nil))
-			_, err := client.RunTask(ctx, "svc", NewRequest("remove the stream"), handler)
+			_, err := client.RunTask(ctx, "svc", wire.NewRequest("remove the stream"), handler)
 			Expect(err).To(MatchError(context.Canceled))
 
 			// The question the run was waiting on closes first, and says nobody answered
@@ -346,12 +348,12 @@ var _ = Describe("ClientHooks", func() {
 		// The ack is what says a turn began, so a set that never got one has no turn to
 		// close and the caller learns what happened from the error return.
 		It("Should report nothing for a set that failed before the ack", func() {
-			transport.prefix = func(*Header) [][]byte { return nil }
+			transport.prefix = func(*wire.Header) [][]byte { return nil }
 			transport.endEarly = true
 			close(transport.release)
 
 			client := newClient(rec.hooks(nil))
-			_, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+			_, err := client.RunTask(context.Background(), "svc", wire.NewRequest("remove the stream"), handler)
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(rec.fired()).To(HaveExactElements("PromptSubmit"))
@@ -364,7 +366,7 @@ var _ = Describe("ClientHooks", func() {
 				return ClientPromptSubmitResult{Deny: true, DenyReason: "it carried a secret"}, nil
 			}))
 
-			out, err := client.RunTask(context.Background(), "svc", NewRequest("the password is hunter2"), handler)
+			out, err := client.RunTask(context.Background(), "svc", wire.NewRequest("the password is hunter2"), handler)
 			Expect(out).To(BeNil())
 			Expect(err).To(MatchError(ErrPromptDenied))
 			Expect(err).To(MatchError(ContainSubstring("it carried a secret")))
@@ -380,7 +382,7 @@ var _ = Describe("ClientHooks", func() {
 				return ClientPromptSubmitResult{Prompt: "the password is [redacted]"}, nil
 			}))
 
-			_, err := client.RunTask(context.Background(), "svc", NewRequest("the password is hunter2"), handler)
+			_, err := client.RunTask(context.Background(), "svc", wire.NewRequest("the password is hunter2"), handler)
 			Expect(err).ToNot(HaveOccurred())
 
 			sent := transport.sentRequests()
@@ -394,7 +396,7 @@ var _ = Describe("ClientHooks", func() {
 				return ClientPromptSubmitResult{}, fmt.Errorf("the policy service is down")
 			}))
 
-			_, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+			_, err := client.RunTask(context.Background(), "svc", wire.NewRequest("remove the stream"), handler)
 			Expect(err).To(MatchError(ContainSubstring("PromptSubmit hook")))
 			Expect(err).To(MatchError(ContainSubstring("policy service is down")))
 			Expect(transport.sentRequests()).To(BeEmpty())
@@ -406,7 +408,7 @@ var _ = Describe("ClientHooks", func() {
 			releaseOnAnswer()
 
 			client := newClient(rec.hooks(nil))
-			_, err := client.RunTask(context.Background(), "svc", NewResume("tok-existing"), handler)
+			_, err := client.RunTask(context.Background(), "svc", wire.NewResume("tok-existing"), handler)
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(rec.fired()).ToNot(ContainElement("PromptSubmit"))
@@ -422,7 +424,7 @@ var _ = Describe("ClientHooks", func() {
 		client, err := NewClient(transport, "caller1")
 		Expect(err).ToNot(HaveOccurred())
 
-		out, err := client.RunTask(context.Background(), "svc", NewRequest("remove the stream"), handler)
+		out, err := client.RunTask(context.Background(), "svc", wire.NewRequest("remove the stream"), handler)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out.Result).ToNot(BeNil())
 	})

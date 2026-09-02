@@ -43,7 +43,7 @@ var _ = Describe("Tools", func() {
 			Dialer:   servers.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 		return sessions
 	}
@@ -69,7 +69,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports).To(HaveLen(1))
 			Expect(imports[0].Server.Name).To(Equal("docs"))
@@ -91,7 +91,7 @@ var _ = Describe("Tools", func() {
 				Include: &config.ToolFilter{Tools: []string{"^(read|search)$"}},
 			})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports[0].Discovered).To(Equal(3))
 			Expect(imports[0].Kept).To(HaveLen(2))
@@ -112,7 +112,7 @@ var _ = Describe("Tools", func() {
 				Exclude: &config.ToolFilter{Tools: []string{"^read$"}},
 			})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imported(imports[0])).To(Equal([]string{"docs_search"}))
 		})
@@ -126,7 +126,7 @@ var _ = Describe("Tools", func() {
 				config.MCPServer{Name: "issues", Alias: "iss", Command: "unused"},
 			)
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports).To(HaveLen(2))
 			Expect(imported(imports[0])).To(Equal([]string{"docs_search"}))
@@ -141,7 +141,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -157,7 +157,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -182,7 +182,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -207,7 +207,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -232,7 +232,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -248,7 +248,7 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(map[string]bool{"docs_search": true}, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(map[string]bool{"docs_search": true}, nil))
 			Expect(err).To(MatchError(ContainSubstring(`imported mcp tool name collision: "docs_search" (mcp server "docs")`)))
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -266,7 +266,7 @@ var _ = Describe("Tools", func() {
 
 			remote := map[string]*functool.Tool{"docs_search": localTool("docs_search")}
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, remote))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, remote))
 			Expect(err).To(MatchError(ContainSubstring(`imported mcp tool name collision: "docs_search" (mcp server "docs")`)))
 			Expect(imported(imports[0])).To(Equal([]string{"docs_read"}))
 			Expect(imports[0].Skipped).To(HaveLen(1))
@@ -276,16 +276,16 @@ var _ = Describe("Tools", func() {
 		It("should refuse claimed names that were not built with NewClaimedNames", func() {
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, ClaimedNames{})
+			imports, err := importServers(ctx, sessions, ClaimedNames{})
 			Expect(err).To(MatchError(ContainSubstring("must be built with mcpclient.NewClaimedNames")))
 			Expect(imports).To(BeNil())
 		})
 
 		It("should record the failure of a server it cannot list and leave the others alone", func() {
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
-			Expect(sessions.Close()).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports).To(HaveLen(1))
 			Expect(imports[0].Err).To(MatchError(ContainSubstring("are closed")))
@@ -302,7 +302,7 @@ var _ = Describe("Tools", func() {
 				config.MCPServer{Name: "docs", Command: "unused"},
 			)
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports).To(HaveLen(2))
 			Expect(imports[0].Err).To(MatchError(ContainSubstring(`listing the tools of mcp server "slow": it did not answer within 250ms`)))
@@ -320,7 +320,7 @@ var _ = Describe("Tools", func() {
 				Include: &config.ToolFilter{Tools: []string{"^(read"}},
 			})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports[0].Err).To(MatchError(ContainSubstring(`invalid mcp tool filter pattern "^(read"`)))
 			Expect(imports[0].RTT).To(BeZero())
@@ -331,7 +331,7 @@ var _ = Describe("Tools", func() {
 		})
 	})
 
-	Describe("ImportForRun", func() {
+	Describe("Import", func() {
 		It("should return the tools in server order and keyed by name", func() {
 			servers.tools["docs"] = []fakeTool{textTool("search", "Searches the pages", "found")}
 			servers.tools["issues"] = []fakeTool{textTool("open", "Opens an issue", "opened")}
@@ -341,23 +341,23 @@ var _ = Describe("Tools", func() {
 				config.MCPServer{Name: "issues", Command: "unused"},
 			)
 
-			tools, byName, imports, err := ImportForRun(ctx, sessions, NewClaimedNames(nil, nil))
+			imported, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
-			Expect(imports).To(HaveLen(2))
-			Expect(tools).To(HaveLen(2))
-			Expect(tools[0].Name()).To(Equal("docs_search"))
-			Expect(tools[1].Name()).To(Equal("issues_open"))
-			Expect(byName).To(HaveKey("docs_search"))
-			Expect(byName).To(HaveKey("issues_open"))
+			Expect(imported.Servers).To(HaveLen(2))
+			Expect(imported.Tools).To(HaveLen(2))
+			Expect(imported.Tools[0].Name()).To(Equal("docs_search"))
+			Expect(imported.Tools[1].Name()).To(Equal("issues_open"))
+			Expect(imported.ByName).To(HaveKey("docs_search"))
+			Expect(imported.ByName).To(HaveKey("issues_open"))
 		})
 
 		It("should fail on a server it cannot list", func() {
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
-			Expect(sessions.Close()).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
 
-			_, _, imports, err := ImportForRun(ctx, sessions, NewClaimedNames(nil, nil))
+			imported, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).To(MatchError(ContainSubstring(`importing tools from mcp server "docs"`)))
-			Expect(imports).To(HaveLen(1))
+			Expect(imported.Servers).To(HaveLen(1))
 		})
 
 		It("should fail on a name collision", func() {
@@ -365,13 +365,13 @@ var _ = Describe("Tools", func() {
 
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			_, _, imports, err := ImportForRun(ctx, sessions, NewClaimedNames(map[string]bool{"docs_search": true}, nil))
+			imported, err := Import(ctx, sessions, NewClaimedNames(map[string]bool{"docs_search": true}, nil))
 			Expect(err).To(MatchError(ContainSubstring("imported mcp tool name collision")))
-			Expect(imports[0].Skipped).To(HaveLen(1))
+			Expect(imported.Servers[0].Skipped).To(HaveLen(1))
 		})
 	})
 
-	Describe("DiscoverForInfo", func() {
+	Describe("Inspect", func() {
 		// The sessions this opens are its own and nobody else can close them: it returns
 		// outcomes rather than a Sessions, so a session it left open would hold a stdio
 		// child for the life of the command. The server side of each in-memory pair is
@@ -381,7 +381,7 @@ var _ = Describe("Tools", func() {
 			servers.tools["docs"] = []fakeTool{textTool("search", "Searches the pages", "found")}
 			servers.tools["issues"] = []fakeTool{textTool("open", "Opens an issue", "opened")}
 
-			imports := DiscoverForInfo(ctx, Options{
+			imports := Inspect(ctx, Options{
 				Servers:  []config.MCPServer{{Name: "docs", Command: "unused"}, {Name: "issues", Command: "unused"}},
 				Identity: "fisk-test",
 				Version:  "0.0.1",
@@ -400,7 +400,7 @@ var _ = Describe("Tools", func() {
 		})
 	})
 
-	Describe("NewTool", func() {
+	Describe("newTool", func() {
 		// built imports one server and returns the single tool it built, for the specs
 		// that drive a call through the real protocol.
 		built := func(tool fakeTool) *functool.Tool {
@@ -409,7 +409,7 @@ var _ = Describe("Tools", func() {
 			servers.tools["docs"] = []fakeTool{tool}
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(imports[0].Skipped).To(BeEmpty())
 			Expect(imports[0].Tools).To(HaveLen(1))
@@ -526,11 +526,11 @@ var _ = Describe("Tools", func() {
 			servers.tools["docs"] = []fakeTool{textTool("search", "Searches the pages", "found")}
 			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
 
-			imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+			imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 			Expect(err).ToNot(HaveOccurred())
 			tool := imports[0].Tools[0]
 
-			Expect(sessions.Close()).To(Succeed())
+			Expect(sessions.Close(ctx)).To(Succeed())
 
 			_, err = tool.Execute(ctx, json.RawMessage(`{}`), toolkit.ExecDeps{})
 			Expect(err).To(MatchError(ContainSubstring(`calling tool "search" on mcp server "docs"`)))
@@ -561,7 +561,7 @@ var _ = Describe("Tools", func() {
 		})
 
 		It("should resolve a server that contradicts itself rather than dropping its tool", func() {
-			tool, err := NewTool("docs_wipe", "docs", &mcp.Tool{
+			tool, err := newTool("docs_wipe", "docs", &mcp.Tool{
 				Name:        "wipe",
 				Description: "Wipes the index",
 				InputSchema: map[string]any{"type": "object"},
@@ -575,20 +575,20 @@ var _ = Describe("Tools", func() {
 		})
 
 		It("should refuse a descriptor with no usable schema or no description", func() {
-			_, err := NewTool("docs_search", "docs", &mcp.Tool{Name: "search", Description: "Searches"}, nil)
+			_, err := newTool("docs_search", "docs", &mcp.Tool{Name: "search", Description: "Searches"}, nil)
 			Expect(err).To(MatchError(`tool "search" from mcp server "docs" advertises no usable input schema; it must be a JSON object`))
 
-			_, err = NewTool("docs_search", "docs", &mcp.Tool{Name: "search", InputSchema: map[string]any{"type": "object"}}, nil)
+			_, err = newTool("docs_search", "docs", &mcp.Tool{Name: "search", InputSchema: map[string]any{"type": "object"}}, nil)
 			Expect(err).To(MatchError(`tool "search" from mcp server "docs" advertises no description`))
 		})
 
 		It("should refuse a descriptor with no name", func() {
-			_, err := NewTool("docs_", "docs", &mcp.Tool{Description: "Searches", InputSchema: map[string]any{"type": "object"}}, nil)
+			_, err := newTool("docs_", "docs", &mcp.Tool{Description: "Searches", InputSchema: map[string]any{"type": "object"}}, nil)
 			Expect(err).To(MatchError(`mcp server "docs" advertises a tool with no name`))
 		})
 
 		It("should accept a root schema that declares no type and refuse one that declares another", func() {
-			tool, err := NewTool("docs_search", "docs", &mcp.Tool{
+			tool, err := newTool("docs_search", "docs", &mcp.Tool{
 				Name:        "search",
 				Description: "Searches",
 				InputSchema: map[string]any{"properties": map[string]any{"query": map[string]any{"type": "string"}}},
@@ -596,7 +596,7 @@ var _ = Describe("Tools", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(tool.InputSchema()).ToNot(HaveKey("type"))
 
-			_, err = NewTool("docs_search", "docs", &mcp.Tool{
+			_, err = newTool("docs_search", "docs", &mcp.Tool{
 				Name:        "search",
 				Description: "Searches",
 				InputSchema: map[string]any{"type": []any{"object", "null"}},
@@ -605,33 +605,33 @@ var _ = Describe("Tools", func() {
 		})
 	})
 
-	Describe("BehaviorFromAnnotations", func() {
+	Describe("behaviorFromAnnotations", func() {
 		It("should declare nothing for a server that declared nothing", func() {
-			Expect(BehaviorFromAnnotations(nil)).To(Equal(toolkit.Behavior{}))
+			Expect(behaviorFromAnnotations(nil)).To(Equal(toolkit.Behavior{}))
 		})
 
 		It("should read an absent read-only or idempotent hint as unset rather than false", func() {
 			// Both are plain bools on the wire, so a server that said nothing and one that
 			// said false are the same bytes. HintFalse would be an assertion the server
 			// never made.
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{})).To(Equal(toolkit.Behavior{}))
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: false})).To(Equal(toolkit.Behavior{}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{})).To(Equal(toolkit.Behavior{}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: false})).To(Equal(toolkit.Behavior{}))
 		})
 
 		It("should carry a declared read-only or idempotent hint", func() {
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{ReadOnlyHint: true})).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue}))
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{IdempotentHint: true})).To(Equal(toolkit.Behavior{Idempotent: toolkit.HintTrue}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{ReadOnlyHint: true})).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{IdempotentHint: true})).To(Equal(toolkit.Behavior{Idempotent: toolkit.HintTrue}))
 		})
 
 		It("should carry all three states of the destructive and open-world hints", func() {
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{DestructiveHint: boolPtr(true)})).To(Equal(toolkit.Behavior{Destructive: toolkit.HintTrue}))
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{DestructiveHint: boolPtr(false)})).To(Equal(toolkit.Behavior{Destructive: toolkit.HintFalse}))
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{OpenWorldHint: boolPtr(true)})).To(Equal(toolkit.Behavior{OpenWorld: toolkit.HintTrue}))
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{OpenWorldHint: boolPtr(false)})).To(Equal(toolkit.Behavior{OpenWorld: toolkit.HintFalse}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{DestructiveHint: boolPtr(true)})).To(Equal(toolkit.Behavior{Destructive: toolkit.HintTrue}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{DestructiveHint: boolPtr(false)})).To(Equal(toolkit.Behavior{Destructive: toolkit.HintFalse}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{OpenWorldHint: boolPtr(true)})).To(Equal(toolkit.Behavior{OpenWorld: toolkit.HintTrue}))
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{OpenWorldHint: boolPtr(false)})).To(Equal(toolkit.Behavior{OpenWorld: toolkit.HintFalse}))
 		})
 
 		It("should return the server's claim unresolved", func() {
-			Expect(BehaviorFromAnnotations(&mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(true)})).To(Equal(toolkit.Behavior{
+			Expect(behaviorFromAnnotations(&mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(true)})).To(Equal(toolkit.Behavior{
 				ReadOnly:    toolkit.HintTrue,
 				Destructive: toolkit.HintTrue,
 			}))

@@ -7,6 +7,8 @@ package a2a
 import (
 	"encoding/json"
 	"fmt"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // ReplyStream numbers and sends the messages of one task's reply set.
@@ -23,7 +25,7 @@ import (
 // concurrent use. It is not used after a terminal message.
 type ReplyStream struct {
 	reply  StreamReplier
-	req    Header
+	req    wire.Header
 	sender string
 	seq    uint64
 }
@@ -31,7 +33,7 @@ type ReplyStream struct {
 // NewReplyStream numbers a reply set answering req, sending through reply and
 // stamping sender as the message sender. It is a value the caller owns rather than
 // registered anywhere, so a run that ends takes its stream with it.
-func NewReplyStream(reply StreamReplier, req *Header, sender string) *ReplyStream {
+func NewReplyStream(reply StreamReplier, req *wire.Header, sender string) *ReplyStream {
 	return &ReplyStream{reply: reply, req: *req, sender: sender}
 }
 
@@ -45,12 +47,12 @@ func NewReplyStream(reply StreamReplier, req *Header, sender string) *ReplyStrea
 // It takes the message rather than its fields, as Result and Error do, so a surface
 // that has something to say on an ack says it here rather than through a parameter
 // every other caller passes empty.
-func (s *ReplyStream) Ack(ack *Ack) error {
+func (s *ReplyStream) Ack(ack *wire.Ack) error {
 	if s.seq != 0 {
-		return fmt.Errorf("%w: the ack is the first message of a reply set", ErrInvalidMessage)
+		return fmt.Errorf("%w: the ack is the first message of a reply set", wire.ErrInvalidMessage)
 	}
 
-	ack.Protocol = AckProtocol
+	ack.Protocol = wire.AckProtocol
 
 	data, err := s.encode(&ack.Header, ack)
 	if err != nil {
@@ -68,8 +70,8 @@ func (s *ReplyStream) Ack(ack *Ack) error {
 }
 
 // Event publishes one content block of the run as it is produced.
-func (s *ReplyStream) Event(block Block) error {
-	ev := NewEvent(block)
+func (s *ReplyStream) Event(block wire.Block) error {
+	ev := wire.NewEvent(block)
 
 	return s.send(&ev.Header, ev, false)
 }
@@ -77,16 +79,16 @@ func (s *ReplyStream) Event(block Block) error {
 // Result publishes the terminal success message and ends the set. A failure to send
 // it is returned rather than logged, since a caller left without a terminal message
 // holds a stream that never ends.
-func (s *ReplyStream) Result(res *Result) error {
-	res.Protocol = ResultProtocol
+func (s *ReplyStream) Result(res *wire.Result) error {
+	res.Protocol = wire.ResultProtocol
 
 	return s.send(&res.Header, res, true)
 }
 
 // Error publishes the terminal failure message and ends the set. It carries the same
 // obligation as Result: the caller is waiting for one of the two.
-func (s *ReplyStream) Error(msg *ErrorMessage) error {
-	msg.Protocol = ErrorProtocol
+func (s *ReplyStream) Error(msg *wire.ErrorMessage) error {
+	msg.Protocol = wire.ErrorProtocol
 
 	return s.send(&msg.Header, msg, true)
 }
@@ -95,8 +97,8 @@ func (s *ReplyStream) Error(msg *ErrorMessage) error {
 // call's reply set ends with the tool's own outcome rather than with a Result, which
 // belongs to a run: the two sets share an ack and their events and differ in what
 // closes them.
-func (s *ReplyStream) ToolReply(reply *ToolReply) error {
-	reply.Protocol = ToolReplyProtocol
+func (s *ReplyStream) ToolReply(reply *wire.ToolReply) error {
+	reply.Protocol = wire.ToolReplyProtocol
 
 	return s.send(&reply.Header, reply, true)
 }
@@ -107,10 +109,10 @@ func (s *ReplyStream) ToolReply(reply *ToolReply) error {
 //
 // The question's kind stamps its own id, so a question this build does not name is refused
 // here rather than published under a family prefix that names nothing.
-func (s *ReplyStream) Elicit(ask *ElicitRequest) error {
-	protocol, ok := ElicitRequestProtocolFor(ask.Kind)
+func (s *ReplyStream) Elicit(ask *wire.ElicitRequest) error {
+	protocol, ok := wire.ElicitRequestProtocolFor(ask.Kind)
 	if !ok {
-		return fmt.Errorf("%w: %q is not a question this agent asks", ErrInvalidMessage, ask.Kind)
+		return fmt.Errorf("%w: %q is not a question this agent asks", wire.ErrInvalidMessage, ask.Kind)
 	}
 
 	ask.Protocol = protocol
@@ -126,7 +128,7 @@ func (s *ReplyStream) Sequence() uint64 { return s.seq }
 // has gone out. A message the sink refused was never sent, so reusing its number
 // keeps the set gap-free and stops a gap describing a message the sender chose not
 // to send.
-func (s *ReplyStream) send(hdr *Header, msg any, final bool) error {
+func (s *ReplyStream) send(hdr *wire.Header, msg any, final bool) error {
 	data, err := s.encode(hdr, msg)
 	if err != nil {
 		return err
@@ -146,8 +148,8 @@ func (s *ReplyStream) send(hdr *Header, msg any, final bool) error {
 // sequence it would occupy, and marshals it. The encoded body is checked against the
 // size cap before it reaches the sink, since an event carrying a large tool result
 // can exceed both it and the transport's own payload limit.
-func (s *ReplyStream) encode(hdr *Header, msg any) ([]byte, error) {
-	StampReply(hdr, &s.req, s.sender)
+func (s *ReplyStream) encode(hdr *wire.Header, msg any) ([]byte, error) {
+	wire.StampReply(hdr, &s.req, s.sender)
 	hdr.Sequence = s.seq + 1
 
 	data, err := json.Marshal(msg)
@@ -155,8 +157,8 @@ func (s *ReplyStream) encode(hdr *Header, msg any) ([]byte, error) {
 		return nil, fmt.Errorf("marshaling %s: %w", hdr.Protocol, err)
 	}
 
-	if len(data) > MaxMessageSize {
-		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit", ErrMessageTooLarge, hdr.Protocol, len(data), MaxMessageSize)
+	if len(data) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit", ErrMessageTooLarge, hdr.Protocol, len(data), wire.MaxMessageSize)
 	}
 
 	return data, nil
@@ -168,7 +170,7 @@ func (s *ReplyStream) encode(hdr *Header, msg any) ([]byte, error) {
 // The refusal is narrow because Request.Stream is a *bool: a request that explicitly
 // asks to stream is refused, and one that says nothing is answered terminal-only,
 // which is what a caller who did not ask for a stream gets anyway.
-func AcceptStream(transport Transport, req *Request) (bool, error) {
+func AcceptStream(transport Transport, req *wire.Request) (bool, error) {
 	_, streams := transport.(StreamingTransport)
 
 	switch {

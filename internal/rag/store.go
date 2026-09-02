@@ -51,9 +51,13 @@ const (
 	// this policy differs from runstate.Version, where the journal is the only copy
 	// of the run and a bump owes a converter.
 	//
-	// It is 1 because it always has been in anything anyone ran: it counted drafts
-	// of a format that was never released.
-	formatVersion = 1
+	// It is 3, and 2 is skipped. A build that wrote 2 shipped, so indexes pinned at 2
+	// exist; a build that then pinned 1 read them as later than itself and refused
+	// every command against them. Reusing 2 would leave two layouts claiming one
+	// generation with nothing to tell them apart, so the pin moves past both. This
+	// build then refuses an index at 1 or 2 as an earlier generation, and the operator
+	// discards and rebuilds it.
+	formatVersion = 3
 
 	// dbFileName is the SQLite index file inside the store directory.
 	dbFileName = "knowledge.db"
@@ -91,7 +95,7 @@ const idleReaderTimeout = 30 * time.Second
 var (
 	// ErrIndexNotBuilt reports that no index file exists yet. It is a soft state,
 	// not a failure: the agent read path returns it so a missing store never bricks
-	// startup, and the CLI turns it into "run: fisk-ai knowledge index".
+	// startup, and a CLI in front of it turns it into the command that builds one.
 	ErrIndexNotBuilt = errors.New("knowledge index has not been built")
 
 	// ErrCitationNotFound reports that a citation (<relpath>#<ordinal>) names no
@@ -117,16 +121,16 @@ var (
 	// still agree, so this is the only check that catches the substitution.
 	ErrModelMismatch = errors.New("embeddings server served a different model than the one configured")
 
-	// ErrFormatTooNew reports an index written by a newer fisk-ai than this one.
+	// ErrFormatTooNew reports an index written at a later format generation than this
+	// build supports.
 	ErrFormatTooNew = errors.New("knowledge index format is newer than this build supports")
 
-	// ErrFormatTooOld reports an index written by an older fisk-ai. It is the mirror
-	// of ErrFormatTooNew and the fix is the opposite one: nothing migrates such an
-	// index today, so it is discarded and rebuilt from the documents rather than
-	// upgraded. Every open refuses it, and 'knowledge reset --force' is the one
-	// command that can act on it, since an index nothing can open has no rows to
-	// clear.
-	ErrFormatTooOld = errors.New("knowledge index was built by an older fisk-ai and cannot be read by this build")
+	// ErrFormatTooOld reports an index written at an earlier format generation.
+	// Nothing migrates such an index today, so it is discarded and rebuilt from the
+	// documents rather than upgraded. Every open refuses it, and Destroy is the one
+	// call that can act on it, since an index nothing can open has no rows to clear.
+	// The same holds for ErrFormatTooNew where no build reading that format exists.
+	ErrFormatTooOld = errors.New("knowledge index was built at an earlier format generation and cannot be read by this build")
 
 	// ErrLocked reports that another knowledge index writer holds the advisory lock.
 	ErrLocked = errors.New("another knowledge index is already running")
@@ -526,8 +530,9 @@ var baseSchemaObjects = []string{
 // there is no schema yet.
 type indexCheck struct {
 	// tooNew reports a format newer than this build. It is refused everywhere the
-	// older one is, but the fix is the opposite: upgrade fisk-ai, since discarding
-	// it would throw away an index a newer binary can still read.
+	// older one is, and a build that reads the format is the fix where one exists.
+	// Lowering the format pin puts every index in the field here with no such build to
+	// reach for, so discarding is the other route and both are offered.
 	tooNew int
 	// tooOld describes why the index predates this build, or is empty when it does
 	// not, phrased to complete "cannot be read because ...".
@@ -563,10 +568,8 @@ func (s *Store) checkIndexFormat(ctx context.Context) (indexCheck, error) {
 	case m.FormatVersion > formatVersion:
 		return indexCheck{tooNew: m.FormatVersion}, nil
 
-	// No value satisfies this while formatVersion is 1, since 0 means an unpinned
-	// manifest rather than an older generation. The first bump is what gives an index
-	// a generation to be behind, and the shape checks below catch an old layout in the
-	// meantime.
+	// Zero is an unpinned manifest rather than an older generation, so it falls to the
+	// shape checks below. Everything an earlier build pinned reaches here.
 	case m.FormatVersion > 0 && m.FormatVersion < formatVersion:
 		return indexCheck{tooOld: fmt.Sprintf("its format_version is %d and this build writes %d", m.FormatVersion, formatVersion)}, nil
 
@@ -619,10 +622,11 @@ func (s *Store) missingSchemaObjects(ctx context.Context) ([]string, error) {
 	return missing, nil
 }
 
-// formatTooNewError renders the refusal for an index from a newer build, whose fix
-// is to run the binary that wrote it rather than to discard anything.
+// formatTooNewError renders the refusal for an index written at a later format
+// generation than this build reads. It carries both version numbers, which is what a
+// caller needs to tell an index from a newer build apart from a pin that was lowered.
 func formatTooNewError(pinned int) error {
-	return fmt.Errorf("%w: index format_version=%d, this build supports up to %d; upgrade fisk-ai", ErrFormatTooNew, pinned, formatVersion)
+	return fmt.Errorf("%w: index format_version=%d, this build supports up to %d", ErrFormatTooNew, pinned, formatVersion)
 }
 
 // refuseUnusableIndex fails when the open database is from any format generation
@@ -640,7 +644,7 @@ func (s *Store) refuseUnusableIndex(ctx context.Context) error {
 	case check.tooNew > 0:
 		return formatTooNewError(check.tooNew)
 	case check.tooOld != "":
-		return fmt.Errorf("%w: the index at %q cannot be read because %s; discard it with 'fisk-ai knowledge reset --force' and rebuild it with 'fisk-ai knowledge index'", ErrFormatTooOld, s.dir, check.tooOld)
+		return fmt.Errorf("%w: the index at %q cannot be read because %s; nothing migrates it, so it has to be discarded and rebuilt from the documents", ErrFormatTooOld, s.dbPath, check.tooOld)
 	}
 
 	return nil
@@ -950,11 +954,11 @@ func (s *Store) validateReadMeta(ctx context.Context) error {
 	// model; refuse and point at a reindex rather than silently searching lexical
 	// forever when the operator asked for hybrid.
 	if m.Model == "" {
-		return fmt.Errorf("%w: config requests embeddings model=%q but the index was built lexical-only; run 'fisk-ai knowledge index --reindex'", ErrMetaMismatch, s.emb.Model())
+		return fmt.Errorf("%w: config requests embeddings model=%q but the index was built lexical-only", ErrMetaMismatch, s.emb.Model())
 	}
 
 	if m.Model != s.emb.Model() || m.QueryPrefix != s.emb.QueryPrefix() || m.DocumentPrefix != s.emb.DocumentPrefix() || !m.Normalized {
-		return fmt.Errorf("%w: index built with model=%q query_prefix=%q document_prefix=%q normalized=%v; config requests model=%q query_prefix=%q document_prefix=%q; run 'fisk-ai knowledge index --reindex'",
+		return fmt.Errorf("%w: index built with model=%q query_prefix=%q document_prefix=%q normalized=%v; config requests model=%q query_prefix=%q document_prefix=%q",
 			ErrMetaMismatch, m.Model, m.QueryPrefix, m.DocumentPrefix, m.Normalized,
 			s.emb.Model(), s.emb.QueryPrefix(), s.emb.DocumentPrefix())
 	}

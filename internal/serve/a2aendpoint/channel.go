@@ -12,18 +12,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
-// A prompt channel sizes its own concurrency, holds a transport to release, and names
-// its addresses on a startup banner. Declaring those contracts makes a change to any of
-// them a compile error here rather than a channel the server silently stops asking.
+// A prompt channel sizes its own concurrency, holds a transport to release, stops
+// answering when its registration is dropped, and names its addresses on a startup
+// banner. Declaring those contracts makes a change to any of them a compile error here
+// rather than a channel the server silently stops asking.
 var (
 	_ serve.ConcurrentChannel = (*Channel)(nil)
 	_ serve.ReleasableChannel = (*Channel)(nil)
+	_ serve.FaultingEndpoint  = (*Channel)(nil)
 	_ serve.DescribedEndpoint = (*Channel)(nil)
 )
 
@@ -39,15 +41,15 @@ type Channel struct {
 	workers   int
 	held      *sharedTransport
 	stream    a2a.StreamingTransport
-	validator *a2a.Validator
+	validator *wire.Validator
 	log       *slog.Logger
 
-	// elicits is expose.agent.a2a.prompts.elicit: with it off the channel supplies no
-	// prompter and the server refuses every confirmation-gated tool, which is what a
-	// caller that answers nothing needs. promptWait is how long one question is held
-	// open, taken from request_timeout since it measures the same thing, and the
-	// channel's own prompter enforces it: a caller with a person in front of the
-	// question restarts it, which is why the server bounds none of them.
+	// elicits is PromptOptions.Elicit: with it off the channel supplies no prompter and
+	// the server refuses every confirmation-gated tool, which is what a caller that
+	// answers nothing needs. promptWait is PromptOptions.PromptWait, how long one
+	// question is held open, and the channel's own prompter enforces it: a caller with a
+	// person in front of the question restarts it, which is why the server limits none
+	// of them.
 	elicits    bool
 	promptWait time.Duration
 
@@ -87,13 +89,13 @@ type Channel struct {
 // ack, then events, then a terminal message, and a binding that answers once cannot
 // express that at all, so the refusal names the binding at startup rather than arriving
 // one request at a time.
-func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (*Channel, error) {
+func newChannel(held *sharedTransport, opts Options) (*Channel, error) {
 	stream, ok := held.transport.(a2a.StreamingTransport)
 	if !ok {
-		return nil, fmt.Errorf("the %q transport carries a single reply, so it cannot answer prompts; remove expose.agent.a2a.prompts or use a binding that streams", cfg.A2ATransport())
+		return nil, fmt.Errorf("the %T transport carries a single reply, so it cannot answer prompts; leave Options.Prompts unset or supply a transport that streams", held.transport)
 	}
 
-	validator, err := a2a.NewValidator()
+	validator, err := wire.SharedValidator()
 	if err != nil {
 		return nil, fmt.Errorf("compiling the a2a schemas: %w", err)
 	}
@@ -104,27 +106,27 @@ func newChannel(cfg *config.Config, held *sharedTransport, opts ConfigOptions) (
 	}
 
 	c := &Channel{
-		identity:   cfg.Identity,
-		workers:    cfg.A2APromptsWorkers(),
+		identity:   opts.Identity,
+		workers:    opts.Prompts.Workers,
 		held:       held,
 		stream:     stream,
 		validator:  validator,
 		log:        log.With("channel", channelName),
-		elicits:    cfg.A2APromptsElicit(),
-		promptWait: cfg.A2ARequestTimeout(),
-		maxTokens:  cfg.LLM.Budget.MaxTokens,
-		sessions:   opts.Sessions,
+		elicits:    opts.Prompts.Elicit,
+		promptWait: opts.Prompts.PromptWait,
+		maxTokens:  opts.Prompts.MaxTokens,
+		sessions:   opts.Prompts.Sessions,
 		work:       make(chan *serve.Work),
 		shutdown:   make(chan struct{}),
 		inFlight:   make(map[string]*task),
 	}
 
-	err = held.transport.Serve(a2a.OpTask, c.handle)
+	err = stream.ServeReplySet(a2a.OpTask, c.handle)
 	if err != nil {
 		return nil, fmt.Errorf("registering the task handler: %w", err)
 	}
 
-	c.log.Info("Answering prompts over a2a", "identity", cfg.Identity, "workers", c.workers, "elicit", c.elicits)
+	c.log.Info("Answering prompts over a2a", "identity", c.identity, "workers", c.workers, "elicit", c.elicits)
 
 	return c, nil
 }
@@ -144,9 +146,10 @@ func (c *Channel) Heading() string { return "Answering prompts over a2a" }
 // Describe returns the addresses a peer sends a prompt to and addresses a cancel under,
 // the one it answers questions on when this channel asks any, and how many prompts it
 // runs at once. The transport supplies the addresses, so a later binding describes
-// itself in its own terms and this endpoint never builds one.
+// itself in its own terms and this endpoint never builds one; a binding that names no
+// addresses leaves the worker count as the only row.
 func (c *Channel) Describe() []serve.DescLine {
-	tasks := c.stream.DescribeTasks(c.identity, c.elicits)
+	tasks := taskLines(c.stream, c.identity, c.elicits)
 
 	lines := make([]serve.DescLine, 0, len(tasks)+1)
 	for _, l := range tasks {
@@ -198,7 +201,7 @@ func (c *Channel) Close() error {
 
 // Faults reports that this identity has stopped answering for a reason nobody asked
 // for, which for this channel means no further prompt can arrive.
-func (c *Channel) Faults() <-chan error { return c.held.faults }
+func (c *Channel) Faults() <-chan error { return c.held.faults.Faults() }
 
 // draining reports that this channel has been closed, so a question stops having its
 // window restarted and the runs in flight reach an ending the shutdown can wait for.

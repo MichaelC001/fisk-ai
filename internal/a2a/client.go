@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
@@ -19,12 +20,15 @@ import (
 // protocol, used to import remote tools. All message validation (outgoing request,
 // incoming reply size cap and schema) lives here in the engine; the Transport only
 // moves bytes.
+//
+// It is safe for concurrent use: its fields are set at construction and read after
+// it, and the wire log guards its writer with a mutex.
 type Client struct {
 	transport Transport
 	replySet  ReplySetTransport
 	stream    StreamingTransport
 	sender    string
-	validator *Validator
+	validator *wire.Validator
 	idle      time.Duration
 
 	// wire records what crosses, for a caller that asked to see it. Nil records
@@ -53,6 +57,20 @@ func WithIdleTimeout(d time.Duration) ClientOption {
 	}
 }
 
+// WithValidator supplies the Validator the client holds every message it sends and
+// reads to. A Validator compiles around three dozen JSON schemas, so a program
+// building several clients and servers builds one with NewValidator and passes it to
+// each. A nil validator, or none, uses a package-level Validator built on first use
+// and shared with every other client and server that supplied none.
+func WithValidator(v *wire.Validator) ClientOption {
+	return func(c *Client) {
+		if v == nil {
+			return
+		}
+		c.validator = v
+	}
+}
+
 // NewClient wraps a Transport as a Client. sender is this agent's identity, set as
 // the Header.Sender on outgoing requests. The Transport is borrowed: the caller
 // established it (and the Provider behind it) and closes them.
@@ -61,11 +79,6 @@ func WithIdleTimeout(d time.Duration) ClientOption {
 // that cannot carry a reply set knows it before a call is sent rather than one request
 // at a time.
 func NewClient(transport Transport, sender string, opts ...ClientOption) (*Client, error) {
-	validator, err := NewValidator()
-	if err != nil {
-		return nil, fmt.Errorf("building message validator: %w", err)
-	}
-
 	replySet, _ := transport.(ReplySetTransport)
 	stream, _ := transport.(StreamingTransport)
 
@@ -74,12 +87,22 @@ func NewClient(transport Transport, sender string, opts ...ClientOption) (*Clien
 		replySet:  replySet,
 		stream:    stream,
 		sender:    sender,
-		validator: validator,
 		idle:      DefaultIdleTimeout,
 	}
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	// After the options, since WithValidator is how a caller supplies one and the
+	// package-level set is compiled only for a client that did not.
+	if c.validator == nil {
+		validator, err := wire.SharedValidator()
+		if err != nil {
+			return nil, fmt.Errorf("building message validator: %w", err)
+		}
+
+		c.validator = validator
 	}
 
 	return c, nil
@@ -91,18 +114,18 @@ func (c *Client) CanStream() bool { return c.stream != nil }
 
 // Discover asks the named agent to describe itself and returns its agent card.
 // ErrAgentUnavailable is returned when no agent answers.
-func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error) {
-	req := NewDiscoveryRequest()
+func (c *Client) Discover(ctx context.Context, agent string) (*wire.AgentCard, error) {
+	req := wire.NewDiscoveryRequest()
 	StampRequest(ctx, &req.Header, c.sender, agent)
 
-	reply, err := c.roundTrip(ctx, agent, OpDiscovery, req, DiscoveryReplyProtocol)
+	reply, err := c.roundTrip(ctx, agent, OpDiscovery, req, wire.DiscoveryReplyProtocol)
 	if err != nil {
 		return nil, err
 	}
 
-	dr, ok := reply.(*DiscoveryReply)
+	dr, ok := reply.(*wire.DiscoveryReply)
 	if !ok {
-		return nil, fmt.Errorf("%w: discovery reply had unexpected type %T", ErrProtocolMismatch, reply)
+		return nil, fmt.Errorf("%w: discovery reply had unexpected type %T", wire.ErrProtocolMismatch, reply)
 	}
 
 	return &dr.AgentCard, nil
@@ -115,7 +138,7 @@ func (c *Client) Discover(ctx context.Context, agent string) (*AgentCard, error)
 // The hop is traced when the caller's context carries a telemetry provider, nesting
 // under whatever span opened it. The request carries that span's trace context, so the
 // peer's own span for the call joins this trace rather than starting one.
-func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (reply *ToolReply, err error) {
+func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.RawMessage) (reply *wire.ToolReply, err error) {
 	ctx, span := telemetry.ProviderFromContext(ctx).StartRemoteAgent(ctx, telemetry.RemoteAgentInfo{
 		Agent: agent,
 		Tool:  tool,
@@ -130,7 +153,7 @@ func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.
 		return nil, fmt.Errorf("%w: a tool call is answered as a reply set", ErrStreamUnsupported)
 	}
 
-	req := NewToolRequest(tool, normalizeInput(input))
+	req := wire.NewToolRequest(tool, normalizeInput(input))
 	StampRequest(ctx, &req.Header, c.sender, agent)
 
 	data, err := c.marshalValid(req)
@@ -154,9 +177,9 @@ func (c *Client) InvokeTool(ctx context.Context, agent, tool string, input json.
 // nothing from this tree and so cannot recognize this package's sentinels. Nothing
 // derived from the error text travels: these errors name hosts, subjects and reply
 // fragments.
-func remoteOutcome(reply *ToolReply, err error) telemetry.RemoteAgentOutcome {
+func remoteOutcome(reply *wire.ToolReply, err error) telemetry.RemoteAgentOutcome {
 	switch {
-	case err == nil && reply != nil && reply.Code == CodeCapacity:
+	case err == nil && reply != nil && reply.Code == wire.CodeCapacity:
 		// Answered and refused, with no tool run. Tested before IsError, which a
 		// refusal also sets: filing it as a tool failure would put a busy peer in the
 		// series an operator reads to find broken tools.
@@ -185,7 +208,7 @@ func remoteOutcome(reply *ToolReply, err error) telemetry.RemoteAgentOutcome {
 // reply decoded once it passes the size cap, the schema, and the expected protocol
 // id. A missing responder or an elapsed deadline is surfaced by the transport as
 // ErrAgentUnavailable; an unusable reply is ErrToolImport.
-func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req any, wantReply string) (any, error) {
+func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req any, wantReply string) (wire.Message, error) {
 	data, err := c.marshalValid(req)
 	if err != nil {
 		return nil, err
@@ -200,8 +223,8 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 
 	c.wire.recv(op, agent, "", reply)
 
-	if len(reply) > MaxMessageSize {
-		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrToolImport, MaxMessageSize)
+	if len(reply) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("%w: reply exceeds %d bytes", ErrToolImport, wire.MaxMessageSize)
 	}
 
 	err = c.validator.Validate(reply)
@@ -209,7 +232,7 @@ func (c *Client) roundTrip(ctx context.Context, agent string, op RouteHint, req 
 		return nil, fmt.Errorf("%w: invalid reply: %w", ErrToolImport, err)
 	}
 
-	return ExpectProtocol(reply, wantReply)
+	return wire.ExpectProtocol[wire.Message](reply, wantReply)
 }
 
 // marshalValid encodes an outgoing message and holds it to the same schema a

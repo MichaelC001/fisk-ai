@@ -645,9 +645,9 @@ var _ = Describe("claudeAddHint", func() {
 		Expect(hint).To(Equal("claude mcp add --transport http myagent http://127.0.0.1:9000"))
 	})
 
-	It("Should fall back to a default name when the identity is empty", func() {
+	It("Should omit the hint when the identity is empty", func() {
 		hint := claudeAddHint("", &net.TCPAddr{Port: 8080})
-		Expect(hint).To(Equal("claude mcp add --transport http fisk-ai http://localhost:8080"))
+		Expect(hint).To(BeEmpty())
 	})
 })
 

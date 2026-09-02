@@ -14,6 +14,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/multiplex"
@@ -192,9 +193,10 @@ func hostAgent(ctx context.Context, opts hostOptions) (*hostedAgent, error) {
 		return nil, err
 	}
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), broker.Conns(), a2a.TransportConfig{
-		Identity: identity,
-		Logger:   opts.Logger,
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{
+		Resources: broker.Conns(),
+		Identity:  identity,
+		Logger:    opts.Logger,
 	})
 	if err != nil {
 		broker.Close()
@@ -240,10 +242,11 @@ func dialAgent(ctx context.Context, cfg *config.Config, natsContext string, logg
 		return nil, err
 	}
 
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), provider, a2a.TransportConfig{
-		Identity: clientSender,
-		Timeout:  cfg.A2ARequestTimeout(),
-		Logger:   logger,
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{
+		Resources: provider,
+		Identity:  clientSender,
+		Timeout:   cfg.A2ARequestTimeout(),
+		Logger:    logger,
 	})
 	if err != nil {
 		provider.Close()
@@ -290,7 +293,7 @@ const cardProbeWait = 5 * time.Second
 //
 // Any other failure returns no card and no error. The agent is there and did not answer
 // in time, which costs the caller what the card would have told it and nothing else.
-func probeAgent(ctx context.Context, host *hostedAgent, natsContext string) (*a2a.AgentCard, error) {
+func probeAgent(ctx context.Context, host *hostedAgent, natsContext string) (*wire.AgentCard, error) {
 	ctx, cancel := context.WithTimeout(ctx, cardProbeWait)
 	defer cancel()
 

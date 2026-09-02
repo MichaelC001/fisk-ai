@@ -14,22 +14,23 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 )
 
 var _ = Describe("FakeTransport", func() {
 	var (
 		ctx       context.Context
-		card      a2a.AgentCard
+		card      wire.AgentCard
 		transport *agenttest.FakeTransport
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		card = a2a.AgentCard{
+		card = wire.AgentCard{
 			Name:    "peer",
 			Version: "1.2.3",
-			Tools:   []a2a.ToolDescriptor{{Name: "echo", Description: "echoes its input"}},
+			Tools:   []wire.ToolDescriptor{{Name: "echo", Description: "echoes its input"}},
 		}
 		transport = agenttest.NewFakeTransport(GinkgoTB(), card)
 	})
@@ -80,7 +81,7 @@ var _ = Describe("FakeTransport", func() {
 	})
 
 	It("Should refuse an operation it has no answer for", func() {
-		req := a2a.NewDiscoveryRequest()
+		req := wire.NewDiscoveryRequest()
 		a2a.StampRequest(ctx, &req.Header, "caller", "peer")
 		body, err := json.Marshal(req)
 		Expect(err).ToNot(HaveOccurred())

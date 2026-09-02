@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/tui"
@@ -43,35 +43,35 @@ type blockRenderer struct {
 
 // Lines renders one block. An empty result means the block has nothing to show, which
 // is a progress status, a suppressed thinking block, or a block this build cannot name.
-func (r *blockRenderer) Lines(block a2a.Block) []tui.Line {
+func (r *blockRenderer) Lines(block wire.Block) []tui.Line {
 	switch b := block.Content().(type) {
-	case a2a.TextBlock:
+	case wire.TextBlock:
 		return r.text(b)
 
-	case a2a.ThinkingBlock:
+	case wire.ThinkingBlock:
 		if !r.showThinking || b.Text == "" {
 			return nil
 		}
 
 		return []tui.Line{{Kind: tui.LineThinking, Text: b.Text}}
 
-	case a2a.PromptBlock:
+	case wire.PromptBlock:
 		return []tui.Line{{Kind: tui.LinePrompt, Text: b.Text}}
 
-	case a2a.ToolCallBlock:
+	case wire.ToolCallBlock:
 		line := tui.CallLine(b.Name, b.Input)
 
 		return []tui.Line{{Kind: tui.LineToolCall, Text: line, Short: line}}
 
-	case a2a.AgentCallBlock:
+	case wire.AgentCallBlock:
 		line := fmt.Sprintf("%s (remote %s)", sanitize.ForTerminal(b.Name, 120), sanitize.ForTerminal(b.Task, 120))
 
 		return []tui.Line{{Kind: tui.LineToolCall, Text: line, Short: line}}
 
-	case a2a.ToolResultBlock:
+	case wire.ToolResultBlock:
 		return []tui.Line{toolResultLine(b.Output, b.IsError)}
 
-	case a2a.WarningBlock:
+	case wire.WarningBlock:
 		msg := blockWarningMessage(b)
 		if msg == "" {
 			return nil
@@ -81,7 +81,7 @@ func (r *blockRenderer) Lines(block a2a.Block) []tui.Line {
 
 		return []tui.Line{{Kind: tui.LineWarning, Text: msg}}
 
-	case a2a.StatusBlock:
+	case wire.StatusBlock:
 		return statusLines(b)
 	}
 
@@ -90,7 +90,7 @@ func (r *blockRenderer) Lines(block a2a.Block) []tui.Line {
 
 // text renders the model's prose. The answer is set apart, since the viewport has no
 // separate channel for it, and its raw text is kept for the reprint.
-func (r *blockRenderer) text(b a2a.TextBlock) []tui.Line {
+func (r *blockRenderer) text(b wire.TextBlock) []tui.Line {
 	if b.Text == "" {
 		return nil
 	}
@@ -110,12 +110,12 @@ func (r *blockRenderer) text(b a2a.TextBlock) []tui.Line {
 // statusLines marks a replayed conversation, so what already happened reads as history
 // rather than as a turn arriving now. The progress statuses are for a caller pacing
 // itself and have nothing to show a person.
-func statusLines(b a2a.StatusBlock) []tui.Line {
+func statusLines(b wire.StatusBlock) []tui.Line {
 	switch b.Phase {
-	case a2a.PhaseReplayStart:
+	case wire.PhaseReplayStart:
 		return []tui.Line{{Kind: tui.LineMeta, Text: "--- resuming ---"}}
 
-	case a2a.PhaseReplayEnd:
+	case wire.PhaseReplayEnd:
 		if b.Truncated {
 			return []tui.Line{
 				{Kind: tui.LineMeta, Text: fmt.Sprintf("(showing the last %d blocks; read the whole conversation with 'fisk session show --transcript')", b.Count)},
@@ -131,7 +131,7 @@ func statusLines(b a2a.StatusBlock) []tui.Line {
 
 // renderBlocks is every line a set of blocks produces, for a caller with the whole
 // conversation in hand rather than one block at a time.
-func renderBlocks(blocks []a2a.Block, showThinking bool) []tui.Line {
+func renderBlocks(blocks []wire.Block, showThinking bool) []tui.Line {
 	r := &blockRenderer{showThinking: showThinking}
 
 	var out []tui.Line

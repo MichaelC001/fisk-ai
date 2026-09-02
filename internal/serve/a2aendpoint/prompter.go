@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
@@ -86,7 +87,7 @@ func (p *elicitPrompter) heldFor(toolUseID string) (toolkit.ConfirmChoice, bool)
 type pending struct {
 	// answer carries the reply that ends the question. It is buffered so a handler
 	// never blocks on a waiter that has already given up.
-	answer chan *a2a.ElicitReply
+	answer chan *wire.ElicitReply
 	// alive carries the caller saying the question is still on somebody's screen. It
 	// is buffered by one and written without blocking, since restarting a window twice
 	// is restarting it once.
@@ -116,7 +117,7 @@ func (p *elicitPrompter) ApproveCommand(ctx context.Context, req toolkit.GateReq
 		return choice, nil
 	}
 
-	ask := a2a.NewElicitRequest(a2a.ElicitApprove, a2a.NewID())
+	ask := wire.NewElicitRequest(wire.ElicitApprove, wire.NewID())
 	ask.ToolUseID = req.ToolUseID
 	ask.Command = req.Command
 	ask.Display = req.Display
@@ -128,14 +129,14 @@ func (p *elicitPrompter) ApproveCommand(ctx context.Context, req toolkit.GateReq
 	}
 
 	switch reply.Answer {
-	case a2a.AnswerNoOperator:
+	case wire.AnswerNoOperator:
 		return toolkit.ConfirmNo, errNoOperatorThere
 
-	case a2a.AnswerChoice:
+	case wire.AnswerChoice:
 		switch reply.Choice {
-		case a2a.ChoiceAlways:
+		case wire.ChoiceAlways:
 			return toolkit.ConfirmAlways, nil
-		case a2a.ChoiceOnce:
+		case wire.ChoiceOnce:
 			return toolkit.ConfirmOnce, nil
 		default:
 			return toolkit.ConfirmNo, nil
@@ -148,7 +149,7 @@ func (p *elicitPrompter) ApproveCommand(ctx context.Context, req toolkit.GateReq
 
 // Confirm puts a yes/no question to the caller.
 func (p *elicitPrompter) Confirm(ctx context.Context, question string) (bool, error) {
-	ask := a2a.NewElicitRequest(a2a.ElicitConfirm, a2a.NewID())
+	ask := wire.NewElicitRequest(wire.ElicitConfirm, wire.NewID())
 	ask.ToolUseID = toolkit.ToolUseIDFromContext(ctx)
 	ask.Question = question
 
@@ -158,9 +159,9 @@ func (p *elicitPrompter) Confirm(ctx context.Context, question string) (bool, er
 	}
 
 	switch reply.Answer {
-	case a2a.AnswerNoOperator:
+	case wire.AnswerNoOperator:
 		return false, errNoOperatorThere
-	case a2a.AnswerConfirmed:
+	case wire.AnswerConfirmed:
 		return reply.Confirmed, nil
 	default:
 		return false, fmt.Errorf("the caller answered a confirmation with %q", reply.Answer)
@@ -170,7 +171,7 @@ func (p *elicitPrompter) Confirm(ctx context.Context, question string) (bool, er
 // Select asks the caller to choose one of options and returns its index. An index
 // outside the options is a choice nobody made, reported as such rather than clamped.
 func (p *elicitPrompter) Select(ctx context.Context, question string, options []string) (int, error) {
-	ask := a2a.NewElicitRequest(a2a.ElicitSelect, a2a.NewID())
+	ask := wire.NewElicitRequest(wire.ElicitSelect, wire.NewID())
 	ask.ToolUseID = toolkit.ToolUseIDFromContext(ctx)
 	ask.Question = question
 	ask.Options = options
@@ -181,10 +182,10 @@ func (p *elicitPrompter) Select(ctx context.Context, question string, options []
 	}
 
 	switch reply.Answer {
-	case a2a.AnswerNoOperator:
+	case wire.AnswerNoOperator:
 		return -1, errNoOperatorThere
 
-	case a2a.AnswerIndex:
+	case wire.AnswerIndex:
 		if reply.Index < 0 || reply.Index >= len(options) {
 			return -1, fmt.Errorf("the caller chose option %d of %d", reply.Index, len(options))
 		}
@@ -199,7 +200,7 @@ func (p *elicitPrompter) Select(ctx context.Context, question string, options []
 // Input asks the caller for a free text value. An empty string is a valid answer,
 // which is why the reply's own answer field says what was given.
 func (p *elicitPrompter) Input(ctx context.Context, question, def string) (string, error) {
-	ask := a2a.NewElicitRequest(a2a.ElicitInput, a2a.NewID())
+	ask := wire.NewElicitRequest(wire.ElicitInput, wire.NewID())
 	ask.ToolUseID = toolkit.ToolUseIDFromContext(ctx)
 	ask.Question = question
 	ask.Default = def
@@ -210,9 +211,9 @@ func (p *elicitPrompter) Input(ctx context.Context, question, def string) (strin
 	}
 
 	switch reply.Answer {
-	case a2a.AnswerNoOperator:
+	case wire.AnswerNoOperator:
 		return "", errNoOperatorThere
-	case a2a.AnswerValue:
+	case wire.AnswerValue:
 		return reply.Value, nil
 	default:
 		return "", fmt.Errorf("the caller answered an input with %q", reply.Answer)
@@ -251,7 +252,7 @@ var errNoOperatorThere = fmt.Errorf("the caller has no operator to answer on its
 // question that could be held indefinitely would hold the shutdown with it, and the
 // operator's only way out would be the second interrupt that cancels every run
 // mid-flight.
-func (p *elicitPrompter) ask(ctx context.Context, question *a2a.ElicitRequest, onSilence unanswered) (*a2a.ElicitReply, error) {
+func (p *elicitPrompter) ask(ctx context.Context, question *wire.ElicitRequest, onSilence unanswered) (*wire.ElicitReply, error) {
 	question.WaitMS = p.window.Milliseconds()
 
 	waiting, err := p.register(question.QuestionID)
@@ -333,7 +334,7 @@ func (p *elicitPrompter) register(id string) (*pending, error) {
 		return nil, fmt.Errorf("%w: the run ended", toolkit.ErrPromptAborted)
 	}
 
-	q := &pending{answer: make(chan *a2a.ElicitReply, 1), alive: make(chan struct{}, 1)}
+	q := &pending{answer: make(chan *wire.ElicitReply, 1), alive: make(chan struct{}, 1)}
 	p.pending[id] = q
 
 	return q, nil
@@ -359,7 +360,7 @@ func (p *elicitPrompter) close() {
 // deliver hands an answer to whoever is waiting for it, and reports whether anything
 // was. An answer to a question this task did not ask, or asked and gave up on, is
 // reported to the sender rather than dropped silently.
-func (p *elicitPrompter) deliver(reply *a2a.ElicitReply) bool {
+func (p *elicitPrompter) deliver(reply *wire.ElicitReply) bool {
 	p.mu.Lock()
 	q, waiting := p.pending[reply.QuestionID]
 	p.mu.Unlock()
@@ -428,7 +429,7 @@ func (t *task) handleElicitReply(_ context.Context, _ a2a.Caller, body []byte, r
 
 	switch {
 	case t.prompter == nil:
-	case msg.Answer == a2a.AnswerWaiting:
+	case msg.Answer == wire.AnswerWaiting:
 		delivered = t.prompter.stillWaiting(msg.QuestionID)
 	default:
 		delivered = t.prompter.deliver(msg)
@@ -441,8 +442,8 @@ func (t *task) handleElicitReply(_ context.Context, _ a2a.Caller, body []byte, r
 		return
 	}
 
-	ack := a2a.NewAck(true)
-	a2a.StampReply(&ack.Header, &msg.Header, t.ch.identity)
+	ack := wire.NewAck(true)
+	wire.StampReply(&ack.Header, &msg.Header, t.ch.identity)
 
 	data, err := json.Marshal(ack)
 	if err != nil {
@@ -464,11 +465,11 @@ func (t *task) handleElicitReply(_ context.Context, _ a2a.Caller, body []byte, r
 //
 // It names the six ids an answer arrives under rather than the elicit family, which also
 // holds the four questions: those travel the other way, and admitting one here would put a
-// message of another type on a path contracted for this one. The assertion is checked for
-// the same reason, this being a peer's bytes on a subject that authenticates nobody.
-func (c *Channel) inboundElicitReply(body []byte) (*a2a.ElicitReply, error) {
-	if len(body) > a2a.MaxMessageSize {
-		return nil, fmt.Errorf("the answer is %d bytes, over the %d byte limit", len(body), a2a.MaxMessageSize)
+// message of another type on a path contracted for this one. These are a peer's bytes on
+// a subject that authenticates nobody, so every one of them is checked.
+func (c *Channel) inboundElicitReply(body []byte) (*wire.ElicitReply, error) {
+	if len(body) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("the answer is %d bytes, over the %d byte limit", len(body), wire.MaxMessageSize)
 	}
 
 	err := c.validator.Validate(body)
@@ -476,14 +477,9 @@ func (c *Channel) inboundElicitReply(body []byte) (*a2a.ElicitReply, error) {
 		return nil, fmt.Errorf("the answer is not a valid v1 message: %w", err)
 	}
 
-	msg, err := a2a.ExpectOneProtocol(body, a2a.ElicitAnswerProtocols())
+	reply, err := wire.ExpectOneProtocol[*wire.ElicitReply](body, wire.ElicitAnswerProtocols())
 	if err != nil {
 		return nil, fmt.Errorf("the answer path carries answers to questions: %w", err)
-	}
-
-	reply, ok := msg.(*a2a.ElicitReply)
-	if !ok {
-		return nil, fmt.Errorf("the answer path carries answers to questions, not %T", msg)
 	}
 
 	return reply, nil

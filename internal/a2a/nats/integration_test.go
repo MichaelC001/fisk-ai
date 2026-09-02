@@ -14,12 +14,13 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/conns"
@@ -51,7 +52,7 @@ func runNATS() *nats.Conn {
 func serveOver(nc *nats.Conn, identity string, tools []toolkit.Tool) *a2a.Server {
 	GinkgoHelper()
 
-	transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: identity})
+	transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: identity})
 	Expect(err).NotTo(HaveOccurred())
 
 	srv, err := a2a.NewServer(transport, tools, a2a.ServerOptions{Identity: identity, Version: "v1", LogOutput: io.Discard})
@@ -65,7 +66,7 @@ func serveOver(nc *nats.Conn, identity string, tools []toolkit.Tool) *a2a.Server
 func clientOver(nc *nats.Conn, sender string, timeout time.Duration) *a2a.Client {
 	GinkgoHelper()
 
-	transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: sender, Timeout: timeout})
+	transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: sender, Timeout: timeout})
 	Expect(err).NotTo(HaveOccurred())
 
 	client, err := a2a.NewClient(transport, sender)

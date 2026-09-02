@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 // The elicit family gives every question and every answer an id of its own, so nothing in
 // a body says what kind it is. The four maps below are the whole of the translation, and a
@@ -68,17 +68,19 @@ func ElicitReplyProtocolFor(answer ElicitAnswer) (string, bool) {
 	return protocol, ok
 }
 
-// elicitKindOf is the question an id names, and false for anything else. The lookup is
-// exact: the family mixes a two-segment suffix with three-segment ones, so there is no
-// prefix rule to cut on the way the event family has.
-func elicitKindOf(protocol string) (ElicitKind, bool) {
+// ElicitKindOf is the question an id names, and false for anything else. It is the
+// inverse of ElicitRequestProtocolFor. The lookup is exact: the family mixes a
+// two-segment suffix with three-segment ones, so there is no prefix rule to cut on the
+// way the event family has.
+func ElicitKindOf(protocol string) (ElicitKind, bool) {
 	kind, ok := elicitRequestKinds[protocol]
 
 	return kind, ok
 }
 
-// elicitAnswerOf is the answer an id names, and false for anything else.
-func elicitAnswerOf(protocol string) (ElicitAnswer, bool) {
+// ElicitAnswerOf is the answer an id names, and false for anything else. It is the
+// inverse of ElicitReplyProtocolFor.
+func ElicitAnswerOf(protocol string) (ElicitAnswer, bool) {
 	answer, ok := elicitReplyAnswers[protocol]
 
 	return answer, ok

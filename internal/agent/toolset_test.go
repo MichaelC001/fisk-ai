@@ -121,7 +121,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		a := &movingTool{name: "a"}
 		b := &movingTool{name: "b"}
 
-		src := NewToolSource(NewToolSet([]toolkit.Tool{a}, nil, false))
+		src := newToolSource(newToolSet([]toolkit.Tool{a}, nil, false))
 
 		var sent [][]string
 		calls := 0
@@ -138,7 +138,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 
 				// What an MCP session's goroutine does when a server reports a longer
 				// list: computed once, published once.
-				src.Publish(NewToolSet([]toolkit.Tool{a, b}, nil, false))
+				src.publish(newToolSet([]toolkit.Tool{a, b}, nil, false))
 
 				return mustResponse(toolUseMsg("t1", "a")), nil
 			}),
@@ -157,11 +157,11 @@ var _ = Describe("a tool set that moves during a run", func() {
 		goes := &movingTool{name: "goes"}
 		keep := &movingTool{name: "keep"}
 
-		src := NewToolSource(NewToolSet([]toolkit.Tool{keep, goes}, nil, false))
+		src := newToolSource(newToolSet([]toolkit.Tool{keep, goes}, nil, false))
 
 		// The first tool of the batch removes the second, which the model has already
 		// asked for in the same reply.
-		keep.onRun = func() { src.Publish(NewToolSet([]toolkit.Tool{keep}, nil, false)) }
+		keep.onRun = func() { src.publish(newToolSet([]toolkit.Tool{keep}, nil, false)) }
 
 		batch := `{"id":"m1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[` +
 			`{"type":"tool_use","id":"t1","name":"keep","input":{}},` +
@@ -209,7 +209,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		small := movingTools(2)
 		big := movingTools(ToolSearchThreshold)
 
-		src := NewToolSource(NewToolSet(small, nil, true))
+		src := newToolSource(newToolSet(small, nil, true))
 
 		var search []bool
 		var deferred []bool
@@ -225,9 +225,9 @@ var _ = Describe("a tool set that moves during a run", func() {
 
 				switch calls {
 				case 1:
-					src.Publish(NewToolSet(big, nil, true))
+					src.publish(newToolSet(big, nil, true))
 				case 2:
-					src.Publish(NewToolSet(small, nil, true))
+					src.publish(newToolSet(small, nil, true))
 				default:
 					return mustResponse(toolSetFinalMsg), nil
 				}
@@ -245,7 +245,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 	})
 
 	It("reports a set that crosses the threshold without tool search once for the run", func() {
-		src := NewToolSource(NewToolSet(movingTools(2), nil, false))
+		src := newToolSource(newToolSet(movingTools(2), nil, false))
 
 		ev := &captureEvents{}
 		calls := 0
@@ -259,12 +259,12 @@ var _ = Describe("a tool set that moves during a run", func() {
 				switch calls {
 				case 1:
 					// Over the threshold: the advisory is due at the next call.
-					src.Publish(NewToolSet(movingTools(ToolSearchThreshold), nil, false))
+					src.publish(newToolSet(movingTools(ToolSearchThreshold), nil, false))
 				case 2:
 					// Back under it, then over it again: the operator hears it once.
-					src.Publish(NewToolSet(movingTools(2), nil, false))
+					src.publish(newToolSet(movingTools(2), nil, false))
 				case 3:
-					src.Publish(NewToolSet(movingTools(ToolSearchThreshold+2), nil, false))
+					src.publish(newToolSet(movingTools(ToolSearchThreshold+2), nil, false))
 				default:
 					return mustResponse(toolSetFinalMsg), nil
 				}
@@ -288,7 +288,7 @@ var _ = Describe("a tool set that moves during a run", func() {
 		r := &runner{
 			cfg: toolSetCfg(), stats: &RunStats{}, maxIter: 2, events: ev,
 			messages:         []llm.Message{userMsg("go")},
-			toolSrc:          NewToolSource(NewToolSet(movingTools(ToolSearchThreshold), nil, false)),
+			toolSrc:          newToolSource(newToolSet(movingTools(ToolSearchThreshold), nil, false)),
 			toolSearchWarned: true,
 			provider: noSearchProvider(func(context.Context, llm.Request) (*llm.Response, error) {
 				return mustResponse(toolSetFinalMsg), nil
@@ -303,12 +303,12 @@ var _ = Describe("a tool set that moves during a run", func() {
 	It("backs several runs at once while a session keeps publishing", func() {
 		a := &movingTool{name: "a"}
 		b := &movingTool{name: "b"}
-		one := NewToolSet([]toolkit.Tool{a}, nil, false)
-		two := NewToolSet([]toolkit.Tool{a, b}, nil, false)
+		one := newToolSet([]toolkit.Tool{a}, nil, false)
+		two := newToolSet([]toolkit.Tool{a, b}, nil, false)
 
 		// One source, the shape fisk serve builds: the runs share a configuration and an
 		// application, so a rebuild is computed once and published once.
-		src := NewToolSource(one)
+		src := newToolSource(one)
 
 		done := make(chan struct{})
 		var publisher sync.WaitGroup
@@ -325,10 +325,10 @@ var _ = Describe("a tool set that moves during a run", func() {
 				}
 
 				if i%2 == 0 {
-					src.Publish(two)
+					src.publish(two)
 					continue
 				}
-				src.Publish(one)
+				src.publish(one)
 			}
 		}()
 
@@ -370,8 +370,8 @@ var _ = Describe("a tool set that moves during a run", func() {
 	})
 
 	It("sends the same tools on every call of a run nothing publishes to", func() {
-		set := NewToolSet(movingTools(3), nil, true)
-		src := NewToolSource(set)
+		set := newToolSet(movingTools(3), nil, true)
+		src := newToolSource(set)
 
 		var sent [][]llm.ToolDef
 		var search []bool
@@ -404,36 +404,36 @@ var _ = Describe("a tool set that moves during a run", func() {
 	})
 })
 
-var _ = Describe("ToolSource", func() {
+var _ = Describe("toolSource", func() {
 	It("hands out a set a later publish does not change", func() {
 		a := &movingTool{name: "a"}
 		b := &movingTool{name: "b"}
 
-		src := NewToolSource(NewToolSet([]toolkit.Tool{a}, nil, false))
-		held := src.Snapshot()
+		src := newToolSource(newToolSet([]toolkit.Tool{a}, nil, false))
+		held := src.snapshot()
 
-		src.Publish(NewToolSet([]toolkit.Tool{a, b}, nil, false))
+		src.publish(newToolSet([]toolkit.Tool{a, b}, nil, false))
 
 		Expect(defNames(held.defs)).To(Equal([]string{"a"}))
 		_, ok := held.tool("b")
 		Expect(ok).To(BeFalse())
 
-		Expect(defNames(src.Snapshot().defs)).To(Equal([]string{"a", "b"}))
+		Expect(defNames(src.snapshot().defs)).To(Equal([]string{"a", "b"}))
 	})
 
 	It("refuses a nil set rather than leaving every run with no tools", func() {
-		set := NewToolSet([]toolkit.Tool{&movingTool{name: "a"}}, nil, false)
-		src := NewToolSource(set)
+		set := newToolSet([]toolkit.Tool{&movingTool{name: "a"}}, nil, false)
+		src := newToolSource(set)
 
-		src.Publish(nil)
+		src.publish(nil)
 
-		Expect(src.Snapshot()).To(BeIdenticalTo(set))
+		Expect(src.snapshot()).To(BeIdenticalTo(set))
 	})
 })
 
-var _ = Describe("NewToolSet", func() {
+var _ = Describe("newToolSet", func() {
 	It("sends the built-in tools after the deferrable ones and never defers them", func() {
-		set := NewToolSet(movingTools(ToolSearchThreshold), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
+		set := newToolSet(movingTools(ToolSearchThreshold), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
 
 		names := defNames(set.defs)
 		Expect(names).To(HaveLen(ToolSearchThreshold + 1))
@@ -451,10 +451,10 @@ var _ = Describe("NewToolSet", func() {
 	})
 
 	It("counts the built-ins toward the threshold", func() {
-		set := NewToolSet(movingTools(ToolSearchThreshold-1), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
+		set := newToolSet(movingTools(ToolSearchThreshold-1), []toolkit.Tool{&movingTool{name: "hitl"}}, true)
 		Expect(set.search).To(BeTrue())
 
-		set = NewToolSet(movingTools(ToolSearchThreshold-1), nil, true)
+		set = newToolSet(movingTools(ToolSearchThreshold-1), nil, true)
 		Expect(set.search).To(BeFalse())
 	})
 })

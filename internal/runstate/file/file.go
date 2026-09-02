@@ -418,7 +418,8 @@ func (j *fileJournal) LastSeq() uint64 {
 // the run for the journal's lifetime, so holding is structural: while this journal
 // is open no other process opened it, and the answer needs no I/O. On a platform
 // without flock the lock excludes nobody, and this reports held anyway rather than
-// inventing a guarantee the platform does not offer.
+// inventing a guarantee the platform does not offer. LocksRuns says which of the two
+// this build does, so a caller can tell an enforced answer from an assumed one.
 //
 // The context is still read, so a caller stepping through work on a canceled context
 // is stopped here rather than at the append after it.

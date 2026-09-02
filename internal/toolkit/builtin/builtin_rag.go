@@ -94,7 +94,7 @@ func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writ
 	}
 	fmt.Fprintf(notes, "knowledge %s\n", line)
 	if !store.Built() {
-		fmt.Fprintf(notes, "note: the knowledge index is not built yet; %s will return index_not_built until you run: fisk-ai knowledge index\n", knowledgeSearchName)
+		fmt.Fprintf(notes, "note: the knowledge index is not built yet; %s will return index_not_built until it is\n", knowledgeSearchName)
 	}
 
 	selected := mcpSelectedBuiltins(cfg, RAGTools(cfg, store))
@@ -287,7 +287,7 @@ func knowledgeSearchHandler(store *rag.Store) builtinHandler {
 		}
 		switch res.Status {
 		case rag.StatusIndexNotBuilt:
-			out.Note = "the knowledge index has not been built yet; run: fisk-ai knowledge index"
+			out.Note = "the knowledge index has not been built yet, so nothing can match"
 		case rag.StatusIndexEmpty:
 			out.Note = "the knowledge index is empty or the query had no searchable terms"
 		}

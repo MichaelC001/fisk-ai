@@ -13,6 +13,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/conns"
 )
 
@@ -24,7 +25,7 @@ var _ = Describe("Integration: caller context", Label("integration"), func() {
 
 		nc := runNATS()
 
-		transport, err := a2a.NewTransport("nats", conns.New(conns.WithNats(nc)), a2a.TransportConfig{Identity: "svc"})
+		transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: conns.New(conns.WithNats(nc)), Identity: "svc"})
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(transport.Close)
 
@@ -57,8 +58,8 @@ var _ = Describe("Integration: caller context", Label("integration"), func() {
 	// for. Reading the claim out of the body and presenting it as the transport's answer
 	// is the mistake supplying the caller from the transport exists to prevent.
 	It("Should not promote a claimed sender into the transport's caller", func() {
-		req := a2a.NewToolRequest("ping", nil)
-		req.Sender = a2a.Identity{Name: "trust-me"}
+		req := wire.NewToolRequest("ping", nil)
+		req.Sender = wire.Identity{Name: "trust-me"}
 
 		body, err := json.Marshal(req)
 		Expect(err).NotTo(HaveOccurred())

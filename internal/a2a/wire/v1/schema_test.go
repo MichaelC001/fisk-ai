@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"encoding/json"
@@ -12,8 +12,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // fillHeader populates the required header fields with valid values so a message
@@ -25,6 +23,197 @@ func fillHeader(h *Header) {
 	h.Sequence = 1
 	h.Time = time.Now().UTC()
 	h.Sender = Identity{Name: "agent-a"}
+}
+
+// everyMessage builds one instance of every protocol id in protocolSchemaFile, headers
+// filled and every optional field set. The schema specs and the drift specs both read
+// it.
+//
+// Setting every field is what makes it worth having, since a field left at its Go zero
+// is omitted from the document and a property no sample writes is a property no spec
+// checks. Two specs in schema_drift_test.go hold it to that: one fails when a protocol
+// id has no sample, the other when a property of a sampled type is written by none of
+// its samples. Where the four request kinds refuse each other's fields, the second spec
+// takes the union across a type's samples, so a field belongs to whichever kind may
+// carry it.
+func everyMessage() []any {
+	GinkgoHelper()
+
+	yes := true
+	no := false
+
+	request := NewRequest("do the thing")
+	request.Budget = &Budget{MaxTokens: 1000, MaxIterations: 5, CallTimeout: "60s"}
+	request.Context = "the operator is on call"
+	request.ToolHints = []string{"nats_server_info"}
+	request.Stream = &yes
+	request.Deltas = &yes
+	request.ConversationToken = NewID()
+	request.Force = true
+
+	read, err := NewRead(NewID(), 20)
+	Expect(err).ToNot(HaveOccurred())
+
+	toolResult := NewBlock(ToolResultBlock{
+		CallID:     "c1",
+		ToolResult: ToolResult{Output: "ok", Exec: &ExecResult{Command: "nats server info", ExitCode: 0}},
+	})
+
+	result := NewResult(StopEndTurn)
+	result.Text = "all done"
+	result.Usage = &Usage{InputTokens: 10, OutputTokens: 20}
+	result.TraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	result.ContentExported = true
+
+	failure := NewError("it broke")
+	failure.Code = CodeCapacity
+	failure.StopReason = StopError
+	failure.Usage = &Usage{InputTokens: 3, OutputTokens: 1}
+	failure.TraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	failure.ContentExported = true
+
+	cancel := NewCancel()
+	cancel.Reason = "the operator pressed control-c"
+
+	ack := NewAck(true)
+	ack.Reason = "accepted with a worker free"
+	ack.ConversationToken = NewID()
+	ack.MaxTokens = 200000
+
+	toolReply := NewToolReply("done", true)
+	toolReply.Exec = &ExecResult{Command: "nats server info", ExitCode: 0}
+	toolReply.Code = CodeCapacity
+
+	discoveryReply := NewDiscoveryReply("agent-a", "1.2.3")
+	discoveryReply.Description = "manages nats auth"
+	discoveryReply.Model = "claude-sonnet-5"
+	discoveryReply.Protocols = []string{ProtocolNamespace}
+	discoveryReply.Telemetry = true
+	discoveryReply.TelemetryContent = true
+	discoveryReply.Tools = []ToolDescriptor{{
+		Name:        "nats_server_info",
+		Description: "show server info",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Behavior: ToolBehavior{
+			ReadOnly:    &yes,
+			Destructive: &no,
+			Idempotent:  &yes,
+			OpenWorld:   &no,
+		},
+	}}
+
+	approve := NewElicitRequest(ElicitApprove, "q1")
+	approve.Command = "stream rm"
+	approve.Display = "stream rm ORDERS"
+	approve.Tag = "ai:confirm"
+	approve.ToolUseID = "toolu_1"
+	approve.WaitMS = 90000
+
+	confirmQuestion := NewElicitRequest(ElicitConfirm, "q4")
+	confirmQuestion.Question = "remove it?"
+
+	selectQuestion := NewElicitRequest(ElicitSelect, "q2")
+	selectQuestion.Question = "which cluster?"
+	selectQuestion.Options = []string{"east", "west"}
+
+	input := NewElicitRequest(ElicitInput, "q3")
+	input.Question = "which subject?"
+	input.Default = "orders.>"
+
+	choice := NewElicitReply("q1", AnswerChoice)
+	choice.Choice = ChoiceOnce
+
+	value := NewElicitReply("q3", AnswerValue)
+	value.Value = "orders.new"
+
+	messages := []any{
+		request,
+		NewAnswerRequest(NewID(), &Answer{ToolUseID: "toolu_1", Kind: ElicitSelect, Answer: AnswerValue, Value: "east"}),
+		NewResume(NewID()),
+		read,
+		NewEvent(NewThinkingBlock("hmm")),
+		NewEvent(NewTextBlock("answer")),
+		NewEvent(NewBlock(PromptBlock{Text: "do the thing"})),
+		NewEvent(NewBlock(WarningBlock{Kind: "tool_dropped", Name: "ls", Count: 1, Params: []string{"ai:deny"}, Error: "refused"})),
+		NewEvent(NewToolCallBlock("c1", "nats_server_info", json.RawMessage(`{"id":1}`))),
+		NewEvent(toolResult),
+		NewEvent(NewBlock(AgentCallBlock{ID: "a1", Name: "remote", Task: NewID()})),
+		NewEvent(NewBlock(StatusBlock{Iteration: 2, Phase: "calling-llm", Usage: &Usage{InputTokens: 1}})),
+		NewEvent(NewBlock(TextDeltaBlock{Index: 1, Iteration: 3, Text: "part", Final: true})),
+		NewEvent(NewBlock(ThinkingDeltaBlock{Index: 0, Iteration: 3, Text: "hmm", Final: true})),
+		result,
+		failure,
+		cancel,
+		ack,
+		NewToolRequest("nats_server_info", json.RawMessage(`{"id":1}`)),
+		toolReply,
+		NewDiscoveryRequest(),
+		discoveryReply,
+		approve,
+		confirmQuestion,
+		selectQuestion,
+		input,
+		choice,
+		NewElicitReply("q4", AnswerConfirmed),
+		NewElicitReply("q2", AnswerIndex),
+		value,
+		NewElicitReply("q1", AnswerNoOperator),
+		NewElicitReply("q1", AnswerWaiting),
+	}
+
+	for _, msg := range messages {
+		fillMessageHeader(msg)
+	}
+
+	return messages
+}
+
+// fillWholeHeader sets every header field, including the four a message is valid
+// without. everyMessage uses it rather than fillHeader so that a sample writes each of
+// them, which is what lets the drift spec see a header tag renamed.
+func fillWholeHeader(h *Header) {
+	fillHeader(h)
+
+	h.Parent = NewID()
+	h.Recipient = &Identity{Name: "agent-b"}
+	h.MustUnderstand = true
+	h.TraceParent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+}
+
+// fillMessageHeader fills the header of whichever message type this is. The switch is
+// the price of a slice of any; a message type added without a case fails the spec
+// rather than validating an empty header.
+func fillMessageHeader(msg any) {
+	GinkgoHelper()
+
+	switch m := msg.(type) {
+	case *Request:
+		fillWholeHeader(&m.Header)
+	case *Event:
+		fillWholeHeader(&m.Header)
+	case *Result:
+		fillWholeHeader(&m.Header)
+	case *ErrorMessage:
+		fillWholeHeader(&m.Header)
+	case *Cancel:
+		fillWholeHeader(&m.Header)
+	case *Ack:
+		fillWholeHeader(&m.Header)
+	case *ToolRequest:
+		fillWholeHeader(&m.Header)
+	case *ToolReply:
+		fillWholeHeader(&m.Header)
+	case *DiscoveryRequest:
+		fillWholeHeader(&m.Header)
+	case *DiscoveryReply:
+		fillWholeHeader(&m.Header)
+	case *ElicitRequest:
+		fillWholeHeader(&m.Header)
+	case *ElicitReply:
+		fillWholeHeader(&m.Header)
+	default:
+		Fail("unhandled message type in test")
+	}
 }
 
 // tamper round-trips a body through a map so a test can mutate it before
@@ -50,120 +239,8 @@ var _ = Describe("Validator", func() {
 
 	Describe("valid messages", func() {
 		It("Should accept every fully populated message type", func() {
-			request := NewRequest("do the thing")
-			request.Budget = &Budget{MaxTokens: 1000, MaxIterations: 5, CallTimeout: "60s"}
-
-			toolResult := NewBlock(ToolResultBlock{
-				CallID:     "c1",
-				ToolResult: ToolResult{Output: "ok", Exec: &ExecResult{Command: "nats server info", ExitCode: 0}},
-			})
-
-			result := NewResult(StopEndTurn)
-			result.Text = "all done"
-			result.Usage = &Usage{InputTokens: 10, OutputTokens: 20}
-
-			toolReply := NewToolReply("done", false)
-			toolReply.Exec = &ExecResult{Command: "nats server info", ExitCode: 0}
-
-			discoveryReply := NewDiscoveryReply("agent-a", "1.2.3")
-			discoveryReply.Description = "manages nats auth"
-			discoveryReply.Model = "claude-sonnet-5"
-			discoveryReply.Protocols = []string{ProtocolNamespace}
-			discoveryReply.Tools = []ToolDescriptor{{
-				Name:        "nats_server_info",
-				Description: "show server info",
-				InputSchema: json.RawMessage(`{"type":"object"}`),
-				Behavior: toolkit.Behavior{
-					ReadOnly:    toolkit.HintTrue,
-					Destructive: toolkit.HintFalse,
-					Idempotent:  toolkit.HintTrue,
-					OpenWorld:   toolkit.HintFalse,
-				},
-			}}
-
-			approve := NewElicitRequest(ElicitApprove, "q1")
-			approve.Command = "stream rm"
-			approve.Display = "stream rm ORDERS"
-			approve.Tag = "ai:confirm"
-
-			confirmQuestion := NewElicitRequest(ElicitConfirm, "q4")
-			confirmQuestion.Question = "remove it?"
-
-			selectQuestion := NewElicitRequest(ElicitSelect, "q2")
-			selectQuestion.Question = "which cluster?"
-			selectQuestion.Options = []string{"east", "west"}
-
-			input := NewElicitRequest(ElicitInput, "q3")
-			input.Question = "which subject?"
-			input.Default = "orders.>"
-
-			choice := NewElicitReply("q1", AnswerChoice)
-			choice.Choice = ChoiceOnce
-
-			value := NewElicitReply("q3", AnswerValue)
-			value.Value = "orders.new"
-
-			messages := []any{
-				request,
-				NewEvent(NewThinkingBlock("hmm")),
-				NewEvent(NewTextBlock("answer")),
-				NewEvent(NewToolCallBlock("c1", "nats_server_info", json.RawMessage(`{"id":1}`))),
-				NewEvent(toolResult),
-				NewEvent(NewBlock(AgentCallBlock{ID: "a1", Name: "remote", Task: NewID()})),
-				NewEvent(NewBlock(StatusBlock{Iteration: 2, Phase: "calling-llm", Usage: &Usage{InputTokens: 1}})),
-				NewEvent(NewBlock(TextDeltaBlock{Index: 1, Iteration: 3, Text: "part", Final: true})),
-				NewEvent(NewBlock(ThinkingDeltaBlock{Index: 0, Iteration: 3, Text: "hmm", Final: true})),
-				result,
-				NewError("it broke"),
-				NewCancel(),
-				NewAck(true),
-				NewToolRequest("nats_server_info", json.RawMessage(`{"id":1}`)),
-				toolReply,
-				NewDiscoveryRequest(),
-				discoveryReply,
-				approve,
-				confirmQuestion,
-				selectQuestion,
-				input,
-				choice,
-				NewElicitReply("q4", AnswerConfirmed),
-				NewElicitReply("q2", AnswerIndex),
-				value,
-				NewElicitReply("q1", AnswerNoOperator),
-			}
-
-			for _, msg := range messages {
-				switch m := msg.(type) {
-				case *Request:
-					fillHeader(&m.Header)
-				case *Event:
-					fillHeader(&m.Header)
-				case *Result:
-					fillHeader(&m.Header)
-				case *ErrorMessage:
-					fillHeader(&m.Header)
-				case *Cancel:
-					fillHeader(&m.Header)
-				case *Ack:
-					fillHeader(&m.Header)
-				case *ToolRequest:
-					fillHeader(&m.Header)
-				case *ToolReply:
-					fillHeader(&m.Header)
-				case *DiscoveryRequest:
-					fillHeader(&m.Header)
-				case *DiscoveryReply:
-					fillHeader(&m.Header)
-				case *ElicitRequest:
-					fillHeader(&m.Header)
-				case *ElicitReply:
-					fillHeader(&m.Header)
-				default:
-					Fail("unhandled message type in test")
-				}
-
-				err := v.ValidateMessage(msg)
-				Expect(err).ToNot(HaveOccurred(), "%T should validate", msg)
+			for _, msg := range everyMessage() {
+				Expect(v.ValidateMessage(msg)).To(Succeed(), "%T should validate", msg)
 			}
 		})
 

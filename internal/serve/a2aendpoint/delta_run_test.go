@@ -16,6 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -113,7 +114,7 @@ func (p *streamingScript) Counts() (int, int) {
 type lossyTransport struct {
 	a2a.StreamingTransport
 
-	drops a2a.BlockType
+	drops wire.BlockType
 }
 
 func (t *lossyTransport) Stream(ctx context.Context, agent string, op a2a.RouteHint, body []byte) (a2a.Reader, error) {
@@ -129,7 +130,7 @@ func (t *lossyTransport) Stream(ctx context.Context, agent string, op a2a.RouteH
 type lossyReader struct {
 	a2a.Reader
 
-	drops   a2a.BlockType
+	drops   wire.BlockType
 	dropped bool
 }
 
@@ -146,13 +147,13 @@ func (r *lossyReader) Next(ctx context.Context) ([]byte, error) {
 
 // carriesBlock reports whether a message of a reply set is an event carrying a block of
 // the given kind.
-func carriesBlock(body []byte, kind a2a.BlockType) bool {
-	msg, err := a2a.Decode(body)
+func carriesBlock(body []byte, kind wire.BlockType) bool {
+	msg, err := wire.Decode(body)
 	if err != nil {
 		return false
 	}
 
-	event, ok := msg.(*a2a.Event)
+	event, ok := msg.(*wire.Event)
 	if !ok {
 		return false
 	}
@@ -162,7 +163,7 @@ func carriesBlock(body []byte, kind a2a.BlockType) bool {
 
 // dropFirst builds the transport wrapper that loses the first message carrying a block of
 // the given kind.
-func dropFirst(kind a2a.BlockType) func(a2a.StreamingTransport) a2a.StreamingTransport {
+func dropFirst(kind wire.BlockType) func(a2a.StreamingTransport) a2a.StreamingTransport {
 	return func(t a2a.StreamingTransport) a2a.StreamingTransport {
 		return &lossyTransport{StreamingTransport: t, drops: kind}
 	}
@@ -175,7 +176,7 @@ func dropFirst(kind a2a.BlockType) func(a2a.StreamingTransport) a2a.StreamingTra
 // n belongs to call n.
 type wireBlock struct {
 	call  int
-	block a2a.Block
+	block wire.Block
 }
 
 // blockKey is one content block of one model call, which is what a fragment and the whole
@@ -242,7 +243,7 @@ expose:
 		Eventually(served, 10*time.Second).Should(Receive(Succeed()))
 	}()
 
-	transport, err := a2a.NewTransport("nats", provider, a2a.TransportConfig{Identity: "caller1", Timeout: 5 * time.Second})
+	transport, err := a2a.NewTransport("nats", a2a.TransportConfig{Resources: provider, Identity: "caller1", Timeout: 5 * time.Second})
 	Expect(err).ToNot(HaveOccurred())
 	DeferCleanup(transport.Close)
 
@@ -260,8 +261,8 @@ expose:
 }
 
 // asks builds a prompt request, asking for the turn as it is written when deltas is set.
-func asks(prompt string, deltas bool) *a2a.Request {
-	req := a2a.NewRequest(prompt)
+func asks(prompt string, deltas bool) *wire.Request {
+	req := wire.NewRequest(prompt)
 	if deltas {
 		yes := true
 		req.Deltas = &yes
@@ -272,7 +273,7 @@ func asks(prompt string, deltas bool) *a2a.Request {
 
 // readSet reads a reply set to its terminal message and returns the blocks it carried and
 // the result it ended on.
-func readSet(ctx context.Context, stream *a2a.TaskStream) ([]wireBlock, *a2a.Result) {
+func readSet(ctx context.Context, stream *a2a.TaskStream) ([]wireBlock, *wire.Result) {
 	GinkgoHelper()
 
 	var blocks []wireBlock
@@ -283,21 +284,21 @@ func readSet(ctx context.Context, stream *a2a.TaskStream) ([]wireBlock, *a2a.Res
 		Expect(err).ToNot(HaveOccurred())
 
 		switch m := msg.(type) {
-		case *a2a.Ack:
+		case *wire.Ack:
 			Expect(m.Accepted).To(BeTrue())
 
-		case *a2a.Event:
+		case *wire.Event:
 			blocks = append(blocks, wireBlock{call: call, block: m.Block})
 
-			status, ok := m.Block.Content().(a2a.StatusBlock)
+			status, ok := m.Block.Content().(wire.StatusBlock)
 			if ok && status.Phase == "" {
 				call = status.Iteration + 1
 			}
 
-		case *a2a.ErrorMessage:
+		case *wire.ErrorMessage:
 			Fail(fmt.Sprintf("the run ended in error: %s (%s)", m.Err, m.Code))
 
-		case *a2a.Result:
+		case *wire.Result:
 			return blocks, m
 		}
 	}
@@ -305,8 +306,8 @@ func readSet(ctx context.Context, stream *a2a.TaskStream) ([]wireBlock, *a2a.Res
 
 // contentsOf is the content of every block of a set, in arrival order, for comparing one
 // run's blocks with another's.
-func contentsOf(blocks []wireBlock) []a2a.BlockContent {
-	out := make([]a2a.BlockContent, len(blocks))
+func contentsOf(blocks []wireBlock) []wire.BlockContent {
+	out := make([]wire.BlockContent, len(blocks))
 	for i, b := range blocks {
 		out[i] = b.block.Content()
 	}
@@ -322,15 +323,15 @@ func positions(blocks []wireBlock) (map[blockKey][]int, map[blockKey]int) {
 
 	for at, b := range blocks {
 		switch v := b.block.Content().(type) {
-		case a2a.TextDeltaBlock:
+		case wire.TextDeltaBlock:
 			key := blockKey{call: v.Iteration, index: v.Index}
 			fragments[key] = append(fragments[key], at)
-		case a2a.ThinkingDeltaBlock:
+		case wire.ThinkingDeltaBlock:
 			key := blockKey{call: v.Iteration, index: v.Index}
 			fragments[key] = append(fragments[key], at)
-		case a2a.TextBlock:
+		case wire.TextBlock:
 			wholes[blockKey{call: b.call, index: v.Index}] = at
-		case a2a.ThinkingBlock:
+		case wire.ThinkingBlock:
 			wholes[blockKey{call: b.call, index: v.Index}] = at
 		}
 	}
@@ -348,7 +349,7 @@ func fragmentText(blocks []wireBlock, key blockKey) (string, int) {
 
 	for _, b := range blocks {
 		switch v := b.block.Content().(type) {
-		case a2a.TextDeltaBlock:
+		case wire.TextDeltaBlock:
 			if v.Iteration != key.call || v.Index != key.index {
 				continue
 			}
@@ -356,7 +357,7 @@ func fragmentText(blocks []wireBlock, key blockKey) (string, int) {
 			if v.Final {
 				finals++
 			}
-		case a2a.ThinkingDeltaBlock:
+		case wire.ThinkingDeltaBlock:
 			if v.Iteration != key.call || v.Index != key.index {
 				continue
 			}
@@ -372,14 +373,14 @@ func fragmentText(blocks []wireBlock, key blockKey) (string, int) {
 
 // wholeBlocks is the whole text and thinking blocks of a set, keyed by the call and index
 // they were produced under.
-func wholeBlocks(blocks []wireBlock) map[blockKey]a2a.BlockContent {
-	out := map[blockKey]a2a.BlockContent{}
+func wholeBlocks(blocks []wireBlock) map[blockKey]wire.BlockContent {
+	out := map[blockKey]wire.BlockContent{}
 
 	for _, b := range blocks {
 		switch v := b.block.Content().(type) {
-		case a2a.TextBlock:
+		case wire.TextBlock:
 			out[blockKey{call: b.call, index: v.Index}] = v
-		case a2a.ThinkingBlock:
+		case wire.ThinkingBlock:
 			out[blockKey{call: b.call, index: v.Index}] = v
 		}
 	}
@@ -400,19 +401,19 @@ func assembleCalls(blocks []wireBlock) map[int][]llm.AssembledBlock {
 		last = b.call
 
 		switch v := b.block.Content().(type) {
-		case a2a.TextDeltaBlock:
+		case wire.TextDeltaBlock:
 			assembler.AddDelta(llm.Delta{Kind: llm.DeltaText, Index: v.Index, Text: v.Text, Final: v.Final})
 
-		case a2a.ThinkingDeltaBlock:
+		case wire.ThinkingDeltaBlock:
 			assembler.AddDelta(llm.Delta{Kind: llm.DeltaThinking, Index: v.Index, Text: v.Text, Final: v.Final})
 
-		case a2a.TextBlock:
+		case wire.TextBlock:
 			assembler.AddBlock(llm.WholeBlock{Kind: llm.DeltaText, Index: v.Index, Text: v.Text, Trimmed: v.Trimmed})
 
-		case a2a.ThinkingBlock:
+		case wire.ThinkingBlock:
 			assembler.AddBlock(llm.WholeBlock{Kind: llm.DeltaThinking, Index: v.Index, Text: v.Text, Trimmed: v.Trimmed})
 
-		case a2a.StatusBlock:
+		case wire.StatusBlock:
 			if v.Phase != "" {
 				continue
 			}
@@ -468,7 +469,7 @@ var _ = Describe("A run streamed to a caller", func() {
 	}
 
 	// prompt sends one prompt and reads the whole set it answers on.
-	prompt := func(ctx context.Context, client *a2a.Client, deltas bool) ([]wireBlock, *a2a.Result, *a2a.TaskStream) {
+	prompt := func(ctx context.Context, client *a2a.Client, deltas bool) ([]wireBlock, *wire.Result, *a2a.TaskStream) {
 		GinkgoHelper()
 
 		stream, err := client.Task(ctx, "agent1", asks("how many streams are there", deltas))
@@ -514,9 +515,9 @@ var _ = Describe("A run streamed to a caller", func() {
 			// the text the run ended on.
 			wholes := wholeBlocks(blocks)
 			Expect(wholes).To(HaveLen(3))
-			Expect(wholes[reasoned]).To(Equal(a2a.ThinkingBlock{Text: "checking the streams"}))
-			Expect(wholes[narration]).To(Equal(a2a.TextBlock{Text: "one moment", Index: 1}))
-			Expect(wholes[answered]).To(Equal(a2a.TextBlock{Text: "there are three streams", Final: true}))
+			Expect(wholes[reasoned]).To(Equal(wire.ThinkingBlock{Text: "checking the streams"}))
+			Expect(wholes[narration]).To(Equal(wire.TextBlock{Text: "one moment", Index: 1}))
+			Expect(wholes[answered]).To(Equal(wire.TextBlock{Text: "there are three streams", Final: true}))
 
 			fragments, at := positions(blocks)
 			Expect(at).To(HaveLen(3))
@@ -558,7 +559,7 @@ var _ = Describe("A run streamed to a caller", func() {
 	It("Should send no fragment to a caller that asked for none, and the blocks a run that cannot stream sends", func() {
 		reasoning, answer := scripted()
 
-		var streamedRun []a2a.BlockContent
+		var streamedRun []wire.BlockContent
 
 		script := newStreamingScript(reasoning, answer)
 		runWorker(script, nil, func(ctx context.Context, client *a2a.Client) {
@@ -570,8 +571,8 @@ var _ = Describe("A run streamed to a caller", func() {
 		})
 
 		for _, content := range streamedRun {
-			Expect(content).ToNot(BeAssignableToTypeOf(a2a.TextDeltaBlock{}))
-			Expect(content).ToNot(BeAssignableToTypeOf(a2a.ThinkingDeltaBlock{}))
+			Expect(content).ToNot(BeAssignableToTypeOf(wire.TextDeltaBlock{}))
+			Expect(content).ToNot(BeAssignableToTypeOf(wire.ThinkingDeltaBlock{}))
 		}
 
 		called, streamed := script.Counts()
@@ -580,7 +581,7 @@ var _ = Describe("A run streamed to a caller", func() {
 
 		// The same script against a backend with no CallStream at all, which is the run
 		// this one has to match block for block.
-		var plainRun []a2a.BlockContent
+		var plainRun []wire.BlockContent
 
 		runWorker(agenttest.NewScriptedProvider(GinkgoTB(), reasoning.resp, answer.resp), nil, func(ctx context.Context, client *a2a.Client) {
 			blocks, res, _ := prompt(ctx, client, false)
@@ -607,7 +608,7 @@ var _ = Describe("A run streamed to a caller", func() {
 			resp: agenttest.TextResponse(text),
 		}
 
-		runWorker(newStreamingScript(turn), dropFirst(a2a.BlockTextDelta), func(ctx context.Context, client *a2a.Client) {
+		runWorker(newStreamingScript(turn), dropFirst(wire.BlockTextDelta), func(ctx context.Context, client *a2a.Client) {
 			blocks, res, stream := prompt(ctx, client, true)
 			Expect(res.Text).To(Equal(text))
 			Expect(stream.Gaps()).To(Equal(uint64(1)), "the caller sees the message it never received")
@@ -624,7 +625,7 @@ var _ = Describe("A run streamed to a caller", func() {
 	// The whole block is cut to what one block carries. The fragments are capped one
 	// message at a time and never in aggregate, so they carry all of it.
 	It("Should keep the fragments when the whole block arrives trimmed", func() {
-		text := strings.Repeat("a", a2a.MaxBlockText+6000)
+		text := strings.Repeat("a", wire.MaxBlockText+6000)
 
 		var deltas []llm.Delta
 		for at := 0; at < len(text); at += 10000 {
@@ -638,7 +639,7 @@ var _ = Describe("A run streamed to a caller", func() {
 			blocks, _, stream := prompt(ctx, client, true)
 			Expect(stream.Gaps()).To(BeZero())
 
-			whole, ok := wholeBlocks(blocks)[blockKey{call: 1, index: 0}].(a2a.TextBlock)
+			whole, ok := wholeBlocks(blocks)[blockKey{call: 1, index: 0}].(wire.TextBlock)
 			Expect(ok).To(BeTrue())
 			Expect(whole.Trimmed).To(BeTrue())
 			Expect(whole.Text).ToNot(Equal(text))

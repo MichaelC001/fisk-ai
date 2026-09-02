@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,16 +17,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/choria-io/fisk"
+	"github.com/segmentio/ksuid"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
-	"github.com/segmentio/ksuid"
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/llm"
-	llmanthropic "github.com/choria-io/fisk-ai/internal/llm/anthropic"
 	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	runstatefile "github.com/choria-io/fisk-ai/internal/runstate/file"
@@ -43,7 +44,7 @@ func TestAgent(t *testing.T) {
 // toolSetOf builds a runner's tool set from the name-keyed dispatch map these tests
 // write, in name order so the definitions it sends are stable. Each key must be the
 // tool's own Name, which is the name the set registers it under.
-func toolSetOf(tools map[string]toolkit.Tool) *ToolSet {
+func toolSetOf(tools map[string]toolkit.Tool) *toolSet {
 	GinkgoHelper()
 
 	out := make([]toolkit.Tool, 0, len(tools))
@@ -52,15 +53,15 @@ func toolSetOf(tools map[string]toolkit.Tool) *ToolSet {
 		out = append(out, tools[name])
 	}
 
-	return NewToolSet(out, nil, false)
+	return newToolSet(out, nil, false)
 }
 
 // toolSrcOf is toolSetOf published to a source, for a test that drives the loop
 // rather than a single tool call.
-func toolSrcOf(tools map[string]toolkit.Tool) *ToolSource {
+func toolSrcOf(tools map[string]toolkit.Tool) *toolSource {
 	GinkgoHelper()
 
-	return NewToolSource(toolSetOf(tools))
+	return newToolSource(toolSetOf(tools))
 }
 
 // nopEvents discards every event, for tests that exercise the loop rather than
@@ -121,10 +122,10 @@ func (r *rotateRecorder) SessionRotated(prevID string) { r.prevIDs = append(r.pr
 // stubInvoker is a canned a2a.RemoteInvoker for driving a RemoteTool through the
 // runner without a transport: every call returns the same reply.
 type stubInvoker struct {
-	reply *a2a.ToolReply
+	reply *wire.ToolReply
 }
 
-func (s stubInvoker) InvokeTool(context.Context, string, string, json.RawMessage) (*a2a.ToolReply, error) {
+func (s stubInvoker) InvokeTool(context.Context, string, string, json.RawMessage) (*wire.ToolReply, error) {
 	return s.reply, nil
 }
 
@@ -187,19 +188,60 @@ func userTexts(msgs []llm.Message) []string {
 	return out
 }
 
-func mustMessage(j string) *anthropic.Message {
-	GinkgoHelper()
-	var m anthropic.Message
-	Expect(json.Unmarshal([]byte(j), &m)).To(Succeed())
-	return &m
+// anthropicMessage is the part of an Anthropic message the specs below write: the
+// identity of the reply, why it stopped, what it cost, and text and tool_use blocks.
+type anthropicMessage struct {
+	ID         string `json:"id"`
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason"`
+	Content    []struct {
+		Type  string          `json:"type"`
+		Text  string          `json:"text"`
+		ID    string          `json:"id"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
+	} `json:"content"`
+	Usage struct {
+		Input         int64 `json:"input_tokens"`
+		Output        int64 `json:"output_tokens"`
+		CacheRead     int64 `json:"cache_read_input_tokens"`
+		CacheCreation int64 `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
 }
 
 // mustResponse builds a neutral llm.Response from an Anthropic message JSON, so the
-// test data stays the wire form the model returns while the loop consumes neutral.
+// test data stays the wire form the model returns while the loop consumes neutral. A
+// block of any kind other than text or tool_use fails the spec: the decoding that
+// covers every kind belongs to the anthropic codec and is tested there.
 func mustResponse(j string) *llm.Response {
 	GinkgoHelper()
-	resp, err := llmanthropic.ResponseToNeutral(mustMessage(j))
-	Expect(err).NotTo(HaveOccurred())
+
+	var m anthropicMessage
+	Expect(json.Unmarshal([]byte(j), &m)).To(Succeed())
+
+	resp := llm.Response{
+		ID:         m.ID,
+		Model:      m.Model,
+		StopReason: llm.StopReason(m.StopReason),
+		Usage: llm.Usage{
+			In:          m.Usage.Input,
+			Out:         m.Usage.Output,
+			CacheRead:   m.Usage.CacheRead,
+			CacheCreate: m.Usage.CacheCreation,
+		},
+	}
+
+	for i, block := range m.Content {
+		switch block.Type {
+		case "text":
+			resp.Content = append(resp.Content, llm.ContentBlock{Text: &llm.TextBlock{Text: block.Text}})
+		case "tool_use":
+			resp.Content = append(resp.Content, llm.ContentBlock{ToolUse: &llm.ToolUseBlock{ID: block.ID, Name: block.Name, Input: block.Input}})
+		default:
+			Fail(fmt.Sprintf("content block %d is of kind %q, which mustResponse does not build", i, block.Type))
+		}
+	}
+
 	return &resp
 }
 
@@ -274,7 +316,7 @@ var _ = Describe("runner", func() {
 			// restored in-flight batch runs against the set the runner was built with.
 			emptyTools := func(r *runner) {
 				r.set = toolSetOf(nil)
-				r.toolSrc = NewToolSource(r.set)
+				r.toolSrc = newToolSource(r.set)
 			}
 
 			// Runner A: one tool-using turn, then a suspend request lands, so the
@@ -415,8 +457,8 @@ var _ = Describe("runner", func() {
 
 		It("dispatches a remote tool: reports the dispatch, counts it, and traces the agent", func() {
 			ev := &captureEvents{}
-			desc := a2a.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
-			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: a2a.NewToolReply("ok", false)})
+			desc := wire.ToolDescriptor{Name: "info", Description: "reports info", InputSchema: json.RawMessage(`{"type":"object"}`)}
+			rt, err := a2a.NewRemoteTool("nats_info", "nats", desc, stubInvoker{reply: wire.NewToolReply("ok", false)})
 			Expect(err).NotTo(HaveOccurred())
 
 			r := &runner{stats: &RunStats{}, events: ev, set: toolSetOf(map[string]toolkit.Tool{"nats_info": rt})}
@@ -1224,7 +1266,7 @@ var _ = Describe("runner", func() {
 		}
 		emptyTools := func(r *runner) {
 			r.set = toolSetOf(nil)
-			r.toolSrc = NewToolSource(r.set)
+			r.toolSrc = newToolSource(r.set)
 		}
 		finalMsg := func(text string) string {
 			return `{"id":"x","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"` + text + `"}],"usage":{"input_tokens":1,"output_tokens":1}}`
@@ -1725,7 +1767,7 @@ var _ = Describe("runner", func() {
 	Describe("cache accounting", func() {
 		emptyTools := func(r *runner) {
 			r.set = toolSetOf(nil)
-			r.toolSrc = NewToolSource(r.set)
+			r.toolSrc = newToolSource(r.set)
 		}
 
 		It("flows the cache split into stats, the journal, folded counters and the budget", func() {
@@ -1815,6 +1857,19 @@ var _ = Describe("Run tool availability guard", func() {
 
 		_, err := Run(context.Background(), Options{Config: cfg, ConfigFile: "agent.yaml"}, nopEvents{}, nil)
 		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
+		Expect(err).To(MatchError(ContainSubstring(`in "agent.yaml"`)))
+	})
+
+	// An embedder that built its configuration in Go read no file, so the settings to
+	// change are named without a file to change them in.
+	It("names no file when the caller read none", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "test-model"
+		cfg.LLM.Budget.MaxIterations = 1
+
+		_, err := Run(context.Background(), Options{Config: cfg}, nopEvents{}, nil)
+		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
+		Expect(err.Error()).To(HaveSuffix("mcp_clients"))
 	})
 
 	It("proceeds past the guard when only a native tool (knowledge_search) is enabled", func() {

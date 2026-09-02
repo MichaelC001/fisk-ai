@@ -112,14 +112,26 @@ func (s *FakeMemoryStore) Read(_ context.Context, key string) (string, string, e
 	return m.description, m.content, nil
 }
 
-// Write implements memory.Store.
-func (s *FakeMemoryStore) Write(_ context.Context, key, description, content string, overwrite bool) error {
+// Create implements memory.Store.
+func (s *FakeMemoryStore) Create(_ context.Context, key, description, content string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.items[key]; ok && !overwrite {
+	_, ok := s.items[key]
+	if ok {
 		return memory.ErrExists
 	}
+	s.items[key] = fakeMemory{description: description, content: content}
+
+	return nil
+}
+
+// Update implements memory.Store. It never reports memory.ErrStale: the fake
+// enforces no read-before-update, as the file backend does not.
+func (s *FakeMemoryStore) Update(_ context.Context, key, description, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.items[key] = fakeMemory{description: description, content: content}
 
 	return nil

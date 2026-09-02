@@ -320,7 +320,12 @@ func memoryWriteHandler(store memory.Store) builtinHandler {
 			return "", fmt.Errorf("invalid %s input: %w", memoryWriteName, err)
 		}
 
-		err := store.Write(ctx, args.Key, args.Description, args.Content, args.Overwrite)
+		var err error
+		if args.Overwrite {
+			err = store.Update(ctx, args.Key, args.Description, args.Content)
+		} else {
+			err = store.Create(ctx, args.Key, args.Description, args.Content)
+		}
 		if errors.Is(err, memory.ErrExists) {
 			return outcomeJSON(memoryWriteName, memoryWriteOutcome{Reason: existsReason(ctx, store, args.Key)})
 		}

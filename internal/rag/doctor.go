@@ -232,7 +232,7 @@ func (s *Store) Doctor(ctx context.Context, paths []string) (*DoctorReport, erro
 	}
 
 	if s.db == nil {
-		add("Store present", false, false, fmt.Sprintf("no index file at %s; run: fisk-ai knowledge index", s.dbPath))
+		add("Store present", false, false, fmt.Sprintf("no index file at %s; run: fisk knowledge index", s.dbPath))
 	} else {
 		add("Store present", true, false, s.dbPath)
 		s.doctorDBChecks(ctx, add)
@@ -360,14 +360,14 @@ func (s *Store) doctorEmbeddingChecks(ctx context.Context, add func(string, bool
 		return
 	}
 	if meta.Model == "" {
-		add("Manifest matches model", false, false, "index is lexical-only; run: fisk-ai knowledge index --reindex")
+		add("Manifest matches model", false, false, "index is lexical-only; run: fisk knowledge index --reindex")
 		return
 	}
 	mismatch := meta.Model != s.emb.Model() || meta.Dimension != dim ||
 		meta.QueryPrefix != s.emb.QueryPrefix() || meta.DocumentPrefix != s.emb.DocumentPrefix()
 	if mismatch {
 		add("Manifest matches model", false, false,
-			fmt.Sprintf("index built with model=%s dim=%d; config requests model=%s dim=%d; run: fisk-ai knowledge index --reindex",
+			fmt.Sprintf("index built with model=%s dim=%d; config requests model=%s dim=%d; run: fisk knowledge index --reindex",
 				meta.Model, meta.Dimension, s.emb.Model(), dim))
 		return
 	}

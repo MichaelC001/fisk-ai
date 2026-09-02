@@ -20,7 +20,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -185,7 +185,7 @@ var _ = Describe("A run against a worker elsewhere", func() {
 		Expect(card.Name).To(Equal("worker1"))
 
 		handler := &renderingHandler{}
-		out, err := host.client.RunTask(ctx, host.identity, a2a.NewRequest("how many streams are there"), handler)
+		out, err := host.client.RunTask(ctx, host.identity, wire.NewRequest("how many streams are there"), handler)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(out.Error).To(BeNil())
 		Expect(out.Result.Text).To(Equal("there are three streams"))
@@ -271,11 +271,11 @@ type slowHandler struct {
 	askedOnce sync.Once
 }
 
-func (h *slowHandler) Question(_ context.Context, ask *a2a.ElicitRequest) (*a2a.ElicitReply, error) {
+func (h *slowHandler) Question(_ context.Context, ask *wire.ElicitRequest) (*wire.ElicitReply, error) {
 	h.askedOnce.Do(func() { close(h.asked) })
 	time.Sleep(h.delay)
 
-	return a2a.NewConfirmReply(ask, "terminal", true), nil
+	return wire.NewConfirmReply(ask, "terminal", true), nil
 }
 
 var _ = Describe("An answer that arrived too late", func() {
@@ -332,7 +332,7 @@ var _ = Describe("An answer that arrived too late", func() {
 			Expect(srv.Drain()).To(Succeed())
 		}()
 
-		out, err := host.client.RunTask(ctx, host.identity, a2a.NewRequest("remove the stream"), handler)
+		out, err := host.client.RunTask(ctx, host.identity, wire.NewRequest("remove the stream"), handler)
 		Expect(err).ToNot(HaveOccurred())
 
 		token := out.Ack.ConversationToken
@@ -343,7 +343,7 @@ var _ = Describe("An answer that arrived too late", func() {
 		// The run gave the question up and parked on the call, and what the person
 		// decided is kept rather than dropped.
 		Expect(out.Error).ToNot(BeNil())
-		Expect(out.Error.Code).To(Equal(a2a.CodeDeferred))
+		Expect(out.Error.Code).To(Equal(wire.CodeDeferred))
 		Expect(out.Unsent).To(HaveLen(1), "what the person decided is kept")
 		Expect(out.Unsent[0].ToolUseID).To(Equal("toolu_1"), "it names the call it answers")
 

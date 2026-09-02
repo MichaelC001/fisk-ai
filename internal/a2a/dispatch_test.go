@@ -16,20 +16,35 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
-	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // fakeTransport is an a2a.Transport that records the handlers the Server registers
 // so a test can drive them directly, without a wire. RoundTrip is unused here.
+//
+// The assertions are the audit an outside binding gets from the compiler: a method
+// dropped from either interface stops this file building rather than turning an
+// assertion somewhere else false at run time.
+var (
+	_ ReplySetTransport  = (*fakeTransport)(nil)
+	_ DescribedTransport = (*fakeTransport)(nil)
+)
+
 type fakeTransport struct {
-	handlers map[RouteHint]Handler
+	handlers  map[RouteHint]Handler
+	replySets map[RouteHint]ReplySetHandler
 }
 
 func newFakeTransport() *fakeTransport {
-	return &fakeTransport{handlers: map[RouteHint]Handler{}}
+	return &fakeTransport{
+		handlers:  map[RouteHint]Handler{},
+		replySets: map[RouteHint]ReplySetHandler{},
+	}
 }
 
 func (f *fakeTransport) RoundTrip(context.Context, string, RouteHint, []byte) ([]byte, error) {
@@ -47,7 +62,14 @@ func (f *fakeTransport) Serve(op RouteHint, h Handler) error {
 	return nil
 }
 
+func (f *fakeTransport) ServeReplySet(op RouteHint, h ReplySetHandler) error {
+	f.replySets[op] = h
+	return nil
+}
+
 func (f *fakeTransport) Describe(string) []DescLine { return nil }
+
+func (f *fakeTransport) DescribeTasks(string, bool) []DescLine { return nil }
 
 func (f *fakeTransport) Close() error { return nil }
 
@@ -93,7 +115,7 @@ func (r *fakeReplier) Error(code, _ string) error {
 }
 
 // terminal decodes the last message of the set, which is the tool's own answer.
-func (r *fakeReplier) terminal() *ToolReply {
+func (r *fakeReplier) terminal() *wire.ToolReply {
 	GinkgoHelper()
 
 	r.mu.Lock()
@@ -101,7 +123,7 @@ func (r *fakeReplier) terminal() *ToolReply {
 
 	Expect(r.final).ToNot(BeEmpty(), "the reply set carries no terminal message")
 
-	var reply ToolReply
+	var reply wire.ToolReply
 	Expect(json.Unmarshal(r.final, &reply)).To(Succeed())
 
 	return &reply
@@ -128,7 +150,7 @@ func (r *fakeReplier) keepalives() int {
 func toolRequestBody(name string) []byte {
 	GinkgoHelper()
 
-	req := NewToolRequest(name, nil)
+	req := wire.NewToolRequest(name, nil)
 	StampRequest(context.Background(), &req.Header, "caller", "svc")
 	data, err := json.Marshal(req)
 	Expect(err).NotTo(HaveOccurred())
@@ -152,10 +174,10 @@ var _ = Describe("handleTool dispatch", func() {
 		// A direct request for it is refused in-band, never run: the ack says no and
 		// the terminal reply says why.
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("danger"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("danger"), rep)
 		Expect(rep.responded.Load()).To(BeTrue())
 
-		var ack Ack
+		var ack wire.Ack
 		Expect(json.Unmarshal(rep.body, &ack)).To(Succeed())
 		Expect(ack.Accepted).To(BeFalse())
 
@@ -209,13 +231,13 @@ var _ = Describe("Integration: a2a tool keepalives", Label("integration"), func(
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("slow"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("slow"), rep)
 
 		// Accepted on the serving goroutine, before the tool has finished.
 		Expect(rep.responded.Load()).To(BeTrue())
 		Expect(rep.finished()).To(BeFalse())
 
-		var ack Ack
+		var ack wire.Ack
 		Expect(json.Unmarshal(rep.body, &ack)).To(Succeed())
 		Expect(ack.Accepted).To(BeTrue())
 
@@ -266,21 +288,21 @@ var _ = Describe("Integration: a2a capacity refusal", Label("integration"), func
 		rep1 := &fakeReplier{}
 		// The first request acquires the only slot and its worker starts; the call
 		// itself returns once the worker is spawned.
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep1)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep1)
 		Eventually(runLines).Should(Equal(1))
 
 		// The second is refused whole on the serving goroutine, ack and terminal both,
 		// so the call returns answered without the first having finished.
 		rep2 := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep2)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep2)
 		Expect(rep2.finished()).To(BeTrue())
 
-		var refusedAck Ack
+		var refusedAck wire.Ack
 		Expect(json.Unmarshal(rep2.body, &refusedAck)).To(Succeed())
 		Expect(refusedAck.Accepted).To(BeFalse())
 
 		refused := rep2.terminal()
-		Expect(refused.Code).To(Equal(CodeCapacity))
+		Expect(refused.Code).To(Equal(wire.CodeCapacity))
 		Expect(refused.IsError).To(BeTrue())
 		Expect(refused.Output).To(ContainSubstring("did not run"))
 		Expect(refused.Output).To(ContainSubstring("maximum of 1"))
@@ -299,7 +321,7 @@ var _ = Describe("Integration: a2a capacity refusal", Label("integration"), func
 		rep3 := &fakeReplier{}
 		Eventually(func() bool {
 			rep3 = &fakeReplier{}
-			ft.handlers[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep3)
+			ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("block"), rep3)
 
 			return !rep3.finished()
 		}).Should(BeTrue())

@@ -195,8 +195,11 @@ var (
 // required field is missing, when ValidateRequired is set but the schema declares no
 // required parameters (which would silently validate nothing), when a remote or MCP
 // tool is also marked confirm-gated (such a tool is gated by whoever serves it, never
-// locally), when a Spec claims both a serving agent and an MCP server, or when the
-// declared Behavior contradicts itself.
+// locally), when a Spec claims both a serving agent and an MCP server, when Kind is
+// not one of the toolkit kinds, or when the declared Behavior contradicts itself.
+//
+// The zero Spec.Kind is valid and is what a caller's own tool leaves it at; Describe
+// accounts that tool as toolkit.KindCustom.
 //
 // The contradictory Behavior is a hard error here because a Spec is code its author
 // owns, and a tool that claims to be both read-only and destructive is a bug worth
@@ -220,6 +223,16 @@ func New(spec Spec) (*Tool, error) {
 
 	if spec.ValidateRequired && len(toolkit.SchemaRequired(spec.Schema["required"])) == 0 {
 		return nil, fmt.Errorf("tool %q sets ValidateRequired but its schema declares no required parameters", spec.Name)
+	}
+
+	// Kind is accounting: it becomes CallInfo.Kind, the kind= log token and the
+	// per-kind call counts. A value outside the set toolkit declares formats as the
+	// unknown token, so a Spec that named a provider would be counted among the ones
+	// that named none.
+	switch spec.Kind {
+	case toolkit.KindUnknown, toolkit.KindApplication, toolkit.KindBuiltin, toolkit.KindRemote, toolkit.KindCustom, toolkit.KindMCP:
+	default:
+		return nil, fmt.Errorf("tool %q declares kind %d, which is not a toolkit.Kind; its calls would be accounted as unknown", spec.Name, int(spec.Kind))
 	}
 
 	if spec.Remote != nil && spec.MCP != nil {
@@ -316,19 +329,61 @@ func (t *Tool) MCPExposable() bool { return t.expose.MCP }
 func (t *Tool) A2AExposable() bool { return t.expose.A2A }
 
 // InputSchema returns the tool's JSON-schema input, for a caller that consumes the
-// raw schema directly (the MCP server).
-func (t *Tool) InputSchema() map[string]any { return t.schema }
+// raw schema directly (the MCP server). It is a copy: the map behind it is the one
+// the Spec's author wrote, every serving surface hands it to a third party, and a
+// tool must advertise the same schema to the next caller as to the last.
+func (t *Tool) InputSchema() map[string]any { return cloneSchema(t.schema) }
 
 // Definition renders the tool as a neutral definition. It advertises the
 // model-facing description, so a declared behavior travels with the tool the same way
 // a command tool's tags do. A tool marked NoDefer is always sent directly, even within
 // a deferred set, so its deferral is suppressed here rather than in the caller.
+//
+// InputSchema on the definition is a copy, on the same terms as the InputSchema
+// method.
 func (t *Tool) Definition(deferLoading bool) llm.ToolDef {
 	return llm.ToolDef{
 		Name:         t.name,
 		Description:  t.ModelDescription(),
-		InputSchema:  t.schema,
+		InputSchema:  cloneSchema(t.schema),
 		DeferLoading: deferLoading && !t.noDefer,
+	}
+}
+
+// cloneSchema copies a JSON-schema object down through the containers a schema is
+// built from: nested objects, and the arrays "required" and "enum" take. Anything
+// else is a scalar or a value this package did not put there, and is carried over as
+// it stands. A nil schema clones to nil, so a caller distinguishing an absent schema
+// from an empty one still can.
+func cloneSchema(schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+
+	out := make(map[string]any, len(schema))
+	for k, v := range schema {
+		out[k] = cloneSchemaValue(v)
+	}
+
+	return out
+}
+
+// cloneSchemaValue copies one schema value.
+func cloneSchemaValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return cloneSchema(val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = cloneSchemaValue(item)
+		}
+
+		return out
+	case []string:
+		return slices.Clone(val)
+	default:
+		return v
 	}
 }
 

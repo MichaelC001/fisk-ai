@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"regexp"
@@ -47,12 +47,35 @@ const MaxRequestIDBytes = 64
 // the two answer different questions. A request id correlates a reply set, and on the
 // task path it also becomes part of the address the process running that task
 // listens on, so a caller choosing those bytes freely would shape a subscription.
+//
+// It is exported for a transport author, who checks an id before it becomes part of an
+// address: the NATS binding calls it before building the subject a cancel or an answer
+// is sent or listened on. The client calls it too, on the request id a caller handed
+// Cancel or Answer, so a bad id is refused where that caller can see it.
 func ValidRequestID(id string) bool {
 	if len(id) > MaxRequestIDBytes {
 		return false
 	}
 
 	return schemaNamePattern.MatchString(id)
+}
+
+// Message is what Decode and TaskStream.Next hand back. A caller reads the protocol id
+// off the header and switches on it, or switches on the concrete type; the header is
+// where the correlation tag, the sequence number and the sender are, so the same call
+// answers what a caller needs to log or order what it received.
+//
+// Embedding Header implements it, which is how the twelve message types satisfy it and
+// how a thirteenth added to the package will. That also leaves it open: a type outside
+// this package embedding Header is a Message, and so is a *Header on its own. Decode
+// returns one of the twelve, listed on it and asserted at the bottom of this file, so a
+// caller reading a decoded message has that set rather than this interface's.
+type Message interface {
+	// MessageHeader returns the message's framing fields.
+	//
+	// The name is MessageHeader rather than Header because Header is the name of the
+	// embedded field that carries them.
+	MessageHeader() *Header
 }
 
 // Header carries the framing fields shared by every message. It is embedded into
@@ -96,3 +119,26 @@ type Header struct {
 	// names is the sender's choice and nothing reads it as evidence of who called.
 	TraceParent string `json:"traceparent,omitempty"`
 }
+
+// MessageHeader returns the header itself, which is what makes every type embedding one
+// a Message. The receiver is a pointer, so a message is a Message as *Request rather
+// than as Request, which is the form Decode returns and the form a caller mutating a
+// header already holds.
+func (h *Header) MessageHeader() *Header { return h }
+
+// The twelve types Decode returns. A message type added to the package and not listed
+// here is one Decode cannot hand back, so this is where that is caught.
+var (
+	_ Message = (*Request)(nil)
+	_ Message = (*Event)(nil)
+	_ Message = (*Result)(nil)
+	_ Message = (*ErrorMessage)(nil)
+	_ Message = (*Cancel)(nil)
+	_ Message = (*Ack)(nil)
+	_ Message = (*ToolRequest)(nil)
+	_ Message = (*ToolReply)(nil)
+	_ Message = (*DiscoveryRequest)(nil)
+	_ Message = (*DiscoveryReply)(nil)
+	_ Message = (*ElicitRequest)(nil)
+	_ Message = (*ElicitReply)(nil)
+)

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // DefaultIdleTimeout bounds how long a caller waits for the next message of a tool
@@ -30,7 +32,7 @@ const minIdleTimeout = 3 * KeepaliveInterval
 // discarded, their arrival being the whole of what they say.
 type toolSet struct {
 	reader    Reader
-	validator *Validator
+	validator *wire.Validator
 	idle      time.Duration
 	acked     bool
 }
@@ -42,7 +44,7 @@ type toolSet struct {
 // working. An expired wait is reported as ErrAgentUnavailable: to this caller a peer
 // that stopped speaking is indistinguishable from one that was never there, and
 // reporting the context error instead would file it as this run timing out.
-func (t *toolSet) reply(ctx context.Context) (*ToolReply, error) {
+func (t *toolSet) reply(ctx context.Context) (*wire.ToolReply, error) {
 	defer t.reader.Close()
 
 	for {
@@ -52,29 +54,29 @@ func (t *toolSet) reply(ctx context.Context) (*ToolReply, error) {
 		}
 
 		switch m := msg.(type) {
-		case *Ack:
+		case *wire.Ack:
 			if t.acked {
-				return nil, fmt.Errorf("%w: a reply set carries one ack", ErrProtocolMismatch)
+				return nil, fmt.Errorf("%w: a reply set carries one ack", wire.ErrProtocolMismatch)
 			}
 			t.acked = true
 			// A refusal still sends its terminal reply, which carries the code and the
 			// text, so nothing is decided here.
 
-		case *Event:
+		case *wire.Event:
 			// A keepalive. Nothing reads its content: that the peer sent one is the
 			// message.
 
-		case *ToolReply:
+		case *wire.ToolReply:
 			return m, nil
 
 		default:
-			return nil, fmt.Errorf("%w: %q does not belong in a tool reply set", ErrProtocolMismatch, protocolOf(msg))
+			return nil, fmt.Errorf("%w: %q does not belong in a tool reply set", wire.ErrProtocolMismatch, msg.MessageHeader().Protocol)
 		}
 	}
 }
 
 // next reads and decodes one message under the idle bound.
-func (t *toolSet) next(ctx context.Context) (any, error) {
+func (t *toolSet) next(ctx context.Context) (wire.Message, error) {
 	readCtx, cancel := context.WithTimeout(ctx, t.idle)
 	defer cancel()
 
@@ -90,8 +92,8 @@ func (t *toolSet) next(ctx context.Context) (any, error) {
 		return nil, err
 	}
 
-	if len(body) > MaxMessageSize {
-		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, MaxMessageSize)
+	if len(body) > wire.MaxMessageSize {
+		return nil, fmt.Errorf("%w: message exceeds %d bytes", ErrMessageTooLarge, wire.MaxMessageSize)
 	}
 
 	err = t.validator.Validate(body)
@@ -99,16 +101,5 @@ func (t *toolSet) next(ctx context.Context) (any, error) {
 		return nil, fmt.Errorf("invalid message in the tool reply set: %w", err)
 	}
 
-	return Decode(body)
-}
-
-// protocolOf names the protocol id of a decoded message, for an error that has to say
-// what arrived. It answers empty for a message carrying no header.
-func protocolOf(msg any) string {
-	hdr := headerOf(msg)
-	if hdr == nil {
-		return ""
-	}
-
-	return hdr.Protocol
+	return wire.Decode(body)
 }

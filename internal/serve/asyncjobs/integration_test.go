@@ -7,6 +7,7 @@ package asyncjobs
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/choria-io/asyncjobs"
@@ -18,7 +19,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -122,7 +123,7 @@ func answerOf(task *asyncjobs.Task) any {
 	raw, err := json.Marshal(task.Result.Payload)
 	Expect(err).ToNot(HaveOccurred())
 
-	msg, err := a2a.Decode(raw)
+	msg, err := wire.Decode(raw)
 	Expect(err).ToNot(HaveOccurred())
 
 	return msg
@@ -188,6 +189,10 @@ type worker struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	serveErr error
+
+	// wantFault says the spec ends this worker by breaking its processor rather than by
+	// asking it to stop, so Serve is expected to return the fault.
+	wantFault bool
 }
 
 func startWorker(nc *nats.Conn, opts workerOpts) *worker {
@@ -242,6 +247,12 @@ func (w *worker) waitServed() {
 	GinkgoHelper()
 
 	Eventually(w.done, 30*time.Second).Should(BeClosed())
+
+	if w.wantFault {
+		Expect(w.serveErr).To(MatchError(errProcessorStopped))
+		return
+	}
+
 	Expect(w.serveErr).To(Succeed())
 }
 
@@ -309,6 +320,24 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			Expect(ch.renewEvery).To(Equal(5*time.Second), "half the queue's own run time")
 			Expect(ch.Name()).To(Equal("asyncjobs/" + testQueue))
 		})
+
+		// A library that reached for a default logger would write to an embedder's
+		// stderr uninvited, so a caller who asked for no logging gets none, from the
+		// channel and from the engine bridged into it.
+		It("Should discard the log when it is given no logger", func() {
+			newQueue(nc, 30*time.Second, 5)
+
+			ch, err := New(Options{
+				Conn: nc, Queue: testQueue, TaskType: testTaskType,
+				Identity: "worker", Concurrency: 1,
+			})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(ch.Close)
+
+			for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+				Expect(ch.log.Enabled(context.Background(), level)).To(BeFalse(), "level %s", level)
+			}
+		})
 	})
 
 	Describe("Running a job", func() {
@@ -326,10 +355,10 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			task := loadTask(client, "job1")
 			Expect(task.Tries).To(Equal(1), "one delivery, no retry")
 
-			res, ok := answerOf(task).(*a2a.Result)
+			res, ok := answerOf(task).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("all done"))
-			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 			Expect(res.Request).To(Equal(req.Request), "the answer correlates to the request that asked")
 			Expect(res.Sender.Name).To(Equal("worker"))
 		})
@@ -352,7 +381,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			res, err := ParseAnswer(loadTask(client, "job1"))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(res.Text).To(Equal("all done"))
-			Expect(res.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(res.StopReason).To(Equal(wire.StopEndTurn))
 			Expect(res.Request).To(Equal(requestOf(task).Request), "the answer correlates to the request the helper built")
 		})
 
@@ -370,7 +399,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			Eventually(taskState(client, "job1"), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
 
 			task := loadTask(client, "job1")
-			msg, ok := answerOf(task).(*a2a.ErrorMessage)
+			msg, ok := answerOf(task).(*wire.ErrorMessage)
 			Expect(ok).To(BeTrue(), "a run that ran out of model responses answers with an error message")
 			Expect(msg.Err).ToNot(BeEmpty())
 			Expect(task.Tries).To(Equal(1), "a finished run is not retried")
@@ -397,7 +426,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			task := loadTask(client, "job1")
 			Expect(task.Tries).To(Equal(1), "the lease was renewed, so the job was never delivered twice")
 
-			res, ok := answerOf(task).(*a2a.Result)
+			res, ok := answerOf(task).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("slow but done"))
 		})
@@ -465,7 +494,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 
 			Eventually(taskState(client, "job1"), 30*time.Second).Should(Equal(asyncjobs.TaskStateCompleted))
 
-			res, ok := answerOf(loadTask(client, "job1")).(*a2a.Result)
+			res, ok := answerOf(loadTask(client, "job1")).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(res.Text).To(Equal("finished"))
 
@@ -518,10 +547,10 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			task := loadTask(client, "job1")
 			Expect(task.Tries).To(Equal(1))
 
-			answer, ok := answerOf(task).(*a2a.Result)
+			answer, ok := answerOf(task).(*wire.Result)
 			Expect(ok).To(BeTrue())
 			Expect(answer.Text).To(Equal("paid for already"), "the stored answer, not a second one")
-			Expect(answer.StopReason).To(Equal(a2a.StopEndTurn))
+			Expect(answer.StopReason).To(Equal(wire.StopEndTurn))
 			// What this asserts is that the replayed answer carries the first run's
 			// accounting rather than an empty one. How stats become a Usage is the
 			// mapping's own business and is covered where it lives.
@@ -587,7 +616,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 				"not a valid v1 message"),
 			Entry("a valid message that is not a request", "job2",
 				func() []byte {
-					cancel := a2a.NewCancel()
+					cancel := wire.NewCancel()
 					stampHeader(&cancel.Header)
 					return encode(cancel)
 				},
@@ -597,7 +626,7 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 				"not a valid v1 message"),
 			Entry("a request that is not a prompt", "job6",
 				func() []byte {
-					resume := a2a.NewResume("2Ab3Cd4Ef5Gh")
+					resume := wire.NewResume("2Ab3Cd4Ef5Gh")
 					stampHeader(&resume.Header)
 					return encode(resume)
 				},
@@ -628,14 +657,16 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			w.stop()
 		})
 
-		// The other order is not a choice a caller makes, it is what an unreachable
-		// queue does to them. A puller whose channel can produce nothing more has to be
-		// told, or Serve never returns.
-		It("Should end the channel when the processor goes first", func() {
+		// The other order is not a choice a caller makes, it is what an unreachable queue
+		// does to them. A puller whose channel can produce nothing more has to be told or
+		// Serve never returns, and the worker has to exit non-zero so a supervisor
+		// restarts it rather than leaving it alive taking nothing.
+		It("Should fault when the processor goes first", func() {
 			client := newQueue(nc, 30*time.Second, 5)
 			w := startWorker(nc, workerOpts{
 				provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
 			})
+			w.wantFault = true
 
 			enqueue(client, "job1", encode(newRequest("go")))
 
@@ -662,6 +693,10 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			Expect(w.ch.Close()).To(Succeed())
 
 			w.waitServed()
+
+			// The processor's context was canceled by that Close, so its return is the
+			// stop the program asked for.
+			Expect(w.ch.Faults()).ToNot(Receive())
 		})
 
 		// An idle worker has nothing to wait for, so the same call is what makes a first
@@ -692,6 +727,47 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 
 			Expect(ch.Close()).To(Succeed())
 			Expect(ch.Close()).To(Succeed())
+
+			// No processor ever ran, so there is nothing that could have stopped unasked.
+			Expect(ch.Faults()).ToNot(Receive())
+		})
+
+		// A faulted processor closes nothing Next selects on, which is what lets the
+		// server read the fault before its puller exits. A Next returning ErrChannelDone
+		// here would race Serve's read of the fault, and Serve returning nil is a dead
+		// worker exiting zero.
+		It("Should hold Next after a fault until Close", func() {
+			newQueue(nc, 30*time.Second, 5)
+
+			ch, err := New(Options{
+				Conn: nc, Queue: testQueue, TaskType: testTaskType,
+				Identity: "worker", Concurrency: 1, Logger: quietLogger(),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(ch.Close)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			DeferCleanup(cancel)
+
+			next := make(chan error, 1)
+			go func() {
+				defer GinkgoRecover()
+
+				_, nerr := ch.Next(ctx)
+				next <- nerr
+			}()
+
+			// Next is what starts the processor, so it has to be running before there is
+			// anything to stop.
+			Eventually(ch.running.Load).Should(BeTrue())
+
+			ch.procStop()
+
+			Eventually(ch.Faults()).Should(Receive())
+			Consistently(next, time.Second).ShouldNot(Receive())
+
+			Expect(ch.Close()).To(Succeed())
+			Eventually(next).Should(Receive(MatchError(serve.ErrChannelDone)))
 		})
 	})
 })

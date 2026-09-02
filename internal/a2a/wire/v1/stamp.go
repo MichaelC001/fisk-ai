@@ -2,13 +2,10 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
-	"context"
 	"time"
-
-	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 // StampRequest fills in the framing fields the v1 header schema requires beyond the protocol
@@ -21,9 +18,12 @@ import (
 // is set to zero: the transport reply inbox correlates the answer.
 //
 // A recipient names who the message is for, and an empty one leaves whatever the header already
-// carried. The trace context comes from the span ctx carries, so a receiver's spans join this
-// one's trace, and it is empty when nothing is tracing.
-func StampRequest(ctx context.Context, h *Header, sender string, recipient string) {
+// carried. The traceparent is the W3C trace context a receiver joins its spans to, and an empty
+// one leaves the field off.
+//
+// It writes into h in place and leaves Protocol, Parent and MustUnderstand as the caller set
+// them. h stays the caller's, and this package holds no reference to it once the call returns.
+func StampRequest(h *Header, sender string, recipient string, traceparent string) {
 	id := NewID()
 
 	// A request tag the caller set is kept, so a caller holds the tag its own task
@@ -48,7 +48,7 @@ func StampRequest(ctx context.Context, h *Header, sender string, recipient strin
 	h.Sequence = 0
 	h.Time = time.Now().UTC()
 	h.Sender = Identity{Name: sender}
-	h.TraceParent = telemetry.TraceContextFrom(ctx).TraceParent
+	h.TraceParent = traceparent
 	if recipient != "" {
 		h.Recipient = &Identity{Name: recipient}
 	}
@@ -61,6 +61,12 @@ func StampRequest(ctx context.Context, h *Header, sender string, recipient strin
 //
 // Sequence is left at zero, which is what a single reply carries. A message
 // belonging to a reply set is numbered by the ReplyStream that sends it.
+//
+// It writes into h in place and only reads req. Both headers stay the caller's,
+// and this package holds a reference to neither once the call returns. It leaves
+// Protocol, Parent, MustUnderstand and TraceParent on h as the caller set them,
+// and it sets Recipient only when the request names a sender, so a recipient the
+// caller already put on h survives a request that does not.
 func StampReply(h *Header, req *Header, sender string) {
 	h.ID = NewID()
 	h.Request = req.Request

@@ -118,11 +118,11 @@ var _ = Describe("Spans", func() {
 			Dialer:   servers.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
-		_, _, imports, err := ImportForRun(ctx, sessions, NewClaimedNames(nil, nil))
+		run, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
 		Expect(err).ToNot(HaveOccurred())
-		Expect(imports).To(HaveLen(1))
+		Expect(run.Servers).To(HaveLen(1))
 
 		connect := named("mcp_connect docs")
 		v, ok := attrOf(connect, telemetry.AttrMCPServer)
@@ -228,9 +228,9 @@ var _ = Describe("Spans", func() {
 			Dialer:   servers.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
-		imports, err := Import(ctx, sessions, NewClaimedNames(nil, nil))
+		imports, err := importServers(ctx, sessions, NewClaimedNames(nil, nil))
 		Expect(err).ToNot(HaveOccurred())
 		Expect(imports[0].Err).To(HaveOccurred())
 
@@ -260,7 +260,7 @@ var _ = Describe("Spans", func() {
 			Dialer:   servers.dialer(),
 		})
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { Expect(sessions.Close()).To(Succeed()) })
+		DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
 
 		changed := make(chan ToolListChange, 1)
 		DeferCleanup(sessions.OnToolListChanged(func(c ToolListChange) { changed <- c }))

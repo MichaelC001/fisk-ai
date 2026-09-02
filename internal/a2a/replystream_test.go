@@ -12,6 +12,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 )
 
 // sentMessage is one message a fake sink received, with how it was sent.
@@ -56,7 +58,7 @@ func (s *fakeSink) record(msg sentMessage) error {
 func (s *fakeSink) sequences() []uint64 {
 	var out []uint64
 	for _, msg := range s.sent {
-		var hdr Header
+		var hdr wire.Header
 		Expect(json.Unmarshal(msg.body, &hdr)).To(Succeed())
 		out = append(out, hdr.Sequence)
 	}
@@ -65,8 +67,8 @@ func (s *fakeSink) sequences() []uint64 {
 }
 
 // taskRequest is the inbound request header a reply set answers.
-func taskRequest() *Header {
-	req := NewRequest("do the thing")
+func taskRequest() *wire.Header {
+	req := wire.NewRequest("do the thing")
 	StampRequest(context.Background(), &req.Header, "caller", "svc")
 
 	return &req.Header
@@ -93,11 +95,11 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should number from 1 with no gaps across the ack, the events and the terminal", func() {
-		Expect(stream.Ack(NewAck(true))).To(Succeed())
-		Expect(stream.Event(NewTextBlock("first"))).To(Succeed())
-		Expect(stream.Event(NewTextBlock("second"))).To(Succeed())
+		Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("first"))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("second"))).To(Succeed())
 
-		res := NewResult(StopEndTurn)
+		res := wire.NewResult(wire.StopEndTurn)
 		res.Text = "done"
 		Expect(stream.Result(res)).To(Succeed())
 
@@ -106,9 +108,9 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should carry the ack through Respond and everything after it through Publish, marking only the last", func() {
-		Expect(stream.Ack(NewAck(true))).To(Succeed())
-		Expect(stream.Event(NewTextBlock("working"))).To(Succeed())
-		Expect(stream.Error(NewError("it broke"))).To(Succeed())
+		Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("working"))).To(Succeed())
+		Expect(stream.Error(wire.NewError("it broke"))).To(Succeed())
 
 		Expect(sink.sent).To(HaveLen(3))
 		Expect(sink.sent[0].viaRespond).To(BeTrue())
@@ -124,11 +126,11 @@ var _ = Describe("ReplyStream", func() {
 		req := taskRequest()
 		stream = NewReplyStream(sink, req, "svc")
 
-		Expect(stream.Ack(NewAck(true))).To(Succeed())
-		Expect(stream.Event(NewTextBlock("hi"))).To(Succeed())
+		Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("hi"))).To(Succeed())
 
 		for _, msg := range sink.sent {
-			var hdr Header
+			var hdr wire.Header
 			Expect(json.Unmarshal(msg.body, &hdr)).To(Succeed())
 			Expect(hdr.Request).To(Equal(req.Request))
 			Expect(hdr.Conversation).To(Equal(req.Conversation))
@@ -138,23 +140,23 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should refuse an oversized event without advancing the sequence", func() {
-		Expect(stream.Ack(NewAck(true))).To(Succeed())
+		Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
 
-		err := stream.Event(NewTextBlock(strings.Repeat("x", MaxMessageSize)))
+		err := stream.Event(wire.NewTextBlock(strings.Repeat("x", wire.MaxMessageSize)))
 		Expect(err).To(MatchError(ErrMessageTooLarge))
 		Expect(sink.sent).To(HaveLen(1))
 
 		// The number the refused event would have taken is still free, so the event that
 		// does go out leaves no gap describing a message the sender chose not to send.
-		Expect(stream.Event(NewTextBlock("small"))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("small"))).To(Succeed())
 		Expect(sink.sequences()).To(Equal([]uint64{1, 2}))
 	})
 
 	It("Should report a failed terminal publish rather than dropping it", func() {
-		Expect(stream.Ack(NewAck(true))).To(Succeed())
+		Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
 
 		sink.failFrom = 2
-		err := stream.Result(NewResult(StopEndTurn))
+		err := stream.Result(wire.NewResult(wire.StopEndTurn))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("the sink refused"))
 
@@ -163,23 +165,23 @@ var _ = Describe("ReplyStream", func() {
 	})
 
 	It("Should refuse an ack that is not the first message of the set", func() {
-		Expect(stream.Ack(NewAck(true))).To(Succeed())
-		Expect(stream.Event(NewTextBlock("hi"))).To(Succeed())
+		Expect(stream.Ack(wire.NewAck(true))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("hi"))).To(Succeed())
 
-		Expect(stream.Ack(NewAck(true))).To(MatchError(ErrInvalidMessage))
+		Expect(stream.Ack(wire.NewAck(true))).To(MatchError(wire.ErrInvalidMessage))
 	})
 
 	It("Should produce messages that pass the schema", func() {
-		validator, err := NewValidator()
+		validator, err := wire.NewValidator()
 		Expect(err).ToNot(HaveOccurred())
 
-		refusal := NewAck(false)
+		refusal := wire.NewAck(false)
 		refusal.Reason = "at capacity"
 		refusal.ConversationToken = "2Ab3Cd4Ef5Gh"
 
 		Expect(stream.Ack(refusal)).To(Succeed())
-		Expect(stream.Event(NewTextBlock("hi"))).To(Succeed())
-		Expect(stream.Result(NewResult(StopEndTurn))).To(Succeed())
+		Expect(stream.Event(wire.NewTextBlock("hi"))).To(Succeed())
+		Expect(stream.Result(wire.NewResult(wire.StopEndTurn))).To(Succeed())
 
 		for _, msg := range sink.sent {
 			Expect(validator.Validate(msg.body)).To(Succeed())
@@ -191,7 +193,7 @@ var _ = Describe("AcceptStream", func() {
 	yes, no := true, false
 
 	It("Should refuse only a request that explicitly asks a transport that cannot carry one", func() {
-		req := NewRequest("go")
+		req := wire.NewRequest("go")
 		req.Stream = &yes
 
 		_, err := AcceptStream(plainTransport{}, req)
@@ -199,11 +201,11 @@ var _ = Describe("AcceptStream", func() {
 	})
 
 	It("Should answer a request that says nothing terminal-only rather than refusing it", func() {
-		stream, err := AcceptStream(plainTransport{}, NewRequest("go"))
+		stream, err := AcceptStream(plainTransport{}, wire.NewRequest("go"))
 		Expect(err).ToNot(HaveOccurred())
 		Expect(stream).To(BeFalse())
 
-		req := NewRequest("go")
+		req := wire.NewRequest("go")
 		req.Stream = &no
 		stream, err = AcceptStream(plainTransport{}, req)
 		Expect(err).ToNot(HaveOccurred())
@@ -211,11 +213,11 @@ var _ = Describe("AcceptStream", func() {
 	})
 
 	It("Should stream on a transport that can, unless the request declined it", func() {
-		stream, err := AcceptStream(&scriptedTransport{}, NewRequest("go"))
+		stream, err := AcceptStream(&scriptedTransport{}, wire.NewRequest("go"))
 		Expect(err).ToNot(HaveOccurred())
 		Expect(stream).To(BeTrue())
 
-		req := NewRequest("go")
+		req := wire.NewRequest("go")
 		req.Stream = &no
 		stream, err = AcceptStream(&scriptedTransport{}, req)
 		Expect(err).ToNot(HaveOccurred())

@@ -15,7 +15,7 @@ import (
 	"github.com/choria-io/fisk"
 
 	"github.com/choria-io/fisk-ai/config"
-	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/multiplex"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
@@ -293,7 +293,7 @@ func clientConfig() (*config.Config, error) {
 //
 // No card is not a no: the agent was reachable and did not answer in time, so what a
 // person is shown has to say that rather than the reassuring half of it.
-func exportsFromCard(card *a2a.AgentCard) (bool, tui.ContentExport) {
+func exportsFromCard(card *wire.AgentCard) (bool, tui.ContentExport) {
 	if card == nil {
 		return false, tui.ContentExportUnknown
 	}
@@ -314,7 +314,7 @@ func exportsFromCard(card *a2a.AgentCard) (bool, tui.ContentExport) {
 //
 // It is sanitized here because a peer chose it: the status bar escapes widget markup and
 // stops there, and a long value would push the token count and the key hints off the bar.
-func modelFromCard(card *a2a.AgentCard) string {
+func modelFromCard(card *wire.AgentCard) string {
 	if card == nil {
 		return ""
 	}
@@ -518,7 +518,7 @@ func runUsesTUI(cfg *config.Config) bool {
 // are reprinted to the normal buffer, so the result survives in scrollback and a piped
 // answer stays clean. It returns ErrNoTTY (wrapped) when the screen cannot be opened,
 // so the caller falls back to the line UI.
-func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, token string, card *a2a.AgentCard) error {
+func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, token string, card *wire.AgentCard) error {
 	renderer := &blockRenderer{showThinking: showThinking}
 	session := &chatSession{host: host, conversation: token}
 

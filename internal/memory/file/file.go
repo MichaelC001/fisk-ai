@@ -75,43 +75,42 @@ func newStore(env memory.RuntimeEnv, identity string, raw json.RawMessage) (memo
 		dir = filepath.Join(env.StoreDir, dir)
 	}
 
-	return newFileStore(dir)
+	return NewFileStore(dir)
 }
 
-// fileStore is the file-backed Store: one markdown file per key under dir.
-type fileStore struct {
+// FileStore is the file-backed memory.Store: one markdown file per key under a
+// directory, each carrying its one-line description in YAML frontmatter. Build one
+// with NewFileStore.
+type FileStore struct {
 	dir string
-}
-
-// newFileStore creates the backing directory if needed and returns a store over
-// it. The directory is private since a memory may hold operator notes.
-func newFileStore(dir string) (*fileStore, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("creating memory directory %q: %w", dir, err)
-	}
-
-	return &fileStore{dir: dir}, nil
 }
 
 // NewFileStore opens the file-backed memory store rooted at dir, creating the directory
 // if needed. It is the constructor a Go caller embedding the agent uses to build a
 // built-in store to hand to agent.Options.MemoryStore, without importing this package
 // for its registration side effect. dir is used verbatim (no identity namespacing, no
-// StoreDir rebasing); the caller resolves the path it wants. The store is safe for
-// concurrent use across runs: writes stage in a temp file and link or rename into place
-// atomically, so a reader never observes a half-written value and concurrent overwrites
-// of one key are last-write-wins.
-func NewFileStore(dir string) (memory.Store, error) {
-	return newFileStore(dir)
+// StoreDir rebasing); the caller resolves the path it wants. The directory is private
+// since a memory may hold operator notes. The store is safe for concurrent use across
+// runs: writes stage in a temp file and link or rename into place atomically, so a
+// reader never observes a half-written value and concurrent updates of one key are
+// last-write-wins.
+func NewFileStore(dir string) (*FileStore, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("creating memory directory %q: %w", dir, err)
+	}
+
+	return &FileStore{dir: dir}, nil
 }
 
 // path returns the filename for key. The key is validated by the caller, so it
 // carries no separator and cannot escape dir.
-func (s *fileStore) path(key string) string {
+func (s *FileStore) path(key string) string {
 	return filepath.Join(s.dir, key+fileExtension)
 }
 
-func (s *fileStore) Read(_ context.Context, key string) (string, string, error) {
+// Read implements memory.Store. It takes no context: the read is one file open on
+// local disk.
+func (s *FileStore) Read(_ context.Context, key string) (string, string, error) {
 	if err := memory.ValidateKey(key); err != nil {
 		return "", "", err
 	}
@@ -129,31 +128,54 @@ func (s *fileStore) Read(_ context.Context, key string) (string, string, error) 
 	return description, content, nil
 }
 
-func (s *fileStore) Write(_ context.Context, key, description, content string, overwrite bool) error {
-	description, err := memory.ValidateWrite(key, description, content)
+// Create implements memory.Store. The link this writes under fails when the name is
+// taken, so two processes creating one key cannot both succeed, and the capacity check
+// runs here rather than on Update because only a create adds a key.
+func (s *FileStore) Create(_ context.Context, key, description, content string) error {
+	data, err := entryValue(key, description, content)
 	if err != nil {
 		return err
 	}
 
-	data, err := memory.Serialize(description, content)
+	count, err := s.count()
 	if err != nil {
 		return err
 	}
 
-	if !overwrite {
-		count, err := s.count()
-		if err != nil {
-			return err
-		}
-		if err := memory.CheckCapacity(count); err != nil {
-			return err
-		}
+	err = memory.CheckCapacity(count)
+	if err != nil {
+		return err
 	}
 
-	return s.writeAtomic(s.path(key), data, overwrite)
+	return s.writeAtomic(s.path(key), data, false)
 }
 
-func (s *fileStore) Delete(_ context.Context, key string) (bool, error) {
+// Update implements memory.Store, and writes a key holding nothing yet. This backend
+// enforces no read-before-update, so it never returns memory.ErrStale and the last
+// write wins.
+func (s *FileStore) Update(_ context.Context, key, description, content string) error {
+	data, err := entryValue(key, description, content)
+	if err != nil {
+		return err
+	}
+
+	return s.writeAtomic(s.path(key), data, true)
+}
+
+// entryValue validates a write against the shared rules and serializes the bytes
+// both verbs store.
+func entryValue(key, description, content string) ([]byte, error) {
+	description, err := memory.ValidateWrite(key, description, content)
+	if err != nil {
+		return nil, err
+	}
+
+	return memory.Serialize(description, content)
+}
+
+// Delete implements memory.Store. Removing an absent key is not an error and reports
+// that nothing was removed.
+func (s *FileStore) Delete(_ context.Context, key string) (bool, error) {
 	if err := memory.ValidateKey(key); err != nil {
 		return false, err
 	}
@@ -176,11 +198,13 @@ func (s *fileStore) Delete(_ context.Context, key string) (bool, error) {
 // operator's machine rather than the run, which is the same reason the knowledge store's
 // data source id must not fall back to its database path. Nothing is lost: the directory
 // is in the config and in fisk info, where it is not leaving the process.
-func (s *fileStore) Info() memory.Info {
+func (s *FileStore) Info() memory.Info {
 	return memory.Info{Backend: memory.BackendFile}
 }
 
-func (s *fileStore) List(_ context.Context) ([]memory.Item, error) {
+// List implements memory.Store. It reads the directory and then opens each file, so
+// its cost grows with the number of memories rather than with their size.
+func (s *FileStore) List(_ context.Context) ([]memory.Item, error) {
 	names, err := s.keyFiles()
 	if err != nil {
 		return nil, err
@@ -205,7 +229,7 @@ func (s *fileStore) List(_ context.Context) ([]memory.Item, error) {
 
 // keyFiles returns the keys of every valid memory file in the directory, filtering
 // out temp files, subdirectories, and any name whose stem is not a valid key.
-func (s *fileStore) keyFiles() ([]string, error) {
+func (s *FileStore) keyFiles() ([]string, error) {
 	dirEntries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading memory directory %q: %w", s.dir, err)
@@ -232,7 +256,7 @@ func (s *fileStore) keyFiles() ([]string, error) {
 
 // count reports how many valid memory files the directory holds, for the
 // create-time entry cap.
-func (s *fileStore) count() (int, error) {
+func (s *FileStore) count() (int, error) {
 	keys, err := s.keyFiles()
 	if err != nil {
 		return 0, err
@@ -250,7 +274,7 @@ func (s *fileStore) count() (int, error) {
 // is, and a second open by name would resolve the path again and follow whatever
 // was swapped in since, which is exactly the substitution the no-follow open is
 // there to prevent.
-func (s *fileStore) readFile(path string) ([]byte, error) {
+func (s *FileStore) readFile(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
 	if err != nil {
 		return nil, err
@@ -273,7 +297,7 @@ func (s *fileStore) readFile(path string) ([]byte, error) {
 // (overwrite false) uses a hard link, which fails if the name already exists,
 // giving the create-guard atomically; replace (overwrite true) uses rename,
 // which atomically supersedes any existing value.
-func (s *fileStore) writeAtomic(path string, data []byte, overwrite bool) error {
+func (s *FileStore) writeAtomic(path string, data []byte, overwrite bool) error {
 	tmp, err := os.CreateTemp(s.dir, tempPattern)
 	if err != nil {
 		return fmt.Errorf("staging memory write: %w", err)

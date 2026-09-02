@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
@@ -37,7 +38,7 @@ func servedSpan(exp *tracetest.InMemoryExporter) tracetest.SpanStub {
 func toolRequestFrom(ctx context.Context, name string) []byte {
 	GinkgoHelper()
 
-	req := NewToolRequest(name, nil)
+	req := wire.NewToolRequest(name, nil)
 	StampRequest(ctx, &req.Header, "caller", "svc")
 
 	data, err := json.Marshal(req)
@@ -53,12 +54,12 @@ var _ = Describe("Serving telemetry", func() {
 		ctx, span := tel.StartRemoteAgent(context.Background(), telemetry.RemoteAgentInfo{Agent: "svc"})
 		defer span.Finish(telemetry.RemoteAgentOutcome{})
 
-		var traced ToolRequest
+		var traced wire.ToolRequest
 		Expect(json.Unmarshal(toolRequestFrom(ctx, "ping"), &traced)).To(Succeed())
 		Expect(traced.TraceParent).ToNot(BeEmpty())
 		Expect(traced.TraceParent).To(ContainSubstring(trace.SpanContextFromContext(ctx).TraceID().String()))
 
-		var untraced ToolRequest
+		var untraced wire.ToolRequest
 		Expect(json.Unmarshal(toolRequestFrom(context.Background(), "ping"), &untraced)).To(Succeed())
 		Expect(untraced.TraceParent).To(BeEmpty())
 	})
@@ -75,7 +76,7 @@ var _ = Describe("Serving telemetry", func() {
 		wantTrace := trace.SpanContextFromContext(callerCtx).TraceID()
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(callerCtx, "ping"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(callerCtx, "ping"), rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 		callerSpan.Finish(telemetry.RemoteAgentOutcome{})
 
@@ -99,7 +100,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 
 		Eventually(func() int { return len(exp.GetSpans()) }).Should(BeNumerically(">=", 1))
@@ -116,7 +117,7 @@ var _ = Describe("Serving telemetry", func() {
 			ServerOptions{Identity: "svc", LogOutput: io.Discard, Telemetry: tel})
 		Expect(err).NotTo(HaveOccurred())
 
-		req := NewToolRequest("ping", nil)
+		req := wire.NewToolRequest("ping", nil)
 		StampRequest(context.Background(), &req.Header, "caller", "svc")
 		req.TraceParent = "nonsense"
 
@@ -124,10 +125,10 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, body, rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, body, rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 
-		var reply ToolReply
+		var reply wire.ToolReply
 		Expect(json.Unmarshal(rep.body, &reply)).To(Succeed())
 		Expect(reply.IsError).To(BeFalse())
 
@@ -144,7 +145,7 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "missing"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "missing"), rep)
 		Expect(rep.responded.Load()).To(BeTrue())
 
 		got := servedSpan(exp)
@@ -167,10 +168,10 @@ var _ = Describe("Serving telemetry", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		rep := &fakeReplier{}
-		ft.handlers[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestFrom(context.Background(), "ping"), rep)
 		Eventually(rep.responded.Load).Should(BeTrue())
 
-		var reply ToolReply
+		var reply wire.ToolReply
 		Expect(json.Unmarshal(rep.body, &reply)).To(Succeed())
 		Expect(reply.IsError).To(BeFalse())
 	})

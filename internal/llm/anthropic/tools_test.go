@@ -13,13 +13,13 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 )
 
-var _ = Describe("ToolDefToAnthropic", func() {
+var _ = Describe("toolDefToAnthropic", func() {
 	// marshal renders a rendered tool to the JSON the SDK would send, so assertions
 	// check what the model actually receives; the Opt fields are only observable after
 	// marshaling.
 	marshal := func(td llm.ToolDef) map[string]any {
 		GinkgoHelper()
-		data, err := json.Marshal(ToolDefToAnthropic(td))
+		data, err := json.Marshal(toolDefToAnthropic(td))
 		Expect(err).NotTo(HaveOccurred())
 		out := map[string]any{}
 		Expect(json.Unmarshal(data, &out)).To(Succeed())

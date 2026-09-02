@@ -22,8 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 const (
@@ -388,23 +389,25 @@ func serveListener(ctx context.Context, ln net.Listener, srv *mcp.Server, regist
 }
 
 // claudeAddHint returns the `claude mcp add` command an operator can run to
-// register this server with Claude Code, or "" if the address has no parsable
-// port. The server speaks the streamable HTTP transport at the listener root, so
-// the hint uses --transport http with a URL built from the listener's port. The
-// listener binds an unspecified host (":port"), whose resolved address (e.g.
-// "[::]:port") is not a URL an operator can paste; localhost is what they
-// actually connect to on the same host, so the host is rewritten to it.
+// register this server with Claude Code, or "" when the server has no name or the
+// address has no parsable port. The command takes the name before the URL, so
+// without a name the pasted line registers the server under its own URL. The
+// server speaks the streamable HTTP transport at the listener root, so the hint
+// uses --transport http with a URL built from the listener's port. The listener
+// binds an unspecified host (":port"), whose resolved address (e.g. "[::]:port")
+// is not a URL an operator can paste; localhost is what they actually connect to
+// on the same host, so the host is rewritten to it.
 func claudeAddHint(name string, addr net.Addr) string {
+	if name == "" {
+		return ""
+	}
+
 	host, port, err := net.SplitHostPort(addr.String())
 	if err != nil {
 		return ""
 	}
 	if host == "" || host == "::" || host == "0.0.0.0" {
 		host = "localhost"
-	}
-
-	if name == "" {
-		name = "fisk-ai"
 	}
 
 	return fmt.Sprintf("claude mcp add --transport http %s http://%s:%s", name, host, port)

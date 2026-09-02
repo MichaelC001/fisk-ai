@@ -2,7 +2,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-package a2a
+package wire
 
 import (
 	"encoding/json"
@@ -26,7 +26,7 @@ const (
 
 	// BlockTextDelta and BlockThinkingDelta carry a fragment of a text block and of a
 	// thinking block. They take the underscore form tool_call and tool_result use,
-	// since blockTypeOf refuses a suffix carrying a dot of its own.
+	// since BlockTypeOf refuses a suffix carrying a dot of its own.
 	BlockTextDelta     BlockType = "text_delta"
 	BlockThinkingDelta BlockType = "thinking_delta"
 )
@@ -318,15 +318,17 @@ func EventProtocolFor(t BlockType) string {
 	return EventProtocol + "." + string(t)
 }
 
-// blockTypeOf is the block an event id carries, and false for an id outside the event
-// family. A type this build does not name still reports true: the id says a block is
+// BlockTypeOf is the block an event id carries, and false for an id outside the event
+// family. It is the inverse of EventProtocolFor.
+//
+// A type this build does not name still reports true: the id says a block is
 // what arrived, which is what decides how to read the message, and UnknownBlock is
 // what carries one nobody here can render.
 //
 // A suffix carrying a dot of its own is refused. Nothing mints one, so it is a peer
 // naming something else entirely, and reading it as the type before the dot would be
 // this build deciding what somebody else's id meant.
-func blockTypeOf(protocol string) (BlockType, bool) {
+func BlockTypeOf(protocol string) (BlockType, bool) {
 	suffix, found := strings.CutPrefix(protocol, EventProtocol+".")
 	if !found || suffix == "" || strings.Contains(suffix, ".") {
 		return "", false
@@ -344,6 +346,21 @@ func (b Block) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(b.content)
+}
+
+// UnmarshalJSON refuses. A block object carries no name for its own kind, and
+// {"text":"..."} is a valid thinking block as well as a valid text one, so there is
+// nothing here to decide on: Event.UnmarshalJSON reads the kind off the protocol id
+// and is where a block is put back together.
+//
+// It exists to say that at the decode. Without it encoding/json decodes a Block as an
+// ordinary struct, whose one field is unexported, so every property goes to no field
+// and a caller gets a nil error and an empty Block; the failure then surfaces from
+// MarshalJSON, a step later, about a value the caller believes it read. A caller
+// keeping blocks of its own stores the events that carry them, or stores the type
+// beside each block and rebuilds the Event.
+func (b *Block) UnmarshalJSON([]byte) error {
+	return fmt.Errorf("%w: a block decodes only as part of the event whose protocol id names its kind", ErrInvalidMessage)
 }
 
 // unmarshalAs decodes the block as the type its event's id named, or into an
