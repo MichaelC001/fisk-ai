@@ -112,6 +112,47 @@ var _ = Describe("Index format gate", func() {
 		})
 	})
 
+	// Indexes in the field are pinned at 1 and at 2, and the pin is past both. A build
+	// that pinned 1 read an index at 2 as later than itself and refused every command
+	// against it.
+	Describe("an index pinned at a generation this build has passed", func() {
+		DescribeTable("is refused with the version it carries", func(pinned int) {
+			buildIndex()
+			pinFormatVersion(dbPath, pinned)
+
+			_, err := Open(cfg, "", Options{})
+			Expect(err).To(MatchError(ErrFormatTooOld))
+			Expect(err.Error()).To(ContainSubstring("its format_version is " + strconv.Itoa(pinned)))
+			Expect(err.Error()).To(ContainSubstring("this build writes " + strconv.Itoa(formatVersion)))
+
+			_, err = OpenWriter(cfg, "", Options{})
+			Expect(err).To(MatchError(ErrFormatTooOld))
+		},
+			Entry("the first released generation", 1),
+			Entry("the generation the lowered pin stranded", 2),
+		)
+
+		// The refusal names discarding and rebuilding, so that has to work from here.
+		It("is discarded by Destroy, leaving a rebuildable store", func() {
+			buildIndex()
+			pinFormatVersion(dbPath, 2)
+
+			removed, err := Destroy(cfg, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(removed).To(Equal(dbPath))
+
+			Expect(buildIndex()).To(Equal(2))
+
+			w, err := OpenWriter(cfg, "", Options{})
+			Expect(err).ToNot(HaveOccurred())
+			defer w.Close()
+
+			st, err := w.Stats(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(st.Meta.FormatVersion).To(Equal(formatVersion))
+		})
+	})
+
 	// A schema can gain an object without any column changing, and such an index has
 	// the right pinned format and the right columns. Reporting zero counts from a
 	// table that does not exist, as though they had been measured, is the failure the

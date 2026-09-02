@@ -51,9 +51,13 @@ const (
 	// this policy differs from runstate.Version, where the journal is the only copy
 	// of the run and a bump owes a converter.
 	//
-	// It is 1 because it always has been in anything anyone ran: it counted drafts
-	// of a format that was never released.
-	formatVersion = 1
+	// It is 3, and 2 is skipped. A build that wrote 2 shipped, so indexes pinned at 2
+	// exist; a build that then pinned 1 read them as later than itself and refused
+	// every command against them. Reusing 2 would leave two layouts claiming one
+	// generation with nothing to tell them apart, so the pin moves past both. This
+	// build then refuses an index at 1 or 2 as an earlier generation, and the operator
+	// discards and rebuilds it.
+	formatVersion = 3
 
 	// dbFileName is the SQLite index file inside the store directory.
 	dbFileName = "knowledge.db"
@@ -564,10 +568,8 @@ func (s *Store) checkIndexFormat(ctx context.Context) (indexCheck, error) {
 	case m.FormatVersion > formatVersion:
 		return indexCheck{tooNew: m.FormatVersion}, nil
 
-	// No value satisfies this while formatVersion is 1, since 0 means an unpinned
-	// manifest rather than an older generation. The first bump is what gives an index
-	// a generation to be behind, and the shape checks below catch an old layout in the
-	// meantime.
+	// Zero is an unpinned manifest rather than an older generation, so it falls to the
+	// shape checks below. Everything an earlier build pinned reaches here.
 	case m.FormatVersion > 0 && m.FormatVersion < formatVersion:
 		return indexCheck{tooOld: fmt.Sprintf("its format_version is %d and this build writes %d", m.FormatVersion, formatVersion)}, nil
 
