@@ -557,7 +557,7 @@ func (s *Store) planVectorTier(ctx context.Context, reindex bool) (vectorPlan, e
 	if meta.Model != "" {
 		if meta.Model != desired.Model || meta.Dimension != desired.Dimension ||
 			meta.QueryPrefix != desired.QueryPrefix || meta.DocumentPrefix != desired.DocumentPrefix || !meta.Normalized {
-			return vectorPlan{}, fmt.Errorf("%w: manifest built with model=%s dim=%d; config requests model=%s dim=%d - run 'fisk-ai knowledge index --reindex'",
+			return vectorPlan{}, fmt.Errorf("%w: manifest built with model=%s dim=%d; config requests model=%s dim=%d",
 				ErrMetaMismatch, meta.Model, meta.Dimension, desired.Model, desired.Dimension)
 		}
 
@@ -569,7 +569,7 @@ func (s *Store) planVectorTier(ctx context.Context, reindex bool) (vectorPlan, e
 		return vectorPlan{}, err
 	}
 	if chunkCount > 0 {
-		return vectorPlan{}, fmt.Errorf("%w: the existing index is lexical-only but config now requests embeddings model=%s - run 'fisk-ai knowledge index --reindex'", ErrMetaMismatch, desired.Model)
+		return vectorPlan{}, fmt.Errorf("%w: the existing index is lexical-only but config now requests embeddings model=%s", ErrMetaMismatch, desired.Model)
 	}
 
 	return plan, nil

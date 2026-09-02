@@ -145,7 +145,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Logger:     log,
 	})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	// After Serve has returned and before the telemetry flush, which the defer order
 	// arranges: the runs using these have all ended by then, and the flush is last

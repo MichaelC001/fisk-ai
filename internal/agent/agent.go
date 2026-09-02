@@ -531,6 +531,15 @@ type DeferredCall struct {
 // named is not here, and a new one is where its prompt has to go.
 var ErrConversationNotFound = errors.New("conversation not found")
 
+// ErrConfigDrift reports that a resume was refused because the configuration changed
+// in a way a stored conversation does not survive. The error lists what changed.
+//
+// Options.Checkpoint.Force overrides it, so a caller that offers its user that choice
+// matches this and says how its own interface takes it. Nothing else Run returns is
+// overridable, which is why this one is separated: a CLI naming its flag against any
+// other refusal would be offering a way out that does not exist.
+var ErrConfigDrift = errors.New("the configuration changed since the session was saved")
+
 // PanicError is the error Run returns when it recovered a panic on its run goroutine.
 // It reports that the run crashed rather than reaching a terminal outcome, so a caller
 // (a job system) tells a crash from an outcome with errors.As and requeues or escalates
@@ -546,7 +555,7 @@ type PanicError struct {
 // the outcomes it would otherwise be confused with (a model refusal, a tool failure, a
 // budget cap). It carries no stack.
 func (e *PanicError) Error() string {
-	return "internal error: fisk-ai crashed (a bug, not a model or tool failure); please report it"
+	return "internal error: the agent crashed (a bug, not a model or tool failure); please report it"
 }
 
 // Value returns the recovered panic value, for a caller that wants to inspect or
@@ -1101,6 +1110,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			declared := cfg.MemoryBackendDeclared()
 			running := opts.MemoryStore.Info().Backend
 			if declared != "" && declared != running {
+				if opts.ConfigFile == "" {
+					return res, fmt.Errorf("Options.MemoryStore runs on the %q backend but harness.memory.backend selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.memory.backend to %q", running, declared, running)
+				}
 				return res, fmt.Errorf("Options.MemoryStore runs on the %q backend but harness.memory.backend in %q selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.memory.backend to %q", running, opts.ConfigFile, declared, running)
 			}
 			memStore = opts.MemoryStore
@@ -1337,10 +1349,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// tools. Checking only the application tools would abort a run whose sole tools are
 	// native (e.g. knowledge_search), imported, or injected by the caller.
 	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(mcpTools)+len(opts.CustomTools) == 0 {
-		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients in %q", opts.ConfigFile)
+		in := ""
+		if opts.ConfigFile != "" {
+			in = fmt.Sprintf(" in %q", opts.ConfigFile)
 		}
-		return res, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
+		if cfg.ApplicationPath == "" {
+			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients%s", in)
+		}
+		return res, fmt.Errorf("no tools available after filtering; check include/exclude%s", in)
 	}
 
 	// The confirm gate enforces confirmation tags: a tool carrying ai:confirm (always
@@ -1433,7 +1449,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	provider := opts.Provider
 	if provider == nil {
 		if opts.BaseURL != "" {
-			if err := sanitize.BaseURL("--base-url / ANTHROPIC_BASE_URL", opts.BaseURL); err != nil {
+			if err := sanitize.BaseURL("Options.BaseURL", opts.BaseURL); err != nil {
 				return res, err
 			}
 		}
@@ -1703,6 +1719,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			declared := cfg.SessionBackendDeclared()
 			running := opts.SessionStore.Info().Backend
 			if declared != "" && declared != running {
+				if opts.ConfigFile == "" {
+					return res, fmt.Errorf("Options.SessionStore runs on the %q backend but harness.sessions.backend selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.sessions.backend to %q", running, declared, running)
+				}
 				return res, fmt.Errorf("Options.SessionStore runs on the %q backend but harness.sessions.backend in %q selects %q: an injected store must be the store the configuration asks for; build it from this configuration, or set harness.sessions.backend to %q", running, opts.ConfigFile, declared, running)
 			}
 			store = opts.SessionStore
@@ -1849,7 +1868,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			// coherently, so --force (which is for configuration drift) must not cross
 			// it. Checked before the forceable drift so the message is unambiguous.
 			if rs.Fingerprint.Provider != fp.Provider {
-				return res, fmt.Errorf("cannot resume %q: it was started with provider %q but the current configuration uses %q; a run cannot change provider, and --force does not apply",
+				return res, fmt.Errorf("cannot resume %q: it was started with provider %q but the current configuration uses %q; a run cannot change provider",
 					sessionID, rs.Fingerprint.Provider, fp.Provider)
 			}
 			// Drift the resume must refuse, which is every part of the configuration that
@@ -1862,8 +1881,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			blocking := rs.Fingerprint.BlockingDiff(fp)
 			toolDrift := rs.Fingerprint.ToolsDiff(fp)
 			if len(blocking) > 0 && !opts.Checkpoint.Force {
-				return res, fmt.Errorf("cannot resume %q, the configuration changed since it was saved:\n  %s\nre-run against the original configuration, or pass --force to continue with the current one",
-					sessionID, strings.Join(blocking, "\n  "))
+				return res, fmt.Errorf("%w: cannot resume %q:\n  %s\nre-run against the original configuration",
+					ErrConfigDrift, sessionID, strings.Join(blocking, "\n  "))
 			}
 
 			j, err := store.Open(ctx, sessionID)

@@ -322,7 +322,7 @@ func (t *Transport) service() (micro.Service, error) {
 	svc, err := micro.AddService(t.nc, micro.Config{
 		Name:        t.identity,
 		Version:     microServiceVersion,
-		Description: "fisk-ai a2a tool server",
+		Description: "a2a protocol endpoint for this agent",
 		QueueGroup:  t.identity,
 		ErrorHandler: func(_ micro.Service, e *micro.NATSError) {
 			t.fault(fmt.Errorf("a2a service error on %q: %s", e.Subject, e.Description))

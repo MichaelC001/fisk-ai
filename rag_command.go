@@ -109,6 +109,32 @@ func knowledgeConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
+// knowledgeAdvice appends the command that repairs the index state a rag sentinel
+// reports. The library states what is wrong and names no binary, since an embedder
+// ships its own commands, so this CLI renders its own. An error carrying none of
+// the five sentinels is returned unchanged, and so is a nil one.
+func knowledgeAdvice(err error) error {
+	switch {
+	case err == nil:
+		return nil
+
+	case errors.Is(err, rag.ErrMetaMismatch), errors.Is(err, rag.ErrDimensionMismatch):
+		return fmt.Errorf("%w; run: fisk knowledge index --reindex", err)
+
+	case errors.Is(err, rag.ErrModelMismatch):
+		return fmt.Errorf("%w; set knowledge.embeddings.model to the model the server serves, or point knowledge.embeddings.base_url at a server that serves the configured one", err)
+
+	case errors.Is(err, rag.ErrFormatTooNew):
+		return fmt.Errorf("%w; upgrade fisk to a build that can read it", err)
+
+	case errors.Is(err, rag.ErrFormatTooOld):
+		return fmt.Errorf("%w; discard it with 'fisk knowledge reset --force' and rebuild it with 'fisk knowledge index'", err)
+
+	default:
+		return err
+	}
+}
+
 // printTierLine prints the canonical tier line for a store to stdout.
 func printTierLine(ctx context.Context, c *columns.Document, store *rag.Store) error {
 	line, err := store.TierLine(ctx)
@@ -146,7 +172,7 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
@@ -171,7 +197,7 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 			return nil
 		}
 		if err != nil {
-			return err
+			return knowledgeAdvice(err)
 		}
 		bar = newIndexBar(total)
 	}
@@ -195,7 +221,9 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		// Index is where a changed embedding model surfaces: OpenWriter checks only
+		// that the format is readable, so the manifest comparison happens here.
+		return knowledgeAdvice(err)
 	}
 
 	bar.done()
@@ -273,13 +301,13 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
 	res, err := store.Search(ctx, knowledgeQuery, knowledgeTopK)
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 
 	// Before the document is built: every soft outcome below is a status field in
@@ -372,7 +400,7 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
@@ -415,7 +443,7 @@ func knowledgeRmAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.OpenWriter(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
@@ -482,7 +510,7 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
@@ -531,7 +559,7 @@ func knowledgeRebuildAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
@@ -572,7 +600,7 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 
@@ -673,7 +701,7 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 	// failed check carrying its own fix rather than returned as a bare error.
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		c.Item("Store readable", columns.Style(fmt.Sprintf("[%s] %v", doctorMark(rag.DoctorFail), err)))
+		c.Item("Store readable", columns.Style(fmt.Sprintf("[%s] %v", doctorMark(rag.DoctorFail), knowledgeAdvice(err))))
 		return fmt.Errorf("knowledge doctor found problems that must be fixed")
 	}
 	defer store.Close()
@@ -731,7 +759,7 @@ func knowledgeStatsAction(_ *fisk.ParseContext) error {
 
 	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	defer store.Close()
 

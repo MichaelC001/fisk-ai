@@ -48,6 +48,10 @@ const (
 	codeConversationBusy    = wire.CodeConversationBusy
 	codeTurnNotTaken        = wire.CodeTurnNotTaken
 
+	// A resume the agent's own configuration refuses, which the caller answers by
+	// asking for the resume to be forced.
+	codeConfigDrift = wire.CodeConfigDrift
+
 	// The ending a conversation has once, permanently: its token allowance is spent, so
 	// no caller gets a further turn out of it.
 	codeBudgetExhausted = wire.CodeBudgetExhausted
@@ -766,6 +770,13 @@ func (t *task) disposition(out serve.Outcome) (string, string) {
 		// so this is a token that was never minted, or one whose conversation the store no
 		// longer holds.
 		return codeUnknownConversation, "this conversation is not known here; send the prompt without a conversation token to start one"
+
+	case errors.Is(out.Err, agent.ErrConfigDrift):
+		// The agent's configuration moved under a stored conversation. Nothing ran, and
+		// the caller decides between resuming under the current configuration and
+		// leaving the conversation where it is, so the message carries what changed and
+		// the code carries the choice.
+		return codeConfigDrift, out.Err.Error()
 
 	case out.Reason == runstate.ReasonBudget:
 		// Above the follow-up case below, which would otherwise claim every budget

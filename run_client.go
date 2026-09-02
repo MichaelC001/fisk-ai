@@ -504,6 +504,12 @@ func endingMessage(msg *wire.ErrorMessage) string {
 	case wire.CodeTurnNotTaken:
 		return "the conversation could not take this turn, so nothing ran: " + detail
 
+	case wire.CodeConfigDrift:
+		// The detail lists what changed. --force is this program's way of asking for the
+		// resume the code says is available, which the agent states as a choice rather
+		// than as a flag it does not own.
+		return detail + "\nre-run with --force to continue under the current configuration"
+
 	case wire.CodeCrashed:
 		return "the agent crashed, which is a bug rather than a model or tool failure; the detail is in its log"
 

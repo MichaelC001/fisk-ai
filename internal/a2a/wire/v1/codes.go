@@ -48,6 +48,12 @@ const (
 	// CodeTurnNotTaken means the conversation could not take the turn, so the prompt
 	// did not run and was not journaled.
 	CodeTurnNotTaken = "turn_not_taken"
+	// CodeConfigDrift means the agent's configuration changed in a way the stored
+	// conversation does not survive, so the resume was refused and nothing ran. The
+	// message lists what changed. A caller may send the same request again asking for
+	// the resume to be forced, which continues the conversation under the current
+	// configuration.
+	CodeConfigDrift = "config_drift"
 	// CodeBudgetExhausted means the conversation has processed its whole token budget,
 	// so it took no turn and will take none: the prompt did not run and was not
 	// journaled. It is permanent for that conversation, whoever sends the next turn,

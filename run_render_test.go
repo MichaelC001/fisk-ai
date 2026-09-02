@@ -232,3 +232,24 @@ var _ = Describe("endsSession", func() {
 		Expect(endsSession(wire.CodeUnknownConversation)).To(BeTrue())
 	})
 })
+
+var _ = Describe("endingMessage", func() {
+	// The agent states which parts of the configuration moved and names no flag, since
+	// a peer reaching it over a2a has no command line. This program has --force, and the
+	// code is what tells it the resume is available.
+	It("Should name --force for a refused resume", func() {
+		msg := endingMessage(&wire.ErrorMessage{
+			Code: wire.CodeConfigDrift,
+			Err:  "cannot resume \"run-4f2a\":\n  llm.model: a -> b\nre-run against the original configuration",
+		})
+
+		Expect(msg).To(ContainSubstring("llm.model: a -> b"))
+		Expect(msg).To(ContainSubstring("re-run with --force"))
+	})
+
+	It("Should leave a code it does not know as the worker's own message", func() {
+		msg := endingMessage(&wire.ErrorMessage{Code: "something_new", Err: "the worker said this"})
+
+		Expect(msg).To(Equal("the worker said this"))
+	})
+})

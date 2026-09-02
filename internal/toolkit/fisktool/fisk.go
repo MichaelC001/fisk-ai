@@ -845,7 +845,7 @@ func resolveExposedGlobals(app *fisk.ApplicationModel, allowlist []string) ([]*f
 	for _, name := range allowlist {
 		f, ok := byName[name]
 		if !ok {
-			return nil, fmt.Errorf("global_flags entry %q matches no global flag of application %q; run `fisk-ai info` to list the exposable global flags", name, app.Name)
+			return nil, fmt.Errorf("global_flags entry %q matches no global flag of application %q", name, app.Name)
 		}
 		if frameworkGlobalFlags[f.Name] || f.Hidden {
 			return nil, fmt.Errorf("global_flags entry %q is a hidden or framework flag and cannot be exposed to the model; only application-defined global flags can be exposed", name)

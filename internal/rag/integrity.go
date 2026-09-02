@@ -68,7 +68,7 @@ func (s *Store) CheckFTSIntegrity(ctx context.Context) error {
 		for _, table := range ftsTables {
 			q := fmt.Sprintf(`INSERT INTO %s(%[1]s, rank) VALUES('integrity-check', 1)`, table)
 			if _, err := db.ExecContext(ctx, q); err != nil {
-				return fmt.Errorf("%w: %s is stale; run: fisk-ai knowledge rebuild", ErrFTSDesynced, table)
+				return fmt.Errorf("%w: %s is stale; run: fisk knowledge rebuild", ErrFTSDesynced, table)
 			}
 		}
 

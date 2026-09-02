@@ -514,10 +514,10 @@ func fitText(s string, budget int) (string, bool) {
 // looking at. n is the original length, omitted when it is not known.
 func marker(n int) string {
 	if n == 0 {
-		return "[truncated by fisk-ai; raise telemetry.capture.max_bytes]"
+		return "[truncated; raise telemetry.capture.max_bytes]"
 	}
 
-	return "...[truncated by fisk-ai: " + strconv.Itoa(n) + " bytes; raise telemetry.capture.max_bytes]"
+	return "...[truncated: " + strconv.Itoa(n) + " bytes; raise telemetry.capture.max_bytes]"
 }
 
 // truncateEncoded returns the longest prefix of s whose encoded form fits budget, and

@@ -1817,6 +1817,19 @@ var _ = Describe("Run tool availability guard", func() {
 
 		_, err := Run(context.Background(), Options{Config: cfg, ConfigFile: "agent.yaml"}, nopEvents{}, nil)
 		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
+		Expect(err).To(MatchError(ContainSubstring(`in "agent.yaml"`)))
+	})
+
+	// An embedder that built its configuration in Go read no file, so the settings to
+	// change are named without a file to change them in.
+	It("names no file when the caller read none", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "test-model"
+		cfg.LLM.Budget.MaxIterations = 1
+
+		_, err := Run(context.Background(), Options{Config: cfg}, nopEvents{}, nil)
+		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
+		Expect(err.Error()).To(HaveSuffix("mcp_clients"))
 	})
 
 	It("proceeds past the guard when only a native tool (knowledge_search) is enabled", func() {

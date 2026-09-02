@@ -417,7 +417,11 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 		}
 		if len(tools) == 0 {
 			releaseTransport(transport, opts.Logger)
-			return nil, fmt.Errorf("no tools available after filtering; check include/exclude in %q", opts.ConfigFile)
+			in := ""
+			if opts.ConfigFile != "" {
+				in = fmt.Sprintf(" in %q", opts.ConfigFile)
+			}
+			return nil, fmt.Errorf("no tools available after filtering; check include/exclude%s", in)
 		}
 
 		built.Tools = &ToolOptions{

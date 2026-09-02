@@ -137,8 +137,8 @@ var _ = Describe("Index format gate", func() {
 			Expect(err.Error()).To(ContainSubstring(storeD))
 			Expect(err.Error()).To(ContainSubstring("chunks_fts_exact"))
 			Expect(err.Error()).To(ContainSubstring("chunks_vocab"))
-			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
-			Expect(err.Error()).To(ContainSubstring("knowledge index"))
+			Expect(err.Error()).To(ContainSubstring("nothing migrates it"))
+			Expect(err.Error()).To(ContainSubstring("discarded and rebuilt from the documents"))
 		})
 
 		// A writer could create the missing table, but the rows already in chunks would
@@ -146,13 +146,13 @@ var _ = Describe("Index format gate", func() {
 		It("is refused by a writer rather than repaired underneath the existing rows", func() {
 			_, err := OpenWriter(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooOld))
-			Expect(err.Error()).To(ContainSubstring("knowledge reset --force"))
+			Expect(err.Error()).To(ContainSubstring("discarded and rebuilt from the documents"))
 		})
 
-		// The refusal names a command, so that command has to work against the state
-		// it is named for: a message naming a fix that also refuses is worse than one
-		// naming none.
-		It("is discarded by the command the refusal names, leaving a rebuildable store", func() {
+		// The refusal names discarding and rebuilding as the fix, so that has to work
+		// against the state it is named for: a message naming a fix that also refuses is
+		// worse than one naming none.
+		It("is discarded by Destroy, leaving a rebuildable store", func() {
 			removed, err := Destroy(cfg, "")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(removed).To(Equal(dbPath))
@@ -180,10 +180,11 @@ var _ = Describe("Index format gate", func() {
 			pinFormatVersion(dbPath, formatVersion+1)
 		})
 
-		It("is refused by a reader, naming the upgrade rather than a rebuild", func() {
+		It("is refused by a reader, naming the format it needs rather than a rebuild", func() {
 			_, err := Open(cfg, "", Options{})
 			Expect(err).To(MatchError(ErrFormatTooNew))
-			Expect(err.Error()).To(ContainSubstring("upgrade fisk-ai"))
+			Expect(err.Error()).To(ContainSubstring("index format_version=" + strconv.Itoa(formatVersion+1)))
+			Expect(err.Error()).To(ContainSubstring("reading it needs a build that supports that format"))
 		})
 
 		// The writer read the manifest nowhere at all before the gate, so an older

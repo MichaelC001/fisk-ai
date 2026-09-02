@@ -103,13 +103,20 @@ func mcpAction(_ *fisk.ParseContext) error {
 
 	ragBuiltins, ragStore, err := builtin.MCPKnowledgeBuiltins(ctx, cfg, os.Stderr)
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	// Close after Serve returns (Serve below is the final call, so this deferred
 	// close runs only once graceful shutdown has drained in-flight tool calls),
 	// never concurrently with a live query.
 	if ragStore != nil {
 		defer ragStore.Close()
+
+		// MCPKnowledgeBuiltins has just told the operator on this same stream that the
+		// index is not built. It names no command, since an embedder ships its own, so
+		// this one adds the command that builds it.
+		if !ragStore.Built() {
+			fmt.Fprintln(os.Stderr, "run: fisk knowledge index")
+		}
 	}
 
 	if len(tools)+len(ragBuiltins) == 0 {

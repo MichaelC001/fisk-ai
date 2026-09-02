@@ -43,7 +43,7 @@ func knowledgeWatchAction(_ *fisk.ParseContext) error {
 	// locks the watcher takes for each index pass.
 	rstore, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
 	if err != nil {
-		return err
+		return knowledgeAdvice(err)
 	}
 	err = printTierLine(ctx, nil, rstore)
 	rstore.Close()
@@ -102,7 +102,7 @@ func watchReporter(roots []string) rag.WatchReporter {
 		},
 		OnIndex: func(stats *rag.IndexStats, err error) {
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s reindex failed: %v\n", watchStamp(), err)
+				fmt.Fprintf(os.Stderr, "%s reindex failed: %v\n", watchStamp(), knowledgeAdvice(err))
 				return
 			}
 			printIndexStats(stats, false)
