@@ -7,6 +7,7 @@ package asyncjobs
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/choria-io/asyncjobs"
@@ -188,6 +189,10 @@ type worker struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	serveErr error
+
+	// wantFault says the spec ends this worker by breaking its processor rather than by
+	// asking it to stop, so Serve is expected to return the fault.
+	wantFault bool
 }
 
 func startWorker(nc *nats.Conn, opts workerOpts) *worker {
@@ -242,6 +247,12 @@ func (w *worker) waitServed() {
 	GinkgoHelper()
 
 	Eventually(w.done, 30*time.Second).Should(BeClosed())
+
+	if w.wantFault {
+		Expect(w.serveErr).To(MatchError(errProcessorStopped))
+		return
+	}
+
 	Expect(w.serveErr).To(Succeed())
 }
 
@@ -308,6 +319,24 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			Expect(ch.Concurrency()).To(Equal(3), "the server is set from this, not the other way around")
 			Expect(ch.renewEvery).To(Equal(5*time.Second), "half the queue's own run time")
 			Expect(ch.Name()).To(Equal("asyncjobs/" + testQueue))
+		})
+
+		// A library that reached for a default logger would write to an embedder's
+		// stderr uninvited, so a caller who asked for no logging gets none, from the
+		// channel and from the engine bridged into it.
+		It("Should discard the log when it is given no logger", func() {
+			newQueue(nc, 30*time.Second, 5)
+
+			ch, err := New(Options{
+				Conn: nc, Queue: testQueue, TaskType: testTaskType,
+				Identity: "worker", Concurrency: 1,
+			})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(ch.Close)
+
+			for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+				Expect(ch.log.Enabled(context.Background(), level)).To(BeFalse(), "level %s", level)
+			}
 		})
 	})
 
@@ -628,14 +657,16 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			w.stop()
 		})
 
-		// The other order is not a choice a caller makes, it is what an unreachable
-		// queue does to them. A puller whose channel can produce nothing more has to be
-		// told, or Serve never returns.
-		It("Should end the channel when the processor goes first", func() {
+		// The other order is not a choice a caller makes, it is what an unreachable queue
+		// does to them. A puller whose channel can produce nothing more has to be told or
+		// Serve never returns, and the worker has to exit non-zero so a supervisor
+		// restarts it rather than leaving it alive taking nothing.
+		It("Should fault when the processor goes first", func() {
 			client := newQueue(nc, 30*time.Second, 5)
 			w := startWorker(nc, workerOpts{
 				provider: agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
 			})
+			w.wantFault = true
 
 			enqueue(client, "job1", encode(newRequest("go")))
 
@@ -662,6 +693,10 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 			Expect(w.ch.Close()).To(Succeed())
 
 			w.waitServed()
+
+			// The processor's context was canceled by that Close, so its return is the
+			// stop the program asked for.
+			Expect(w.ch.Faults()).ToNot(Receive())
 		})
 
 		// An idle worker has nothing to wait for, so the same call is what makes a first
@@ -692,6 +727,47 @@ var _ = Describe("Integration: asyncjobs channel", Label("integration"), func() 
 
 			Expect(ch.Close()).To(Succeed())
 			Expect(ch.Close()).To(Succeed())
+
+			// No processor ever ran, so there is nothing that could have stopped unasked.
+			Expect(ch.Faults()).ToNot(Receive())
+		})
+
+		// A faulted processor closes nothing Next selects on, which is what lets the
+		// server read the fault before its puller exits. A Next returning ErrChannelDone
+		// here would race Serve's read of the fault, and Serve returning nil is a dead
+		// worker exiting zero.
+		It("Should hold Next after a fault until Close", func() {
+			newQueue(nc, 30*time.Second, 5)
+
+			ch, err := New(Options{
+				Conn: nc, Queue: testQueue, TaskType: testTaskType,
+				Identity: "worker", Concurrency: 1, Logger: quietLogger(),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(ch.Close)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			DeferCleanup(cancel)
+
+			next := make(chan error, 1)
+			go func() {
+				defer GinkgoRecover()
+
+				_, nerr := ch.Next(ctx)
+				next <- nerr
+			}()
+
+			// Next is what starts the processor, so it has to be running before there is
+			// anything to stop.
+			Eventually(ch.running.Load).Should(BeTrue())
+
+			ch.procStop()
+
+			Eventually(ch.Faults()).Should(Receive())
+			Consistently(next, time.Second).ShouldNot(Receive())
+
+			Expect(ch.Close()).To(Succeed())
+			Eventually(next).Should(Receive(MatchError(serve.ErrChannelDone)))
 		})
 	})
 })
