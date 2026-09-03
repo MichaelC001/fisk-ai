@@ -562,15 +562,32 @@ func (s *Store) prepareIndex(ctx context.Context, reindex bool) error {
 // planVectorTier probes the live model's dimension and reconciles it with the
 // manifest before any embedding spend (invariant 1), refusing upfront when the
 // configured embedding identity differs from an existing index and naming the fix. It
-// writes nothing: a lexical-only store plans the format version alone, and every
+// writes nothing: a store with no embedder plans the format version alone, and every
 // refusal here leaves the index untouched.
 //
 // The manifest checks run only when reindex is false. A reindex exists to resolve the
 // mismatch they report, so applying them to one would refuse the command that fixes
 // it.
 func (s *Store) planVectorTier(ctx context.Context, reindex bool) (vectorPlan, error) {
+	lexical := vectorPlan{meta: Meta{FormatVersion: formatVersion}}
+
 	if s.emb == nil {
-		return vectorPlan{meta: Meta{FormatVersion: formatVersion}}, nil
+		if reindex {
+			return lexical, nil
+		}
+
+		// Pinning an empty model here would write over the manifest, and the ingest
+		// that follows would drop every re-embedded chunk's vector through the
+		// chunks_ad_vec trigger, stripping an index that was built with a model.
+		meta, err := s.readMeta(ctx)
+		if err != nil {
+			return vectorPlan{}, err
+		}
+		if meta.Model != "" {
+			return vectorPlan{}, fmt.Errorf("%w: %w (%q)", ErrMetaMismatch, ErrEmbeddingsAbsent, meta.Model)
+		}
+
+		return lexical, nil
 	}
 
 	dim, err := s.emb.Dim(ctx)

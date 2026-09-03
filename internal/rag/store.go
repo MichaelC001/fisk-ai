@@ -109,6 +109,16 @@ var (
 	// is always a reindex.
 	ErrMetaMismatch = errors.New("knowledge index was built with a different embedding configuration")
 
+	// ErrEmbeddingsAbsent reports that the index pins an embedding model while the
+	// configuration this store opened with names no embeddings block, so a search
+	// would answer lexically from a corpus built for hybrid retrieval and a re-ingest
+	// would drop the vectors it already holds. Every refusal wraps it alongside
+	// ErrMetaMismatch, so a caller matching either sentinel classifies it. Restoring
+	// the embeddings block for the pinned model reads the index as it was built; a
+	// reindex with no embeddings block rebuilds the index lexical-only and discards
+	// its vectors.
+	ErrEmbeddingsAbsent = errors.New("the index pins an embedding model the configuration does not name")
+
 	// ErrDimensionMismatch reports that the live model's embedding dimension differs
 	// from the one pinned in the index. It surfaces before any table create or
 	// embedding spend on the write path, and as a query-time refusal on the read
@@ -282,8 +292,8 @@ type Options struct {
 	// Its Model, QueryPrefix and DocumentPrefix are pinned in the index at build time.
 	// A later open that configures the vector tier checks them against the manifest and
 	// is refused with ErrMetaMismatch when they differ. A later open with no embedder
-	// at all searches the index lexically and reports itself undegraded, so an index
-	// built with a supplied Embedder needs one on every open that expects vectors.
+	// at all is refused with ErrEmbeddingsAbsent, so an index built with a supplied
+	// Embedder needs one on every open.
 	Embedder Embedder
 }
 
@@ -936,8 +946,10 @@ func writeMeta(ctx context.Context, tx *sql.Tx, m Meta) error {
 // embedder before any query runs: when the vector tier is configured it refuses an
 // index whose pinned model, prefixes, or normalization differ from the
 // configuration (a stale index that would return garbage rankings) or that was
-// built lexical-only. Dimension is validated at query time against the live model's
-// probe so Open never contacts the server. The format generation itself is settled
+// built lexical-only. A store with no embedder is refused with ErrEmbeddingsAbsent
+// when the index pins a model, since it would answer every search lexically and
+// report itself undegraded. Dimension is validated at query time against the live
+// model's probe so Open never contacts the server. The format generation is settled
 // before this runs, by refuseUnusableIndex, which is the single place both
 // directions are refused.
 func (s *Store) validateReadMeta(ctx context.Context) error {
@@ -947,6 +959,12 @@ func (s *Store) validateReadMeta(ctx context.Context) error {
 	}
 
 	if s.emb == nil {
+		// The index pins a model and this store has no embedder, so every search would
+		// answer lexically from a corpus built for hybrid retrieval.
+		if m.Model != "" {
+			return fmt.Errorf("%w: %w (%q)", ErrMetaMismatch, ErrEmbeddingsAbsent, m.Model)
+		}
+
 		return nil
 	}
 

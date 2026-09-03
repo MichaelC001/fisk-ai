@@ -206,6 +206,85 @@ var _ = Describe("Store (vector tier)", func() {
 		Expect(err).To(MatchError(ErrMetaMismatch))
 	})
 
+	// Answering lexically from a corpus built for hybrid retrieval reports itself
+	// undegraded, so the operator sees a working search returning worse results.
+	It("refuses on the read path when the index pins a model and no embeddings are configured", func() {
+		indexVector("m1", 32)
+
+		_, err := Open(lexicalConfig(storeD), "", Options{})
+		Expect(err).To(MatchError(ErrMetaMismatch))
+		Expect(err).To(MatchError(ErrEmbeddingsAbsent))
+		Expect(err.Error()).To(ContainSubstring(`("m1")`))
+	})
+
+	It("opens the same index with the embedder it was built with", func() {
+		indexVector("m1", 32)
+
+		r, err := Open(vectorConfig(storeD, "m1"), "", Options{Embedder: &fakeEmbedder{model: "m1", dim: 32}})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(r.Close()).To(Succeed())
+	})
+
+	It("opens a lexical-only index with no embeddings configured", func() {
+		w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(w.Close()).To(Succeed())
+
+		r, err := Open(lexicalConfig(storeD), "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		defer r.Close()
+
+		res, err := r.Search(ctx, "backpressure buffer full", 5)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.Hits).ToNot(BeEmpty())
+	})
+
+	// Re-ingesting through a store with no embedder pins an empty model and drops
+	// every vector through the chunks_ad_vec trigger, so the refusal has to land
+	// before the transaction runs.
+	It("refuses to index a vector-pinned store with no embeddings configured, leaving the index whole", func() {
+		indexVector("m1", 32)
+
+		before, err := statsFor(vectorConfig(storeD, "m1"))
+		Expect(err).ToNot(HaveOccurred())
+
+		w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
+		Expect(err).To(MatchError(ErrMetaMismatch))
+		Expect(err).To(MatchError(ErrEmbeddingsAbsent))
+		Expect(err.Error()).To(ContainSubstring(`("m1")`))
+		Expect(w.Close()).To(Succeed())
+
+		after, err := statsFor(vectorConfig(storeD, "m1"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(after.Meta.Model).To(Equal("m1"))
+		Expect(after.Meta.Dimension).To(Equal(32))
+		Expect(after.Vectors).To(Equal(before.Vectors))
+		Expect(after.Vectors).To(BeNumerically(">", 0))
+	})
+
+	// A reindex is the command that resolves the mismatch, so it rebuilds rather than
+	// refusing, and the operator who runs it without an embeddings block gets a
+	// lexical-only index.
+	It("rebuilds a vector-pinned store lexical-only on a reindex with no embeddings configured", func() {
+		indexVector("m1", 32)
+
+		w, err := OpenWriter(lexicalConfig(storeD), "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true, Reindex: true})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(w.Close()).To(Succeed())
+
+		st, err := statsFor(lexicalConfig(storeD))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(st.Meta.Model).To(BeEmpty())
+		Expect(st.Vectors).To(BeZero())
+		Expect(st.Chunks).To(BeNumerically(">", 0))
+	})
+
 	It("degrades to lexical when the embeddings server is unreachable at query time", func() {
 		indexVector("m1", 32)
 
