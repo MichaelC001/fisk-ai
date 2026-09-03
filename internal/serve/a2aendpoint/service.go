@@ -63,6 +63,7 @@ func newService(held *sharedTransport, opts Options) (*Service, error) {
 		ConfirmTags: opts.Tools.ConfirmTags,
 		Concurrency: concurrency,
 		CallTimeout: callTimeout,
+		WorkDir:     opts.Tools.WorkDir,
 		Logger:      opts.Logger,
 		Telemetry:   opts.Telemetry,
 	})

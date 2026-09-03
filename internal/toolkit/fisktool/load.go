@@ -21,7 +21,7 @@ func LoadTools(ctx context.Context, cfg *config.Config) ([]*CommandTool, error) 
 		return nil, nil
 	}
 
-	tools, err := ToolsForApp(ctx, cfg.ApplicationPath, cfg.CredentialEnvNames(), cfg.GlobalFlagNames()...)
+	tools, err := ToolsForApp(ctx, cfg.ApplicationPath, cfg.RootDirectory, cfg.CredentialEnvNames(), cfg.GlobalFlagNames()...)
 	if err != nil {
 		return nil, err
 	}

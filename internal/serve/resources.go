@@ -67,9 +67,10 @@ type ResourceOptions struct {
 	RAG rag.Options
 
 	// StoreDir is the base directory the persistent stores resolve relative paths
-	// under. Empty keeps each store's own default, which resolves against the process
-	// working directory. It must be the same value given to Options.StoreDir, or the
-	// stores built here and the paths a run validates disagree.
+	// under. Empty resolves them under Config.RootDirectory, and against the process
+	// working directory when the configuration sets no root. It must be the same value
+	// given to Options.StoreDir, or the stores built here and the paths a run validates
+	// disagree.
 	StoreDir string
 
 	// Conns, when non-nil, is a NATS connection the caller already holds. It is
@@ -208,19 +209,23 @@ func NewResources(ctx context.Context, cfg *config.Config, opts ResourceOptions)
 		r.ownsConns = true
 	}
 
-	err = r.openKnowledge(cfg, opts.StoreDir, opts.RAG, opts.Logger)
+	// Resolved once so the three stores share a base, whether the caller named one or
+	// the configuration's root supplies it.
+	storeDir := cfg.StoreBase(opts.StoreDir)
+
+	err = r.openKnowledge(cfg, storeDir, opts.RAG, opts.Logger)
 	if err != nil {
 		return nil, err
 	}
 
 	if cfg.MemoryEnabled() {
-		r.MemoryStore, err = memory.New(cfg, memory.RuntimeEnv{StoreDir: opts.StoreDir, Nats: r.Conns.Nats()})
+		r.MemoryStore, err = memory.New(cfg, memory.RuntimeEnv{StoreDir: storeDir, Nats: r.Conns.Nats()})
 		if err != nil {
 			return nil, fmt.Errorf("%w: the memory store: %w", ErrResourceBuild, err)
 		}
 	}
 
-	sessions, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: opts.StoreDir, Nats: r.Conns.Nats()})
+	sessions, err := runstate.New(cfg.SessionBackend(), cfg.SessionRawOptions(), runstate.RuntimeEnv{StoreDir: storeDir, Nats: r.Conns.Nats()})
 	if err != nil {
 		return nil, fmt.Errorf("%w: the session store: %w", ErrResourceBuild, err)
 	}
@@ -261,6 +266,7 @@ func (r *Resources) connectMCP(ctx context.Context, cfg *config.Config, version 
 		Identity:           cfg.Identity,
 		Version:            version,
 		CredentialEnvNames: cfg.CredentialEnvNames(),
+		WorkDir:            cfg.RootDirectory,
 	})
 	if err != nil {
 		return fmt.Errorf("%w: the MCP sessions: %w", ErrResourceBuild, err)

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -209,11 +210,56 @@ func servingApp(name, body string) []toolkit.Tool {
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\n%s", modelPath, body)
 	Expect(os.WriteFile(path, []byte(script), 0o700)).To(Succeed())
 
-	tools, err := fisktool.ToolsForApp(context.Background(), path, nil)
+	tools, err := fisktool.ToolsForApp(context.Background(), path, "", nil)
 	Expect(err).NotTo(HaveOccurred())
 
 	return toolkit.Tools(tools)
 }
+
+// A served command runs in the same directory an agent run would run it in, so an
+// application_path or a configured file written relative to root_directory resolves
+// here too. The command reports the directory it ran in, so removing the WorkDir hop
+// puts the test process's own directory in the reply.
+var _ = Describe("the served tool working directory", func() {
+	// runWhere serves one command that prints its working directory, drives one
+	// request through the registered handler, and returns what the caller was told.
+	runWhere := func(workDir string) string {
+		GinkgoHelper()
+
+		ft := newFakeTransport()
+		_, err := NewServer(ft, servingApp("where", "pwd -P\n"), ServerOptions{
+			Identity:  "svc",
+			LogOutput: io.Discard,
+			WorkDir:   workDir,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		rep := &fakeReplier{}
+		ft.replySets[OpTool](context.Background(), Caller{}, toolRequestBody("where"), rep)
+		Eventually(rep.finished).Should(BeTrue())
+
+		reply := rep.terminal()
+		Expect(reply.IsError).To(BeFalse())
+
+		return strings.TrimSpace(reply.Output)
+	}
+
+	It("Should run the command in the configured work directory", func() {
+		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(runWhere(dir)).To(Equal(dir))
+	})
+
+	It("Should run the command in the process working directory when none is configured", func() {
+		wd, err := os.Getwd()
+		Expect(err).NotTo(HaveOccurred())
+		wd, err = filepath.EvalSymlinks(wd)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(runWhere("")).To(Equal(wd))
+	})
+})
 
 var _ = Describe("Integration: a2a tool keepalives", Label("integration"), func() {
 	It("Should say it is still working while a tool runs, and close the set with the reply", func() {

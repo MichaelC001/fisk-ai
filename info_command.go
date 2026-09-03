@@ -115,6 +115,7 @@ func infoAction(_ *fisk.ParseContext) error {
 		Identity:           cfg.Identity,
 		Version:            version,
 		CredentialEnvNames: cfg.CredentialEnvNames(),
+		WorkDir:            cfg.RootDirectory,
 	}, mcpclient.NewClaimedNames(taken, remoteByName))
 
 	totalTools := len(tools) + len(hitlTools) + len(memTools) + len(ragTools)

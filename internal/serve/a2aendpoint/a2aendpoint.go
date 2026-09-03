@@ -164,6 +164,11 @@ type ToolOptions struct {
 	// Service.Describe reports the resolved duration.
 	CallTimeout time.Duration
 
+	// WorkDir is the directory a served command tool runs in, shared by every call.
+	// Empty runs them in the process working directory. Pass
+	// config.Config.RootDirectory.
+	WorkDir string
+
 	// WithheldBuiltins names the built-in tools the program enabled and does not serve,
 	// which Service.WithheldBuiltins returns for a startup banner. Tools is the served
 	// set; nothing here filters it.
@@ -429,6 +434,7 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 			ConfirmTags:      cfg.ConfirmTags(),
 			Concurrency:      cfg.A2AMaxConcurrentTools(),
 			CallTimeout:      cfg.A2AToolTimeout(),
+			WorkDir:          cfg.RootDirectory,
 			WithheldBuiltins: builtin.WithheldFromA2A(cfg),
 		}
 	}

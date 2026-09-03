@@ -128,8 +128,9 @@ type Options struct {
 	DoneTimeout time.Duration
 
 	// WorkDir is the directory command tools run in. It must be an absolute path that
-	// already exists. Empty inherits the process working directory, which is what a
-	// run at a terminal does.
+	// already exists. Empty runs them in Config.RootDirectory, and in the process
+	// working directory when the configuration sets no root, which is what a run at a
+	// terminal does.
 	//
 	// Every run shares it. Giving each run a directory of its own would keep a tool
 	// writing a relative path off a sibling run's file, but an application that
@@ -198,7 +199,9 @@ type Options struct {
 
 	// StoreDir is the base directory the persistent stores resolve their paths
 	// under. Unlike the per-run tool working directory it is shared, since those
-	// stores belong to an identity rather than to a run.
+	// stores belong to an identity rather than to a run. Empty resolves them under
+	// Config.RootDirectory, and as they do with no root when the configuration sets
+	// none.
 	StoreDir string
 
 	// Telemetry, when non-nil, receives every run's traces and metrics. The caller

@@ -65,7 +65,7 @@ func registerRunCommand(cmd *fisk.Application) {
 	run.Flag("trace", "Write a JSON-lines trace of every LLM request and response to a file").IsSetByUser(&setTraceFile).PlaceHolder("FILE").StringVar(&traceFile)
 	run.Flag("resume", "Continue a stored conversation, by session id or by conversation token").PlaceHolder("ID").StringVar(&resumeID)
 	run.Flag("force", "Resume even if the configuration no longer matches the saved session").UnNegatableBoolVar(&forceResume)
-	run.Flag("state-dir", "Directory holding the sessions of the agent this process hosts (default: XDG state dir)").IsSetByUser(&setStateDir).StringVar(&stateDirFlag)
+	run.Flag("state-dir", "Directory holding checkpointed sessions (default: <root-dir>/runs when a root is set, else the XDG state dir)").IsSetByUser(&setStateDir).StringVar(&stateDirFlag)
 	run.Flag("no-telemetry", "Suppress OpenTelemetry export for this run, whatever the configuration says").IsSetByUser(&setNoTelemetry).Envar("NO_TELEMETRY").UnNegatableBoolVar(&noTelemetry)
 	run.Flag("nats-context", "Talk to an agent on this NATS context instead of running one in this process").PlaceHolder("NAME").StringVar(&runNatsContext)
 	run.Flag("identity", "Identity of the agent to talk to, the subject it answers on; requires --nats-context").PlaceHolder("NAME").StringVar(&runIdentity)
@@ -418,6 +418,7 @@ func validateRunTarget(cfg *config.Config, remote bool) error {
 		{setHTTPDebug, "--http-debug", "a file written on the machine running the agent, which is not this one"},
 		{setVerbose, "--verbose", "the agent's own narration, which happens on the worker"},
 		{setStateDir, "--state-dir", "where the agent this process hosts keeps its sessions, and this process hosts none"},
+		{setRootDir, "--root-dir", "where the agent this process hosts reads its corpus and runs its tools, and this process hosts none"},
 		{setNoTelemetry, "--no-telemetry", "export by the process running the agent, which is not this one"},
 	} {
 		if refusal.typed {

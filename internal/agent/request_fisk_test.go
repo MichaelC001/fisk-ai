@@ -101,7 +101,7 @@ func runnableCommandTool() *fisktool.CommandTool {
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\necho hello\n", modelPath)
 	Expect(os.WriteFile(appPath, []byte(script), 0o700)).To(Succeed())
 
-	tools, err := fisktool.ToolsForApp(context.Background(), appPath, nil)
+	tools, err := fisktool.ToolsForApp(context.Background(), appPath, "", nil)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(tools).To(HaveLen(1))
 	Expect(tools[0].Name()).To(Equal("do"))

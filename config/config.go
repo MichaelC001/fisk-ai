@@ -108,6 +108,29 @@ type Config struct {
 	// through agent.Options.CustomTools. SuppliesTools answers for everything but the
 	// last, which no configuration describes.
 	ApplicationPath string `json:"application_path" yaml:"application_path"`
+	// RootDirectory is the base a relative path in this configuration resolves under:
+	// the knowledge index, the memory store, the run journal, and each relative entry
+	// of harness.knowledge.paths. It is also the directory the command tools, the
+	// application introspection and a stdio MCP child run in. An absolute configured
+	// path is honored verbatim and ignores it. Empty resolves each of those paths
+	// against the process working directory, starts each of those processes there, and
+	// leaves the run journal in the XDG state directory.
+	//
+	// It must be an absolute path that already exists as a directory, which a run
+	// checks before it starts anything. The caller creates the directory and owns
+	// everything under it. A value read from a file must already be absolute, since a
+	// file has no working directory to resolve against; ApplyRootDir resolves the
+	// --root-dir flag against the process working directory before it lands here.
+	//
+	// agent.Options.StoreDir replaces it as the base the persistent stores resolve
+	// under, and agent.Options.ToolWorkDir replaces it as the directory command tools
+	// run in. A caller that set neither needs to read neither.
+	//
+	// It is a working directory rather than a jail. A configured path containing ".."
+	// joins and cleans its way outside it, and a program started in it reads whatever
+	// that directory supplies, so it must be as trusted as the working directory it
+	// replaces.
+	RootDirectory string `json:"root_directory,omitempty" yaml:"root_directory,omitempty"`
 	// NatsContext is the name of a NATS context (as managed by `nats context`
 	// and resolved by jsm.go/natscontext) used to connect to NATS for importing
 	// remote tools and for the a2a server. Required when RemoteTools is set or in
@@ -419,6 +442,97 @@ func (c *Config) ApplyStateDir(dir string) error {
 	return nil
 }
 
+// ApplyRootDir folds the --root-dir flag onto RootDirectory after the file has been
+// parsed, so a typed flag replaces a root_directory the file set, and then checks
+// whichever value results.
+//
+// dir is made absolute against the process working directory, so "." names the
+// directory the operator is standing in. An empty dir keeps what the file set, and an
+// empty dir with no root_directory leaves every relative path resolving as it does
+// without a root.
+//
+// The effective value must be an absolute path that already exists as a directory.
+// The error names the source that supplied it, --root-dir or root_directory, so an
+// operator is sent to where they wrote it.
+func (c *Config) ApplyRootDir(dir string) error {
+	source := "root_directory"
+
+	if dir != "" {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("--root-dir %q: %w", dir, err)
+		}
+
+		c.RootDirectory = abs
+		source = "--root-dir"
+	}
+
+	if c.RootDirectory == "" {
+		return nil
+	}
+
+	return checkRootDir(source, c.RootDirectory)
+}
+
+// checkRootDir reports whether dir is usable as a root: absolute, present, and a
+// directory. source names what supplied it and leads every message.
+func checkRootDir(source string, dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("%s must be an absolute path, got %q", source, dir)
+	}
+
+	info, err := os.Stat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s %q does not exist; create it before the run", source, dir)
+	}
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", source, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s %q is not a directory", source, dir)
+	}
+
+	return nil
+}
+
+// StoreBase returns the base directory the knowledge index, the memory store and the
+// run journal resolve their relative and default paths under: dir when the caller has
+// a base of its own (agent.Options.StoreDir, fisk knowledge --store-dir), else
+// RootDirectory. An empty result leaves each store the default it has without a root,
+// which resolves against the process working directory.
+func (c *Config) StoreBase(dir string) string {
+	if dir != "" {
+		return dir
+	}
+
+	return c.RootDirectory
+}
+
+// RAGPaths returns the harness.knowledge.paths entries the indexer walks, with each
+// relative entry joined under RootDirectory and each absolute entry returned as
+// written. Without a root every entry is returned as written and is walked from the
+// process working directory. It is nil when the block names no paths, which is what
+// makes an explicit path argument required.
+//
+// Every reader of the configured paths calls it, so the index, the watcher and the
+// doctor walk and stat one set of directories.
+func (c *Config) RAGPaths() []string {
+	if c.Harness.RAG == nil || len(c.Harness.RAG.Paths) == 0 {
+		return nil
+	}
+
+	out := make([]string, len(c.Harness.RAG.Paths))
+	for i, path := range c.Harness.RAG.Paths {
+		if c.RootDirectory != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(c.RootDirectory, path)
+		}
+
+		out[i] = path
+	}
+
+	return out
+}
+
 // ApplyIdentity folds an operator-supplied identity into a parsed config, so a name
 // typed at the command line wins over the file's. An empty name is a no-op, leaving
 // whatever the file set or Prepare derived.
@@ -456,10 +570,10 @@ type RAGConfig struct {
 	// is given. It is not an error for this to be empty, but then knowledge index
 	// requires an explicit path argument.
 	Paths []string `json:"paths,omitempty" yaml:"paths,omitempty"`
-	// Directory is where the SQLite index lives. It is resolved relative to the
-	// working directory when not absolute, and defaults to knowledge/<identity>,
-	// mirroring harness.memory's directory. It is project-local and excluded from its
-	// own index walk.
+	// Directory is where the SQLite index lives. It defaults to
+	// knowledge/<identity>, mirroring harness.memory's directory. A value that is not
+	// absolute resolves under root_directory, and against the working directory when
+	// no root is set. It is project-local and excluded from its own index walk.
 	Directory string `json:"directory,omitempty" yaml:"directory,omitempty"`
 	// TopK is the default number of chunks knowledge_search returns when the model
 	// does not request a specific count. It defaults to 5 and is clamped to a hard
@@ -479,7 +593,10 @@ type RAGConfig struct {
 	//
 	// Patterns match the stored document path verbatim, which is the path the indexer
 	// walked and nothing normalizes: indexing ./docs stores docs/foo/bar.md and
-	// indexing /srv/docs stores /srv/docs/foo/bar.md.
+	// indexing /srv/docs stores /srv/docs/foo/bar.md. Under a root_directory of
+	// /srv/agent the same paths entry is walked as /srv/agent/docs and stores
+	// /srv/agent/docs/foo/bar.md, so adding a root to a deployment reanchors the
+	// rules written for it.
 	Citations []RAGCitationRule `json:"citations,omitempty" yaml:"citations,omitempty"`
 }
 

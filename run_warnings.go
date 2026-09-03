@@ -67,7 +67,7 @@ func warningMessage(w agent.Warning) string {
 	case agent.WarnToolSearchUnsupported:
 		return fmt.Sprintf("%d tools are available but the model backend does not support server-side tool search, so all are sent to the model directly and use more context each request; use a provider that supports tool search to defer them", w.Count)
 	case agent.WarnKnowledgeIndexAbsent:
-		return fmt.Sprintf("knowledge is enabled but no index exists at %q; if you built it with 'knowledge index', re-run it with a matching --store-dir (or an absolute knowledge directory), or knowledge_search will return nothing", w.Name)
+		return fmt.Sprintf("knowledge is enabled but no index exists at %q; if you built it with 'knowledge index', build it again under the same root, or set root_directory in the config so the CLI and the agent read it from one file, or give both a matching --store-dir or an absolute knowledge directory, or knowledge_search will return nothing", w.Name)
 	case agent.WarnTraceClose:
 		return fmt.Sprintf("closing trace file: %v", w.Err)
 	case agent.WarnJournalClose:

@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ func runnableTools(app *fisk.Application, bodies map[string]string) []*fisktool.
 	path := filepath.Join(dir, "app")
 	Expect(os.WriteFile(path, []byte(script), 0o700)).To(Succeed())
 
-	tools, err := fisktool.ToolsForApp(context.Background(), path, nil)
+	tools, err := fisktool.ToolsForApp(context.Background(), path, "", nil)
 	Expect(err).NotTo(HaveOccurred())
 
 	return tools
@@ -490,6 +491,48 @@ var _ = Describe("tool calls", func() {
 		var result tools2.CommandResult
 		Expect(json.Unmarshal([]byte(text), &result)).To(Succeed())
 		Expect(result.ExitCode).To(Equal(4))
+	})
+
+	// A served command runs in the same directory an agent run would run it in, so an
+	// application_path or a configured file written relative to root_directory resolves
+	// here too. The command reports the directory it ran in, so removing the WorkDir hop
+	// puts the test process's own directory in the result.
+	It("Should run the command in the configured work directory", func() {
+		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+
+		tools := appWithExecutables(map[string]string{"where": "pwd -P\n"})
+		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", WorkDir: dir, LogOutput: io.Discard})
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		text, isError := callText(ctx, cs, "where", nil)
+		Expect(isError).To(BeFalse())
+
+		var result tools2.CommandResult
+		Expect(json.Unmarshal([]byte(text), &result)).To(Succeed())
+		Expect(strings.TrimSpace(result.Output)).To(Equal(dir))
+	})
+
+	It("Should run the command in the process working directory when none is configured", func() {
+		wd, err := os.Getwd()
+		Expect(err).NotTo(HaveOccurred())
+		wd, err = filepath.EvalSymlinks(wd)
+		Expect(err).NotTo(HaveOccurred())
+
+		tools := appWithExecutables(map[string]string{"where": "pwd -P\n"})
+		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		text, isError := callText(ctx, cs, "where", nil)
+		Expect(isError).To(BeFalse())
+
+		var result tools2.CommandResult
+		Expect(json.Unmarshal([]byte(text), &result)).To(Succeed())
+		Expect(strings.TrimSpace(result.Output)).To(Equal(wd))
 	})
 
 	It("Should report an execution failure as an error result", func() {

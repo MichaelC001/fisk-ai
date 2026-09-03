@@ -88,6 +88,11 @@ type Options struct {
 	Concurrency int
 	// CallTimeout bounds a single tool call; <= 0 uses the default.
 	CallTimeout time.Duration
+	// WorkDir is the directory a served command tool runs in. Every call shares it,
+	// since this server holds no per-call state. Empty runs them in the process
+	// working directory. Pass config.Config.RootDirectory, so a command written as
+	// "./bin/app" resolves the same way here as it does in an agent run.
+	WorkDir string
 	// ConfirmTags lists the tags that, alongside the always-on ai:confirm, mark a
 	// command as requiring the caller's approval before it runs. It mirrors the
 	// agent's confirm_tags: an existing CLI whose commands are not ai:* aware can
@@ -189,7 +194,7 @@ func BuildServer(tools []toolkit.Tool, opts Options) (*mcp.Server, []string) {
 			Description: t.ModelDescription(),
 			InputSchema: inputSchema(t),
 			Annotations: toolAnnotations(t),
-		}, toolHandler(t, policy, sem, opts.CallTimeout, opts.LogOutput))
+		}, toolHandler(t, policy, sem, opts.CallTimeout, opts.WorkDir, opts.LogOutput))
 		registered = append(registered, t.Name())
 		taken[t.Name()] = true
 
@@ -462,7 +467,7 @@ type confirmPolicy struct {
 // JSON body carries the exit code and output. Failures are never returned as a
 // Go error, which the SDK would treat as a protocol-level error the client
 // cannot reason about.
-func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeout time.Duration, logOut io.Writer) mcp.ToolHandler {
+func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeout time.Duration, workDir string, logOut io.Writer) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Resolve the command line up front for a tool that runs one: it names the
 		// command in the approval prompt and the run log, and an argument-resolution
@@ -495,11 +500,11 @@ func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeou
 			fmt.Fprintf(logOut, "Running %s\n", cmdLine)
 		}
 
-		// The served tool runs in the process working directory; a per-call scratch
-		// directory for served tools is future server work, not this run path. There
-		// is no operator on the MCP path, so an in-process tool that asks a question
-		// is denied rather than left waiting.
-		result, err := t.Execute(callCtx, req.Params.Arguments, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
+		// Every served tool runs in workDir, the root the agent's own tools run in; a
+		// per-call scratch directory for served tools is future server work, not this
+		// run path. There is no operator on the MCP path, so an in-process tool that
+		// asks a question is denied rather than left waiting.
+		result, err := t.Execute(callCtx, req.Params.Arguments, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter(), WorkDir: workDir})
 		if err != nil {
 			// A tool answering later has nowhere to answer to on this path: there is no
 			// session to resume and the client is waiting on this reply. It is refused as

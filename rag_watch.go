@@ -29,11 +29,9 @@ func knowledgeWatchAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	roots := knowledgePaths
-	reconcile := false
-	if len(roots) == 0 {
-		roots = cfg.Harness.RAG.Paths
-		reconcile = true // a full-corpus walk over the configured paths reconciles deletions
+	roots, reconcile, err := knowledgeRoots(cfg)
+	if err != nil {
+		return err
 	}
 	if len(roots) == 0 {
 		return fmt.Errorf("no paths given and knowledge.paths is empty - pass a path or set knowledge.paths")

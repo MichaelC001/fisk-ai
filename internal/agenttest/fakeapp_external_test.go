@@ -102,7 +102,7 @@ var _ = Describe("FakeApp", func() {
 	It("Should satisfy ToolsForApp, which runs the binary to introspect it", func() {
 		app := agenttest.NewFakeApp(GinkgoTB(), streamApp())
 
-		tools, err := fisktool.ToolsForApp(context.Background(), app.Path, nil)
+		tools, err := fisktool.ToolsForApp(context.Background(), app.Path, "", nil)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(tools).To(HaveLen(1))
 		Expect(tools[0].Name()).To(Equal("stream_rm"))
@@ -121,7 +121,7 @@ var _ = Describe("FakeApp", func() {
 	It("Should report the working directory it was handed, symlinks unresolved", func() {
 		app := agenttest.NewFakeApp(GinkgoTB(), streamApp())
 
-		tools, err := fisktool.ToolsForApp(context.Background(), app.Path, nil)
+		tools, err := fisktool.ToolsForApp(context.Background(), app.Path, "", nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		dir := GinkgoT().TempDir()
