@@ -13,6 +13,7 @@ import (
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
 
+	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
 )
@@ -153,7 +154,7 @@ func runKnowledgeMatch(pc *fisk.ParseContext) (int, error) {
 	c := columns.New()
 	defer c.WriteTo(os.Stdout)
 
-	return res.Matched, renderMatch(c, res, len(cfg.RAGCitationRules()) > 0)
+	return res.Matched, renderMatch(c, res, cfg)
 }
 
 // flagWasSet reports whether the user gave a flag, as opposed to it holding its
@@ -168,22 +169,23 @@ func flagWasSet(pc *fisk.ParseContext, name string) bool {
 	return false
 }
 
-// renderMatch adds the whole result to c. citations says whether the operator
-// configured any citation rules, which decides whether the table carries a mapped
-// citation column.
+// renderMatch adds the whole result to c. cfg supplies the citation rules, which
+// decide whether the table carries a mapped citation column, and the store directory
+// the unbuilt-index report names.
 //
 // The two machine-readable modes bypass it and write bare lines, as knowledge show
 // does for a chunk: a document renderer decorates, and decoration is exactly what a
 // pipe cannot have.
-func renderMatch(c *columns.Document, res *rag.EnumerateResult, citations bool) error {
+func renderMatch(c *columns.Document, res *rag.EnumerateResult, cfg *config.Config) error {
 	machine := knowledgeMatchCount || knowledgeMatchPathsOnly
 
 	switch res.Status {
 	case rag.EnumIndexNotBuilt:
+		detail := knowledgeNotBuiltDetail(cfg, knowledgeStoreDir)
 		if machine {
-			return fmt.Errorf("the knowledge index has not been built yet; run: fisk knowledge index")
+			return knowledgeReportError(knowledgeNotBuiltHeadline, detail)
 		}
-		c.Print("the knowledge index has not been built yet; run: fisk knowledge index")
+		printKnowledgeReport(c, knowledgeNotBuiltHeadline, detail)
 
 		return nil
 
@@ -230,7 +232,7 @@ func renderMatch(c *columns.Document, res *rag.EnumerateResult, citations bool) 
 		return nil
 	}
 
-	c.Embed(matchTable(res.Docs, citations))
+	c.Embed(matchTable(res.Docs, len(cfg.RAGCitationRules()) > 0))
 	renderMatchNotes(c, res)
 
 	return nil

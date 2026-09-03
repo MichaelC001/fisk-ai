@@ -62,6 +62,50 @@ var _ = Describe("resolveDir", func() {
 	})
 })
 
+var _ = Describe("the Store present doctor check", func() {
+	ctx := context.Background()
+
+	detail := func(cfg *config.Config) string {
+		GinkgoHelper()
+
+		s, err := Open(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(s.Close)
+
+		r, err := s.Doctor(ctx, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		for _, c := range r.Checks {
+			if c.Name == "Store present" {
+				Expect(c.State).To(Equal(DoctorFail))
+				return c.Detail
+			}
+		}
+
+		Fail("the store check is absent from the report")
+		return ""
+	}
+
+	// A relative dbPath in the report resolves against whichever directory the reader
+	// is standing in, and standing in the wrong one is what produced the missing file.
+	It("names the absolute path it found nothing at", func() {
+		abs, err := filepath.Abs(filepath.Join("kb", dbFileName))
+		Expect(err).ToNot(HaveOccurred())
+
+		d := detail(lexicalConfig("kb"))
+		Expect(d).To(ContainSubstring("no index file at " + abs))
+		Expect(d).To(ContainSubstring("the configured knowledge directory is relative"))
+	})
+
+	It("says nothing about the working directory for an absolute directory", func() {
+		dir := GinkgoT().TempDir()
+
+		d := detail(lexicalConfig(dir))
+		Expect(d).To(ContainSubstring("no index file at " + filepath.Join(dir, dbFileName)))
+		Expect(d).ToNot(ContainSubstring("relative"))
+	})
+})
+
 var _ = Describe("newStore", func() {
 	// A reader and a writer are built from one config by one helper, so every value
 	// that config decides has to be the same on both. Before the helper existed each

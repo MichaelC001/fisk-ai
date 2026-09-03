@@ -151,6 +151,82 @@ func knowledgeAdvice(err error) error {
 	}
 }
 
+// knowledgeNotBuiltHeadline opens every report about a store that holds no index
+// file.
+const knowledgeNotBuiltHeadline = "the knowledge index has not been built yet"
+
+// absPathOrSelf renders a path as an absolute one, returning it unchanged when
+// filepath.Abs fails, which happens only when the working directory cannot be read.
+func absPathOrSelf(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+
+	return abs
+}
+
+// knowledgeStoreDetail names the index file the command searched for and says when
+// the configured knowledge directory is relative.
+//
+// Two situations produce a store with no index file: nothing has been indexed yet,
+// and an index that exists while the process stands somewhere a relative
+// knowledge.directory does not resolve from. The absolute path separates them, and
+// the second is why it is printed: an operator who follows "run: fisk knowledge
+// index" from there builds a second index under the directory they were standing in.
+func knowledgeStoreDetail(cfg *config.Config, storeDir string) []string {
+	path := rag.StorePath(cfg, storeDir)
+	detail := []string{fmt.Sprintf("looked for: %s", absPathOrSelf(path))}
+	if filepath.IsAbs(path) {
+		return detail
+	}
+
+	if cfg.Harness.RAG.Directory == "" {
+		return append(detail, fmt.Sprintf("knowledge.directory is not set, so the index defaults to knowledge/%s under the current directory", cfg.Identity))
+	}
+
+	return append(detail, fmt.Sprintf("knowledge.directory %q is relative, so it resolved against the current directory", cfg.Harness.RAG.Directory))
+}
+
+// knowledgeNotBuiltDetail adds the command that builds an index to the store
+// detail, for the verbs whose answer is to build one.
+func knowledgeNotBuiltDetail(cfg *config.Config, storeDir string) []string {
+	return append(knowledgeStoreDetail(cfg, storeDir), "run: fisk knowledge index")
+}
+
+// printKnowledgeReport prints a headline with its detail lines indented under it. A
+// nil document prints to stdout, for the verbs that render no document.
+func printKnowledgeReport(c *columns.Document, headline string, detail []string) {
+	if c == nil {
+		fmt.Println(headline)
+		for _, line := range detail {
+			fmt.Printf("  %s\n", line)
+		}
+
+		return
+	}
+
+	c.Print(headline)
+	c.Indent()
+	for _, line := range detail {
+		c.Print(line)
+	}
+	c.Outdent()
+}
+
+// knowledgeReportError renders the same report as an error, for the verbs that
+// cannot continue and exit non-zero.
+func knowledgeReportError(headline string, detail []string) error {
+	var b strings.Builder
+
+	b.WriteString(headline)
+	for _, line := range detail {
+		fmt.Fprintf(&b, "\n  %s", line)
+	}
+
+	return errors.New(b.String())
+}
+
 // printTierLine prints the canonical tier line for a store to stdout.
 func printTierLine(ctx context.Context, c *columns.Document, store *rag.Store) error {
 	line, err := store.TierLine(ctx)
@@ -194,6 +270,16 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 
 	if err := printTierLine(ctx, nil, store); err != nil {
 		return err
+	}
+
+	// A relative knowledge.directory resolves against the working directory, so an
+	// operator running this from the wrong one builds a second index there. This names
+	// the file before the run starts, while they can still stop it. A dry run adds no
+	// rows and embeds nothing, so it names the file the real run would write.
+	if knowledgeDryRun {
+		fmt.Printf("the index would be written to %s\n", absPathOrSelf(store.Path()))
+	} else {
+		fmt.Printf("writing the index to %s\n", absPathOrSelf(store.Path()))
 	}
 
 	opts := rag.IndexOptions{
@@ -344,7 +430,7 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 
 	switch res.Status {
 	case rag.StatusIndexNotBuilt:
-		c.Print("the knowledge index has not been built yet; run: fisk knowledge index")
+		printKnowledgeReport(c, knowledgeNotBuiltHeadline, knowledgeNotBuiltDetail(cfg, knowledgeStoreDir))
 		return nil
 	case rag.StatusIndexEmpty:
 		c.Print("the knowledge index is empty, or the query had no searchable terms")
@@ -422,7 +508,7 @@ func knowledgeShowAction(_ *fisk.ParseContext) error {
 
 	headingPath, content, err := store.ChunkText(ctx, relPath, ordinal)
 	if errors.Is(err, rag.ErrIndexNotBuilt) {
-		return fmt.Errorf("the knowledge index has not been built yet; run: fisk knowledge index")
+		return knowledgeReportError(knowledgeNotBuiltHeadline, knowledgeNotBuiltDetail(cfg, knowledgeStoreDir))
 	}
 	if errors.Is(err, rag.ErrCitationNotFound) {
 		return fmt.Errorf("no chunk found for citation %q: it may have shifted since the last reindex; run 'fisk knowledge sources' to list files", knowledgeCitation)
@@ -453,7 +539,7 @@ func knowledgeRmAction(_ *fisk.ParseContext) error {
 		return err
 	}
 	if !exists {
-		fmt.Println("the knowledge index has not been built yet; run: fisk knowledge index")
+		printKnowledgeReport(nil, knowledgeNotBuiltHeadline, knowledgeNotBuiltDetail(cfg, knowledgeStoreDir))
 		return nil
 	}
 
@@ -500,7 +586,7 @@ func knowledgeResetAction(_ *fisk.ParseContext) error {
 		return err
 	}
 	if !exists {
-		fmt.Println("no knowledge index to reset")
+		printKnowledgeReport(nil, "no knowledge index to reset", knowledgeStoreDetail(cfg, knowledgeStoreDir))
 		return nil
 	}
 
@@ -592,7 +678,7 @@ func knowledgeRebuildAction(_ *fisk.ParseContext) error {
 	if err := store.RebuildFTS(ctx); err != nil {
 		switch {
 		case errors.Is(err, rag.ErrIndexNotBuilt):
-			return fmt.Errorf("there is no knowledge index to rebuild; run: fisk knowledge index")
+			return knowledgeReportError("there is no knowledge index to rebuild", knowledgeNotBuiltDetail(cfg, knowledgeStoreDir))
 		case errors.Is(err, rag.ErrLocked):
 			return fmt.Errorf("another knowledge writer holds the index lock; rebuild needs it, so try again when it finishes")
 		}
@@ -626,7 +712,7 @@ func knowledgeSourcesAction(_ *fisk.ParseContext) error {
 
 	sources, err := store.Sources(ctx)
 	if errors.Is(err, rag.ErrIndexNotBuilt) {
-		fmt.Println("the knowledge index has not been built yet; run: fisk knowledge index")
+		printKnowledgeReport(nil, knowledgeNotBuiltHeadline, knowledgeNotBuiltDetail(cfg, knowledgeStoreDir))
 		return nil
 	}
 	if err != nil {
@@ -794,11 +880,11 @@ func knowledgeStatsAction(_ *fisk.ParseContext) error {
 	c.Blank()
 
 	if !st.Built {
-		c.Item("Store", fmt.Sprintf("%s (not built; run: fisk knowledge index)", st.StorePath))
+		printKnowledgeReport(c, knowledgeNotBuiltHeadline, knowledgeNotBuiltDetail(cfg, knowledgeStoreDir))
 		return nil
 	}
 
-	c.Item("Store", st.StorePath)
+	c.Item("Store", absPathOrSelf(st.StorePath))
 	c.Item("Documents", st.Documents)
 	c.Item("Chunks", st.Chunks)
 	c.Item("Vectors", st.Vectors)
