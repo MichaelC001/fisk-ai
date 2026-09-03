@@ -124,11 +124,18 @@ func formatRefusal(err error) bool {
 // knowledgeAdvice appends the command that repairs the index state a rag sentinel
 // reports. The library states what is wrong and names no binary, since an embedder
 // ships its own commands, so this CLI renders its own. An error carrying none of
-// the five sentinels is returned unchanged, and so is a nil one.
+// the six sentinels is returned unchanged, and so is a nil one.
 func knowledgeAdvice(err error) error {
 	switch {
 	case err == nil:
 		return nil
+
+	// ErrEmbeddingsAbsent is wrapped alongside ErrMetaMismatch, so it is matched
+	// first. A reindex is one route out of it, and on its own it is the wrong advice:
+	// run from a config with no embeddings block it rebuilds the index lexical-only
+	// and discards the vectors the operator built.
+	case errors.Is(err, rag.ErrEmbeddingsAbsent):
+		return fmt.Errorf("%w; restore the knowledge.embeddings block for the pinned model, or run 'fisk knowledge index --reindex' to rebuild the index lexical-only and discard its vectors", err)
 
 	case errors.Is(err, rag.ErrMetaMismatch), errors.Is(err, rag.ErrDimensionMismatch):
 		return fmt.Errorf("%w; run: fisk knowledge index --reindex", err)

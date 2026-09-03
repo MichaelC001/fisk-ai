@@ -608,7 +608,10 @@ func runWithTUI(ctx context.Context, host *hostedAgent, cfg *config.Config, toke
 		fmt.Fprintf(os.Stderr, "%s\n", line)
 	}
 
-	return runErr
+	// A knowledge sentinel reaches here whenever a run opens the index and the
+	// configuration and the index disagree, which stops the run before the loop. The
+	// operator reads it here and nowhere else, since run prints no doctor report.
+	return knowledgeAdvice(runErr)
 }
 
 // runDir is the working directory shown on the live view's startup card, with the home

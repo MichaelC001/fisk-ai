@@ -43,6 +43,28 @@ var _ = Describe("knowledgeAdvice", func() {
 		Entry("an earlier format generation", rag.ErrFormatTooOld, "fisk knowledge reset --force"),
 	)
 
+	// A reindex from a config with no embeddings block rebuilds the index lexical-only
+	// and discards the vectors, so the advice that names it alone destroys what the
+	// operator wanted back.
+	It("Should offer both routes out of an index whose embeddings block is gone", func() {
+		err := fmt.Errorf("%w: %w (%q)", rag.ErrMetaMismatch, rag.ErrEmbeddingsAbsent, "m1")
+		advice := knowledgeAdvice(err).Error()
+
+		Expect(advice).To(ContainSubstring("knowledge.embeddings"))
+		Expect(advice).To(ContainSubstring("fisk knowledge index --reindex"))
+		Expect(advice).To(ContainSubstring("discard its vectors"))
+		Expect(advice).To(ContainSubstring(`("m1")`))
+	})
+
+	// The two travel wrapped together, so the case that matches only ErrMetaMismatch
+	// has to keep answering the mismatches that carry no embeddings sentinel.
+	It("Should still send a bare embedding mismatch to a reindex", func() {
+		advice := knowledgeAdvice(fmt.Errorf("%w: dim 32 vs 64", rag.ErrMetaMismatch)).Error()
+
+		Expect(advice).To(ContainSubstring("run: fisk knowledge index --reindex"))
+		Expect(advice).ToNot(ContainSubstring("knowledge.embeddings"))
+	})
+
 	// Reset discards the file rather than clearing rows for either of these, and it
 	// covering only the earlier one is what left an operator with no working command
 	// after the format pin was lowered.
@@ -69,7 +91,7 @@ var _ = Describe("knowledgeAdvice", func() {
 	// Every command this product ships is fisk, and the binary named in the advice is
 	// the one the operator has to type.
 	It("Should name no binary the product does not install", func() {
-		for _, sentinel := range []error{rag.ErrMetaMismatch, rag.ErrDimensionMismatch, rag.ErrModelMismatch, rag.ErrFormatTooNew, rag.ErrFormatTooOld} {
+		for _, sentinel := range []error{rag.ErrMetaMismatch, rag.ErrEmbeddingsAbsent, rag.ErrDimensionMismatch, rag.ErrModelMismatch, rag.ErrFormatTooNew, rag.ErrFormatTooOld} {
 			Expect(knowledgeAdvice(sentinel).Error()).ToNot(ContainSubstring("fisk-ai"))
 		}
 	})
