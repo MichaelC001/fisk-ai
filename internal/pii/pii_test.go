@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/awslabs/ferret-scan/v2/pkg/redact"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -193,10 +194,14 @@ eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ
 	})
 
 	Describe("DefaultChecks", func() {
-		// The three validators left out are left out for what they do to ordinary text an
+		// The four validators left out are left out for what they do to ordinary text an
 		// agent reads all day, and each of these is the sample that decided it.
 		BeforeEach(func() {
 			scanner = newScanner(pii.Options{Mode: pii.ModeRedact})
+		})
+
+		It("Should not name VIN", func() {
+			Expect(pii.DefaultChecks).NotTo(ContainElement("VIN"))
 		})
 
 		It("Should leave a license header alone", func() {
@@ -224,6 +229,31 @@ Route: 198.51.100.7:6222  Connections: 412`
 			res, err := scanner.Scan(context.Background(), report)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.Text).To(Equal(report))
+		})
+
+		// runagent138245072 is a temp directory name of the shape the item measured, and
+		// its position-9 digit is the check digit ISO 3779 computes over the other
+		// sixteen, so ferret-scan's VIN validator matches it. A scan with that validator
+		// enabled replaces it; the default set leaves it.
+		It("Should leave a token that passes the VIN check digit alone", func() {
+			eng, err := redact.NewEngine(redact.EngineOptions{Checks: []string{"VIN"}, Strategy: redact.Simple})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(eng.Close()).To(Succeed()) })
+
+			for _, text := range []string{
+				"runagent138245072",
+				"the note landed in /tmp/runagent138245072/docs/note.md at 10:04",
+				"the build ran in runagent138245072 and finished",
+			} {
+				vin, err := eng.Redact(context.Background(), redact.Request{Text: text})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(vin.AuditRecord().FindingsByType).To(HaveKeyWithValue("VIN", 1), "for %q", text)
+
+				res, err := scanner.Scan(context.Background(), text)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.Text).To(Equal(text), "for %q", text)
+				Expect(res.Found()).To(BeFalse(), "for %q", text)
+			}
 		})
 	})
 })

@@ -48,7 +48,7 @@ var ErrModeOff = errors.New("mode is off, so there is nothing to build a scanner
 
 // DefaultChecks are the validators a Scanner runs when Options.Checks is empty.
 //
-// It is every validator ferret-scan offers on this path except three, each dropped for
+// It is every validator ferret-scan offers on this path except four, each dropped for
 // what it does to ordinary text rather than for what it costs:
 //
 //   - INTELLECTUAL_PROPERTY matches a copyright line, so it rewrites the license header
@@ -57,9 +57,15 @@ var ErrModeOff = errors.New("mode is off, so there is nothing to build a scanner
 //     named in one sentence it took two.
 //   - IP_ADDRESS marked nothing in a server report, a Kubernetes service or a log line
 //     full of addresses, so it earns no place in a set a caller cannot narrow.
+//   - VIN matches a seventeen-character run of letters and digits. ferret-scan checks the
+//     position-9 checksum, which ISO 3779 makes mandatory only for North American VINs, so
+//     a token whose check digit passes by chance matches anyway: on a path of the shape
+//     /tmp/runagent138245072/note.md, four of 300 random suffixes did. A tool's output is
+//     mostly machine-generated identifiers of that shape, from build hashes and request ids
+//     to container names.
 //
 // The names are ferret-scan's own validator IDs. A name this build does not recognize is
-// dropped silently by the engine, so New checks them itself.
+// dropped silently by the engine, so New checks them itself against ValidCheckNames.
 var DefaultChecks = []string{
 	"BANK_ACCOUNT",
 	"CLOUD_RESOURCES",
@@ -74,7 +80,6 @@ var DefaultChecks = []string{
 	"PHYSICAL_ADDRESS",
 	"SECRETS",
 	"SSN",
-	"VIN",
 }
 
 // MaxTextBytes is the largest text a Scan accepts. Anything longer is an error rather
@@ -95,7 +100,8 @@ type Options struct {
 	// Checks names the validators to run, using ferret-scan's validator IDs. Empty
 	// takes DefaultChecks. Every name must be one ValidCheckNames reports, since a name
 	// the engine does not recognize would otherwise be dropped and leave the caller
-	// believing it was scanning for something it was not.
+	// believing it was scanning for something it was not. VIN is refused for the same
+	// reason it is out of DefaultChecks, so no Scanner runs it.
 	Checks []string
 }
 
@@ -159,7 +165,10 @@ func New(opts Options) (*Scanner, error) {
 		checks = DefaultChecks
 	}
 
-	valid := redact.ValidCheckNames()
+	// ferret-scan still offers VIN. DefaultChecks says why this package does not run it,
+	// and dropping it here refuses the name the way the engine's own unknown names are
+	// refused.
+	valid := slices.DeleteFunc(redact.ValidCheckNames(), func(name string) bool { return name == "VIN" })
 	for _, name := range checks {
 		if !slices.Contains(valid, name) {
 			return nil, fmt.Errorf("unknown pii check %q: accepted checks are %v", name, valid)
