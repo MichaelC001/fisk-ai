@@ -389,6 +389,9 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(out.Documents).To(HaveLen(1))
 			Expect(out.Documents[0].Citation).To(Equal("https://docs.example.net/shard"))
 			Expect(out.Documents[0].IndexRef).To(ContainSubstring("shard.md#"))
+			Expect(out.Documents[0].Path).To(HaveSuffix(filepath.Join("docs", "shard.md")))
+			Expect(out.Documents[0].Path).ToNot(ContainSubstring("#"))
+			Expect(out.Documents[0].Path).ToNot(ContainSubstring("https://"))
 		})
 
 		// A corpus that is published nowhere is the default, and the model is told to
@@ -401,6 +404,11 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(out.Documents).To(HaveLen(1))
 			Expect(out.Documents[0].Citation).To(ContainSubstring("shard.md#"))
 			Expect(out.Documents[0].Citation).To(Equal(out.Documents[0].IndexRef))
+			// Both citation fields hold the same token here, so path is the only string a
+			// file reader can take.
+			Expect(out.Documents[0].Path).To(HaveSuffix(filepath.Join("docs", "shard.md")))
+			Expect(out.Documents[0].Path).ToNot(Equal(out.Documents[0].Citation))
+			Expect(out.Documents[0].Path).ToNot(Equal(out.Documents[0].IndexRef))
 		})
 
 		// The empty answer is the reason the tool exists, so it has to arrive with the
