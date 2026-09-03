@@ -79,6 +79,18 @@ var _ = Describe("knowledge_search tool", func() {
 		Expect(note).To(ContainSubstring("rather than fetching it"))
 	})
 
+	// The model is told not to show a citation's URL to a file reader and not to show
+	// index_ref to anyone, so without this the only move left for a model that wants
+	// the whole document is a web fetch. Fisk ships no file reader, so the note offers
+	// the path to a tool the model may have rather than naming one it does not.
+	It("tells the model to read a document at the path a result carries", func() {
+		note := RAGSystemNote(enabled(""))
+		Expect(note).To(ContainSubstring("Each result carries a path"))
+		Expect(note).To(ContainSubstring("where you have a tool that reads files, give it that path"))
+		Expect(note).To(ContainSubstring("take the content from the document's path"))
+		Expect(note).ToNot(ContainSubstring("not targets for other tools"))
+	})
+
 	It("returns an error when invoked with a nil store", func() {
 		tools := RAGTools(enabled(""), nil)
 		Expect(tools).To(HaveLen(2))
@@ -206,6 +218,22 @@ var _ = Describe("knowledge_search tool", func() {
 			Expect(out[0].Citation).To(Equal("https://docs.example.net/note#backpressure"))
 			Expect(out[0].IndexRef).To(Equal("docs/note.md#3"))
 		})
+
+		// The path is what a file reader takes, so the ordinal the index key carries and
+		// whatever a rule rendered both have to stay out of it.
+		It("carries the document path with no ordinal and no rule applied", func() {
+			hits := []rag.Hit{{
+				Citation:       "docs/note.md#3",
+				DocPath:        "docs/note.md",
+				MappedCitation: "https://docs.example.net/note#backpressure",
+				Mapped:         true,
+				Content:        "text",
+			}}
+
+			out := capHits(hits, 1000)
+			Expect(out).To(HaveLen(1))
+			Expect(out[0].Path).To(Equal("docs/note.md"))
+		})
 	})
 
 	Describe("against a real lexical store", func() {
@@ -291,6 +319,9 @@ var _ = Describe("knowledge_search tool", func() {
 			hit := search()
 			Expect(hit.Citation).To(Equal("https://docs.example.net/note#sharding"))
 			Expect(hit.IndexRef).To(ContainSubstring("note.md#"))
+			Expect(hit.Path).To(HaveSuffix(filepath.Join("docs", "note.md")))
+			Expect(hit.Path).ToNot(ContainSubstring("#"))
+			Expect(hit.Path).ToNot(ContainSubstring("https://"))
 		})
 
 		// A corpus that is published nowhere is the default, and the model is told to
@@ -303,6 +334,11 @@ var _ = Describe("knowledge_search tool", func() {
 			hit := search()
 			Expect(hit.Citation).To(ContainSubstring("note.md#"))
 			Expect(hit.Citation).To(Equal(hit.IndexRef))
+			// Both citation fields hold the same token here, so path is the only string a
+			// file reader can take.
+			Expect(hit.Path).To(HaveSuffix(filepath.Join("docs", "note.md")))
+			Expect(hit.Path).ToNot(Equal(hit.Citation))
+			Expect(hit.Path).ToNot(Equal(hit.IndexRef))
 		})
 	})
 })
