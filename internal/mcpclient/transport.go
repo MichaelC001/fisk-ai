@@ -42,15 +42,20 @@ func (s *Sessions) transport(ctx context.Context, server config.MCPServer) (mcp.
 	case server.URL != "":
 		return httpTransport(server, s.opts.LookupEnv)
 	case server.Command != "":
-		return commandTransport(server, s.opts.CredentialEnvNames, s.opts.LookupEnv)
+		return commandTransport(server, s.opts.WorkDir, s.opts.CredentialEnvNames, s.opts.LookupEnv)
 	default:
 		return nil, fmt.Errorf("mcp server %q sets neither command nor url", server.Name)
 	}
 }
 
 // commandTransport builds the stdio transport for a server started as a child
-// process, with the environment childEnv gives it.
-func commandTransport(server config.MCPServer, credentials []string, lookup func(string) (string, bool)) (mcp.Transport, error) {
+// process, in workDir and with the environment childEnv gives it.
+//
+// os/exec looks a command name with no separator up in the parent's PATH and resolves
+// one with a separator against Dir in the child, which chdirs before it execs, so
+// "npx" stays a PATH lookup and "./bin/server" runs from workDir. An empty workDir
+// starts the child in the process working directory.
+func commandTransport(server config.MCPServer, workDir string, credentials []string, lookup func(string) (string, bool)) (mcp.Transport, error) {
 	env, err := childEnv(server, credentials, lookup)
 	if err != nil {
 		return nil, err
@@ -63,6 +68,7 @@ func commandTransport(server config.MCPServer, credentials []string, lookup func
 	// and gives it a terminate window before signaling it.
 	cmd := exec.Command(server.Command, server.Args...)
 	cmd.Env = env
+	cmd.Dir = workDir
 
 	return &mcp.CommandTransport{Command: cmd}, nil
 }

@@ -69,7 +69,10 @@ func sessionStoreFor(ctx context.Context, cfg *config.Config) (runstate.Store, f
 	noop := func() {}
 	backend := cfg.SessionBackend()
 
-	env := runstate.RuntimeEnv{}
+	// A directory-backed journal resolves under the root, so a run and every session
+	// subcommand under the same root read and write one journal. An explicit
+	// --state-dir was folded onto the config before this and wins from there.
+	env := runstate.RuntimeEnv{StoreDir: cfg.StoreBase("")}
 	cleanup := noop
 	if runstate.NeedsNats(backend) {
 		p, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
@@ -99,7 +102,7 @@ func sessionStoreFor(ctx context.Context, cfg *config.Config) (runstate.Store, f
 func registerSessionCommand(cmd *fisk.Application) {
 	session := cmd.Command("session", "Manage checkpointed agent runs")
 	session.Flag("config", "Path to an agent configuration file whose session backend to use (default: the file backend under --state-dir)").ExistingFileVar(&sessionConfigFile)
-	session.Flag("state-dir", "Directory holding checkpointed sessions (default: XDG state dir)").StringVar(&stateDirFlag)
+	session.Flag("state-dir", "Directory holding checkpointed sessions (default: <root-dir>/runs when a root is set, else the XDG state dir)").StringVar(&stateDirFlag)
 
 	session.Command("ls", "Lists checkpointed sessions").Alias("list").Action(sessionLsAction)
 

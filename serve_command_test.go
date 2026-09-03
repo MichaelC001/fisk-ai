@@ -115,11 +115,15 @@ var _ = Describe("fiskServeCommand", func() {
 			wd, err := os.Getwd()
 			Expect(err).ToNot(HaveOccurred())
 
+			cfg := &config.Config{}
 			c := &fiskServeCommand{}
-			Expect(c.toolDirectory()).To(Equal(wd))
+			Expect(c.toolDirectory(cfg)).To(Equal(wd))
+
+			cfg.RootDirectory = "/srv/agent"
+			Expect(c.toolDirectory(cfg)).To(Equal("/srv/agent"))
 
 			c.workDir = "/var/lib/fisk-ai"
-			Expect(c.toolDirectory()).To(Equal("/var/lib/fisk-ai"))
+			Expect(c.toolDirectory(cfg)).To(Equal("/var/lib/fisk-ai"))
 		})
 	})
 

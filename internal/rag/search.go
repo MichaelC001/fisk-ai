@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
@@ -71,8 +72,13 @@ const (
 // <relpath>#<ordinal> token, identical across the tool and every CLI surface;
 // HeadingPath is the human-readable breadcrumb shown alongside it.
 type Hit struct {
-	ChunkID     int64
-	Citation    string
+	ChunkID  int64
+	Citation string
+	// DocPath is where the document sits on the filesystem, for a reader that opens
+	// it. It is the path the indexer stored, joined under config.Config.RootDirectory
+	// when that path is relative and a root is set, so a corpus indexed before the
+	// root and one indexed under it answer with the same absolute path. Citation and
+	// MappedCitation render from the stored path either way.
 	DocPath     string
 	Ordinal     int
 	HeadingPath string
@@ -393,6 +399,17 @@ func (s *Store) vecSearch(ctx context.Context, qv []float32, limit int) ([]resul
 	return out, rows.Err()
 }
 
+// docPath turns a stored document key into the path a reader opens. A key the
+// indexer walked relative is joined under the root; an absolute key, and every key
+// when no root is set, is returned as it was stored.
+func (s *Store) docPath(stored string) string {
+	if s.root == "" || filepath.IsAbs(stored) {
+		return stored
+	}
+
+	return filepath.Join(s.root, stored)
+}
+
 // hydrate turns fused (chunkID) rows into citation-ready Hits with one join,
 // preserving the fused order. A row that vanished between fusion and hydration
 // (concurrent reindex) is skipped rather than failing the search.
@@ -426,6 +443,10 @@ func (s *Store) hydrate(ctx context.Context, ranked []result) ([]Hit, error) {
 		}
 		h.Citation = Citation(h.DocPath, h.Ordinal)
 		h.MappedCitation, h.Mapped = s.citations.Render(h.DocPath, h.Ordinal, h.HeadingPath)
+		// Both citations are rendered from the stored key first, so a rule written
+		// against the corpus as it was walked keeps matching while DocPath becomes a
+		// path the reader can open.
+		h.DocPath = s.docPath(h.DocPath)
 		byID[h.ChunkID] = h
 	}
 	if err := rows.Err(); err != nil {

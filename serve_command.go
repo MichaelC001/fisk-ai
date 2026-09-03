@@ -51,8 +51,8 @@ func registerServeCommand(app *fisk.Application) {
 		Default(fmt.Sprintf("%d", config.DefaultJobsWorkers)).
 		IsSetByUser(&c.workersSet).
 		IntVar(&c.workers)
-	srv.Flag("state-dir", "Directory for checkpointed sessions (default: XDG state dir)").StringVar(&c.stateDir)
-	srv.Flag("work-dir", "Directory command tools run in (default: the worker's own working directory)").StringVar(&c.workDir)
+	srv.Flag("state-dir", "Directory holding checkpointed sessions (default: <root-dir>/runs when a root is set, else the XDG state dir)").StringVar(&c.stateDir)
+	srv.Flag("work-dir", "Directory command tools run in (default: --root-dir, else the worker's own working directory)").StringVar(&c.workDir)
 	srv.Flag("api-key", "Anthropic API key to use").Envar("ANTHROPIC_API_KEY").StringVar(&c.apiKey)
 	srv.Flag("base-url", "Anthropic API base URL to use").Envar("ANTHROPIC_BASE_URL").StringVar(&c.baseURL)
 	srv.Flag("no-telemetry", "Suppress OpenTelemetry export for this worker, whatever the configuration says").Envar("NO_TELEMETRY").UnNegatableBoolVar(&c.noTelemetry)
@@ -142,6 +142,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Version:    version,
 		APIKey:     c.apiKey,
 		BaseURL:    c.baseURL,
+		StoreDir:   cfg.StoreBase(""),
 		Logger:     log,
 	})
 	if err != nil {
@@ -187,8 +188,12 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Version:    version,
 		// Where the commands run, so a worker started from somewhere else (a unit file,
 		// a container) can still point them at the application's own directory. Empty
-		// leaves them in the worker's working directory.
-		WorkDir:   c.workDir,
+		// leaves them in the root, and in the worker's working directory when the
+		// configuration sets none.
+		WorkDir: c.workDir,
+		// The base NewResources built the shared stores under. The runs get the same
+		// value, so a run validates the directory its stores were opened in.
+		StoreDir:  cfg.StoreBase(""),
 		APIKey:    c.apiKey,
 		BaseURL:   c.baseURL,
 		Telemetry: tel,
@@ -364,7 +369,7 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 	doc.Item("Telemetry", c.telemetryDescription(tel))
 
 	if runs {
-		doc.Item("Tool Directory", c.toolDirectory())
+		doc.Item("Tool Directory", c.toolDirectory(cfg))
 		doc.Item("Tool Timeout", c.toolTimeout(cfg).String())
 	}
 
@@ -497,13 +502,15 @@ func (c *fiskServeCommand) telemetryDescription(tel *telemetry.Provider) string 
 	return "enabled"
 }
 
-// toolDirectory names where command tools will run, which is the process's own
-// directory unless the operator moved it. It is on the banner because an application
-// that cannot find its own files fails one paid model call at a time rather than at
-// startup.
-func (c *fiskServeCommand) toolDirectory() string {
+// toolDirectory names where command tools will run: --work-dir, else the root, else
+// the process's own directory. It is on the banner because an application that cannot
+// find its own files fails one paid model call at a time rather than at startup.
+func (c *fiskServeCommand) toolDirectory(cfg *config.Config) string {
 	if c.workDir != "" {
 		return c.workDir
+	}
+	if cfg.RootDirectory != "" {
+		return cfg.RootDirectory
 	}
 
 	wd, err := os.Getwd()

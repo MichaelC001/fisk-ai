@@ -97,7 +97,7 @@ func servingApp(name, body string) []toolkit.Tool {
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--fisk-introspect\" ]; then\n  cat %q\n  exit 0\nfi\n%s", modelPath, body)
 	Expect(os.WriteFile(path, []byte(script), 0o700)).To(Succeed())
 
-	tools, err := fisktool.ToolsForApp(context.Background(), path, nil)
+	tools, err := fisktool.ToolsForApp(context.Background(), path, "", nil)
 	Expect(err).NotTo(HaveOccurred())
 
 	return toolkit.Tools(tools)

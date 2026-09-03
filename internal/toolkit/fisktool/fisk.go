@@ -1020,14 +1020,18 @@ func matchesFilter(t *CommandTool, filter *config.ToolFilter, patterns []*regexp
 // named. Use ApplicationTools directly only when an executable path is not needed
 // (for example to inspect or filter the command tree).
 //
+// workDir is the directory the introspection subprocess runs in; see
+// FetchFiskAppModel. It does not reach the returned tools, which run in the directory
+// their caller passes to RunCommand.
+//
 // credentialEnvNames (see config.CredentialEnvNames) is copied onto every returned
 // tool and used to scrub the introspection subprocess, so both executions of the
 // operator's binary run without the agent's named credentials. Read the stored copy
 // with SensitiveEnvVars and the binary path with AppPath.
-func ToolsForApp(ctx context.Context, appPath string, credentialEnvNames []string, globalFlags ...string) ([]*CommandTool, error) {
+func ToolsForApp(ctx context.Context, appPath string, workDir string, credentialEnvNames []string, globalFlags ...string) ([]*CommandTool, error) {
 	// FetchFiskAppModel already names the binary in its errors, so it is returned as-is
 	// rather than wrapped again with a second "introspecting %q".
-	model, err := FetchFiskAppModel(ctx, appPath, credentialEnvNames)
+	model, err := FetchFiskAppModel(ctx, appPath, workDir, credentialEnvNames)
 	if err != nil {
 		return nil, err
 	}
@@ -1052,13 +1056,20 @@ func ToolsForApp(ctx context.Context, appPath string, credentialEnvNames []strin
 // (alongside the static sensitive set) so the operator's binary never sees the
 // agent's named credentials, even at introspection time.
 //
+// workDir is the directory the subprocess runs in, and is what makes an appPath
+// written with a separator ("./bin/app") resolve against it: os/exec chdirs in the
+// child before it execs, and looks a name with no separator up in the parent's PATH.
+// Pass config.Config.RootDirectory, the directory the tools this model describes will
+// themselves run in, so a binary reading a relative file at introspect time reads the
+// one it will read at call time. Empty runs it in the process working directory.
+//
 // It runs on the LoadTools path at the top of every run, so a hung binary would
 // otherwise block the run forever. ctx governs cancellation; when ctx carries no
 // deadline of its own the default introspectTimeout is applied, so a run whose caller
 // did not bound it is still protected. WaitDelay bounds the I/O teardown after a
 // cancel, matching Execute, so a canceled introspection does not leave a lingering
 // pipe reader.
-func FetchFiskAppModel(ctx context.Context, appPath string, credentialEnvNames []string) (*fisk.ApplicationModel, error) {
+func FetchFiskAppModel(ctx context.Context, appPath string, workDir string, credentialEnvNames []string) (*fisk.ApplicationModel, error) {
 	// Apply the default bound only when the caller supplied none, so a caller that
 	// already bounded (or deliberately left unbounded and then bounded elsewhere) its
 	// context is not silently re-clamped, and so the timeout error can name the window.
@@ -1072,11 +1083,12 @@ func FetchFiskAppModel(ctx context.Context, appPath string, credentialEnvNames [
 
 	cmd := exec.CommandContext(ctx, appPath, "--fisk-introspect")
 	cmd.WaitDelay = commandWaitDelay
-	// Introspection deliberately runs in the process working directory, not a per-run
-	// ToolWorkDir: it is a one-time read at run start, so it never collides, and a
-	// binary that reads a relative config at introspect time must see the same one the
-	// operator would, or the exposed tool set could differ per run.
-	cmd.Env = commandEnv(credentialEnvNames, "")
+	// Introspection runs in the root, not in a per-run ToolWorkDir: it is a one-time
+	// read at run start, so it never collides, and a binary that reads a relative
+	// config at introspect time must see the same one the operator would, which under
+	// a root is the one under the root, or the exposed tool set could differ per run.
+	cmd.Dir = workDir
+	cmd.Env = commandEnv(credentialEnvNames, workDir)
 	// A slow introspection binary that forks leaves no orphan when the timeout fires.
 	configureProcessGroup(cmd)
 
@@ -1164,7 +1176,7 @@ func AppGlobalFlags(ctx context.Context, cfg *config.Config) ([]GlobalFlagInfo, 
 	}
 
 	// FetchFiskAppModel already names the binary in its errors, so it is returned as-is.
-	model, err := FetchFiskAppModel(ctx, cfg.ApplicationPath, cfg.CredentialEnvNames())
+	model, err := FetchFiskAppModel(ctx, cfg.ApplicationPath, cfg.RootDirectory, cfg.CredentialEnvNames())
 	if err != nil {
 		return nil, err
 	}

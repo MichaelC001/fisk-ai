@@ -152,5 +152,6 @@ func mcpAction(_ *fisk.ParseContext) error {
 		ConfirmMode:  mcpserver.ConfirmMode(cfg.ConfirmOverMCPMode()),
 		Concurrency:  cfg.MCPMaxConcurrentTools(),
 		CallTimeout:  cfg.MCPToolTimeout(),
+		WorkDir:      cfg.RootDirectory,
 	})
 }

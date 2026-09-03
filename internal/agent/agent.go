@@ -341,28 +341,30 @@ type Options struct {
 	// one long-lived process, each run passes its own so a tool writing a relative path
 	// does not collide with a sibling run's. It must be an absolute path that already
 	// exists; the caller owns its lifecycle (creation and removal) and must not remove
-	// it until Run has returned. Empty inherits the process working directory, the CLI's
-	// behavior.
+	// it until Run has returned. Empty runs the tools in Config.RootDirectory, and in
+	// the process working directory when the configuration sets no root.
 	//
 	// It is collision avoidance, not confinement: it sets the tool subprocess's working
 	// directory and nothing more, so a tool can still write anywhere the process uid can
-	// (an absolute path, $HOME, $TMPDIR, all of which stay shared across runs). It is
-	// never defaulted; a run with it empty behaves exactly as before. It does not affect
-	// application introspection, which always runs in the process working directory.
+	// (an absolute path, $HOME, $TMPDIR, all of which stay shared across runs). It does
+	// not move application introspection, which runs in Config.RootDirectory, or in the
+	// process working directory when there is no root.
 	ToolWorkDir string
 
 	// StoreDir is the base directory the persistent stores (memory, knowledge, and the
 	// run journal) resolve their relative or default paths under, so runs sharing one
 	// process place their state deterministically. Unlike ToolWorkDir it is not per-run
 	// scratch: these stores are usually shared across runs of one identity. It must be
-	// an absolute path that already exists; empty resolves as before (memory and
-	// knowledge relative to the process working directory, the journal in the XDG state
-	// directory). A backend that is not directory-backed ignores it, and an absolute
-	// configured store directory is honored verbatim regardless of it.
+	// an absolute path that already exists; empty resolves under Config.RootDirectory
+	// when the configuration sets one, and otherwise as it does with no root (memory
+	// and knowledge relative to the process working directory, the journal in the XDG
+	// state directory). A backend that is not directory-backed ignores it, and an
+	// absolute configured store directory is honored verbatim regardless of it.
 	//
-	// The standalone knowledge CLI must be pointed at the same base (its --store-dir
-	// flag) or an absolute knowledge directory both read, or the agent reads its index
-	// from a different directory than the CLI wrote it to.
+	// The standalone knowledge CLI must resolve to the same base, or the agent reads
+	// its index from a different directory than the CLI wrote it to: point it there
+	// with its --store-dir flag, give both an absolute knowledge directory, or write
+	// root_directory in the configuration they share, which needs no flag on either.
 	StoreDir string
 
 	// Conns, when non-nil, is the shared connection Provider Run borrows for remote
@@ -1071,6 +1073,21 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	if err := validateCallerDir("store_dir", opts.StoreDir); err != nil {
 		return res, err
 	}
+	// Checked here as well as at the command line, for a Go caller who assigned the
+	// field rather than folding a flag onto it.
+	if err := validateCallerDir("root_directory", cfg.RootDirectory); err != nil {
+		return res, err
+	}
+
+	// The root supplies both directory options the caller left empty, so an embedder
+	// that set root_directory and nothing else gets its stores and its command tools
+	// under it. opts is this call's own copy, so nothing the caller holds changes.
+	if opts.ToolWorkDir == "" {
+		opts.ToolWorkDir = cfg.RootDirectory
+	}
+	if opts.StoreDir == "" {
+		opts.StoreDir = cfg.RootDirectory
+	}
 
 	tools, err := fisktool.LoadTools(ctx, cfg)
 	if err != nil {
@@ -1296,6 +1313,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Identity:           cfg.Identity,
 				Version:            opts.Version,
 				CredentialEnvNames: cfg.CredentialEnvNames(),
+				WorkDir:            cfg.RootDirectory,
 			})
 			if err != nil {
 				return res, err
@@ -2353,8 +2371,9 @@ func endsOnAssistant(messages []llm.Message) bool {
 // to read, expressed the same way Run takes it.
 type SessionOptions struct {
 	// StoreDir is Options.StoreDir, the base directory a directory-backed session store
-	// resolves its relative or default path under. Empty puts the journal in the XDG
-	// state directory, the CLI's behavior.
+	// resolves its relative or default path under. Empty reads under
+	// cfg.RootDirectory when the configuration sets one, and otherwise from the XDG
+	// state directory, which is the rule Run applies to the same field.
 	StoreDir string
 
 	// SessionStore is Options.SessionStore, a store the caller has already opened. When
@@ -2403,7 +2422,9 @@ func LoadSession(ctx context.Context, cfg *config.Config, id string, opts Sessio
 
 	store := opts.SessionStore
 	if store == nil {
-		env := runstate.RuntimeEnv{StoreDir: opts.StoreDir}
+		// Through StoreBase, so a caller that set only root_directory reads the journal
+		// under the root that Run wrote it to.
+		env := runstate.RuntimeEnv{StoreDir: cfg.StoreBase(opts.StoreDir)}
 		if runstate.NeedsNats(cfg.SessionBackend()) {
 			// An injected connection is borrowed: the caller established it and shares it,
 			// so the read uses it and leaves it open. Only a connection dialed here is

@@ -68,6 +68,12 @@ type Options struct {
 	// LookupEnv resolves the "${VAR}" references in an entry's env, headers and url.
 	// Nil reads the process environment through os.LookupEnv.
 	LookupEnv func(name string) (string, bool)
+	// WorkDir is the directory a stdio child is started in, and is what makes a
+	// command written with a separator ("./bin/server") resolve against it rather than
+	// against the process working directory. Empty starts the child in the process
+	// working directory. Pass config.Config.RootDirectory. It applies to a stdio child
+	// alone: an HTTP server runs wherever its operator started it.
+	WorkDir string
 	// Dialer overrides how a transport is built for a server. Nil builds the stdio
 	// and streamable HTTP transports this package builds from the entry.
 	Dialer Dialer

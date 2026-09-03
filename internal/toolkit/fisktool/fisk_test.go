@@ -1210,7 +1210,7 @@ var _ = Describe("FetchFiskAppModel", func() {
 		defer cancel()
 
 		start := time.Now()
-		_, err := FetchFiskAppModel(ctx, app, nil)
+		_, err := FetchFiskAppModel(ctx, app, "", nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("introspecting"))
 		Expect(err.Error()).To(ContainSubstring(app))
@@ -1221,8 +1221,96 @@ var _ = Describe("FetchFiskAppModel", func() {
 	It("rejects introspection output larger than the ceiling", func() {
 		app := writeExecutable("#!/bin/sh\nhead -c 20000000 /dev/zero | tr '\\0' a\n")
 
-		_, err := FetchFiskAppModel(context.Background(), app, nil)
+		_, err := FetchFiskAppModel(context.Background(), app, "", nil)
 		Expect(err).To(MatchError(ContainSubstring("produced more than")))
+	})
+
+	// The root is what an application reading a relative file at introspect time sees,
+	// so the tool set a run exposes is the one the operator's own directory describes.
+	Describe("the directory it runs in", func() {
+		// modelDir writes an introspection document and an application that only finds
+		// it through a relative path, so the document is read exactly when the
+		// subprocess ran in that directory.
+		modelDir := func() (dir string, appPath string) {
+			GinkgoHelper()
+
+			app := fisk.New("app", "an app")
+			app.Command("run", "run it")
+
+			doc, err := json.Marshal(introspect(app))
+			Expect(err).NotTo(HaveOccurred())
+
+			dir = GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(dir, "model.json"), doc, 0o600)).To(Succeed())
+
+			appPath = writeExecutable("#!/bin/sh\ncat ./model.json\n")
+
+			return dir, appPath
+		}
+
+		It("reads a relative file from the working directory it was given", func() {
+			dir, app := modelDir()
+
+			model, err := FetchFiskAppModel(context.Background(), app, dir, nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(model.Commands).To(HaveLen(1))
+		})
+
+		It("runs in the process working directory when it is given none", func() {
+			_, app := modelDir()
+
+			_, err := FetchFiskAppModel(context.Background(), app, "", nil)
+			Expect(err).To(MatchError(ContainSubstring("introspecting")))
+		})
+
+		It("sets the child's PWD to the working directory", func() {
+			dir, _ := modelDir()
+			app := writeExecutable("#!/bin/sh\necho \"$PWD\" > pwd.txt\ncat ./model.json\n")
+
+			_, err := FetchFiskAppModel(context.Background(), app, dir, nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			got, err := os.ReadFile(filepath.Join(dir, "pwd.txt"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(string(got))).To(Equal(dir))
+		})
+
+		// os/exec looks a name with no separator up in the parent's PATH and resolves
+		// one with a separator against Dir, so a bare application_path is unaffected by
+		// a root and "./bin/app" runs the program the root supplies.
+		It("still resolves a bare application path through PATH", func() {
+			dir, app := modelDir()
+
+			binDir := GinkgoT().TempDir()
+			named := filepath.Join(binDir, "rooted-app")
+			body, err := os.ReadFile(app)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(named, body, 0o700)).To(Succeed())
+
+			GinkgoT().Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			model, err := FetchFiskAppModel(context.Background(), "rooted-app", dir, nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(model.Commands).To(HaveLen(1))
+		})
+
+		It("resolves an application path with a separator against the working directory", func() {
+			dir, app := modelDir()
+
+			binDir := filepath.Join(dir, "bin")
+			Expect(os.MkdirAll(binDir, 0o755)).To(Succeed())
+			body, err := os.ReadFile(app)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(filepath.Join(binDir, "app"), body, 0o700)).To(Succeed())
+
+			model, err := FetchFiskAppModel(context.Background(), "./bin/app", dir, nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(model.Commands).To(HaveLen(1))
+
+			// The same path with no working directory has nothing to resolve against.
+			_, err = FetchFiskAppModel(context.Background(), "./bin/app", "", nil)
+			Expect(err).To(HaveOccurred())
+		})
 	})
 })
 

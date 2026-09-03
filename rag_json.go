@@ -23,6 +23,11 @@ import (
 
 // ragSearchHitJSON is one ranked chunk.
 type ragSearchHitJSON struct {
+	// Citation is the index's own key for the chunk, <stored path>#<ordinal>, which is
+	// what knowledge show resolves and what a citation rule matches. DocPath is where
+	// the document sits on the filesystem, absolute under a root_directory. The two are
+	// the same path only when no root is set, so doc_path and ordinal do not
+	// reconstruct citation.
 	Citation    string `json:"citation"`
 	DocPath     string `json:"doc_path"`
 	Ordinal     int    `json:"ordinal"`

@@ -30,12 +30,23 @@ var version = "devel"
 // server. Product is left empty, which announces "fisk-ai". Wrapping the load is what
 // covers every command: a configuration that reaches a dial without going through here
 // would announce the product with no version.
+//
+// It is also where --root-dir is folded onto the parsed configuration and where the
+// root is checked, which for the same reason covers run, serve, knowledge, mcp, info,
+// session and discover from one call site. The check cannot live in ValidateForMode,
+// which runs inside the parse and would refuse a file whose relative root_directory
+// the flag is about to replace.
 func versionedConfig(cfg *config.Config, err error) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
 
 	cfg.ProductVersion = version
+
+	err = cfg.ApplyRootDir(rootDirFlag)
+	if err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -56,6 +67,9 @@ var (
 
 	showToolOutput bool
 	showThinking   bool
+
+	rootDirFlag string
+	setRootDir  bool
 
 	resumeID          string
 	forceResume       bool
@@ -78,6 +92,16 @@ func interruptContext() (context.Context, context.CancelFunc) {
 func main() {
 	cmd := fisk.New("fisk", "Fisk AI Toolkit")
 	cmd.Version(version)
+
+	// Registered on the application rather than on each command, so every command
+	// carries it and none can be forgotten. An application flag joins the parse context
+	// before any command is matched, and interspersed parsing is on, so it binds on
+	// either side of a command's own arguments.
+	cmd.Flag("root-dir", "Directory the configuration's relative paths resolve under and the directory tools run in (default: this process's working directory)").
+		PlaceHolder("DIR").
+		Envar("FISK_AI_ROOT").
+		IsSetByUser(&setRootDir).
+		StringVar(&rootDirFlag)
 
 	registerRunCommand(cmd)
 	registerSessionCommand(cmd)

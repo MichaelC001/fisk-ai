@@ -51,8 +51,9 @@ func registerRAGCommand(cmd *fisk.Application) {
 	// The store base must match the one the agent runs with (agent.Options.StoreDir),
 	// or the CLI writes the index to a different directory than the agent reads it from.
 	// It is distinct from --state-dir, which locates session state, not the knowledge
-	// index. An absolute knowledge directory in the config needs neither.
-	k.Flag("store-dir", "Base directory the knowledge index resolves under; must match the agent's store_dir (absolute)").Envar("FISK_AI_STORE_DIR").StringVar(&knowledgeStoreDir)
+	// index. A root_directory the CLI and the agent share gives both the same base with
+	// no flag, and an absolute knowledge directory in the config needs neither.
+	k.Flag("store-dir", "Base directory the knowledge index resolves under; must match the agent's store_dir (absolute, default: --root-dir)").Envar("FISK_AI_STORE_DIR").StringVar(&knowledgeStoreDir)
 
 	idx := k.Command("index", "Builds or updates the index (incremental by content hash)").Action(knowledgeIndexAction)
 	idx.Arg("paths", "Paths to index; defaults to knowledge.paths from the config").StringsVar(&knowledgePaths)
@@ -107,6 +108,39 @@ func knowledgeConfig() (*config.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// knowledgeRoots resolves the corpus an index or watch pass walks and reports whether
+// the pass reconciles deletions, which only a walk of the whole configured corpus can.
+// It returns no paths when none were typed and the configuration names none, which is
+// what makes an explicit path argument required.
+//
+// A typed path resolves against the working directory rather than under the root: a
+// shell hands over paths completed against the directory the operator is standing in,
+// and walking a different one silently would be worse. With a root set it is made
+// absolute there before it is walked, so an operator standing in the root writes the
+// document keys the configured walk writes rather than a second relative copy of every
+// file, which nothing prunes because a typed path does not reconcile.
+func knowledgeRoots(cfg *config.Config) ([]string, bool, error) {
+	if len(knowledgePaths) == 0 {
+		return cfg.RAGPaths(), true, nil
+	}
+
+	if cfg.RootDirectory == "" {
+		return knowledgePaths, false, nil
+	}
+
+	roots := make([]string, len(knowledgePaths))
+	for i, path := range knowledgePaths {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, false, fmt.Errorf("resolving the path %q against the working directory: %w", path, err)
+		}
+
+		roots[i] = abs
+	}
+
+	return roots, false, nil
 }
 
 // formatRefusal reports an open this build refused because the index was written at
@@ -259,11 +293,9 @@ func knowledgeIndexAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	roots := knowledgePaths
-	reconcile := false
-	if len(roots) == 0 {
-		roots = cfg.Harness.RAG.Paths
-		reconcile = true // a full-corpus walk over the configured paths reconciles deletions
+	roots, reconcile, err := knowledgeRoots(cfg)
+	if err != nil {
+		return err
 	}
 	if len(roots) == 0 {
 		return fmt.Errorf("no paths given and knowledge.paths is empty - pass a path or set knowledge.paths")
@@ -815,7 +847,7 @@ func knowledgeDoctorAction(_ *fisk.ParseContext) error {
 	}
 	defer store.Close()
 
-	report, err := store.Doctor(ctx, cfg.Harness.RAG.Paths)
+	report, err := store.Doctor(ctx, cfg.RAGPaths())
 	if err != nil {
 		return err
 	}

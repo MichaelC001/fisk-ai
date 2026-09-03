@@ -162,7 +162,11 @@ type Store struct {
 	dbPath   string
 	dir      string
 	readOnly bool
-	lock     *writeLock // non-nil only for a writer that took the advisory lock
+	// root is cfg.RootDirectory, joined onto a relative stored document path so
+	// Hit.DocPath is a path the reader can open. It is empty when no root is set, and
+	// the stored path is then returned as the indexer walked it.
+	root string
+	lock *writeLock // non-nil only for a writer that took the advisory lock
 
 	topK              int
 	maxInjectedTokens int
@@ -175,18 +179,21 @@ type Store struct {
 
 // resolveDir returns the store directory for cfg: the configured directory when
 // set, else knowledge/<identity>, mirroring the memory feature's layout. A relative
-// result is rebased under storeDir when the caller set one, so runs sharing a process
-// place their index deterministically; an absolute configured directory is honored
-// verbatim and ignores storeDir, and an empty storeDir keeps the process-working-
-// directory behavior. The agent and the knowledge CLI must pass the same storeDir or
-// they resolve to different directories (see rag.Open's soft not-built state).
+// result is rebased under the base cfg.StoreBase gives it, which is storeDir when the
+// caller set one and cfg.RootDirectory otherwise, so runs sharing a process place
+// their index deterministically; an absolute configured directory is honored verbatim
+// and ignores both, and neither one set keeps the process-working-directory behavior.
+// The agent and the knowledge CLI must resolve to the same base or they read and write
+// different directories (see rag.Open's soft not-built state).
 func resolveDir(cfg *config.Config, storeDir string) string {
 	dir := cfg.Harness.RAG.Directory
 	if dir == "" {
 		dir = filepath.Join("knowledge", cfg.Identity)
 	}
-	if storeDir != "" && !filepath.IsAbs(dir) {
-		dir = filepath.Join(storeDir, dir)
+
+	base := cfg.StoreBase(storeDir)
+	if base != "" && !filepath.IsAbs(dir) {
+		dir = filepath.Join(base, dir)
 	}
 
 	return dir
@@ -326,6 +333,7 @@ func newStore(cfg *config.Config, storeDir string, readOnly bool, opts Options) 
 		dbPath:            filepath.Join(dir, dbFileName),
 		dir:               dir,
 		readOnly:          readOnly,
+		root:              cfg.RootDirectory,
 		topK:              resolvedTopK(cfg.Harness.RAG),
 		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
 		citations:         NewCitationMapper(cfg.RAGCitationRules()),

@@ -85,6 +85,11 @@ type ServerOptions struct {
 	Concurrency int
 	// CallTimeout bounds a single tool call; <= 0 uses the default.
 	CallTimeout time.Duration
+	// WorkDir is the directory a served command tool runs in. Every call shares it,
+	// since a served agent holds no per-call state. Empty runs them in the process
+	// working directory. Pass config.Config.RootDirectory, so a command written as
+	// "./bin/app" resolves the same way here as it does in an agent run.
+	WorkDir string
 	// KeepaliveInterval is how often a running tool call tells its caller it is still
 	// working; <= 0 uses KeepaliveInterval. It is here rather than in a configuration
 	// because it is protocol timing an operator has nothing to decide with, and a test
@@ -414,13 +419,14 @@ func (s *Server) handleTool(ctx context.Context, caller Caller, body []byte, rep
 		// message of the set is sent from here, which is what keeps the sequence
 		// gap-free without a lock.
 		//
-		// The served tool runs in the process working directory; a per-call scratch
-		// directory for served tools is future server work, not this run path. There
-		// is no operator behind a served call, so the deny prompter refuses any
-		// question a tool asks rather than blocking the call forever.
+		// Every served tool runs in ServerOptions.WorkDir, the root the agent's own
+		// tools run in; a per-call scratch directory for served tools is future server
+		// work, not this run path. There is no operator behind a served call, so the
+		// deny prompter refuses any question a tool asks rather than blocking the call
+		// forever.
 		done := make(chan toolOutcome, 1)
 		go func() {
-			result, err := tool.Execute(runCtx, tr.Input, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter()})
+			result, err := tool.Execute(runCtx, tr.Input, toolkit.ExecDeps{Prompter: toolkit.DefaultDenyPrompter(), WorkDir: s.opts.WorkDir})
 			done <- toolOutcome{result: result, err: err}
 		}()
 

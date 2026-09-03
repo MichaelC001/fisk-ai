@@ -212,6 +212,42 @@ var _ = Describe("Transports", func() {
 		})
 	})
 
+	// A stdio child runs in the root, which is what makes a command written with a
+	// separator resolve against the root rather than against the process working
+	// directory. An HTTP server is somebody else's process and is unaffected.
+	Describe("The stdio child's working directory", func() {
+		server := config.MCPServer{Name: "docs", Command: "docs-server"}
+
+		It("starts the child in the directory it was given", func() {
+			tr, err := commandTransport(server, "/srv/agent", nil, os.LookupEnv)
+			Expect(err).ToNot(HaveOccurred())
+
+			cmd, ok := tr.(*mcp.CommandTransport)
+			Expect(ok).To(BeTrue())
+			Expect(cmd.Command.Dir).To(Equal("/srv/agent"))
+		})
+
+		It("leaves the child in the process working directory when it is given none", func() {
+			tr, err := commandTransport(server, "", nil, os.LookupEnv)
+			Expect(err).ToNot(HaveOccurred())
+
+			cmd, ok := tr.(*mcp.CommandTransport)
+			Expect(ok).To(BeTrue())
+			Expect(cmd.Command.Dir).To(BeEmpty())
+		})
+
+		It("takes the directory from the session options", func() {
+			s := &Sessions{opts: Options{WorkDir: "/srv/agent", LookupEnv: os.LookupEnv}}
+
+			tr, err := s.transport(ctx, server)
+			Expect(err).ToNot(HaveOccurred())
+
+			cmd, ok := tr.(*mcp.CommandTransport)
+			Expect(ok).To(BeTrue())
+			Expect(cmd.Command.Dir).To(Equal("/srv/agent"))
+		})
+	})
+
 	Describe("The stdio transport", func() {
 		var binary string
 
