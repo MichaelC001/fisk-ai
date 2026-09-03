@@ -480,6 +480,49 @@ func (s *Store) DeleteDocument(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// DeleteDocumentsUnder removes every document whose path lies under dir, with their
+// chunks, in one transaction; the triggers clear the FTS and vec rows. It returns how
+// many documents it removed, and an absent directory removes none of them without
+// erroring.
+//
+// The match is the prefix dir + "/", so deleting under "docs/a" leaves "docs/ab.md"
+// in place, and a path equal to dir matches nothing because directories are never
+// indexed. dir is normalized with filepath.ToSlash and one trailing slash is trimmed.
+func (s *Store) DeleteDocumentsUnder(ctx context.Context, dir string) (int, error) {
+	prefix := strings.TrimSuffix(filepath.ToSlash(dir), "/") + "/"
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// substr rather than LIKE: a corpus path may contain % or _, which LIKE reads as
+	// wildcards.
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE substr(path, 1, length(?)) = ?)`,
+		prefix, prefix)
+	if err != nil {
+		return 0, err
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE substr(path, 1, length(?)) = ?`, prefix, prefix)
+	if err != nil {
+		return 0, err
+	}
+
+	removed, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	return int(removed), nil
+}
+
 // vectorPlan is what prepareIndex resolved before it changed anything: the manifest
 // to pin, and whether the run wants a vector table at the probed dimension.
 type vectorPlan struct {

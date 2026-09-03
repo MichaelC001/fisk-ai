@@ -309,6 +309,7 @@ func (w *Watcher) loop(ctx context.Context) error {
 
 	pending := map[string]bool{}
 	deletes := map[string]bool{}
+	prefixes := map[string]bool{}
 	done := make(chan indexResult, 1)
 	running := false
 	dirty := false
@@ -322,7 +323,7 @@ func (w *Watcher) loop(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if w.handleEvent(ev, pending, deletes) {
+			if w.handleEvent(ev, pending, deletes, prefixes) {
 				arm()
 			}
 
@@ -342,9 +343,11 @@ func (w *Watcher) loop(ctx context.Context) error {
 				w.reporter.OnDetect(keysOf(pending))
 			}
 			delKeys := keysOf(deletes)
+			prefixKeys := keysOf(prefixes)
 			pending = map[string]bool{}
 			deletes = map[string]bool{}
-			go func() { done <- w.indexOnce(ctx, delKeys) }()
+			prefixes = map[string]bool{}
+			go func() { done <- w.indexOnce(ctx, delKeys, prefixKeys) }()
 
 		case res := <-done:
 			running = false
@@ -367,8 +370,12 @@ func (w *Watcher) loop(ctx context.Context) error {
 
 // handleEvent records a change and reports whether it should arm the debounce timer.
 // A directory create adds watches for the new subtree and fires so the next pass's
-// full walk indexes any files created before the watch was in place.
-func (w *Watcher) handleEvent(ev fsnotify.Event, pending, deletes map[string]bool) bool {
+// full walk indexes any files created before the watch was in place. A removed or
+// renamed path that is not indexable becomes a prefix deletion in prefixes: a renamed
+// directory arrives as one event carrying the old directory name and none for the
+// files under it, so an exact key drops nothing. A directory deleted file by file
+// emits a Remove per watched file, which the exact keys in deletes already cover.
+func (w *Watcher) handleEvent(ev fsnotify.Event, pending, deletes, prefixes map[string]bool) bool {
 	if ev.Op == fsnotify.Chmod {
 		return false
 	}
@@ -379,7 +386,11 @@ func (w *Watcher) handleEvent(ev fsnotify.Event, pending, deletes map[string]boo
 		return false
 	}
 
+	key := filepath.ToSlash(ev.Name)
+
 	if ev.Op&fsnotify.Create != 0 {
+		delete(prefixes, key)
+
 		info, err := os.Lstat(ev.Name)
 		if err == nil && info.IsDir() {
 			if shouldSkipDir(ev.Name, w.storeDir) {
@@ -395,10 +406,17 @@ func (w *Watcher) handleEvent(ev fsnotify.Event, pending, deletes map[string]boo
 	}
 
 	if !w.indexable(ev.Name) {
+		if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+			// fsnotify carries no type on a Remove or Rename and the path is gone by now,
+			// so a removed file with an unindexed extension is recorded here too; its
+			// prefix matches no documents.
+			prefixes[key] = true
+			return true
+		}
+
 		return false
 	}
 
-	key := filepath.ToSlash(ev.Name)
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		deletes[key] = true
 	}
@@ -413,8 +431,9 @@ func (w *Watcher) handleEvent(ev fsnotify.Event, pending, deletes map[string]boo
 // indexOnce opens the writer, runs a non-reconciling incremental pass, then applies
 // the pending deletions, opening and closing the store so the writer lock is held
 // only for the pass. Deletions are stat-guarded so an editor's atomic save (a
-// transient rename that Index has already re-added) does not drop a live file.
-func (w *Watcher) indexOnce(ctx context.Context, delKeys []string) indexResult {
+// transient rename that Index has already re-added) does not drop a live file, and
+// prefixKeys are guarded the same way before every document under them is deleted.
+func (w *Watcher) indexOnce(ctx context.Context, delKeys, prefixKeys []string) indexResult {
 	store, err := OpenWriter(w.cfg, w.baseDir, Options{})
 	if err != nil {
 		return indexResult{err: err}
@@ -437,6 +456,17 @@ func (w *Watcher) indexOnce(ctx context.Context, delKeys []string) indexResult {
 		if removed {
 			stats.Removed++
 		}
+	}
+
+	for _, key := range prefixKeys {
+		if _, statErr := os.Stat(filepath.FromSlash(key)); statErr == nil {
+			continue
+		}
+		removed, err := store.DeleteDocumentsUnder(ctx, key)
+		if err != nil {
+			return indexResult{stats: stats, err: err}
+		}
+		stats.Removed += removed
 	}
 
 	return indexResult{stats: stats}

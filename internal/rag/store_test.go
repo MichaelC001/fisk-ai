@@ -604,6 +604,125 @@ var _ = Describe("Store rm and reset", func() {
 	})
 })
 
+var _ = Describe("Store DeleteDocumentsUnder", func() {
+	ctx := context.Background()
+
+	var (
+		docsD string
+		cfg   *config.Config
+		w     *Store
+	)
+
+	// The corpus pairs each directory with a sibling that a LIKE pattern built from
+	// its name would also match: "ab.md" against "a", "axb" against "a_b", "aZZb"
+	// against "a%b".
+	BeforeEach(func() {
+		tmp := GinkgoT().TempDir()
+		docsD = filepath.Join(tmp, "docs")
+		cfg = lexicalConfig(filepath.Join(tmp, "knowledge"))
+
+		writeDoc(docsD, "a/one.md", "# One\n\nthe first document body\n")
+		writeDoc(docsD, "a/deep/two.md", "# Two\n\nthe second document body\n")
+		writeDoc(docsD, "ab.md", "# Sibling\n\nthe sibling document body\n")
+		writeDoc(docsD, "a_b/under.md", "# Under\n\nthe underscore document body\n")
+		writeDoc(docsD, "axb/plain.md", "# Plain\n\nthe plain document body\n")
+		writeDoc(docsD, "a%b/pct.md", "# Percent\n\nthe percent document body\n")
+		writeDoc(docsD, "aZZb/other.md", "# Other\n\nthe other document body\n")
+
+		var err error
+		w, err = OpenWriter(cfg, "", Options{})
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(w.Close)
+
+		_, err = w.Index(ctx, []string{docsD}, IndexOptions{Reconcile: true})
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	doc := func(rel string) string {
+		return filepath.ToSlash(filepath.Join(docsD, rel))
+	}
+
+	orphanChunks := func() int {
+		var n int
+		err := w.db.QueryRowContext(ctx, `SELECT count(*) FROM chunks WHERE document_id NOT IN (SELECT id FROM documents)`).Scan(&n)
+		Expect(err).ToNot(HaveOccurred())
+
+		return n
+	}
+
+	It("removes every document under the directory along with its chunks", func() {
+		before, err := w.Stats(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(before.Chunks).To(BeNumerically(">=", 7))
+
+		removed, err := w.DeleteDocumentsUnder(ctx, filepath.Join(docsD, "a"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(removed).To(Equal(2))
+
+		Expect(documentPaths(w)).ToNot(ContainElements(doc("a/one.md"), doc("a/deep/two.md")))
+
+		after, err := w.Stats(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(after.Documents).To(Equal(before.Documents - 2))
+		Expect(after.Chunks).To(BeNumerically("<", before.Chunks))
+		Expect(orphanChunks()).To(Equal(0))
+	})
+
+	It("leaves a sibling whose name starts with the directory name", func() {
+		_, err := w.DeleteDocumentsUnder(ctx, filepath.Join(docsD, "a"))
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(documentPaths(w)).To(ContainElement(doc("ab.md")))
+	})
+
+	It("matches a directory holding an underscore or a percent literally", func() {
+		removed, err := w.DeleteDocumentsUnder(ctx, filepath.Join(docsD, "a_b"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(removed).To(Equal(1))
+
+		removed, err = w.DeleteDocumentsUnder(ctx, filepath.Join(docsD, "a%b"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(removed).To(Equal(1))
+
+		Expect(documentPaths(w)).To(ContainElements(doc("axb/plain.md"), doc("aZZb/other.md")))
+	})
+
+	It("removes nothing for a directory that holds no documents", func() {
+		removed, err := w.DeleteDocumentsUnder(ctx, filepath.Join(docsD, "absent"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(removed).To(Equal(0))
+
+		st, err := w.Stats(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(st.Documents).To(Equal(7))
+	})
+
+	It("ignores a trailing slash on the directory", func() {
+		removed, err := w.DeleteDocumentsUnder(ctx, filepath.Join(docsD, "a")+"/")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(removed).To(Equal(2))
+	})
+})
+
+// documentPaths returns every indexed document path, sorted.
+func documentPaths(s *Store) []string {
+	GinkgoHelper()
+
+	rows, err := s.db.QueryContext(context.Background(), `SELECT path FROM documents ORDER BY path`)
+	Expect(err).ToNot(HaveOccurred())
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var p string
+		Expect(rows.Scan(&p)).To(Succeed())
+		out = append(out, p)
+	}
+	Expect(rows.Err()).ToNot(HaveOccurred())
+
+	return out
+}
+
 // statsFor opens a read-only store and returns its stats.
 func statsFor(cfg *config.Config) (*Stats, error) {
 	r, err := Open(cfg, "", Options{})
