@@ -63,6 +63,16 @@ const (
 	// confuses it with a record subject.
 	metaToken = "_meta"
 
+	// maxScanBatch caps how many meta records one fetch asks for, so a page filtered to
+	// one agent scans a store of another agent's runs in rounds that grow rather than in
+	// one fetch the size of the stream.
+	maxScanBatch = 512
+
+	// listConsumerIdle is how long a paging consumer outlives its fetch. ListPage builds
+	// one ephemeral consumer per fetch and a rail pages repeatedly, so the five minute
+	// default would leave one consumer per page on the stream long after it answered.
+	listConsumerIdle = 30 * time.Second
+
 	// recordFloorBytes is a conservative lower bound on a stream's max message size:
 	// below it even a small meta record could not be stored, so a stream capped this
 	// low is a construction failure rather than a run that fails on its first write.
@@ -278,6 +288,13 @@ func (s *store) runWildcard(id string) string {
 	return s.prefix + "." + id + ".>"
 }
 
+// metaWildcard matches the meta record of every run and nothing else, since a run id
+// holds no dot. It enumerates the store: one subject per run, and under a consumer one
+// message per run in the order the runs were created.
+func (s *store) metaWildcard() string {
+	return s.prefix + ".*." + metaToken
+}
+
 // subjectForSeq is the subject a record at seq is stored under: the meta subject for
 // seq 1, else the numeric seq token. The caller validates id first, so the result is
 // always a legal NATS subject.
@@ -426,7 +443,7 @@ func (s *store) List(ctx context.Context, filter runstate.ListFilter) ([]runstat
 	// A run id has no dots, so '<prefix>.*._meta' matches exactly the meta subject of
 	// every run and nothing else. The filtered stream info returns those subjects,
 	// which enumerate the runs without reading any record body.
-	info, err := s.stream.Info(opCtx, jetstream.WithSubjectFilter(s.prefix+".*."+metaToken))
+	info, err := s.stream.Info(opCtx, jetstream.WithSubjectFilter(s.metaWildcard()))
 	if err != nil {
 		return nil, fmt.Errorf("jetstream session: listing runs on stream %q: %w", s.streamName, err)
 	}
@@ -462,6 +479,172 @@ func (s *store) List(ctx context.Context, filter runstate.ListFilter) ([]runstat
 	return out, nil
 }
 
+// ListPage implements runstate.Store.
+//
+// The page comes off an ordered consumer filtered to the meta subjects, so the stream
+// delivers one message per run and that message is the meta record itself rather than
+// a subject to read afterwards. A meta record is written when a run is created and the
+// stream forbids rewriting its subject, so its stream sequence is where the run sits in
+// creation order, and the cursor is the sequence to resume from.
+//
+// A row costs one further read, the run's last record, for when it was last touched and
+// why it stopped. So a page of twenty is one fetch and twenty reads whatever the store
+// holds, where List reads two records of every stored run before the caller sees a row.
+//
+// The jetstream package's ordered consumer is a pull consumer: it takes PullConsumeOpt
+// and PullMessagesOpt, exposes Fetch, and never sets a delivery subject. The push one is
+// nats.OrderedConsumer in the legacy package, which this backend does not use.
+func (s *store) ListPage(ctx context.Context, filter runstate.ListFilter, limit int, cursor string) (runstate.RunPage, error) {
+	err := runstate.CheckPageLimit(limit)
+	if err != nil {
+		return runstate.RunPage{}, err
+	}
+
+	next, err := parseCursor(cursor)
+	if err != nil {
+		return runstate.RunPage{}, err
+	}
+
+	opCtx, cancel := opContext(ctx)
+	defer cancel()
+
+	var runs []runstate.RunInfo
+	// A filter excludes runs the fetch still had to deliver, so a page can need several
+	// rounds. Each round asks for twice what the one before it did, which costs a
+	// filtered page a handful of consumers over a store of another agent's runs rather
+	// than one per page's worth scanned.
+	scan := limit
+	for len(runs) < limit {
+		err = opCtx.Err()
+		if err != nil {
+			return runstate.RunPage{}, err
+		}
+
+		metas, err := s.fetchMetas(opCtx, next, scan)
+		if err != nil {
+			return runstate.RunPage{}, err
+		}
+		// Nothing left on the meta subjects at or after this sequence: the page ends
+		// here and carries no cursor.
+		if len(metas) == 0 {
+			break
+		}
+		scan = min(2*scan, maxScanBatch)
+
+		for _, m := range metas {
+			next = m.seq + 1
+
+			ri, err := s.summarizeMeta(opCtx, m, filter)
+			if err != nil {
+				// A run this build cannot summarize is left out, as List leaves it out.
+				// A run it could not reach because the caller stopped is a different
+				// answer, so the context decides between them.
+				cerr := opCtx.Err()
+				if cerr != nil {
+					return runstate.RunPage{}, cerr
+				}
+
+				continue
+			}
+			if ri == nil {
+				continue
+			}
+
+			runs = append(runs, *ri)
+			// A round can deliver more runs than the page still has room for. The ones
+			// past the limit are left where they are, since next names the last run
+			// this page summarized and the following page fetches from there.
+			if len(runs) == limit {
+				break
+			}
+		}
+	}
+
+	page := runstate.RunPage{Runs: runs}
+	// A short page reached the end of the store. A full one may or may not have, and
+	// finding out costs another fetch, so the caller makes it as the next page.
+	if len(runs) == limit {
+		page.Cursor = formatCursor(next)
+	}
+
+	return page, nil
+}
+
+// metaMsg is one run's meta record as the paging consumer delivered it: the record body
+// and where it sits on the stream.
+type metaMsg struct {
+	// subject is '<prefix>.<run>._meta', which names the run the record belongs to.
+	subject string
+	// seq is the record's stream sequence, which orders the runs and carries the cursor.
+	seq uint64
+	// stored is when the stream took the record, the row's last-touched time for a run
+	// holding nothing but its meta record.
+	stored time.Time
+	data   []byte
+}
+
+// fetchMetas reads up to n meta records at or after stream sequence start, oldest
+// first. An empty result means the stream holds no meta record from there on.
+//
+// It builds one consumer and makes one fetch on it. An ordered consumer's FetchNoWait
+// leaves the consumer's cursor where it was, so a second fetch on the same consumer
+// re-reads the first fetch's messages; ListPage tracks the sequence itself and starts a
+// fresh consumer for each round instead. The fetch is the no-wait form because every
+// record it asks for is already stored: a waiting fetch would sit out its window on the
+// last page of every listing rather than returning what the stream has.
+func (s *store) fetchMetas(ctx context.Context, start uint64, n int) ([]metaMsg, error) {
+	cons, err := s.stream.OrderedConsumer(ctx, jetstream.OrderedConsumerConfig{
+		FilterSubjects:    []string{s.metaWildcard()},
+		DeliverPolicy:     jetstream.DeliverByStartSequencePolicy,
+		OptStartSeq:       start,
+		InactiveThreshold: listConsumerIdle,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("jetstream session: listing runs on stream %q: %w", s.streamName, err)
+	}
+
+	batch, err := cons.FetchNoWait(n)
+	if err != nil {
+		return nil, fmt.Errorf("jetstream session: fetching a page of runs from stream %q: %w", s.streamName, err)
+	}
+
+	out := make([]metaMsg, 0, n)
+	for msg := range batch.Messages() {
+		md, err := msg.Metadata()
+		if err != nil {
+			return nil, fmt.Errorf("jetstream session: reading the stream position of %q: %w", msg.Subject(), err)
+		}
+
+		out = append(out, metaMsg{subject: msg.Subject(), seq: md.Sequence.Stream, stored: md.Timestamp, data: msg.Data()})
+	}
+
+	err = batch.Error()
+	if err != nil {
+		return nil, fmt.Errorf("jetstream session: reading a page of runs from stream %q: %w", s.streamName, err)
+	}
+
+	return out, nil
+}
+
+// summarizeMeta builds a listing row from a meta record the paging consumer delivered,
+// returning nil for a run the filter excludes. The meta record is already in hand, so an
+// excluded run costs no read at all.
+func (s *store) summarizeMeta(ctx context.Context, m metaMsg, filter runstate.ListFilter) (*runstate.RunInfo, error) {
+	id, ok := s.runIDFromMetaSubject(m.subject)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q is not a run's meta subject", runstate.ErrCorrupt, m.subject)
+	}
+
+	ri, err := decodeMetaRow(id, m.data, m.stored, filter)
+	if err != nil || ri == nil {
+		return nil, err
+	}
+
+	s.readEnding(ctx, id, ri)
+
+	return ri, nil
+}
+
 // summarize builds one run's listing entry from its first and last records, returning
 // nil for a run the filter excludes. The agent is on the meta record, which is the first
 // of the two reads, so an excluded run costs one read rather than two.
@@ -476,8 +659,22 @@ func (s *store) summarize(ctx context.Context, id string, filter runstate.ListFi
 		return nil, fmt.Errorf("jetstream session: reading the meta record of run %q: %w", id, err)
 	}
 
+	ri, err := decodeMetaRow(id, first.Data, first.Time, filter)
+	if err != nil || ri == nil {
+		return nil, err
+	}
+
+	s.readEnding(ctx, id, ri)
+
+	return ri, nil
+}
+
+// decodeMetaRow turns a stored meta record into a listing row, returning nil for a run
+// the filter excludes. stored is when the stream took the record, which is the row's
+// last-touched time until the ending read replaces it.
+func decodeMetaRow(id string, data []byte, stored time.Time, filter runstate.ListFilter) (*runstate.RunInfo, error) {
 	var meta runstate.Record
-	err = json.Unmarshal(first.Data, &meta)
+	err := json.Unmarshal(data, &meta)
 	if err != nil {
 		return nil, fmt.Errorf("%w: run %q meta record: %w", runstate.ErrCorrupt, id, err)
 	}
@@ -491,26 +688,28 @@ func (s *store) summarize(ctx context.Context, id string, filter runstate.ListFi
 		return nil, nil
 	}
 
-	ri := &runstate.RunInfo{
+	return &runstate.RunInfo{
 		RunID:   meta.Meta.RunID,
 		Created: meta.Meta.Created,
-		Updated: first.Time,
+		Updated: stored,
 		Model:   meta.Meta.Fingerprint.Model,
 		Prompt:  meta.Meta.Prompt,
 		Agent:   meta.Meta.Agent,
-	}
+	}, nil
+}
 
-	// The last message on the run wildcard is the highest-stream-seq record, which is
-	// the last appended. Its store time is when the run was last touched, and a terminal
-	// payload on it is why the run stopped.
-	//
-	// A run with a turn in flight ends on whatever that turn last wrote, which carries
-	// no terminal payload, so it is reported as open. That is the one thing this reads
-	// differently from a fold, which keeps the previous turn's ending until a new one
-	// replaces it and so calls a running conversation completed.
+// readEnding puts the run's last record on a listing row: its store time is when the run
+// was last touched, and a terminal payload on it is why the run stopped. A tail that
+// cannot be read leaves the row as the meta record made it.
+//
+// A run with a turn in flight ends on whatever that turn last wrote, which carries no
+// terminal payload, so it is reported as open. That is the one thing a listing reads
+// differently from a fold, which keeps the previous turn's ending until a new one
+// replaces it and so calls a running conversation completed.
+func (s *store) readEnding(ctx context.Context, id string, ri *runstate.RunInfo) {
 	last, err := s.stream.GetLastMsgForSubject(ctx, s.runWildcard(id))
 	if err != nil {
-		return ri, nil
+		return
 	}
 
 	ri.Updated = last.Time
@@ -521,8 +720,31 @@ func (s *store) summarize(ctx context.Context, id string, filter runstate.ListFi
 		ri.Terminal = rec.Terminal.Reason
 		ri.Summary = rec.Terminal.Summary
 	}
+}
 
-	return ri, nil
+// parseCursor reads a cursor back into the stream sequence a page resumes at. An empty
+// cursor starts at the first record on the stream.
+func parseCursor(cursor string) (uint64, error) {
+	if cursor == "" {
+		return 1, nil
+	}
+
+	seq, err := strconv.ParseUint(cursor, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %q is not a stream sequence this store minted", runstate.ErrInvalidCursor, cursor)
+	}
+	if seq == 0 {
+		return 0, fmt.Errorf("%w: %q is not a stream sequence this store minted", runstate.ErrInvalidCursor, cursor)
+	}
+
+	return seq, nil
+}
+
+// formatCursor writes the stream sequence a page resumes at as the cursor a caller
+// holds. It is this backend's own value: no caller reads it, and the file backend
+// refuses it.
+func formatCursor(seq uint64) string {
+	return strconv.FormatUint(seq, 10)
 }
 
 // Delete implements runstate.Store. Purging the run wildcard removes every record of

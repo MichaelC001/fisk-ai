@@ -10,13 +10,19 @@
 package file
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -290,30 +296,266 @@ func (s *FileStore) List(ctx context.Context, filter runstate.ListFilter) ([]run
 			continue
 		}
 
-		recs, err := readRecords(s.journalPath(id))
-		if err != nil || len(recs) == 0 || recs[0].Meta == nil {
-			continue
-		}
-		rs, err := runstate.Fold(recs)
+		info, err := s.summarize(id)
 		if err != nil {
 			continue
 		}
-		if !filter.MatchesAgent(rs.Agent) {
+		if !filter.MatchesAgent(info.Agent) {
 			continue
 		}
 
-		info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt, Agent: rs.Agent}
-		if fi, err := e.Info(); err == nil {
-			info.Updated = fi.ModTime()
-		}
-		if rs.Terminal != nil {
-			info.Terminal = rs.Terminal.Reason
-			info.Summary = rs.Terminal.Summary
-		}
-		out = append(out, info)
+		out = append(out, *info)
 	}
 
 	return out, nil
+}
+
+// ListPage implements runstate.Store.
+//
+// Ordering a directory of journals needs each run's creation time, which is on the meta
+// record every journal opens with, so this reads the first line of each and orders on
+// what it finds. Only the page's runs are then folded. The whole-journal read List makes
+// of every run is what the page is spared, and it is the read that grows with a
+// conversation.
+//
+// Two runs can carry the same creation time, so the run id orders those and the cursor
+// holds the pair.
+//
+// The creation time is the one the caller stamped on the meta record and no store
+// controls it, so this cursor does not carry RunPage.Cursor's guarantee that a run
+// created after a page is enumerated after it. A run stamped earlier than the run a page
+// ended on sorts before that page's cursor, and a walk resumed there never reaches it.
+// Two agents whose clocks disagree, or one clock stepped backwards, both produce it, and
+// a caller that must see every run walks from an empty cursor. Nothing on disk is
+// monotonic: a run id is whatever the caller chose, and a journal's modification time is
+// its last turn rather than its first.
+func (s *FileStore) ListPage(ctx context.Context, filter runstate.ListFilter, limit int, cursor string) (runstate.RunPage, error) {
+	err := runstate.CheckPageLimit(limit)
+	if err != nil {
+		return runstate.RunPage{}, err
+	}
+
+	after, err := parseCursor(cursor)
+	if err != nil {
+		return runstate.RunPage{}, err
+	}
+
+	err = ctx.Err()
+	if err != nil {
+		return runstate.RunPage{}, err
+	}
+
+	order, err := s.creationOrder(ctx)
+	if err != nil {
+		return runstate.RunPage{}, err
+	}
+
+	var runs []runstate.RunInfo
+	var last position
+	for _, p := range order {
+		if len(runs) == limit {
+			break
+		}
+
+		err = ctx.Err()
+		if err != nil {
+			return runstate.RunPage{}, err
+		}
+
+		if after != nil && !after.precedes(p) {
+			continue
+		}
+		last = p
+
+		// The agent came off the meta record with the creation time, so an excluded run
+		// is dropped before its journal is folded. Folding it first would cost the
+		// whole-journal read the page exists to avoid, once per run another agent wrote.
+		if !filter.MatchesAgent(p.agent) {
+			continue
+		}
+
+		info, err := s.summarize(p.id)
+		if err != nil {
+			continue
+		}
+
+		runs = append(runs, *info)
+	}
+
+	page := runstate.RunPage{Runs: runs}
+	// A short page ran out of runs. A full one stops where it stops, and the caller
+	// finds out whether anything follows by asking for the next page.
+	if len(runs) == limit {
+		page.Cursor = last.cursor()
+	}
+
+	return page, nil
+}
+
+// position is where a page ended: the run it ended on, in the order runs are enumerated.
+type position struct {
+	created time.Time
+	id      string
+	// agent is MetaRecord.Agent, read off the same line as the creation time so a page
+	// answers the filter without folding the run. It is not part of the cursor.
+	agent string
+}
+
+// precedes reports whether other comes after p in creation order, which is what a page
+// resuming at p takes.
+func (p position) precedes(other position) bool {
+	if !other.created.Equal(p.created) {
+		return other.created.After(p.created)
+	}
+
+	return other.id > p.id
+}
+
+// cursorSeparator divides the two halves of a cursor. A run id is letters, digits, '-'
+// and '_', and a timestamp holds none of it, so neither half can carry one.
+const cursorSeparator = "|"
+
+// cursor writes the position a page resumes after. It is base64 so that a caller reads
+// it as the store's own value rather than as a run id and a date to take apart, and the
+// JetStream backend refuses it.
+func (p position) cursor() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(p.created.UTC().Format(time.RFC3339Nano) + cursorSeparator + p.id))
+}
+
+// parseCursor reads a cursor back into the position a page resumes after, returning nil
+// for an empty cursor, which starts at the oldest run in the store.
+func parseCursor(cursor string) (*position, error) {
+	invalid := func() error {
+		return fmt.Errorf("%w: %q is not a position this store minted", runstate.ErrInvalidCursor, cursor)
+	}
+
+	if cursor == "" {
+		return nil, nil
+	}
+
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return nil, invalid()
+	}
+
+	stamp, id, ok := strings.Cut(string(raw), cursorSeparator)
+	if !ok {
+		return nil, invalid()
+	}
+	created, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return nil, invalid()
+	}
+	err = runstate.ValidateID(id)
+	if err != nil {
+		return nil, invalid()
+	}
+
+	return &position{created: created, id: id}, nil
+}
+
+// creationOrder enumerates the store's runs oldest first, reading each journal's meta
+// record and nothing else. That record carries the agent as well as the creation time, so
+// a filtered page answers the filter from it. A journal whose first line is missing or
+// unreadable is left out, as List leaves it out: the meta record is written first, so a
+// journal without one holds no run to name.
+func (s *FileStore) creationOrder(ctx context.Context) ([]position, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]position, 0, len(entries))
+	for _, e := range entries {
+		err = ctx.Err()
+		if err != nil {
+			return nil, err
+		}
+
+		name := e.Name()
+		if e.IsDir() || filepath.Ext(name) != ".json" {
+			continue
+		}
+		id := name[:len(name)-len(".json")]
+		if runstate.ValidateID(id) != nil {
+			continue
+		}
+
+		meta, err := readMeta(s.journalPath(id))
+		if err != nil {
+			continue
+		}
+
+		out = append(out, position{created: meta.Created, id: id, agent: meta.Agent})
+	}
+
+	slices.SortFunc(out, func(a, b position) int {
+		if !a.created.Equal(b.created) {
+			return a.created.Compare(b.created)
+		}
+
+		return strings.Compare(a.id, b.id)
+	})
+
+	return out, nil
+}
+
+// summarize folds one run into a listing row. Both listings build a row here, so the two
+// cannot describe the same run differently.
+func (s *FileStore) summarize(id string) (*runstate.RunInfo, error) {
+	path := s.journalPath(id)
+
+	recs, err := readRecords(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(recs) == 0 || recs[0].Meta == nil {
+		return nil, fmt.Errorf("%w: run %q opens on no meta record", runstate.ErrCorrupt, id)
+	}
+
+	rs, err := runstate.Fold(recs)
+	if err != nil {
+		return nil, err
+	}
+
+	info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt, Agent: rs.Agent}
+	fi, err := os.Stat(path)
+	if err == nil {
+		info.Updated = fi.ModTime()
+	}
+	if rs.Terminal != nil {
+		info.Terminal = rs.Terminal.Reason
+		info.Summary = rs.Terminal.Summary
+	}
+
+	return &info, nil
+}
+
+// readMeta reads a journal's first record, the meta record every run is created with.
+// It reads the head of the file rather than the whole journal, so ordering a store of
+// long conversations costs one short read per run.
+func readMeta(path string) (*runstate.MetaRecord, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	line, err := bufio.NewReader(f).ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+
+	var rec runstate.Record
+	err = json.Unmarshal(line, &rec)
+	if err != nil {
+		return nil, fmt.Errorf("%w: run at %q opens on an unreadable record: %w", runstate.ErrCorrupt, filepath.Base(path), err)
+	}
+	if rec.Meta == nil {
+		return nil, fmt.Errorf("%w: run at %q opens on no meta record", runstate.ErrCorrupt, filepath.Base(path))
+	}
+
+	return rec.Meta, nil
 }
 
 // Delete implements runstate.Store. The context is read once, before the first removal,

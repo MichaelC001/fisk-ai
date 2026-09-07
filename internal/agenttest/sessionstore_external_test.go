@@ -254,6 +254,184 @@ var _ = Describe("FakeSessionStore", func() {
 		})
 	})
 
+	// An embedder pages this fake the way it pages a real store, so the fake enumerates
+	// oldest first, applies the filter itself, and mints a cursor only it can read.
+	Describe("paging the listing", func() {
+		createFor := func(id, agent string) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{RunID: id, Prompt: "do the thing", Agent: agent})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		idsOf := func(page runstate.RunPage) []string {
+			out := make([]string, 0, len(page.Runs))
+			for _, info := range page.Runs {
+				out = append(out, info.RunID)
+			}
+
+			return out
+		}
+
+		walk := func(filter runstate.ListFilter, limit int) []string {
+			GinkgoHelper()
+
+			var out []string
+			cursor := ""
+			for range 20 {
+				page, err := store.ListPage(ctx, filter, limit, cursor)
+				Expect(err).ToNot(HaveOccurred())
+				out = append(out, idsOf(page)...)
+				if page.Cursor == "" {
+					return out
+				}
+				cursor = page.Cursor
+			}
+
+			Fail("the walk never reached a page without a cursor")
+
+			return nil
+		}
+
+		It("Should return a page smaller than the store, oldest first, with a cursor", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+			createFor("run3", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run1", "run2"}))
+			Expect(page.Cursor).ToNot(BeEmpty())
+		})
+
+		It("Should continue at the run the page ended on, repeating none and skipping none", func() {
+			want := []string{"run1", "run2", "run3", "run4", "run5"}
+			for _, id := range want {
+				createFor(id, "")
+			}
+
+			Expect(walk(runstate.ListFilter{}, 2)).To(Equal(want))
+			Expect(walk(runstate.ListFilter{}, 3)).To(Equal(want))
+			Expect(walk(runstate.ListFilter{}, 1)).To(Equal(want))
+		})
+
+		It("Should carry the same row a full listing does", func() {
+			createFor("run1", "agent-a")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+			Expect(err).ToNot(HaveOccurred())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(Equal(infos))
+		})
+
+		It("Should end the walk on a page carrying no cursor", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+			createFor("run3", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+
+			page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run3"}))
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should hand a full page a cursor at the end of the store and answer it with an empty page", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Cursor).ToNot(BeEmpty())
+
+			page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(BeEmpty())
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should skip another agent's runs without shortening the page", func() {
+			createFor("run-a1", "agent-a")
+			createFor("run-b1", "agent-b")
+			createFor("run-a2", "agent-a")
+			createFor("run-b2", "agent-b")
+			createFor("run-a3", "agent-a")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{Agent: "agent-a"}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run-a1", "run-a2"}))
+
+			Expect(walk(runstate.ListFilter{Agent: "agent-a"}, 2)).To(Equal([]string{"run-a1", "run-a2", "run-a3"}))
+		})
+
+		It("Should return an empty page and no cursor for an empty store", func() {
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(BeEmpty())
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should return the whole store, and no cursor, under a limit larger than it", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run1", "run2"}))
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should leave out a run deleted between two pages", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+			createFor("run3", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 1, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run1"}))
+
+			Expect(store.Delete(ctx, "run2")).To(Succeed())
+
+			page, err = store.ListPage(ctx, runstate.ListFilter{}, 1, page.Cursor)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run3"}))
+		})
+
+		It("Should refuse a limit no page can hold", func() {
+			_, err := store.ListPage(ctx, runstate.ListFilter{}, 0, "")
+			Expect(err).To(MatchError(runstate.ErrInvalidLimit))
+
+			_, err = store.ListPage(ctx, runstate.ListFilter{}, -1, "")
+			Expect(err).To(MatchError(runstate.ErrInvalidLimit))
+		})
+
+		// A cursor from a real store must not answer here. The JetStream store's is a
+		// decimal stream sequence and the file store's is base64, and reading either as a
+		// place in this fake's creation order would hand an embedder a page from a
+		// position neither cursor meant.
+		It("Should refuse a cursor it did not mint", func() {
+			createFor("run1", "")
+
+			for _, cursor := range []string{"1", "12", "MTcwMDAwMDAwMHxydW4x", "fake-", "fake-x", "next"} {
+				_, err := store.ListPage(ctx, runstate.ListFilter{}, 2, cursor)
+				Expect(err).To(MatchError(runstate.ErrInvalidCursor), cursor)
+			}
+		})
+
+		It("Should refuse a page on a canceled context", func() {
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			_, err := store.ListPage(canceled, runstate.ListFilter{}, 2, "")
+			Expect(err).To(MatchError(context.Canceled))
+		})
+	})
+
 	It("Should forget a deleted run", func() {
 		create("run1", "do the thing")
 

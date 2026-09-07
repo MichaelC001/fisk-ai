@@ -49,6 +49,10 @@ func (s *stubStore) List(context.Context, runstate.ListFilter) ([]runstate.RunIn
 	return nil, s.err
 }
 
+func (s *stubStore) ListPage(context.Context, runstate.ListFilter, int, string) (runstate.RunPage, error) {
+	return runstate.RunPage{}, s.err
+}
+
 func (s *stubStore) Delete(context.Context, string) error { return s.err }
 
 // stubJournal is a journal that records nothing and can be told to fail its release.
