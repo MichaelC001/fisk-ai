@@ -527,6 +527,45 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
 		})
 
+		Describe("listing the conversation summary", func() {
+			It("Should carry the summary off the terminal record", func() {
+				want := &runstate.ConversationSummary{
+					Turns:         3,
+					ContextTokens: 4096,
+					Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2, InTokens: 900},
+				}
+
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+
+				rec := terminalRec(runstate.ReasonCompleted)
+				rec.Terminal.Summary = want
+				Expect(j.Append(ctx, 3, rec)).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Summary).To(Equal(want))
+			})
+
+			It("Should report no summary for a conversation whose last turn wrote none", func() {
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+				Expect(infos[0].Summary).To(BeNil())
+			})
+		})
+
 		// The one thing a listing reads differently from a fold. A fold keeps the last
 		// terminal record it saw until another replaces it, so a conversation whose next
 		// turn is under way still reads as completed; the last record says what is

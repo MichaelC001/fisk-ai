@@ -519,6 +519,7 @@ func (s *store) summarize(ctx context.Context, id string, filter runstate.ListFi
 	err = json.Unmarshal(last.Data, &rec)
 	if err == nil && rec.Terminal != nil {
 		ri.Terminal = rec.Terminal.Reason
+		ri.Summary = rec.Terminal.Summary
 	}
 
 	return ri, nil

@@ -1751,9 +1751,13 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	}
 
 	var (
-		journal               runstate.Journal
-		seq                   uint64
-		startIter             int64
+		journal   runstate.Journal
+		seq       uint64
+		startIter int64
+		// The conversation's own count and size, which a resume continues and a fresh run
+		// opens: the prompt below is turn one and it has sent nothing yet.
+		turns                 int64 = 1
+		contextTokens         int64
 		pending               *runstate.PendingTurn
 		sessionID             string
 		resumeAtInputBoundary bool
@@ -2002,6 +2006,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			startIter = rs.NextIteration
 			pending = rs.Pending
 			messages = rs.Messages
+			// Both are derived from the records, so a journal whose last turn wrote no
+			// summary seeds them as readily as one that did.
+			turns = rs.Turns
+			contextTokens = rs.ContextTokens
 
 			// A chat session's iteration cap grows one turn's worth per accepted
 			// follow-up; on resume that grown cap is not stored, only the position, so
@@ -2237,6 +2245,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		journal:          journal,
 		seq:              seq,
 		startIter:        startIter,
+		turns:            turns,
+		contextTokens:    contextTokens,
 		pending:          pending,
 		nextPrompt:       opts.NextPrompt,
 		sessionID:        sessionID,

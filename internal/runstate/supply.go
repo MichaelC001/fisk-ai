@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // MaxSuppliedResultBytes caps the answer SupplyToolResult will accept. A supplied
@@ -100,10 +101,16 @@ func SupplyToolResult(ctx context.Context, store Store, sessionID, toolUseID, co
 // The two share one rule about which call may be answered, and one record shape, so a
 // resumed run and an operator at a terminal cannot disagree about either.
 //
-// state is updated to match the journal: the call is marked answered and its result
-// joins the turn's results. A caller that goes on to run the loop against that state
-// therefore sees the call as answered, which is what stops the tool being dispatched a
-// second time.
+// state is updated to match the journal: the call is marked answered, its result joins
+// the turn's results, and the counters take the call the record adds. A caller that goes
+// on to run the loop against that state therefore sees the call as answered, which is
+// what stops the tool being dispatched a second time, and reports the same totals a fold
+// of the journal now gives.
+//
+// The answer carries no provider of its own, so the record takes the kind and the
+// dispatch flag off the deferral it answers. Whoever supplies an answer knows what the
+// call was waiting on and not which provider took it, and dropping them would move the
+// call into the unknown bucket the moment it was answered.
 func AnswerDeferredCall(ctx context.Context, journal Journal, state *RunState, toolUseID, content string, isError bool) error {
 	if journal == nil {
 		return fmt.Errorf("an open journal is required")
@@ -117,18 +124,32 @@ func AnswerDeferredCall(ctx context.Context, journal Journal, state *RunState, t
 		return err
 	}
 
+	deferral := state.Pending.Deferred[toolUseID]
 	result := llm.ToolResultBlock{ToolUseID: toolUseID, Content: content, IsError: isError}
+	rec := &ToolResultRecord{
+		ToolUseID:  toolUseID,
+		Result:     result,
+		Remote:     deferral.Dispatched && deferral.Kind == toolkit.KindRemote.String(),
+		Kind:       deferral.Kind,
+		Dispatched: deferral.Dispatched,
+	}
 
-	err = journal.Append(ctx, journal.LastSeq()+1, Record{
-		Protocol:   ToolResultProtocol,
-		ToolResult: &ToolResultRecord{ToolUseID: toolUseID, Result: result},
-	})
+	err = journal.Append(ctx, journal.LastSeq()+1, Record{Protocol: ToolResultProtocol, ToolResult: rec})
 	if err != nil {
 		return err
 	}
 
 	state.Pending.Answered[toolUseID] = true
 	state.Pending.Results = append(state.Pending.Results, result)
+
+	// The same two axes Fold recomputes from this record, applied here so the state the
+	// caller already holds does not report one call fewer than the journal it just wrote.
+	state.Counters.ToolCalls++
+	kind, dispatched := resultKind(*rec)
+	state.Counters.countKind(kind)
+	if dispatched {
+		state.Counters.countDispatch(kind)
+	}
 
 	return nil
 }

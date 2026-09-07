@@ -179,7 +179,8 @@ func (s *FakeSessionStore) Load(ctx context.Context, id string) (*runstate.RunSt
 // List implements runstate.Store. The filter is answered through
 // runstate.ListFilter.MatchesAgent, the call both real backends make, so a test written
 // against this fake sees a run with no agent listed under any agent as it would be in a
-// file or JetStream store.
+// file or JetStream store. The row's summary comes off the terminal record the same way,
+// and stays nil for a conversation whose last turn wrote none.
 func (s *FakeSessionStore) List(ctx context.Context, filter runstate.ListFilter) ([]runstate.RunInfo, error) {
 	err := ctx.Err()
 	if err != nil {
@@ -201,6 +202,7 @@ func (s *FakeSessionStore) List(ctx context.Context, filter runstate.ListFilter)
 		info := runstate.RunInfo{RunID: id, Prompt: rs.Prompt, Agent: rs.Agent}
 		if rs.Terminal != nil {
 			info.Terminal = rs.Terminal.Reason
+			info.Summary = rs.Terminal.Summary
 		}
 		out = append(out, info)
 	}

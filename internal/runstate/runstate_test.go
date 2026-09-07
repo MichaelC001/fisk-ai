@@ -556,6 +556,104 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Completed()).To(BeTrue())
 		})
 
+		Describe("the numbers a terminal record's summary carries", func() {
+			It("counts the opening prompt and every user record as a turn", func() {
+				rs, err := Fold([]Record{meta()})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Turns).To(Equal(int64(1)), "the prompt on the meta record")
+
+				rs, err = Fold([]Record{
+					meta(),
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "one")},
+					{Seq: 3, Protocol: UserProtocol, User: userRecord("second question")},
+					{Seq: 4, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "two")},
+					{Seq: 5, Protocol: UserProtocol, User: userRecord("third question")},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Turns).To(Equal(int64(3)))
+			})
+
+			// Two follow-ups after an errored turn merge into one message, which the API
+			// requires, and the operator still typed twice.
+			It("counts merged user records apart", func() {
+				rs, err := Fold([]Record{
+					meta(),
+					{Seq: 2, Protocol: UserProtocol, User: userRecord("one")},
+					{Seq: 3, Protocol: UserProtocol, User: userRecord("two")},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Messages).To(HaveLen(1))
+				Expect(rs.Turns).To(Equal(int64(3)))
+			})
+
+			It("takes the context size from the last model call, cache tiers included", func() {
+				rs, err := Fold([]Record{
+					meta(),
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: &AssistantRecord{
+						Iteration: 0, Message: assistantMessage(textBlock("a")),
+						InTokens: 10, OutTokens: 5, CacheReadTokens: 100, CacheCreateTokens: 40,
+					}},
+					{Seq: 3, Protocol: AssistantProtocol, Assistant: &AssistantRecord{
+						Iteration: 1, Message: assistantMessage(textBlock("b")),
+						InTokens: 2, OutTokens: 3, CacheReadTokens: 200,
+					}},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.ContextTokens).To(Equal(int64(202)), "the last call's whole input, not the sum over the run")
+			})
+
+			It("reports no context size for a conversation that has made no model call", func() {
+				rs, err := Fold([]Record{meta()})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.ContextTokens).To(BeZero())
+			})
+
+			// The field is omitempty, so a terminal record written before it existed has no
+			// summary key. It folds with none rather than with zeros, which is what lets a
+			// listing say a conversation was never summarized.
+			It("folds a terminal record written before the summary existed", func() {
+				body := `{"seq":2,"protocol":"io.choria.fisk-ai.v1.session.terminal","terminal":{"reason":"completed"}}`
+
+				var rec Record
+				Expect(json.Unmarshal([]byte(body), &rec)).To(Succeed())
+
+				rs, err := Fold([]Record{meta(), rec})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Terminal).NotTo(BeNil())
+				Expect(rs.Terminal.Summary).To(BeNil())
+			})
+
+			It("writes no summary key for a terminal record that carries none", func() {
+				data, err := json.Marshal(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(bytes.Contains(data, []byte(`"summary"`))).To(BeFalse())
+			})
+
+			It("stores the counters under their own names", func() {
+				data, err := json.Marshal(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{
+					Reason: ReasonCompleted,
+					Summary: &ConversationSummary{
+						Turns:         2,
+						ContextTokens: 4096,
+						Counters: Counters{
+							LlmCalls: 3, ToolCalls: 1, InTokens: 900, OutTokens: 40,
+							ToolCallsByKind: map[toolkit.Kind]int64{toolkit.KindApplication: 1},
+						},
+					},
+				}})
+				Expect(err).NotTo(HaveOccurred())
+
+				var back Record
+				Expect(json.Unmarshal(data, &back)).To(Succeed())
+				Expect(back.Terminal.Summary.Turns).To(Equal(int64(2)))
+				Expect(back.Terminal.Summary.ContextTokens).To(Equal(int64(4096)))
+				Expect(back.Terminal.Summary.Counters.LlmCalls).To(Equal(int64(3)))
+				Expect(back.Terminal.Summary.Counters.ToolCallsByKind).To(HaveKeyWithValue(toolkit.KindApplication, int64(1)))
+				Expect(bytes.Contains(data, []byte(`"llm_calls":3`))).To(BeTrue())
+				Expect(bytes.Contains(data, []byte(`"context_tokens":4096`))).To(BeTrue())
+			})
+		})
+
 		It("rejects any version other than the current one", func() {
 			for _, v := range []int{Version - 1, Version + 1} {
 				r := meta()

@@ -211,6 +211,49 @@ var _ = Describe("FakeSessionStore", func() {
 		})
 	})
 
+	// The same reason as the agent filter: an embedder's rail reads the turn count, the
+	// context size and the tool call count off this fake, and a conversation nobody
+	// summarized has to read as absent here as it does in a real store.
+	Describe("listing the conversation summary", func() {
+		end := func(id string, summary *runstate.ConversationSummary) {
+			GinkgoHelper()
+
+			j := create(id, "do the thing")
+			err := j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+				Reason:  runstate.ReasonCompleted,
+				Summary: summary,
+			}})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		It("Should carry the summary off the terminal record", func() {
+			want := &runstate.ConversationSummary{
+				Turns:         3,
+				ContextTokens: 4096,
+				Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2, InTokens: 900},
+			}
+			end("run1", want)
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Summary).To(Equal(want))
+		})
+
+		It("Should report no summary for a conversation whose last turn wrote none", func() {
+			end("run1", nil)
+			create("run2", "still running")
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(2))
+			for _, info := range infos {
+				Expect(info.Summary).To(BeNil(), "run %q", info.RunID)
+			}
+		})
+	})
+
 	It("Should forget a deleted run", func() {
 		create("run1", "do the thing")
 

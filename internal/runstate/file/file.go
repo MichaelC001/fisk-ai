@@ -308,6 +308,7 @@ func (s *FileStore) List(ctx context.Context, filter runstate.ListFilter) ([]run
 		}
 		if rs.Terminal != nil {
 			info.Terminal = rs.Terminal.Reason
+			info.Summary = rs.Terminal.Summary
 		}
 		out = append(out, info)
 	}

@@ -251,6 +251,64 @@ var _ = Describe("FileStore", func() {
 		})
 	})
 
+	Describe("listing the conversation summary", func() {
+		// A run whose terminal record carries a summary, and one whose terminal record
+		// predates the field, which is every conversation journaled before this build.
+		createEnded := func(summary *runstate.ConversationSummary) string {
+			GinkgoHelper()
+
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+
+			err = j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+				Reason:  runstate.ReasonCompleted,
+				Summary: summary,
+			}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+
+			return id
+		}
+
+		It("carries the summary off the terminal record", func() {
+			want := &runstate.ConversationSummary{
+				Turns:         3,
+				ContextTokens: 4096,
+				Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2, InTokens: 900},
+			}
+			id := createEnded(want)
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].RunID).To(Equal(id))
+			Expect(infos[0].Summary).To(Equal(want))
+		})
+
+		It("reports no summary for a conversation whose last turn wrote none", func() {
+			createEnded(nil)
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+			Expect(infos[0].Summary).To(BeNil(), "absent, so a rail draws an empty slot rather than a turn count of zero")
+		})
+
+		It("reports no summary for a conversation that has written no terminal record", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Summary).To(BeNil())
+		})
+	})
+
 	It("refuses a listing on a context canceled before the call", func() {
 		id := newID()
 		j, err := store.Create(ctx, id, newMeta(id))

@@ -36,15 +36,17 @@ var (
 // bucket and in neither counter, so a counter is a subset of the bucket of the same kind
 // and never that bucket. agent.RunStats.ToolCallsByKind states the distinction in full,
 // and these counters seed those.
+// The JSON tags are what a ConversationSummary is stored under, so a name here is part
+// of the record format as well as of this API.
 type Counters struct {
-	LlmCalls  int64
-	ToolCalls int64
+	LlmCalls  int64 `json:"llm_calls,omitempty"`
+	ToolCalls int64 `json:"tool_calls,omitempty"`
 	// RemoteToolCalls is the number of calls dispatched to another agent over a2a, a
 	// subset of the KindRemote bucket of ToolCallsByKind rather than that bucket.
-	RemoteToolCalls int64
+	RemoteToolCalls int64 `json:"remote_tool_calls,omitempty"`
 	// MCPToolCalls is the number of calls dispatched to an MCP server, a subset of the
 	// KindMCP bucket of ToolCallsByKind rather than that bucket.
-	MCPToolCalls int64
+	MCPToolCalls int64 `json:"mcp_tool_calls,omitempty"`
 	// ToolCallsByKind counts each tool result by the provider that served it, keyed
 	// the way agent.RunStats keys its own buckets so a resume seeds those without
 	// re-keying. Every call ToolCalls counts is counted here too, the ones answered
@@ -54,12 +56,12 @@ type Counters struct {
 	// A record written before the kind field existed contributes its Remote flag as
 	// KindRemote and everything else as KindUnknown, so a journal from an older build
 	// still partitions rather than leaving the buckets short of the total.
-	ToolCallsByKind   map[toolkit.Kind]int64
-	InTokens          int64
-	OutTokens         int64
-	CacheReadTokens   int64
-	CacheCreateTokens int64
-	ThinkingTokens    int64
+	ToolCallsByKind   map[toolkit.Kind]int64 `json:"tool_calls_by_kind,omitempty"`
+	InTokens          int64                  `json:"in_tokens,omitempty"`
+	OutTokens         int64                  `json:"out_tokens,omitempty"`
+	CacheReadTokens   int64                  `json:"cache_read_tokens,omitempty"`
+	CacheCreateTokens int64                  `json:"cache_create_tokens,omitempty"`
+	ThinkingTokens    int64                  `json:"thinking_tokens,omitempty"`
 }
 
 // countKind records one tool result against the provider that served it, allocating
@@ -168,6 +170,15 @@ type RunState struct {
 	// in-flight turn lives in Pending, not here.
 	Messages []llm.Message
 	Counters Counters
+	// Turns is how many turns the conversation has taken: the prompt on the Meta record
+	// is the first, and each User record after it is another. A run that continues this
+	// conversation carries on from here, so the turn count a listing shows climbs across
+	// a suspend instead of restarting.
+	Turns int64
+	// ContextTokens is the input the last assistant record carried, the two prompt-cache
+	// tiers included, which is what the next turn sends again before adding its prompt.
+	// It is zero for a journal holding no assistant record.
+	ContextTokens int64
 
 	// NextIteration is the loop index to resume at.
 	NextIteration int64
@@ -244,6 +255,9 @@ func Fold(records []Record) (*RunState, error) {
 		Caller:            meta.Caller,
 		Agent:             meta.Agent,
 		Messages:          []llm.Message{userTextMessage(meta.Prompt)},
+		// The prompt on the Meta record is the conversation's first turn. Every later
+		// turn arrives as a User record and is counted where those are folded.
+		Turns: 1,
 	}
 
 	// cur* accumulate the assistant turn currently being answered. The journal
@@ -310,6 +324,9 @@ func Fold(records []Record) (*RunState, error) {
 			rs.Counters.CacheReadTokens += r.Assistant.CacheReadTokens
 			rs.Counters.CacheCreateTokens += r.Assistant.CacheCreateTokens
 			rs.Counters.ThinkingTokens += r.Assistant.ThinkingTokens
+			// Assigned rather than added: this is how large the conversation was when the
+			// call was made, so the last record to set it is the one that counts.
+			rs.ContextTokens = r.Assistant.InTokens + r.Assistant.CacheReadTokens + r.Assistant.CacheCreateTokens
 
 		case UserProtocol:
 			if r.User == nil {
@@ -328,6 +345,9 @@ func Fold(records []Record) (*RunState, error) {
 				curDeferred = nil
 			}
 			appendOrMergeUser(rs, r.User.Message)
+			// Counted per record rather than per message. Two consecutive follow-ups merge
+			// into one message, which the API requires, and the operator still typed twice.
+			rs.Turns++
 
 		case ToolResultProtocol:
 			if r.ToolResult == nil {

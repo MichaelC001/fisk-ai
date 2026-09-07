@@ -263,6 +263,17 @@ type DeferredRecord struct {
 	ToolName  string `json:"tool_name"`
 	Note      string `json:"note,omitempty"`
 	Handle    string `json:"handle,omitempty"`
+	// Kind is the toolkit.Kind token of the provider that took the call, and Dispatched
+	// marks a call that reached that provider rather than one a prompter deferred before
+	// it ran. AnswerDeferredCall copies both onto the ToolResult record it writes, since
+	// whoever supplies the answer knows neither, and the fold then counts the call under
+	// the provider that served it.
+	//
+	// Additive and omitempty. A record written before they existed carries neither, so
+	// its answer folds under the unknown kind and not dispatched, which is what such a
+	// journal has always reported.
+	Kind       string `json:"kind,omitempty"`
+	Dispatched bool   `json:"dispatched,omitempty"`
 }
 
 // DecisionRecord is a standing approval the operator granted for a named tool,
@@ -335,4 +346,32 @@ const (
 type TerminalRecord struct {
 	Reason  TerminalReason `json:"reason"`
 	Message string         `json:"message,omitempty"`
+	// Summary is what the conversation had cost when this turn ended. A listing reads
+	// it off this record, which it fetches anyway, instead of folding the journal.
+	//
+	// It is absent on a record written before the field existed, and RunInfo reports
+	// that as absent rather than as zeros, so a rail draws an empty slot for an older
+	// conversation rather than a count of nothing.
+	Summary *ConversationSummary `json:"summary,omitempty"`
+}
+
+// ConversationSummary is the conversation's size and cost at the moment a turn ended,
+// carried on that turn's TerminalRecord.
+//
+// Fold remains the authority on every number in it. The runner takes them from what it
+// counts during the turn, seeded on resume from the journal, and copies them here, so
+// writing one reads no records. Folding the journal up to this record gives the same
+// Turns, ContextTokens and Counters.
+type ConversationSummary struct {
+	// Turns is how many turns the conversation has taken, this one included. The prompt
+	// that opened the journal is the first, and each user turn journaled after it is
+	// another.
+	Turns int64 `json:"turns"`
+	// ContextTokens is the input the last model call carried, the two prompt-cache tiers
+	// included, which is what the next turn sends again before adding its prompt. It is
+	// zero for a conversation that has made no model call.
+	ContextTokens int64 `json:"context_tokens"`
+	// Counters is what the conversation has spent, holding the tool call count a listing
+	// shows beside the turn count.
+	Counters Counters `json:"counters"`
 }

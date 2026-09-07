@@ -17,6 +17,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	runstatefile "github.com/choria-io/fisk-ai/internal/runstate/file"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 var _ = Describe("SupplyToolResult", func() {
@@ -52,6 +53,7 @@ var _ = Describe("SupplyToolResult", func() {
 		}})).To(Succeed())
 		Expect(j.Append(ctx, 4, runstate.Record{Seq: 4, Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
 			ToolUseID: "tu_2", ToolName: "change_request", Note: "waiting on approval", Handle: "CHG-1",
+			Kind: toolkit.KindMCP.String(), Dispatched: true,
 		}})).To(Succeed())
 		Expect(j.Append(ctx, 5, runstate.Record{Seq: 5, Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}})).To(Succeed())
 		Expect(j.Close()).To(Succeed())
@@ -107,6 +109,28 @@ var _ = Describe("SupplyToolResult", func() {
 
 		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", "first", false)).To(Succeed())
 		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", "second", false)).To(MatchError(runstate.ErrAlreadyAnswered))
+	})
+
+	// The caller runs the loop against the state it passed in and writes what it counted
+	// onto the next terminal record, so a state left one call short of the journal would
+	// put a summary there that disagrees with a fold of it.
+	It("Should count the answered call into the caller's state under the deferral's kind", func() {
+		rs, err := store.Load(ctx, id)
+		Expect(err).ToNot(HaveOccurred())
+		before := rs.Counters.ToolCalls
+
+		j, err := store.Open(ctx, id)
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(j.Close)
+
+		Expect(runstate.AnswerDeferredCall(ctx, j, rs, "tu_2", `{"approved":true}`, false)).To(Succeed())
+		Expect(rs.Counters.ToolCalls).To(Equal(before + 1))
+
+		reloaded, err := store.Load(ctx, id)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(reloaded.Counters).To(Equal(rs.Counters), "a fold of what was written gives what the caller now holds")
+		Expect(reloaded.Counters.ToolCallsByKind).To(HaveKeyWithValue(toolkit.KindMCP, int64(1)), "the kind came off the deferral")
+		Expect(reloaded.Counters.MCPToolCalls).To(Equal(int64(1)), "and so did the dispatch flag")
 	})
 
 	It("Should mark an answer as an error when asked to", func() {

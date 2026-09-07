@@ -25,6 +25,24 @@
         }
       }
     },
+    "conversation_summary": {
+      "type": "object",
+      "description": "What the conversation had cost when a turn ended, copied onto that turn's terminal record so a listing reads it without folding the journal. Folding gives the same numbers. Additive and optional; absent on a terminal record written before it existed, which a listing reports as absent rather than as zeros.",
+      "properties": {
+        "turns": {
+          "type": "integer",
+          "description": "How many turns the conversation has taken, this one included. The prompt on the meta record is the first and each user record after it is another."
+        },
+        "context_tokens": {
+          "type": "integer",
+          "description": "The input the last model call carried, both prompt-cache tiers included, which is what the next turn sends again before adding its prompt."
+        },
+        "counters": {
+          "type": "object",
+          "description": "What the conversation spent, keyed as runstate.Counters serializes: llm_calls, tool_calls, remote_tool_calls, mcp_tool_calls, tool_calls_by_kind, in_tokens, out_tokens, cache_read_tokens, cache_create_tokens and thinking_tokens. A zero counter is omitted."
+        }
+      }
+    },
     "fingerprint": {
       "type": "object",
       "description": "Configuration the run was started with; validated on resume. The system prompt is stored as a hash, never verbatim.",

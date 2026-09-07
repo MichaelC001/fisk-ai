@@ -55,6 +55,14 @@ type RunInfo struct {
 	// Terminal is the reason the run ended, or empty if it is still open (was
 	// suspended or crashed).
 	Terminal TerminalReason
+	// Summary is what the conversation had cost when its last turn ended, read off the
+	// terminal record that turn wrote.
+	//
+	// It is nil for a conversation whose last turn ended before the field existed, and
+	// for one with a turn in flight, which has written no terminal record to carry it.
+	// Nil is not zero: a caller shows an empty slot for a conversation nobody summarized
+	// rather than a turn count of none.
+	Summary *ConversationSummary
 }
 
 // ListFilter narrows a listing. A zero ListFilter selects every stored run.
