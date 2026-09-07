@@ -217,6 +217,43 @@ var _ = Describe("A served turn", func() {
 		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"stop"}`))
 	})
 
+	// The client keeps building the assistant message it holds while a question is
+	// outstanding, and matches the id in the response head against it. A head naming a
+	// new message appends a second one, which leaves the answered question's card
+	// standing beside a copy of itself carrying the result.
+	It("Should write into the assistant message the answering request names", func() {
+		ch := servedChannel(store)
+		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("everything is gone"),
+		), ch)
+
+		status, _ := post(ch, prompt("t9", "wipe it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := post(ch, `{"id":"t9","messages":[
+			{"role":"user","parts":[{"type":"text","text":"wipe it"}]},
+			{"id":"msg-7","role":"assistant","parts":[{"type":"dynamic-tool","toolCallId":"c1","state":"approval-responded","approval":{"id":"approval-c1","approved":true}}]}
+		]}`)
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"start","messageId":"msg-7"}`))
+	})
+
+	// A turn the page opened with a message of its own starts an assistant message,
+	// since there is nothing on the client to write into.
+	It("Should start a message when the newest message is the page's own", func() {
+		ch := servedChannel(store)
+		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("hello there")), ch)
+
+		status, body := post(ch, `{"id":"t10","messages":[
+			{"id":"msg-3","role":"assistant","parts":[{"type":"text","text":"earlier"}]},
+			{"id":"msg-4","role":"user","parts":[{"type":"text","text":"say hello"}]}
+		]}`)
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).ToNot(ContainSubstring(`"messageId":"msg-3"`))
+		Expect(body).ToNot(ContainSubstring(`"messageId":"msg-4"`))
+	})
+
 	// A page that never sets fiskAnswer answers through the SDK's own approval part,
 	// which is what makes a stock frontend work against this.
 	It("Should take an approval the client answered on the tool part", func() {

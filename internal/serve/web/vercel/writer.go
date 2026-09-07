@@ -55,6 +55,11 @@ type turnWriter struct {
 	// asked reports that the turn ended on a question, which is the ending rather
 	// than the suspend the run reports it as.
 	asked bool
+
+	// continues is the assistant message the client is still building, which this
+	// response head names so the client writes into it rather than appending a second
+	// message beside it. Empty starts a message under a new id.
+	continues string
 }
 
 // blockPart is one content block's stream part: which kind it is, the id it was
@@ -66,26 +71,37 @@ type blockPart struct {
 }
 
 // newTurnWriter holds the response for one turn. answered is the call the request
-// carried an answer for, empty on a request that only prompts.
-func newTurnWriter(w http.ResponseWriter, answered string) *turnWriter {
+// carried an answer for, empty on a request that only prompts, and continues the
+// assistant message the client is still building, empty on a request that starts one.
+func newTurnWriter(w http.ResponseWriter, answered string, continues string) *turnWriter {
 	return &turnWriter{
-		stream:   newStream(w),
-		blocks:   map[int]*blockPart{},
-		suppress: answered,
+		stream:    newStream(w),
+		blocks:    map[int]*blockPart{},
+		suppress:  answered,
+		continues: continues,
 	}
 }
 
 // Open sends the response head and starts the assistant message. It is idempotent:
 // the channel calls it before the first event, and Close calls it when the outcome
 // arrived before any event did.
+//
+// A turn answering a question names the message the client is still building, so the
+// parts of this turn go into it. A turn the page started with a message of its own
+// opens a new one.
 func (t *turnWriter) Open() {
 	if t.opened {
 		return
 	}
 	t.opened = true
 
+	id := t.continues
+	if id == "" {
+		id = ksuid.New().String()
+	}
+
 	t.stream.open()
-	t.stream.part(startPart{Type: "start", MessageID: ksuid.New().String()})
+	t.stream.part(startPart{Type: "start", MessageID: id})
 }
 
 // StreamDeltas asks for the fragments of each assistant turn, which is what makes the

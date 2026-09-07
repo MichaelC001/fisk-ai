@@ -33,6 +33,7 @@ type request struct {
 
 // message is one message of the history.
 type message struct {
+	ID    string `json:"id"`
 	Role  string `json:"role"`
 	Parts []part `json:"parts"`
 }
@@ -140,6 +141,27 @@ func (r *request) approval() *web.Answer {
 	}
 
 	return nil
+}
+
+// continues is the id of the assistant message this request goes on, empty for a
+// request that starts one.
+//
+// A page answering a question posts no new user message, so the client keeps building
+// the assistant message it already holds and matches the id in the response head
+// against it. A response opening a different id is appended as a second message, which
+// leaves the answered question's card standing beside a copy of itself carrying the
+// result. The AI SDK's own server reuses the id for the same reason.
+func (r *request) continues() string {
+	if len(r.Messages) == 0 {
+		return ""
+	}
+
+	last := r.Messages[len(r.Messages)-1]
+	if last.Role != "assistant" {
+		return ""
+	}
+
+	return last.ID
 }
 
 // prompt is the newest user message as one string.

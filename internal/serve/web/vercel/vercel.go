@@ -94,5 +94,5 @@ func (f *Format) Decode(w http.ResponseWriter, r *http.Request) (web.Turn, web.T
 		answered = turn.Answer.ToolUseID
 	}
 
-	return turn, newTurnWriter(w, answered), nil
+	return turn, newTurnWriter(w, answered, body.continues()), nil
 }
