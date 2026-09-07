@@ -114,6 +114,11 @@ func (c *Client) CanStream() bool { return c.stream != nil }
 
 // Discover asks the named agent to describe itself and returns its agent card.
 // ErrAgentUnavailable is returned when no agent answers.
+//
+// The card is a peer's claim about itself and a caller may put it in front of a
+// person, so an IconURL that wire.CheckIconURL refuses is cleared before the card is
+// returned: a peer would otherwise hand a console a javascript: URL to run. The rest
+// of the card is text, which whoever displays it truncates.
 func (c *Client) Discover(ctx context.Context, agent string) (*wire.AgentCard, error) {
 	req := wire.NewDiscoveryRequest()
 	StampRequest(ctx, &req.Header, c.sender, agent)
@@ -127,6 +132,8 @@ func (c *Client) Discover(ctx context.Context, agent string) (*wire.AgentCard, e
 	if !ok {
 		return nil, fmt.Errorf("%w: discovery reply had unexpected type %T", wire.ErrProtocolMismatch, reply)
 	}
+
+	dr.AgentCard.SanitizeIconURL()
 
 	return &dr.AgentCard, nil
 }

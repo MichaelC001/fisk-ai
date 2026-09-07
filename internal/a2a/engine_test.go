@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/choria-io/fisk"
 	. "github.com/onsi/ginkgo/v2"
@@ -37,12 +38,21 @@ func toolsFor(app *fisk.Application) []toolkit.Tool {
 	return toolkit.Tools(tools)
 }
 
-var _ = Describe("buildCard", func() {
+var _ = Describe("BuildCard", func() {
+	build := func(opts CardOptions, tools []toolkit.Tool) wire.AgentCard {
+		GinkgoHelper()
+
+		card, err := BuildCard(opts, tools)
+		Expect(err).ToNot(HaveOccurred())
+
+		return card
+	}
+
 	It("Should describe the agent and its tools", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ping", "ping it")
 
-		card := buildCard(ServerOptions{Identity: "svc", Version: "v1", Model: "opus"}, toolsFor(app))
+		card := build(CardOptions{Identity: "svc", Version: "v1", Model: "opus"}, toolsFor(app))
 		Expect(card.Name).To(Equal("svc"))
 		Expect(card.Version).To(Equal("v1"))
 		Expect(card.Model).To(Equal("opus"), "so a caller can see what answers its prompt")
@@ -57,7 +67,7 @@ var _ = Describe("buildCard", func() {
 		app := fisk.New("app", "an app")
 		app.Command("ls", "list things").Tag("ai:read_only").Tag("ai:idempotent")
 
-		card := buildCard(ServerOptions{Identity: "svc", Version: "v1"}, toolsFor(app))
+		card := build(CardOptions{Identity: "svc", Version: "v1"}, toolsFor(app))
 		Expect(card.Tools).To(HaveLen(1))
 		Expect(BehaviorOf(card.Tools[0].Behavior)).To(Equal(toolkit.Behavior{ReadOnly: toolkit.HintTrue, Idempotent: toolkit.HintTrue}))
 	})
@@ -65,8 +75,52 @@ var _ = Describe("buildCard", func() {
 	// An agent that takes no prompts calls no model, and a card naming one would say
 	// something about this agent that is not true.
 	It("Should name no model where the caller supplied none", func() {
-		card := buildCard(ServerOptions{Identity: "svc", Version: "v1"}, nil)
+		card := build(CardOptions{Identity: "svc", Version: "v1"}, nil)
 		Expect(card.Model).To(BeEmpty())
+	})
+
+	It("Should carry what the operator wrote about the agent", func() {
+		card := build(CardOptions{
+			Identity:    "nats-auth-prod-eu",
+			Version:     "v1",
+			Description: "manages nats auth",
+			DisplayName: "NATS Auth",
+			Icon:        "\U0001f510",
+			IconURL:     "https://example.net/agent.png",
+			Notes:       []string{"the tools of one source could not be listed"},
+		}, nil)
+
+		Expect(card.Name).To(Equal("nats-auth-prod-eu"))
+		Expect(card.Description).To(Equal("manages nats auth"))
+		Expect(card.DisplayName).To(Equal("NATS Auth"))
+		Expect(card.Icon).To(Equal("\U0001f510"))
+		Expect(card.IconURL).To(Equal("https://example.net/agent.png"))
+		Expect(card.Notes).To(ConsistOf("the tools of one source could not be listed"))
+	})
+
+	// The card reaches a browser through whoever reads it, so a scheme a page must not
+	// be handed is refused where the card is built as well as where one is read.
+	It("Should refuse an icon url a browser must not be handed", func() {
+		for _, icon := range []string{"javascript:alert(1)", "http://example.net/a.png", "https://example.net/" + strings.Repeat("a", wire.MaxIconURLLength)} {
+			_, err := BuildCard(CardOptions{Identity: "svc", Version: "v1", IconURL: icon}, nil)
+			Expect(err).To(MatchError(wire.ErrIconURL), icon)
+		}
+	})
+
+	// a2a filters its own set before it gets here; a channel with an operator in front
+	// of it passes the agent's own set, gated tools included.
+	It("Should list every tool it is given rather than applying an exposure policy", func() {
+		app := fisk.New("app", "an app")
+		app.Command("keep", "kept")
+		app.Command("danger", "gated").Tag("ai:confirm")
+
+		card := build(CardOptions{Identity: "svc", Version: "v1"}, toolsFor(app))
+
+		names := make([]string, len(card.Tools))
+		for i, t := range card.Tools {
+			names[i] = t.Name
+		}
+		Expect(names).To(ConsistOf("keep", "danger"))
 	})
 })
 

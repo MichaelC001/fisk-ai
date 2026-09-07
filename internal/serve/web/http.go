@@ -51,6 +51,10 @@ func (c *Channel) handler(formats []Mount) http.Handler {
 		mux.HandleFunc("POST "+route, c.serveTurn(m.Format))
 	}
 
+	cardRoute := c.basePath + "/" + CardPath
+	c.routes = append(c.routes, "GET "+cardRoute)
+	mux.HandleFunc("GET "+cardRoute, c.serveCard)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c.draining() {
 			w.Header().Set("Retry-After", retryAfter)

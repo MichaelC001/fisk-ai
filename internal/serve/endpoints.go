@@ -11,6 +11,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/conns"
+	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
@@ -110,6 +111,18 @@ type BuildOptions struct {
 	// through the server. It is here for an endpoint that answers a caller about a
 	// conversation without running one.
 	Sessions runstate.Store
+
+	// MCPSessions are the live sessions with the configured MCP servers, or nil when
+	// the configuration declares none. They are borrowed like the connection: an
+	// endpoint may list a server's tools and must not close the sessions, since the runs
+	// call the same ones.
+	//
+	// It is here for an endpoint that has to name the agent's whole tool set outside a
+	// run, which the web channel's agent card does: the tools a run offers the model are
+	// assembled inside agent.Run from the configuration and these sessions, so a card
+	// built without them would list the application's commands and omit every tool an
+	// MCP server supplies.
+	MCPSessions *mcpclient.Sessions
 }
 
 // Endpoints builds the endpoints a configuration enables, in the order the builders were

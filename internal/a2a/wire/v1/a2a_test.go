@@ -150,6 +150,61 @@ var _ = Describe("Wire", func() {
 		})
 	})
 
+	Describe("CheckIconURL", func() {
+		It("Should accept an https URL and an agent that named none", func() {
+			Expect(CheckIconURL("")).To(Succeed())
+			Expect(CheckIconURL("https://example.net/agent.png")).To(Succeed())
+			Expect(CheckIconURL("https://example.net/" + strings.Repeat("a", MaxIconURLLength-20))).To(Succeed())
+		})
+
+		It("Should refuse a scheme a browser must not be handed", func() {
+			for _, icon := range []string{"javascript:alert(1)", "data:image/png;base64,AAAA", "http://example.net/a.png", "//example.net/a.png", "example.net/a.png"} {
+				Expect(CheckIconURL(icon)).To(MatchError(ErrIconURL), icon)
+			}
+		})
+
+		It("Should refuse an https URL naming no host", func() {
+			Expect(CheckIconURL("https:///agent.png")).To(MatchError(ErrIconURL))
+		})
+
+		It("Should refuse a URL over the length limit", func() {
+			Expect(CheckIconURL("https://example.net/" + strings.Repeat("a", MaxIconURLLength))).To(MatchError(ErrIconURL))
+		})
+
+		// The Go rule and the schema's are two statements of one rule, and the schema is
+		// what refuses a card from a peer built against neither.
+		It("Should agree with the schema it states", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, icon := range []string{"javascript:alert(1)", "http://example.net/a.png", "https://example.net/" + strings.Repeat("a", MaxIconURLLength)} {
+				card := NewDiscoveryReply("agent-a", "1.2.3")
+				fillHeader(&card.Header)
+				card.IconURL = icon
+
+				body, err := json.Marshal(card)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(CheckIconURL(icon)).To(MatchError(ErrIconURL), icon)
+				Expect(validator.Validate(body)).ToNot(Succeed(), icon)
+			}
+		})
+	})
+
+	Describe("AgentCard.SanitizeIconURL", func() {
+		It("Should clear an icon a browser must not be handed", func() {
+			card := AgentCard{IconURL: "javascript:alert(1)"}
+			card.SanitizeIconURL()
+			Expect(card.IconURL).To(BeEmpty())
+		})
+
+		It("Should leave an https icon alone", func() {
+			card := AgentCard{IconURL: "https://example.net/agent.png"}
+			card.SanitizeIconURL()
+			Expect(card.IconURL).To(Equal("https://example.net/agent.png"))
+		})
+	})
+
 	Describe("StopReason.Valid", func() {
 		It("Should name exactly the eight reasons this build carries", func() {
 			for _, reason := range []StopReason{

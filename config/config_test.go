@@ -896,6 +896,42 @@ llm:
 		})
 	})
 
+	Describe("The agent card", func() {
+		It("Should read what the operator wrote about the agent", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: nats-auth-prod-eu
+application_path: /usr/bin/nats
+system_prompt: do the thing
+description: manages nats auth
+display_name: NATS Auth
+icon: "\U0001F510"
+icon_url: https://example.net/agent.png
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Description).To(Equal("manages nats auth"))
+			Expect(cfg.DisplayName).To(Equal("NATS Auth"))
+			Expect(cfg.Icon).To(Equal("\U0001f510"))
+			Expect(cfg.IconURL).To(Equal("https://example.net/agent.png"))
+		})
+
+		It("Should leave every field empty where the operator wrote none", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Description).To(BeEmpty())
+			Expect(cfg.DisplayName).To(BeEmpty())
+			Expect(cfg.Icon).To(BeEmpty())
+			Expect(cfg.IconURL).To(BeEmpty())
+		})
+	})
+
 	Describe("Web", func() {
 		It("Should be off unless the block is present", func() {
 			cfg, err := ParseConfig([]byte(`

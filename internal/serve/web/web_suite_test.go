@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -199,6 +201,40 @@ func (w *fakeWriter) Ask(q Question) {
 func (w *fakeWriter) Close(e Ending) {
 	w.Open()
 	w.line("close reason=%s taken=%t err=%v", e.Outcome.Reason, !e.PromptNotTaken, e.Outcome.Err)
+}
+
+// cardRequest asks a channel for its agent card, with the headers a spec adds. It
+// drives the handler directly, since a card is answered without a server behind the
+// channel to run anything.
+func cardRequest(ch *Channel, method string, headers map[string]string) *httptest.ResponseRecorder {
+	GinkgoHelper()
+
+	req := httptest.NewRequest(method, "http://"+ch.Addr()+"/fisk/v1/"+CardPath, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	rec := httptest.NewRecorder()
+	ch.server.Handler.ServeHTTP(rec, req)
+
+	return rec
+}
+
+// readCard fetches a channel's agent card, failing the spec unless the status is the
+// one wanted, and decodes the body when that status is a 200.
+func readCard(ch *Channel, want int) wire.AgentCard {
+	GinkgoHelper()
+
+	rec := cardRequest(ch, http.MethodGet, nil)
+	Expect(rec.Code).To(Equal(want), rec.Body.String())
+
+	var card wire.AgentCard
+	if rec.Code == http.StatusOK {
+		Expect(rec.Header().Get("Content-Type")).To(Equal("application/json"))
+		Expect(json.Unmarshal(rec.Body.Bytes(), &card)).To(Succeed())
+	}
+
+	return card
 }
 
 // post sends one turn to a channel's fake route and returns the status and the body's

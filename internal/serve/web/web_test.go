@@ -7,6 +7,7 @@ package web
 import (
 	"context"
 	"net"
+	"net/http"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -14,6 +15,7 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
 var _ = Describe("Options", func() {
@@ -98,15 +100,16 @@ var _ = Describe("New", func() {
 			{Label: "Listen", Value: ch.Addr()},
 			{Label: "Base Path", Value: "/fisk/v1"},
 			{Label: "Origins", Value: testOrigin},
-			{Label: "Routes", Value: "POST /fisk/v1/fake"},
+			{Label: "Routes", Value: "POST /fisk/v1/fake, GET /fisk/v1/card"},
 			{Label: "Workers", Value: "2"},
 		}))
 	})
 
-	It("Should describe no routes when nothing is mounted", func() {
+	// A channel with no format takes no turn and still says what the agent is.
+	It("Should describe the card route alone when nothing is mounted", func() {
 		ch := newTestChannel(testOptions())
 
-		Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Routes", Value: "none"}))
+		Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Routes", Value: "GET /fisk/v1/card"}))
 	})
 
 	It("Should drop a trailing slash from the base path", func() {
@@ -115,7 +118,7 @@ var _ = Describe("New", func() {
 		opts.Formats = []Mount{{Path: "fake", Format: &fakeFormat{}}}
 		ch := newTestChannel(opts)
 
-		Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Routes", Value: "POST /fisk/v1/fake"}))
+		Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Routes", Value: "POST /fisk/v1/fake, GET /fisk/v1/card"}))
 	})
 })
 
@@ -192,7 +195,7 @@ var _ = Describe("The builder", func() {
 		Expect(ch.Describe()).To(ContainElements(
 			serve.DescLine{Label: "Base Path", Value: config.DefaultWebBasePath},
 			serve.DescLine{Label: "Origins", Value: testOrigin},
-			serve.DescLine{Label: "Routes", Value: "none"},
+			serve.DescLine{Label: "Routes", Value: "GET " + config.DefaultWebBasePath + "/card"},
 		))
 	})
 
@@ -208,12 +211,12 @@ var _ = Describe("The builder", func() {
 		DeferCleanup(func() { Expect(ch.Close()).To(Succeed()) })
 
 		Expect(ch.Describe()).To(ContainElement(
-			serve.DescLine{Label: "Routes", Value: "POST " + config.DefaultWebBasePath + "/fake"},
+			serve.DescLine{Label: "Routes", Value: "POST " + config.DefaultWebBasePath + "/fake, GET " + config.DefaultWebBasePath + "/card"},
 		))
 	})
 
 	It("Should refuse a build with no session store", func() {
-		_, err := NewFromConfig(webConfig(""), ConfigOptions{Logger: quietLogger()})
+		_, err := NewFromConfig(context.Background(), webConfig(""), ConfigOptions{Logger: quietLogger()})
 		Expect(err).To(MatchError(ContainSubstring("needs a session store")))
 	})
 
@@ -221,7 +224,50 @@ var _ = Describe("The builder", func() {
 		off, err := config.ParseConfigForMode([]byte("identity: agent1\napplication_path: /bin/true\n"), config.ModeServe)
 		Expect(err).ToNot(HaveOccurred())
 
-		_, err = NewFromConfig(off, ConfigOptions{Sessions: agenttest.NewFakeSessionStore(GinkgoTB())})
+		_, err = NewFromConfig(context.Background(), off, ConfigOptions{Sessions: agenttest.NewFakeSessionStore(GinkgoTB())})
 		Expect(err).To(MatchError(ContainSubstring("not configured")))
+	})
+
+	// The card reports export off the provider the process resolved, so a worker whose
+	// endpoint was refused publishes no promise of an export. A channel handed nothing
+	// would tell a console the conversation reaches no collector while the worker was
+	// exporting it.
+	It("Should carry the process's telemetry provider to the card", func() {
+		provider := &telemetry.Provider{}
+
+		built, err := Builder().Build(context.Background(), webConfig(""), serve.BuildOptions{
+			Sessions:  agenttest.NewFakeSessionStore(GinkgoTB()),
+			Telemetry: provider,
+			Logger:    quietLogger(),
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		ch, ok := built[0].(*Channel)
+		Expect(ok).To(BeTrue())
+		DeferCleanup(func() { Expect(ch.Close()).To(Succeed()) })
+
+		Expect(ch.card.Telemetry).To(BeIdenticalTo(provider))
+	})
+
+	It("Should put what the operator wrote about the agent on the card", func() {
+		built, err := Builder().Build(context.Background(), webConfig("description: manages nats auth\ndisplay_name: NATS Auth\nicon: \"\\U0001f510\"\nicon_url: https://example.net/agent.png\n"), serve.BuildOptions{
+			Sessions: agenttest.NewFakeSessionStore(GinkgoTB()),
+			Version:  "1.2.3",
+			Logger:   quietLogger(),
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		ch, ok := built[0].(*Channel)
+		Expect(ok).To(BeTrue())
+		DeferCleanup(func() { Expect(ch.Close()).To(Succeed()) })
+
+		card := readCard(ch, http.StatusOK)
+		Expect(card.Name).To(Equal("agent1"))
+		Expect(card.Version).To(Equal("1.2.3"))
+		Expect(card.Model).To(Equal("claude-sonnet-4-6"))
+		Expect(card.Description).To(Equal("manages nats auth"))
+		Expect(card.DisplayName).To(Equal("NATS Auth"))
+		Expect(card.Icon).To(Equal("\U0001f510"))
+		Expect(card.IconURL).To(Equal("https://example.net/agent.png"))
 	})
 })

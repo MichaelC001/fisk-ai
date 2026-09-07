@@ -122,6 +122,15 @@ type Options struct {
 	// this identity answers discovery with. An empty one publishes the card as "dev".
 	Version string
 
+	// Description, DisplayName, Icon and IconURL are what the operator wrote about this
+	// agent, published on the card beside Identity. IconURL must be an https URL that
+	// wire.CheckIconURL accepts; anything else refuses the endpoint at construction,
+	// since the card reaches a browser through whoever reads it.
+	Description string
+	DisplayName string
+	Icon        string
+	IconURL     string
+
 	// Logger receives the endpoints' progress, which is a line per served call and per
 	// prompt. Nil discards it, since a library that reached for a default logger would
 	// write to an embedder's stderr uninvited.
@@ -389,12 +398,16 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 	}
 
 	built := Options{
-		Transport: transport,
-		Faults:    faults,
-		Identity:  cfg.Identity,
-		Version:   opts.Version,
-		Logger:    opts.Logger,
-		Telemetry: opts.Telemetry,
+		Transport:   transport,
+		Faults:      faults,
+		Identity:    cfg.Identity,
+		Version:     opts.Version,
+		Description: cfg.Description,
+		DisplayName: cfg.DisplayName,
+		Icon:        cfg.Icon,
+		IconURL:     cfg.IconURL,
+		Logger:      opts.Logger,
+		Telemetry:   opts.Telemetry,
 	}
 
 	if cfg.A2APromptsEnabled() {
@@ -458,6 +471,10 @@ func serveCard(held *sharedTransport, opts Options) error {
 		Identity:      opts.Identity,
 		Version:       opts.Version,
 		Model:         promptModel(opts),
+		Description:   opts.Description,
+		DisplayName:   opts.DisplayName,
+		Icon:          opts.Icon,
+		IconURL:       opts.IconURL,
 		Logger:        opts.Logger,
 		Telemetry:     opts.Telemetry,
 		DiscoveryOnly: true,

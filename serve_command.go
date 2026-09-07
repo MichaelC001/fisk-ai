@@ -175,6 +175,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Logger:           log,
 		Telemetry:        tel,
 		Sessions:         resources.SessionStore,
+		MCPSessions:      resources.MCPSessions,
 	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder(), slackchannel.Builder(), webchannel.Builder(vercel.Mount())})
 	if err != nil {
 		return err

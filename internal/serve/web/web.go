@@ -11,6 +11,11 @@
 // under the base path, and the channel decodes every request through the Format the
 // path belongs to.
 //
+// Beside them it answers the agent card under CardPath: who this agent is, what model
+// answers a prompt, and the tools it holds with the behavior each declares. The card is
+// built per request from a tool set resolved once, so a console reloading a restarted
+// worker reads what that worker is running.
+//
 // # A question ends the turn
 //
 // A page is not an operator. It is reading the response, so it cannot answer until the
@@ -52,8 +57,10 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // Defaults for a Channel built in process. NewFromConfig reads the configuration's
@@ -114,8 +121,22 @@ type Options struct {
 	Workers int
 
 	// Formats are the frontend protocols to mount, each on its path under BasePath.
-	// None mounts nothing, and the channel then refuses every path.
+	// None mounts nothing, and the channel then takes no turn on any path, answering
+	// only the agent card. CardPath is taken: a Format mounted there is refused.
 	Formats []Mount
+
+	// Card is what the agent says about itself on the card served under CardPath: its
+	// version, its model, and the description and decoration an operator configured.
+	// Identity is filled from Options.Identity, so a channel never publishes a card
+	// naming an identity other than the one it derives its sessions under.
+	Card a2a.CardOptions
+
+	// CardTools are the tools the card lists, resolved once by the caller. They are
+	// listed as given: this channel has an operator in front of it, so a confirm-gated
+	// command belongs on the card where a2a's own exposure policy drops it.
+	// ResolveAgentTools produces them from a configuration and the process's MCP
+	// sessions.
+	CardTools []toolkit.Tool
 
 	// Sessions is the run-journal store, borrowed and never closed here since the runs
 	// write to the same one. It is required: a thread is a conversation, and this
@@ -172,6 +193,8 @@ func (o *Options) validate() error {
 			return fmt.Errorf("a format is mounted at %q, which is not a single path segment", m.Path)
 		case m.Format == nil:
 			return fmt.Errorf("the format mounted at %q is nil", m.Path)
+		case m.Path == CardPath:
+			return fmt.Errorf("a format is mounted at %q, where this channel answers the agent card", m.Path)
 		case seen[m.Path]:
 			return fmt.Errorf("two formats are mounted at %q", m.Path)
 		}
@@ -210,6 +233,11 @@ type Channel struct {
 	suspend  func() bool
 	sessions runstate.Store
 	log      *slog.Logger
+
+	// card and cardTools are what the agent card is assembled from. They are resolved
+	// once, here, and the card is built from them on each request.
+	card      a2a.CardOptions
+	cardTools []toolkit.Tool
 
 	// origins is the list as a set, for the check every request makes, and originList
 	// the list as configured, for the banner.
@@ -277,6 +305,9 @@ func New(opts Options) (*Channel, error) {
 		return nil, fmt.Errorf("reading the bound address %q: %w", listener.Addr(), err)
 	}
 
+	card := opts.Card
+	card.Identity = opts.Identity
+
 	c := &Channel{
 		identity:   opts.Identity,
 		basePath:   strings.TrimSuffix(opts.BasePath, "/"),
@@ -284,6 +315,8 @@ func New(opts Options) (*Channel, error) {
 		suspend:    opts.SuspendRequested,
 		sessions:   opts.Sessions,
 		log:        log,
+		card:       card,
+		cardTools:  opts.CardTools,
 		origins:    make(map[string]struct{}, len(opts.Origins)),
 		originList: append([]string(nil), opts.Origins...),
 		listener:   listener,

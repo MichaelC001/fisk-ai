@@ -6,7 +6,9 @@ package wire
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -568,6 +570,29 @@ type AgentCard struct {
 	// beside Name. It is empty on an agent whose operator wrote none.
 	Description string `json:"description,omitempty"`
 
+	// DisplayName is the human name for this agent, where Name is the identity a
+	// caller addresses it by: an agent registered as nats-auth-prod-eu displays as
+	// "NATS Auth". A caller cannot check it, on the same terms as Name, so it is shown
+	// and never decided on. Empty displays Name.
+	DisplayName string `json:"display_name,omitempty"`
+
+	// Icon is an emoji the agent asks to be drawn beside its name.
+	Icon string `json:"icon,omitempty"`
+
+	// IconURL is an https URL of an image the agent asks to be drawn beside its name.
+	// It is decoration the agent asserts and nothing verifies, and it arrives from an
+	// arbitrary peer, so a reader holds it to CheckIconURL before putting it in front of
+	// a browser. Whether to fetch it at all is the reader's decision: fetching it
+	// directly discloses every viewer to the host the card named, and proxying it buys
+	// server-side request forgery.
+	IconURL string `json:"icon_url,omitempty"`
+
+	// Notes are what the agent could not put on this card, one sentence each. An MCP
+	// server whose tools could not be listed names that server, so a tool missing from
+	// Tools reads as a source being down rather than a tool that was removed. A card
+	// built from a complete tool set carries none.
+	Notes []string `json:"notes,omitempty"`
+
 	// Protocols are the message namespaces this agent speaks, as
 	// ProtocolNamespace-shaped strings. It is how a caller holding more than one
 	// version picks a namespace both ends hold, since a message id outside a
@@ -607,6 +632,85 @@ type AgentCard struct {
 	// why they are reported separately rather than as one flag.
 	Telemetry        bool `json:"telemetry,omitempty"`
 	TelemetryContent bool `json:"telemetry_content,omitempty"`
+}
+
+// The limits on what an agent says about itself. Each is the number the discovery
+// reply schema states, so a value one of these refuses is one a peer's validator
+// refuses too, and a card refused here never becomes a discovery every caller fails.
+const (
+	// MaxIconURLLength limits AgentCard.IconURL.
+	MaxIconURLLength = 512
+	// MaxDisplayNameLength limits AgentCard.DisplayName.
+	MaxDisplayNameLength = 128
+	// MaxIconLength limits AgentCard.Icon, which holds an emoji and whose limit counts
+	// the bytes of one, since a single emoji reaches four and a joined sequence more.
+	MaxIconLength = 16
+)
+
+// ErrIconURL reports an AgentCard.IconURL a reader must not put in front of a
+// browser.
+var ErrIconURL = errors.New("icon url is not usable")
+
+// ErrCardField reports a card field longer than the protocol carries.
+var ErrCardField = errors.New("card field is too long")
+
+// CheckDisplayName holds an AgentCard.DisplayName to MaxDisplayNameLength. An empty
+// name passes, leaving a reader to display the identity.
+func CheckDisplayName(name string) error {
+	if len(name) > MaxDisplayNameLength {
+		return fmt.Errorf("%w: the display name is %d bytes, over the %d byte limit", ErrCardField, len(name), MaxDisplayNameLength)
+	}
+
+	return nil
+}
+
+// CheckIcon holds an AgentCard.Icon to MaxIconLength. An empty icon passes.
+func CheckIcon(icon string) error {
+	if len(icon) > MaxIconLength {
+		return fmt.Errorf("%w: the icon is %d bytes, over the %d byte limit", ErrCardField, len(icon), MaxIconLength)
+	}
+
+	return nil
+}
+
+// CheckIconURL holds an AgentCard.IconURL to what a browser may be handed: an https
+// URL naming a host, no longer than MaxIconURLLength. An empty string passes, since
+// an agent that named no icon is not an agent that named a bad one.
+//
+// http is refused with every other scheme: a page served over https cannot load it,
+// and javascript: and data: are how a card hands a console script to run.
+func CheckIconURL(icon string) error {
+	if icon == "" {
+		return nil
+	}
+
+	if len(icon) > MaxIconURLLength {
+		return fmt.Errorf("%w: it is %d bytes, over the %d byte limit", ErrIconURL, len(icon), MaxIconURLLength)
+	}
+
+	u, err := url.Parse(icon)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrIconURL, err)
+	}
+
+	if u.Scheme != "https" {
+		return fmt.Errorf("%w: %q is not an https URL", ErrIconURL, icon)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%w: %q names no host", ErrIconURL, icon)
+	}
+
+	return nil
+}
+
+// SanitizeIconURL clears an IconURL that CheckIconURL refuses, so a card that crossed
+// the protocol from an arbitrary peer can be shown without handing a console a
+// javascript: URL or an unbounded string. A card whose icon passes is left alone.
+func (c *AgentCard) SanitizeIconURL() {
+	err := CheckIconURL(c.IconURL)
+	if err != nil {
+		c.IconURL = ""
+	}
 }
 
 // ElicitKind names what a run is asking the caller for. The four are the four

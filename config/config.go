@@ -102,6 +102,21 @@ type Config struct {
 	// which is how Prepare tells an assignment from its own earlier write and stops
 	// treating the identity as derived.
 	identityValueDerived string
+	// Description is what this agent is for, in the operator's own words. It is
+	// published on the agent card beside Identity, for a caller or a console to display.
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	// DisplayName is the human name for this agent, where Identity is the name a caller
+	// addresses it by: an agent registered as nats-auth-prod-eu displays as "NATS
+	// Auth". It is published on the agent card, and a reader that has none displays the
+	// identity.
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty"`
+	// Icon is an emoji published on the agent card, to draw beside the name.
+	Icon string `json:"icon,omitempty" yaml:"icon,omitempty"`
+	// IconURL is an https URL of an image published on the agent card, to draw beside
+	// the name. It is decoration this agent asserts and nothing verifies, and an
+	// endpoint refuses to publish a card carrying any other scheme, since the card
+	// reaches a browser through whoever reads it.
+	IconURL string `json:"icon_url,omitempty" yaml:"icon_url,omitempty"`
 	// ApplicationPath is the app to run and introspect for tools. It is optional only
 	// when something else gives the agent a tool to call: a built-in enabled under
 	// harness, a remote agent's tools, an MCP server, or tools a Go caller injects
