@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
@@ -108,7 +109,7 @@ func (s *FakeSessionStore) Create(ctx context.Context, id string, meta runstate.
 	}
 
 	s.created++
-	j := &fakeJournal{held: true, created: s.created}
+	j := &fakeJournal{held: true, created: s.created, createdAt: meta.Created}
 	// The Meta record is seq 1 and frames the run, mirroring the file backend.
 	err = j.append(1, runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
 	if err != nil {
@@ -185,10 +186,11 @@ func (s *FakeSessionStore) Load(ctx context.Context, id string) (*runstate.RunSt
 }
 
 // List implements runstate.Store. The filter is answered through
-// runstate.ListFilter.MatchesAgent, the call both real backends make, so a test written
-// against this fake sees a run with no agent listed under any agent as it would be in a
-// file or JetStream store. The row's summary comes off the terminal record the same way,
-// and stays nil for a conversation whose last turn wrote none.
+// runstate.ListFilter.MatchesID and MatchesAgent, the calls both real backends make, so a
+// test written against this fake sees a run with no agent listed under any agent, and a
+// run outside the prefix dropped before it is folded, as it would be in a file or
+// JetStream store. The row's summary comes off the terminal record the same way, and stays
+// nil for a conversation whose last turn wrote none.
 func (s *FakeSessionStore) List(ctx context.Context, filter runstate.ListFilter) ([]runstate.RunInfo, error) {
 	err := ctx.Err()
 	if err != nil {
@@ -200,6 +202,10 @@ func (s *FakeSessionStore) List(ctx context.Context, filter runstate.ListFilter)
 
 	out := make([]runstate.RunInfo, 0, len(s.runs))
 	for id, j := range s.runs {
+		if !filter.MatchesID(id) {
+			continue
+		}
+
 		rs, err := runstate.Fold(j.snapshot())
 		if err != nil {
 			return nil, err
@@ -208,7 +214,8 @@ func (s *FakeSessionStore) List(ctx context.Context, filter runstate.ListFilter)
 			continue
 		}
 
-		out = append(out, runInfoFor(id, rs))
+		created, updated := j.stamps()
+		out = append(out, runInfoFor(id, rs, created, updated))
 	}
 
 	return out, nil
@@ -245,6 +252,11 @@ func (s *FakeSessionStore) ListPage(ctx context.Context, filter runstate.ListFil
 		if j.created <= after {
 			continue
 		}
+		// The prefix goes here rather than beside the agent below, since both real
+		// backends answer it from the id they enumerate on and never fold the run.
+		if !filter.MatchesID(id) {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	slices.SortFunc(ids, func(a, b string) int {
@@ -265,7 +277,8 @@ func (s *FakeSessionStore) ListPage(ctx context.Context, filter runstate.ListFil
 			continue
 		}
 
-		runs = append(runs, runInfoFor(id, rs))
+		created, updated := j.stamps()
+		runs = append(runs, runInfoFor(id, rs, created, updated))
 		if len(runs) == limit {
 			break
 		}
@@ -282,8 +295,21 @@ func (s *FakeSessionStore) ListPage(ctx context.Context, filter runstate.ListFil
 // runInfoFor builds one listing row, so List and ListPage cannot describe the same run
 // differently. The ending and the summary come off the terminal record the way both real
 // backends read them, and stay absent for a conversation whose last turn wrote none.
-func runInfoFor(id string, rs *runstate.RunState) runstate.RunInfo {
-	info := runstate.RunInfo{RunID: id, Prompt: rs.Prompt, Agent: rs.Agent}
+//
+// It fills every field a real backend fills. created is the time the caller stamped on
+// the meta record, as it is in both real stores, and updated is when this journal last
+// took a record, which is the file store's modification time and the JetStream store's
+// stored time. A rail built against this fake would otherwise read year-one dates and no
+// model from rows a real store names.
+func runInfoFor(id string, rs *runstate.RunState, created, updated time.Time) runstate.RunInfo {
+	info := runstate.RunInfo{
+		RunID:   id,
+		Created: created,
+		Updated: updated,
+		Model:   rs.Fingerprint.Model,
+		Prompt:  rs.Prompt,
+		Agent:   rs.Agent,
+	}
 	if rs.Terminal != nil {
 		info.Terminal = rs.Terminal.Reason
 		info.Summary = rs.Terminal.Summary
@@ -344,8 +370,22 @@ type fakeJournal struct {
 	// created is the place this run holds in the order the store made its runs, which
 	// is what ListPage enumerates on and what its cursor carries.
 	created uint64
-	records []runstate.Record
-	lastSeq uint64
+	// createdAt is the time the caller stamped on the meta record and updatedAt is when
+	// this journal last took a record. A listing row carries both, as it does from a
+	// file or JetStream store.
+	createdAt time.Time
+	updatedAt time.Time
+	records   []runstate.Record
+	lastSeq   uint64
+}
+
+// stamps reports when this run was created and when it last took a record, for a
+// listing row.
+func (j *fakeJournal) stamps() (time.Time, time.Time) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	return j.createdAt, j.updatedAt
 }
 
 // acquire takes the lock, reporting false when it is already held.
@@ -394,6 +434,7 @@ func (j *fakeJournal) append(seq uint64, rec runstate.Record) error {
 	rec.Seq = seq
 	j.records = append(j.records, rec)
 	j.lastSeq = seq
+	j.updatedAt = time.Now()
 
 	return nil
 }

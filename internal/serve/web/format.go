@@ -30,6 +30,16 @@ type Format interface {
 	// wrong with the request and nothing about this worker. A Format returning an
 	// error has written nothing to w.
 	Decode(w http.ResponseWriter, r *http.Request) (Turn, TurnWriter, error)
+
+	// Replayer returns the writer a stored conversation is written into, for a page
+	// opening a conversation from the session list. The request carries no turn: the
+	// channel has already read the conversation, and it calls Open, Replay and Close on
+	// what this returns.
+	//
+	// It is separate from Decode because a stored conversation asks for none of what
+	// Decode reads. r is here for a Format that answers a header or a query parameter
+	// of its own.
+	Replayer(w http.ResponseWriter, r *http.Request) TurnWriter
 }
 
 // Mount is one Format and the path segment it answers on under the channel's base

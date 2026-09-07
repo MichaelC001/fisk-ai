@@ -19,6 +19,12 @@ const (
 	// preflightMaxAge is how long a browser may cache a preflight answer, in seconds.
 	preflightMaxAge = "600"
 
+	// allowedMethods is what a preflight is told a page may send: a turn is a POST, the
+	// card and the session list and a stored conversation are GETs, and deleting a
+	// conversation is a DELETE. A method left out here is one a browser refuses to send
+	// cross-origin however the route answers it.
+	allowedMethods = "GET, POST, DELETE, OPTIONS"
+
 	// retryAfter is what a refused request is told to wait, in seconds, before sending
 	// again.
 	retryAfter = "5"
@@ -36,8 +42,10 @@ const (
 	stoppedRefusal  = "the worker stopped before this turn started; send it again"
 )
 
-// handler builds the routes: one POST per mounted format under the base path, behind
-// the checks every request passes first.
+// handler builds the routes, behind the checks every request passes first: a POST per
+// mounted format under the base path, a GET beside it for a stored conversation that
+// format renders, and the agent card and the session list the formats know nothing
+// about.
 //
 // The order is what a refused request costs. A drain and an unlisted Origin are refused
 // on the headers alone, the Host check follows, and only a request that passed all
@@ -49,11 +57,25 @@ func (c *Channel) handler(formats []Mount) http.Handler {
 		route := c.basePath + "/" + m.Path
 		c.routes = append(c.routes, "POST "+route)
 		mux.HandleFunc("POST "+route, c.serveTurn(m.Format))
+
+		// A stored conversation is opened under the format that renders it, since a
+		// browser reads AI SDK parts or AG-UI messages and the channel writes neither.
+		openRoute := route + "/" + SessionsPath + "/{id}"
+		c.routes = append(c.routes, "GET "+openRoute)
+		mux.HandleFunc("GET "+openRoute, c.serveSessionOpen(m.Format))
 	}
 
 	cardRoute := c.basePath + "/" + CardPath
 	c.routes = append(c.routes, "GET "+cardRoute)
 	mux.HandleFunc("GET "+cardRoute, c.serveCard)
+
+	listRoute := c.basePath + "/" + SessionsPath
+	c.routes = append(c.routes, "GET "+listRoute)
+	mux.HandleFunc("GET "+listRoute, c.serveSessionList)
+
+	deleteRoute := listRoute + "/{id}"
+	c.routes = append(c.routes, "DELETE "+deleteRoute)
+	mux.HandleFunc("DELETE "+deleteRoute, c.serveSessionDelete)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c.draining() {
@@ -122,7 +144,7 @@ func (c *Channel) allowOrigin(w http.ResponseWriter, r *http.Request) (string, b
 // and nothing here has a reason to refuse one.
 func (c *Channel) preflight(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
-	h.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	h.Set("Access-Control-Allow-Methods", allowedMethods)
 	h.Set("Access-Control-Max-Age", preflightMaxAge)
 
 	asked := r.Header.Get("Access-Control-Request-Headers")

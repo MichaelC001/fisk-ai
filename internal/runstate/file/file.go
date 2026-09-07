@@ -266,9 +266,9 @@ func (s *FileStore) Load(ctx context.Context, id string) (*runstate.RunState, er
 }
 
 // List implements runstate.Store. It reads and folds one journal per run, so it checks
-// the context before each of them as well as at the start. The filter is applied to the
-// folded run through runstate.ListFilter, so a run with no agent is listed under any
-// agent.
+// the context before each of them as well as at the start. The filter is applied through
+// runstate.ListFilter: the prefix against the journal's name, before the journal is read,
+// and the agent against the folded run, so a run with no agent is listed under any agent.
 func (s *FileStore) List(ctx context.Context, filter runstate.ListFilter) ([]runstate.RunInfo, error) {
 	err := ctx.Err()
 	if err != nil {
@@ -293,6 +293,9 @@ func (s *FileStore) List(ctx context.Context, filter runstate.ListFilter) ([]run
 		}
 		id := name[:len(name)-len(".json")]
 		if runstate.ValidateID(id) != nil {
+			continue
+		}
+		if !filter.MatchesID(id) {
 			continue
 		}
 
@@ -345,7 +348,7 @@ func (s *FileStore) ListPage(ctx context.Context, filter runstate.ListFilter, li
 		return runstate.RunPage{}, err
 	}
 
-	order, err := s.creationOrder(ctx)
+	order, err := s.creationOrder(ctx, filter)
 	if err != nil {
 		return runstate.RunPage{}, err
 	}
@@ -454,12 +457,13 @@ func parseCursor(cursor string) (*position, error) {
 	return &position{created: created, id: id}, nil
 }
 
-// creationOrder enumerates the store's runs oldest first, reading each journal's meta
-// record and nothing else. That record carries the agent as well as the creation time, so
-// a filtered page answers the filter from it. A journal whose first line is missing or
-// unreadable is left out, as List leaves it out: the meta record is written first, so a
-// journal without one holds no run to name.
-func (s *FileStore) creationOrder(ctx context.Context) ([]position, error) {
+// creationOrder enumerates the runs the filter's prefix selects, oldest first, reading
+// each journal's meta record and nothing else. That record carries the agent as well as
+// the creation time, so a filtered page answers the agent from it. The prefix is answered
+// from the journal's name, before the file is opened. A journal whose first line is
+// missing or unreadable is left out, as List leaves it out: the meta record is written
+// first, so a journal without one holds no run to name.
+func (s *FileStore) creationOrder(ctx context.Context, filter runstate.ListFilter) ([]position, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, err
@@ -478,6 +482,9 @@ func (s *FileStore) creationOrder(ctx context.Context) ([]position, error) {
 		}
 		id := name[:len(name)-len(".json")]
 		if runstate.ValidateID(id) != nil {
+			continue
+		}
+		if !filter.MatchesID(id) {
 			continue
 		}
 

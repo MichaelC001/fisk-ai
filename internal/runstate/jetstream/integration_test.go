@@ -734,6 +734,40 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 				Expect(walk(runstate.ListFilter{Agent: "agent-a"}, 2)).To(Equal([]string{a1, a2, a3}))
 			})
 
+			// One store is handed to every channel, and a run id is a subject token, so
+			// a channel listing on its own prefix drops another channel's run from the
+			// delivered meta record without reading anything else.
+			It("Should skip a run outside the prefix without shortening the page", func() {
+				createID := func(prefix string) string {
+					GinkgoHelper()
+
+					id := prefix + newID()
+					meta := newMeta(id)
+
+					j, err := store.Create(ctx, id, meta)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(j.Close()).To(Succeed())
+
+					return id
+				}
+
+				w1 := createID("w-")
+				createID("slack-")
+				w2 := createID("w-")
+				createID("slack-")
+				w3 := createID("w-")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{Prefix: "w-"}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{w1, w2}))
+
+				Expect(walk(runstate.ListFilter{Prefix: "w-"}, 2)).To(Equal([]string{w1, w2, w3}))
+
+				infos, err := store.List(ctx, runstate.ListFilter{Prefix: "w-"})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(3))
+			})
+
 			It("Should return an empty page and no cursor for an empty store", func() {
 				page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
 				Expect(err).ToNot(HaveOccurred())

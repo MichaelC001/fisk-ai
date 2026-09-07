@@ -96,3 +96,10 @@ func (f *Format) Decode(w http.ResponseWriter, r *http.Request) (web.Turn, web.T
 
 	return turn, newTurnWriter(w, answered, body.continues()), nil
 }
+
+// Replayer returns the writer a stored conversation is written into. Nothing has been
+// answered and nothing continues, so the writer suppresses no part and mints its ids from
+// the start.
+func (f *Format) Replayer(w http.ResponseWriter, _ *http.Request) web.TurnWriter {
+	return newTurnWriter(w, "", "")
+}

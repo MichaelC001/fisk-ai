@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -165,10 +166,52 @@ var _ = Describe("FakeSessionStore", func() {
 
 		infos, err := store.List(ctx, runstate.ListFilter{})
 		Expect(err).ToNot(HaveOccurred())
-		Expect(infos).To(ConsistOf(
-			runstate.RunInfo{RunID: "run1", Prompt: "the first prompt"},
-			runstate.RunInfo{RunID: "run2", Prompt: "the second prompt"},
-		))
+
+		prompts := map[string]string{}
+		for _, info := range infos {
+			prompts[info.RunID] = info.Prompt
+		}
+		Expect(prompts).To(Equal(map[string]string{"run1": "the first prompt", "run2": "the second prompt"}))
+	})
+
+	// A rail draws the creation time, the last activity and the model beside the title,
+	// so a row this fake hands an embedder carries what a file or JetStream store puts
+	// there rather than year-one dates and an empty model.
+	Describe("listing the times and the model", func() {
+		created := time.Now().Add(-time.Hour).UTC()
+
+		BeforeEach(func() {
+			j, err := store.Create(ctx, "run1", runstate.MetaRecord{
+				RunID:       "run1",
+				Created:     created,
+				Prompt:      "list the streams",
+				Fingerprint: runstate.Fingerprint{Model: "claude-sonnet-4-6"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		})
+
+		assertRow := func(info runstate.RunInfo) {
+			GinkgoHelper()
+
+			Expect(info.Created).To(BeTemporally("==", created), "the time the caller stamped on the meta record")
+			Expect(info.Updated).To(BeTemporally(">=", created), "when the journal last took a record")
+			Expect(info.Model).To(Equal("claude-sonnet-4-6"))
+		}
+
+		It("Should carry them on a full listing", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			assertRow(infos[0])
+		})
+
+		It("Should carry them on a page", func() {
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(HaveLen(1))
+			assertRow(page.Runs[0])
+		})
 	})
 
 	// An embedder tests a rail against this fake, so it has to give the same three
@@ -208,6 +251,45 @@ var _ = Describe("FakeSessionStore", func() {
 			infos, err := store.List(ctx, runstate.ListFilter{Agent: "agent-a"})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(agentsByID(infos)).To(Equal(map[string]string{"run-a": "agent-a", "run-unstamped": ""}))
+		})
+	})
+
+	// An embedder's channel derives its run ids under a marker of its own and lists on
+	// it, so the fake has to leave another channel's runs out the way a real store does.
+	Describe("listing by id prefix", func() {
+		createID := func(id string) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{RunID: id, Prompt: "do the thing"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		idsOf := func(infos []runstate.RunInfo) []string {
+			out := make([]string, len(infos))
+			for i, info := range infos {
+				out[i] = info.RunID
+			}
+
+			return out
+		}
+
+		BeforeEach(func() {
+			createID("w-one")
+			createID("slack-two")
+			createID("w-three")
+		})
+
+		It("Should list the runs under one prefix", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{Prefix: "w-"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(infos)).To(ConsistOf("w-one", "w-three"))
+		})
+
+		It("Should fill a page from the runs under the prefix rather than shortening it", func() {
+			page, err := store.ListPage(ctx, runstate.ListFilter{Prefix: "w-"}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page.Runs)).To(Equal([]string{"w-one", "w-three"}))
 		})
 	})
 

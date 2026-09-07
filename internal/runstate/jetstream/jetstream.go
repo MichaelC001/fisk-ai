@@ -454,6 +454,12 @@ func (s *store) List(ctx context.Context, filter runstate.ListFilter) ([]runstat
 		if !ok {
 			continue
 		}
+		// The id is a subject token, so the prefix is answered from the enumeration and
+		// an excluded run costs no read. A subject filter cannot do it: a NATS wildcard
+		// matches a whole token and never part of one.
+		if !filter.MatchesID(id) {
+			continue
+		}
 
 		ri, err := s.summarize(opCtx, id, filter)
 		if err != nil {
@@ -633,6 +639,11 @@ func (s *store) summarizeMeta(ctx context.Context, m metaMsg, filter runstate.Li
 	id, ok := s.runIDFromMetaSubject(m.subject)
 	if !ok {
 		return nil, fmt.Errorf("%w: %q is not a run's meta subject", runstate.ErrCorrupt, m.subject)
+	}
+	// The fetch delivered this record whatever its subject, so the prefix saves the
+	// ending read rather than the fetch.
+	if !filter.MatchesID(id) {
+		return nil, nil
 	}
 
 	ri, err := decodeMetaRow(id, m.data, m.stored, filter)

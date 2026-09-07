@@ -253,6 +253,57 @@ var _ = Describe("FileStore", func() {
 		})
 	})
 
+	// One store is handed to every channel, so a channel that derives its run ids under
+	// a marker of its own lists the conversations it minted and leaves the rest out.
+	Describe("listing by id prefix", func() {
+		createID := func(id string) string {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+
+			return id
+		}
+
+		idsOf := func(infos []runstate.RunInfo) []string {
+			out := make([]string, len(infos))
+			for i, info := range infos {
+				out[i] = info.RunID
+			}
+
+			return out
+		}
+
+		It("lists the runs under one prefix and pages them", func() {
+			mine := createID("w-" + newID())
+			also := createID("w-" + newID())
+			createID("slack-" + newID())
+
+			infos, err := store.List(ctx, runstate.ListFilter{Prefix: "w-"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(infos)).To(ConsistOf(mine, also))
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{Prefix: "w-"}, 10, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(page.Runs)).To(ConsistOf(mine, also))
+		})
+
+		It("fills a page from the runs under the prefix rather than shortening it", func() {
+			for range 3 {
+				createID("slack-" + newID())
+				createID("w-" + newID())
+			}
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{Prefix: "w-"}, 3, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(page.Runs).To(HaveLen(3))
+			for _, info := range page.Runs {
+				Expect(info.RunID).To(HavePrefix("w-"))
+			}
+		})
+	})
+
 	Describe("listing the conversation summary", func() {
 		// A run whose terminal record carries a summary, and one whose terminal record
 		// predates the field, which is every conversation journaled before this build.
@@ -529,7 +580,7 @@ var _ = Describe("FileStore", func() {
 				Expect(err).To(HaveOccurred(), "the journal no longer folds")
 			}
 
-			order, err := store.creationOrder(ctx)
+			order, err := store.creationOrder(ctx, runstate.ListFilter{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(order).To(HaveLen(3))
 

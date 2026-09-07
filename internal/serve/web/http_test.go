@@ -70,7 +70,7 @@ var _ = Describe("The handler", func() {
 
 			Expect(rec.Code).To(Equal(http.StatusNoContent))
 			Expect(rec.Header().Get("Access-Control-Allow-Origin")).To(Equal(testOrigin))
-			Expect(rec.Header().Get("Access-Control-Allow-Methods")).To(Equal("POST, OPTIONS"))
+			Expect(rec.Header().Get("Access-Control-Allow-Methods")).To(Equal(allowedMethods))
 			Expect(rec.Header().Get("Access-Control-Allow-Headers")).To(Equal("content-type, x-thread"))
 			Expect(rec.Header().Get("Access-Control-Max-Age")).To(Equal(preflightMaxAge))
 			Expect(rec.Header().Values("Vary")).To(ContainElement("Origin"))

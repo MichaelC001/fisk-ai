@@ -16,6 +16,10 @@
 // built per request from a tool set resolved once, so a console reloading a restarted
 // worker reads what that worker is running.
 //
+// Under SessionsPath it lists the past conversations, deletes one, and hands one to a
+// format to render. Picking a conversation is outside what either frontend protocol has
+// words for, so these routes are Fisk's own and every format shares them.
+//
 // # A question ends the turn
 //
 // A page is not an operator. It is reading the response, so it cannot answer until the
@@ -122,7 +126,8 @@ type Options struct {
 
 	// Formats are the frontend protocols to mount, each on its path under BasePath.
 	// None mounts nothing, and the channel then takes no turn on any path, answering
-	// only the agent card. CardPath is taken: a Format mounted there is refused.
+	// only the agent card and the session list. CardPath and SessionsPath are taken: a
+	// Format mounted on either is refused.
 	Formats []Mount
 
 	// Card is what the agent says about itself on the card served under CardPath: its
@@ -142,6 +147,14 @@ type Options struct {
 	// write to the same one. It is required: a thread is a conversation, and this
 	// channel reads the store to tell a thread it holds from one it is opening.
 	Sessions runstate.Store
+
+	// Conversations answers the sessions API: the past conversations a page lists,
+	// opens and deletes. Nil reads them from Sessions, scoped to this channel's
+	// sessions and to Identity, which is what a process running its own agent wants.
+	//
+	// It is a field so that a process fronting an agent another process runs supplies
+	// the conversations that process holds, with the endpoints above it unchanged.
+	Conversations Conversations
 
 	// SuspendRequested is handed to every run and polled at a loop boundary, so a
 	// worker draining stops its turns where they can be resumed from. Nil never
@@ -195,6 +208,8 @@ func (o *Options) validate() error {
 			return fmt.Errorf("the format mounted at %q is nil", m.Path)
 		case m.Path == CardPath:
 			return fmt.Errorf("a format is mounted at %q, where this channel answers the agent card", m.Path)
+		case m.Path == SessionsPath:
+			return fmt.Errorf("a format is mounted at %q, where this channel lists the stored conversations", m.Path)
 		case seen[m.Path]:
 			return fmt.Errorf("two formats are mounted at %q", m.Path)
 		}
@@ -233,6 +248,11 @@ type Channel struct {
 	suspend  func() bool
 	sessions runstate.Store
 	log      *slog.Logger
+
+	// conversations answers the sessions API. The channel never reaches runstate.Store
+	// for a past conversation, so the process that holds them is a substitution here
+	// rather than a change to the endpoints.
+	conversations Conversations
 
 	// card and cardTools are what the agent card is assembled from. They are resolved
 	// once, here, and the card is built from them on each request.
@@ -308,24 +328,30 @@ func New(opts Options) (*Channel, error) {
 	card := opts.Card
 	card.Identity = opts.Identity
 
+	conversations := opts.Conversations
+	if conversations == nil {
+		conversations = NewStoreConversations(opts.Sessions, opts.Identity)
+	}
+
 	c := &Channel{
-		identity:   opts.Identity,
-		basePath:   strings.TrimSuffix(opts.BasePath, "/"),
-		workers:    opts.Workers,
-		suspend:    opts.SuspendRequested,
-		sessions:   opts.Sessions,
-		log:        log,
-		card:       card,
-		cardTools:  opts.CardTools,
-		origins:    make(map[string]struct{}, len(opts.Origins)),
-		originList: append([]string(nil), opts.Origins...),
-		listener:   listener,
-		loopback:   isLoopback(host),
-		port:       port,
-		work:       make(chan *serve.Work),
-		faults:     make(chan error, 1),
-		served:     make(chan struct{}),
-		shutdown:   make(chan struct{}),
+		identity:      opts.Identity,
+		basePath:      strings.TrimSuffix(opts.BasePath, "/"),
+		workers:       opts.Workers,
+		suspend:       opts.SuspendRequested,
+		sessions:      opts.Sessions,
+		conversations: conversations,
+		log:           log,
+		card:          card,
+		cardTools:     opts.CardTools,
+		origins:       make(map[string]struct{}, len(opts.Origins)),
+		originList:    append([]string(nil), opts.Origins...),
+		listener:      listener,
+		loopback:      isLoopback(host),
+		port:          port,
+		work:          make(chan *serve.Work),
+		faults:        make(chan error, 1),
+		served:        make(chan struct{}),
+		shutdown:      make(chan struct{}),
 	}
 
 	for _, origin := range opts.Origins {

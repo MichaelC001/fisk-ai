@@ -825,6 +825,24 @@ var _ = Describe("runstate", func() {
 		})
 	})
 
+	// A channel derives its run ids under a marker of its own, and every backend drops a
+	// run this excludes before it reads a record.
+	Describe("ListFilter.MatchesID", func() {
+		It("takes every run when the filter names no prefix", func() {
+			var f ListFilter
+			Expect(f.MatchesID("w-abc")).To(BeTrue())
+			Expect(f.MatchesID("")).To(BeTrue())
+		})
+
+		It("takes a run under the prefix and leaves every other run out", func() {
+			f := ListFilter{Prefix: "w-"}
+			Expect(f.MatchesID("w-abc")).To(BeTrue())
+			Expect(f.MatchesID("w-")).To(BeTrue())
+			Expect(f.MatchesID("slack-abc")).To(BeFalse())
+			Expect(f.MatchesID("")).To(BeFalse())
+		})
+	})
+
 	Describe("Fingerprint", func() {
 		It("reports an actionable field-level diff", func() {
 			a := Fingerprint{Model: "claude-opus-4-7", SystemHash: "h1", MaxTokens: 100}

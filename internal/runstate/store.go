@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -76,6 +77,12 @@ type ListFilter struct {
 	// Agent selects the runs one agent produced, matched by MatchesAgent. Empty
 	// selects every run whichever agent produced it.
 	Agent string
+
+	// Prefix selects the runs whose id starts with it, matched by MatchesID. A channel
+	// that derives its session ids under a marker of its own lists the conversations it
+	// minted with this and leaves every other channel's out. Empty selects every run
+	// whatever its id.
+	Prefix string
 }
 
 // MatchesAgent reports whether a run stamped with agent belongs in this listing.
@@ -91,6 +98,21 @@ type ListFilter struct {
 // the three answers cannot drift apart between listings.
 func (f ListFilter) MatchesAgent(agent string) bool {
 	return f.Agent == "" || agent == "" || f.Agent == agent
+}
+
+// MatchesID reports whether a run belongs in this listing by its id, which every backend
+// has without decoding a record: the file store as the journal's name, the JetStream
+// store as a token of the meta subject.
+//
+// What that saves differs by path. The file store drops an excluded run while it reads
+// the directory, and the JetStream store's List drops one while it enumerates the meta
+// subjects, so neither reads a record of it. The JetStream store's ListPage fetches a
+// batch of meta records and decides on each delivered subject, so an excluded run is
+// still delivered and the prefix saves the second read a row costs.
+//
+// A filter naming no prefix takes every run.
+func (f ListFilter) MatchesID(id string) bool {
+	return strings.HasPrefix(id, f.Prefix)
 }
 
 // RunPage is one page of a paged listing, returned by Store.ListPage.

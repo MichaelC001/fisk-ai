@@ -100,16 +100,20 @@ var _ = Describe("New", func() {
 			{Label: "Listen", Value: ch.Addr()},
 			{Label: "Base Path", Value: "/fisk/v1"},
 			{Label: "Origins", Value: testOrigin},
-			{Label: "Routes", Value: "POST /fisk/v1/fake, GET /fisk/v1/card"},
+			{Label: "Routes", Value: "POST /fisk/v1/fake, GET /fisk/v1/fake/sessions/{id}, GET /fisk/v1/card, GET /fisk/v1/sessions, DELETE /fisk/v1/sessions/{id}"},
 			{Label: "Workers", Value: "2"},
 		}))
 	})
 
-	// A channel with no format takes no turn and still says what the agent is.
-	It("Should describe the card route alone when nothing is mounted", func() {
+	// A channel with no format takes no turn and still says what the agent is and what
+	// conversations it holds.
+	It("Should describe the card and the session routes when nothing is mounted", func() {
 		ch := newTestChannel(testOptions())
 
-		Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Routes", Value: "GET /fisk/v1/card"}))
+		Expect(ch.Describe()).To(ContainElement(serve.DescLine{
+			Label: "Routes",
+			Value: "GET /fisk/v1/card, GET /fisk/v1/sessions, DELETE /fisk/v1/sessions/{id}",
+		}))
 	})
 
 	It("Should drop a trailing slash from the base path", func() {
@@ -118,7 +122,10 @@ var _ = Describe("New", func() {
 		opts.Formats = []Mount{{Path: "fake", Format: &fakeFormat{}}}
 		ch := newTestChannel(opts)
 
-		Expect(ch.Describe()).To(ContainElement(serve.DescLine{Label: "Routes", Value: "POST /fisk/v1/fake, GET /fisk/v1/card"}))
+		Expect(ch.Describe()).To(ContainElement(serve.DescLine{
+			Label: "Routes",
+			Value: "POST /fisk/v1/fake, GET /fisk/v1/fake/sessions/{id}, GET /fisk/v1/card, GET /fisk/v1/sessions, DELETE /fisk/v1/sessions/{id}",
+		}))
 	})
 })
 
@@ -195,7 +202,7 @@ var _ = Describe("The builder", func() {
 		Expect(ch.Describe()).To(ContainElements(
 			serve.DescLine{Label: "Base Path", Value: config.DefaultWebBasePath},
 			serve.DescLine{Label: "Origins", Value: testOrigin},
-			serve.DescLine{Label: "Routes", Value: "GET " + config.DefaultWebBasePath + "/card"},
+			serve.DescLine{Label: "Routes", Value: "GET " + config.DefaultWebBasePath + "/card, GET " + config.DefaultWebBasePath + "/sessions, DELETE " + config.DefaultWebBasePath + "/sessions/{id}"},
 		))
 	})
 
@@ -211,7 +218,7 @@ var _ = Describe("The builder", func() {
 		DeferCleanup(func() { Expect(ch.Close()).To(Succeed()) })
 
 		Expect(ch.Describe()).To(ContainElement(
-			serve.DescLine{Label: "Routes", Value: "POST " + config.DefaultWebBasePath + "/fake, GET " + config.DefaultWebBasePath + "/card"},
+			serve.DescLine{Label: "Routes", Value: "POST " + config.DefaultWebBasePath + "/fake, GET " + config.DefaultWebBasePath + "/fake/sessions/{id}, GET " + config.DefaultWebBasePath + "/card, GET " + config.DefaultWebBasePath + "/sessions, DELETE " + config.DefaultWebBasePath + "/sessions/{id}"},
 		))
 	})
 

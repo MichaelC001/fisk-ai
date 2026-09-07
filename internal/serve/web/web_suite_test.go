@@ -131,6 +131,14 @@ func (f *fakeFormat) Decode(w http.ResponseWriter, r *http.Request) (Turn, TurnW
 	return turn, &fakeWriter{w: w, streams: streams}, nil
 }
 
+func (f *fakeFormat) Replayer(w http.ResponseWriter, _ *http.Request) TurnWriter {
+	f.mu.Lock()
+	streams := f.streams
+	f.mu.Unlock()
+
+	return &fakeWriter{w: w, streams: streams}
+}
+
 func (f *fakeFormat) decoded() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -177,7 +185,10 @@ func (w *fakeWriter) SessionRotated(prevID string) { w.line("rotated %s", prevID
 func (w *fakeWriter) Panicked(any, []byte)         { w.line("panicked") }
 func (w *fakeWriter) StreamDeltas() bool           { return w.streams }
 func (w *fakeWriter) MessageDelta(d llm.Delta)     { w.line("delta %d %q", d.Index, d.Text) }
-func (w *fakeWriter) Replay(*runstate.RunState)    { w.line("replay") }
+
+// Replay names the conversation it was handed, so a spec sees which one the open route
+// resolved rather than only that it resolved something.
+func (w *fakeWriter) Replay(rs *runstate.RunState) { w.line("replay %s %q", rs.RunID, rs.Prompt) }
 
 func (w *fakeWriter) ToolResult(t agent.ToolResultTrace) {
 	w.line("result %s error=%t", t.CallID, t.IsError)

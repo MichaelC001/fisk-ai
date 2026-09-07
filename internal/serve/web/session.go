@@ -15,6 +15,12 @@ import (
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
+// SessionPrefix marks a journal this channel minted. Every session id it derives starts
+// with it, and its listing, its open and its delete all filter to it, so a page reaches
+// the conversations this channel holds and neither a Slack thread nor a peer's prompt in
+// the same store.
+const SessionPrefix = "w-"
+
 // SessionFor is the journal a thread runs in, derived from the serving identity and
 // the browser's thread id.
 //
@@ -29,7 +35,7 @@ import (
 func SessionFor(identity, threadID string) string {
 	sum := sha256.Sum256([]byte(identity + "\x00" + threadID))
 
-	return "w-" + hex.EncodeToString(sum[:])
+	return SessionPrefix + hex.EncodeToString(sum[:])
 }
 
 // held reports whether the store holds a conversation under sessionID, which is what
