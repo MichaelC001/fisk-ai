@@ -176,7 +176,7 @@ var _ = Describe("The builder", func() {
 		Expect(b.Enabled(off)).To(BeFalse())
 	})
 
-	It("Should build a channel that mounts nothing yet", func() {
+	It("Should build a channel that mounts nothing when it is given no format", func() {
 		built, err := Builder().Build(context.Background(), webConfig(""), serve.BuildOptions{
 			Sessions: agenttest.NewFakeSessionStore(GinkgoTB()),
 			Logger:   quietLogger(),
@@ -193,6 +193,22 @@ var _ = Describe("The builder", func() {
 			serve.DescLine{Label: "Base Path", Value: config.DefaultWebBasePath},
 			serve.DescLine{Label: "Origins", Value: testOrigin},
 			serve.DescLine{Label: "Routes", Value: "none"},
+		))
+	})
+
+	It("Should mount the formats the builder was given", func() {
+		built, err := Builder(Mount{Path: "fake", Format: &fakeFormat{}}).Build(context.Background(), webConfig(""), serve.BuildOptions{
+			Sessions: agenttest.NewFakeSessionStore(GinkgoTB()),
+			Logger:   quietLogger(),
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		ch, ok := built[0].(*Channel)
+		Expect(ok).To(BeTrue())
+		DeferCleanup(func() { Expect(ch.Close()).To(Succeed()) })
+
+		Expect(ch.Describe()).To(ContainElement(
+			serve.DescLine{Label: "Routes", Value: "POST " + config.DefaultWebBasePath + "/fake"},
 		))
 	})
 

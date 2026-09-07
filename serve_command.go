@@ -25,6 +25,7 @@ import (
 	ajchannel "github.com/choria-io/fisk-ai/internal/serve/asyncjobs"
 	slackchannel "github.com/choria-io/fisk-ai/internal/serve/slack"
 	webchannel "github.com/choria-io/fisk-ai/internal/serve/web"
+	"github.com/choria-io/fisk-ai/internal/serve/web/vercel"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
@@ -174,7 +175,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Logger:           log,
 		Telemetry:        tel,
 		Sessions:         resources.SessionStore,
-	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder(), slackchannel.Builder(), webchannel.Builder()})
+	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder(), slackchannel.Builder(), webchannel.Builder(vercel.Mount())})
 	if err != nil {
 		return err
 	}
