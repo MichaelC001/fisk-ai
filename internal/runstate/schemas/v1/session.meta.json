@@ -52,6 +52,10 @@
         "caller": {
           "type": "string",
           "description": "What the channel knew about who asked for this run, as the caller's own unverified claim. Absent where it knew nothing."
+        },
+        "agent": {
+          "type": "string",
+          "description": "The configured identity of the agent that produced this run, as the agent's own unverified claim. Absent on a record written before the field existed, which a listing filtered by agent shows rather than hides."
         }
       }
     }

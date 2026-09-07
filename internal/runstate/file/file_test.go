@@ -193,7 +193,7 @@ var _ = Describe("FileStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(j.Close()).To(Succeed())
 
-		infos, err := store.List(ctx)
+		infos, err := store.List(ctx, runstate.ListFilter{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(infos).To(HaveLen(1))
 		Expect(infos[0].RunID).To(Equal(id))
@@ -202,6 +202,53 @@ var _ = Describe("FileStore", func() {
 		Expect(store.Delete(ctx, id)).To(Succeed())
 		_, err = store.Load(ctx, id)
 		Expect(err).To(MatchError(runstate.ErrNotFound))
+	})
+
+	Describe("listing by agent", func() {
+		// One run each for two agents sharing this store, plus one written before
+		// Store.Create stamped an agent, which is what an empty agent means.
+		createFor := func(agent string) string {
+			GinkgoHelper()
+
+			id := newID()
+			meta := newMeta(id)
+			meta.Agent = agent
+
+			j, err := store.Create(ctx, id, meta)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+
+			return id
+		}
+
+		agentsByID := func(infos []runstate.RunInfo) map[string]string {
+			out := map[string]string{}
+			for _, info := range infos {
+				out[info.RunID] = info.Agent
+			}
+
+			return out
+		}
+
+		It("carries the agent on every row and lists every run for a zero filter", func() {
+			a := createFor("agent-a")
+			b := createFor("agent-b")
+			unstamped := createFor("")
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agentsByID(infos)).To(Equal(map[string]string{a: "agent-a", b: "agent-b", unstamped: ""}))
+		})
+
+		It("lists one agent's runs and the runs nobody recorded an agent for", func() {
+			a := createFor("agent-a")
+			createFor("agent-b")
+			unstamped := createFor("")
+
+			infos, err := store.List(ctx, runstate.ListFilter{Agent: "agent-a"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agentsByID(infos)).To(Equal(map[string]string{a: "agent-a", unstamped: ""}))
+		})
 	})
 
 	It("refuses a listing on a context canceled before the call", func() {
@@ -213,7 +260,7 @@ var _ = Describe("FileStore", func() {
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
 
-		infos, err := store.List(canceled)
+		infos, err := store.List(canceled, runstate.ListFilter{})
 		Expect(err).To(MatchError(context.Canceled))
 		Expect(infos).To(BeEmpty())
 	})
@@ -234,7 +281,7 @@ var _ = Describe("FileStore", func() {
 		// not the per-run check exists.
 		partway := &liveForReads{Context: ctx, reads: 2}
 
-		infos, err := store.List(partway)
+		infos, err := store.List(partway, runstate.ListFilter{})
 		Expect(err).To(MatchError(context.Canceled))
 		Expect(infos).To(BeEmpty())
 	})

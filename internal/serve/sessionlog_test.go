@@ -45,7 +45,9 @@ func (s *stubStore) Load(context.Context, string) (*runstate.RunState, error) {
 	return s.state, nil
 }
 
-func (s *stubStore) List(context.Context) ([]runstate.RunInfo, error) { return nil, s.err }
+func (s *stubStore) List(context.Context, runstate.ListFilter) ([]runstate.RunInfo, error) {
+	return nil, s.err
+}
 
 func (s *stubStore) Delete(context.Context, string) error { return s.err }
 

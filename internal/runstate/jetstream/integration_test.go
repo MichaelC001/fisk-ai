@@ -411,7 +411,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jg.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].RunID).To(Equal(good))
@@ -432,11 +432,11 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			canceled, cancel := context.WithCancel(ctx)
 			cancel()
 
-			infos, err := store.List(canceled)
+			infos, err := store.List(canceled, runstate.ListFilter{})
 			Expect(err).To(MatchError(context.Canceled))
 			Expect(infos).To(BeEmpty())
 
-			infos, err = store.List(ctx)
+			infos, err = store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(2), "both runs are there, so the refusal was the cancel")
 		})
@@ -451,7 +451,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(jB.Append(ctx, 2, assistantRec(0))).To(Succeed())
 			Expect(jB.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(2))
 
@@ -465,6 +465,54 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			}
 		})
 
+		// Two agents on one operator-owned stream is the deployment the agent field
+		// exists for. The subjects carry the run id and the seq and nothing else, so the
+		// filter is answered from the meta record the listing already reads.
+		Describe("listing by agent", func() {
+			createFor := func(agent string) string {
+				GinkgoHelper()
+
+				id := newID()
+				meta := newMeta(id)
+				meta.Agent = agent
+
+				j, err := store.Create(ctx, id, meta)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Close()).To(Succeed())
+
+				return id
+			}
+
+			agentsByID := func(infos []runstate.RunInfo) map[string]string {
+				out := map[string]string{}
+				for _, info := range infos {
+					out[info.RunID] = info.Agent
+				}
+
+				return out
+			}
+
+			It("Should carry the agent on every row and list every run for a zero filter", func() {
+				a := createFor("agent-a")
+				b := createFor("agent-b")
+				unstamped := createFor("")
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(agentsByID(infos)).To(Equal(map[string]string{a: "agent-a", b: "agent-b", unstamped: ""}))
+			})
+
+			It("Should list one agent's runs and the runs nobody recorded an agent for", func() {
+				a := createFor("agent-a")
+				createFor("agent-b")
+				unstamped := createFor("")
+
+				infos, err := store.List(ctx, runstate.ListFilter{Agent: "agent-a"})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(agentsByID(infos)).To(Equal(map[string]string{a: "agent-a", unstamped: ""}))
+			})
+		})
+
 		It("Should report the ending off the last record", func() {
 			id := newID()
 			j, err := store.Create(ctx, id, newMeta(id))
@@ -473,7 +521,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, 3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
@@ -494,7 +542,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, 5, assistantRec(1))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(BeEmpty())
@@ -524,7 +572,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, seq, terminalRec(runstate.ReasonSuspended))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].RunID).To(Equal(id))

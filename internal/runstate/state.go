@@ -157,6 +157,10 @@ type RunState struct {
 	// MetaRecord for what each is worth; neither is read by the loop.
 	ConversationToken string
 	Caller            string
+	// Agent is the agent that produced the run, restored from the Meta record and
+	// empty for a journal written before that field existed. See MetaRecord.Agent for
+	// what it is worth; the loop does not read it.
+	Agent string
 
 	// Messages is the committed, coherent conversation prefix: it always ends on
 	// a boundary the API would accept (an initial user prompt, or an assistant
@@ -238,6 +242,7 @@ func Fold(records []Record) (*RunState, error) {
 		Interactive:       meta.Interactive,
 		ConversationToken: meta.ConversationToken,
 		Caller:            meta.Caller,
+		Agent:             meta.Agent,
 		Messages:          []llm.Message{userTextMessage(meta.Prompt)},
 	}
 

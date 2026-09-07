@@ -142,6 +142,7 @@ func metaRecord() Record {
 			Prompt:            "do the thing",
 			ConversationToken: "3Hzmp8VqrKL42NmXcPd7bTgWfR1",
 			Caller:            "peer1",
+			Agent:             "agent-a",
 		},
 	}
 }

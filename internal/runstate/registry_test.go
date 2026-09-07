@@ -20,10 +20,10 @@ func (stubStore) Info() Info { return Info{Backend: "faketest"} }
 func (stubStore) Create(context.Context, string, MetaRecord) (Journal, error) {
 	return nil, nil
 }
-func (stubStore) Open(context.Context, string) (Journal, error)   { return nil, nil }
-func (stubStore) Load(context.Context, string) (*RunState, error) { return nil, nil }
-func (stubStore) List(context.Context) ([]RunInfo, error)         { return nil, nil }
-func (stubStore) Delete(context.Context, string) error            { return nil }
+func (stubStore) Open(context.Context, string) (Journal, error)       { return nil, nil }
+func (stubStore) Load(context.Context, string) (*RunState, error)     { return nil, nil }
+func (stubStore) List(context.Context, ListFilter) ([]RunInfo, error) { return nil, nil }
+func (stubStore) Delete(context.Context, string) error                { return nil }
 
 // The fake backend is registered once for the whole test binary so New has
 // something to dispatch to without linking a real backend in. Register panics on a

@@ -49,9 +49,34 @@ type RunInfo struct {
 	Updated time.Time
 	Model   string
 	Prompt  string
+	// Agent is MetaRecord.Agent, so a listing says which agent a conversation belongs
+	// to without loading the run. Empty for a run journaled before that field existed.
+	Agent string
 	// Terminal is the reason the run ended, or empty if it is still open (was
 	// suspended or crashed).
 	Terminal TerminalReason
+}
+
+// ListFilter narrows a listing. A zero ListFilter selects every stored run.
+type ListFilter struct {
+	// Agent selects the runs one agent produced, matched by MatchesAgent. Empty
+	// selects every run whichever agent produced it.
+	Agent string
+}
+
+// MatchesAgent reports whether a run stamped with agent belongs in this listing.
+//
+// A filter naming no agent takes every run. A run carrying no agent is taken by every
+// filter: journals existed before Store.Create began stamping the field, so an empty
+// value is a conversation held before anyone recorded an agent rather than one another
+// agent produced. An operator who has been running an agent since before the field
+// keeps their conversations in the listing; an operator who has been sharing a store
+// sees, beside their own, the older ones either agent could have written.
+//
+// Every backend answers through this rather than comparing the two strings itself, so
+// the three answers cannot drift apart between listings.
+func (f ListFilter) MatchesAgent(agent string) bool {
+	return f.Agent == "" || agent == "" || f.Agent == agent
 }
 
 // Journal is an append-only record log for a single run. Append is idempotent on
@@ -160,14 +185,20 @@ type Store interface {
 	// It stamps meta.Version, so a caller leaves that field zero; a meta record
 	// carrying a version this build does not write fails with ErrVersion. An
 	// implementation gets both from PrepareMeta, which it calls before the append.
+	//
+	// Every other field is written as the caller supplied it, meta.Agent among them:
+	// a store holds no identity of its own, so the process that has the configuration
+	// puts its identity there before it calls this.
 	Create(ctx context.Context, id string, meta MetaRecord) (Journal, error)
 	// Open locks an existing run's journal for appending (resume). It fails with
 	// ErrNotFound if the id is unknown.
 	Open(ctx context.Context, id string) (Journal, error)
 	// Load reads and folds a run without locking it, for inspection and listing.
 	Load(ctx context.Context, id string) (*RunState, error)
-	// List summarizes all stored runs.
-	List(ctx context.Context) ([]RunInfo, error)
+	// List summarizes the stored runs filter selects, applying it inside the store
+	// rather than leaving the caller to drop rows it already paid to read. A zero
+	// ListFilter summarizes every run.
+	List(ctx context.Context, filter ListFilter) ([]RunInfo, error)
 	// Delete removes a run's journal and lock.
 	Delete(ctx context.Context, id string) error
 }

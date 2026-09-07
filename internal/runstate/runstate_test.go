@@ -142,6 +142,37 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Caller).To(BeEmpty())
 		})
 
+		It("restores the agent that produced the run", func() {
+			rec := meta()
+			rec.Meta.Agent = "agent-a"
+
+			rs, err := Fold([]Record{rec})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Agent).To(Equal("agent-a"))
+		})
+
+		// The field is omitempty, so a build that predates it wrote a meta record with no
+		// agent key at all. That record folds with an empty agent at the version it was
+		// written under, which is why adding the field moved no version.
+		It("folds a meta record written before the agent field existed", func() {
+			body := `{"seq":1,"protocol":"io.choria.fisk-ai.v1.session.meta","meta":{"version":1,"run_id":"r1","created":"2026-01-01T00:00:00Z","fingerprint":{"model":"claude-opus-4-8"},"prompt":"start here"}}`
+
+			var rec Record
+			Expect(json.Unmarshal([]byte(body), &rec)).To(Succeed())
+			Expect(rec.Meta.Version).To(Equal(Version), "the record predates the agent field, not this build's version")
+
+			rs, err := Fold([]Record{rec})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Agent).To(BeEmpty())
+			Expect(rs.Prompt).To(Equal("start here"))
+		})
+
+		It("writes no agent key for a run nobody recorded an agent for", func() {
+			data, err := json.Marshal(meta())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(bytes.Contains(data, []byte(`"agent"`))).To(BeFalse())
+		})
+
 		claim := func(seq uint64) Record {
 			return Record{Seq: seq, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-a", Claimed: time.Now().UTC()}}
 		}
@@ -669,6 +700,30 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Completed()).To(BeFalse())
 			Expect(rs.NextIteration).To(Equal(int64(2)))
 			Expect(userTexts(rs)).To(Equal([]string{"start here", "again"}))
+		})
+	})
+
+	// Every backend answers an agent filter through this, so the three answers are
+	// pinned once here and each backend's suite proves it calls this rather than
+	// comparing the two strings itself.
+	Describe("ListFilter.MatchesAgent", func() {
+		It("takes every run when the filter names no agent", func() {
+			var f ListFilter
+			Expect(f.MatchesAgent("agent-a")).To(BeTrue())
+			Expect(f.MatchesAgent("")).To(BeTrue())
+		})
+
+		It("takes the named agent's run and leaves another agent's out", func() {
+			f := ListFilter{Agent: "agent-a"}
+			Expect(f.MatchesAgent("agent-a")).To(BeTrue())
+			Expect(f.MatchesAgent("agent-b")).To(BeFalse())
+		})
+
+		// A run with no agent was journaled before anyone recorded one, so it is shown:
+		// hiding it would empty the rail of an operator who has been running an agent
+		// since before the field existed.
+		It("takes a run that carries no agent", func() {
+			Expect(ListFilter{Agent: "agent-a"}.MatchesAgent("")).To(BeTrue())
 		})
 	})
 

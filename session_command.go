@@ -156,7 +156,9 @@ func sessionLsAction(_ *fisk.ParseContext) error {
 	}
 	defer cleanup()
 
-	infos, err := store.List(ctx)
+	// A zero filter, so the command lists every conversation in the store whichever
+	// agent produced it. An operator at this terminal is asking about the store.
+	infos, err := store.List(ctx, runstate.ListFilter{})
 	if err != nil {
 		return err
 	}

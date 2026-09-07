@@ -173,6 +173,18 @@ type MetaRecord struct {
 	// It is the caller's own claim. Nothing verifies it and nothing decides on it, so
 	// it is a label for a person reading a journal and never evidence of who owns one.
 	Caller string `json:"caller,omitempty"`
+	// Agent names the agent that produced this run, taken from the configured identity
+	// of the process that created the journal. Two agents pointed at one store write
+	// into it together, and this is what a listing tells their conversations apart by.
+	//
+	// It is empty on a record written before the field existed, which is a conversation
+	// held before anyone recorded an agent rather than one belonging to no agent.
+	// ListFilter.MatchesAgent holds what a listing does with that.
+	//
+	// It is the serving agent's label for itself. Nothing verifies it and nothing
+	// decides access on it, as with Caller. A store an operator wants genuinely
+	// separated is a separate store.
+	Agent string `json:"agent,omitempty"`
 }
 
 // AssistantRecord is one assistant turn in the neutral model, so thinking blocks

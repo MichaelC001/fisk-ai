@@ -163,12 +163,52 @@ var _ = Describe("FakeSessionStore", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rs.Prompt).To(Equal("the first prompt"))
 
-		infos, err := store.List(ctx)
+		infos, err := store.List(ctx, runstate.ListFilter{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(infos).To(ConsistOf(
 			runstate.RunInfo{RunID: "run1", Prompt: "the first prompt"},
 			runstate.RunInfo{RunID: "run2", Prompt: "the second prompt"},
 		))
+	})
+
+	// An embedder tests a rail against this fake, so it has to give the same three
+	// answers a file or JetStream store gives: the named agent's runs, none of another
+	// agent's, and the runs journaled before anyone recorded one.
+	Describe("listing by agent", func() {
+		createFor := func(id, agent string) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{RunID: id, Prompt: "do the thing", Agent: agent})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		agentsByID := func(infos []runstate.RunInfo) map[string]string {
+			out := map[string]string{}
+			for _, info := range infos {
+				out[info.RunID] = info.Agent
+			}
+
+			return out
+		}
+
+		BeforeEach(func() {
+			createFor("run-a", "agent-a")
+			createFor("run-b", "agent-b")
+			createFor("run-unstamped", "")
+		})
+
+		It("Should carry the agent on every row and list every run for a zero filter", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(agentsByID(infos)).To(Equal(map[string]string{"run-a": "agent-a", "run-b": "agent-b", "run-unstamped": ""}))
+		})
+
+		It("Should list one agent's runs and the runs nobody recorded an agent for", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{Agent: "agent-a"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(agentsByID(infos)).To(Equal(map[string]string{"run-a": "agent-a", "run-unstamped": ""}))
+		})
 	})
 
 	It("Should forget a deleted run", func() {
@@ -203,7 +243,7 @@ var _ = Describe("FakeSessionStore", func() {
 		_, err = store.Load(canceled, "run1")
 		Expect(err).To(MatchError(context.Canceled))
 
-		_, err = store.List(canceled)
+		_, err = store.List(canceled, runstate.ListFilter{})
 		Expect(err).To(MatchError(context.Canceled))
 
 		Expect(store.Delete(canceled, "run1")).To(MatchError(context.Canceled))
@@ -245,7 +285,7 @@ var _ = Describe("FakeSessionStore", func() {
 				_, err = store.Load(ctx, id)
 				Expect(err).ToNot(HaveOccurred())
 
-				_, err = store.List(ctx)
+				_, err = store.List(ctx, runstate.ListFilter{})
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(j.Close()).To(Succeed())
@@ -254,7 +294,7 @@ var _ = Describe("FakeSessionStore", func() {
 
 		wg.Wait()
 
-		infos, err := store.List(ctx)
+		infos, err := store.List(ctx, runstate.ListFilter{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(infos).To(HaveLen(runs))
 	})

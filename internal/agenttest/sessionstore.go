@@ -176,8 +176,11 @@ func (s *FakeSessionStore) Load(ctx context.Context, id string) (*runstate.RunSt
 	return runstate.Fold(j.snapshot())
 }
 
-// List implements runstate.Store.
-func (s *FakeSessionStore) List(ctx context.Context) ([]runstate.RunInfo, error) {
+// List implements runstate.Store. The filter is answered through
+// runstate.ListFilter.MatchesAgent, the call both real backends make, so a test written
+// against this fake sees a run with no agent listed under any agent as it would be in a
+// file or JetStream store.
+func (s *FakeSessionStore) List(ctx context.Context, filter runstate.ListFilter) ([]runstate.RunInfo, error) {
 	err := ctx.Err()
 	if err != nil {
 		return nil, err
@@ -192,7 +195,10 @@ func (s *FakeSessionStore) List(ctx context.Context) ([]runstate.RunInfo, error)
 		if err != nil {
 			return nil, err
 		}
-		info := runstate.RunInfo{RunID: id, Prompt: rs.Prompt}
+		if !filter.MatchesAgent(rs.Agent) {
+			continue
+		}
+		info := runstate.RunInfo{RunID: id, Prompt: rs.Prompt, Agent: rs.Agent}
 		if rs.Terminal != nil {
 			info.Terminal = rs.Terminal.Reason
 		}

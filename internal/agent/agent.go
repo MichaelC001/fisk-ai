@@ -2117,6 +2117,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				// record it folded.
 				ConversationToken: opts.Checkpoint.ConversationToken,
 				Caller:            opts.Checkpoint.Caller,
+				// The store holds no identity, so the configured one is put on the record
+				// here, alongside the other two things only creation knows.
+				Agent: cfg.Identity,
 			}
 			j, err := store.Create(ctx, sessionID, meta)
 			if err != nil {
@@ -2138,7 +2141,8 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// It carries no conversation token. A channel names a journal by hashing the token,
 		// so this id is not that hash and no caller reaches this journal by holding one.
 		// Copying it would put two conversations in a listing claiming one token, only one
-		// of which can be continued. The caller is copied, since who asked did not change.
+		// of which can be continued. The caller is copied, since who asked did not change,
+		// and so is the agent, since the same process journals this one.
 		newSession = func(ctx context.Context, prompt string) (runstate.Journal, string, error) {
 			id := wire.NewID()
 			meta := runstate.MetaRecord{
@@ -2148,6 +2152,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 				Prompt:      prompt,
 				Interactive: interactive,
 				Caller:      opts.Checkpoint.Caller,
+				Agent:       cfg.Identity,
 			}
 			j, err := store.Create(ctx, id, meta)
 			if err != nil {

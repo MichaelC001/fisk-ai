@@ -260,8 +260,10 @@ func (s *FileStore) Load(ctx context.Context, id string) (*runstate.RunState, er
 }
 
 // List implements runstate.Store. It reads and folds one journal per run, so it checks
-// the context before each of them as well as at the start.
-func (s *FileStore) List(ctx context.Context) ([]runstate.RunInfo, error) {
+// the context before each of them as well as at the start. The filter is applied to the
+// folded run through runstate.ListFilter, so a run with no agent is listed under any
+// agent.
+func (s *FileStore) List(ctx context.Context, filter runstate.ListFilter) ([]runstate.RunInfo, error) {
 	err := ctx.Err()
 	if err != nil {
 		return nil, err
@@ -296,8 +298,11 @@ func (s *FileStore) List(ctx context.Context) ([]runstate.RunInfo, error) {
 		if err != nil {
 			continue
 		}
+		if !filter.MatchesAgent(rs.Agent) {
+			continue
+		}
 
-		info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt}
+		info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt, Agent: rs.Agent}
 		if fi, err := e.Info(); err == nil {
 			info.Updated = fi.ModTime()
 		}

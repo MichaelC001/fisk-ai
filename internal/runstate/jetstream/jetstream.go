@@ -414,7 +414,12 @@ func (s *store) Load(ctx context.Context, id string) (*runstate.RunState, error)
 // Reading and folding every run to fill six fields made a listing cost the whole store,
 // since a fold reads every assistant turn and every tool result of every conversation to
 // reach two of them.
-func (s *store) List(ctx context.Context) ([]runstate.RunInfo, error) {
+//
+// The agent is on the meta record rather than in a subject token: the operator owns the
+// stream and its <prefix>.> binding, and a run is addressed by <prefix>.<run>.<seq> in
+// every other operation, so there is no subject to filter on. summarize therefore reads
+// the meta record and decides from it, before the second read.
+func (s *store) List(ctx context.Context, filter runstate.ListFilter) ([]runstate.RunInfo, error) {
 	opCtx, cancel := opContext(ctx)
 	defer cancel()
 
@@ -433,7 +438,7 @@ func (s *store) List(ctx context.Context) ([]runstate.RunInfo, error) {
 			continue
 		}
 
-		ri, err := s.summarize(opCtx, id)
+		ri, err := s.summarize(opCtx, id, filter)
 		if err != nil {
 			// A run this build cannot summarize is left out of the listing. A run it
 			// could not reach because the caller stopped is a different answer, and the
@@ -447,6 +452,9 @@ func (s *store) List(ctx context.Context) ([]runstate.RunInfo, error) {
 
 			continue
 		}
+		if ri == nil {
+			continue
+		}
 
 		out = append(out, *ri)
 	}
@@ -454,13 +462,15 @@ func (s *store) List(ctx context.Context) ([]runstate.RunInfo, error) {
 	return out, nil
 }
 
-// summarize builds one run's listing entry from its first and last records.
+// summarize builds one run's listing entry from its first and last records, returning
+// nil for a run the filter excludes. The agent is on the meta record, which is the first
+// of the two reads, so an excluded run costs one read rather than two.
 //
 // A run whose meta record is absent, unreadable, or of a version this build does not
 // support is not summarized, which is what folding it did: meta is written first and
 // never removed, so its absence means there is no run, and a listing that named a run
 // nothing else here can open would be worse than one that leaves it out.
-func (s *store) summarize(ctx context.Context, id string) (*runstate.RunInfo, error) {
+func (s *store) summarize(ctx context.Context, id string, filter runstate.ListFilter) (*runstate.RunInfo, error) {
 	first, err := s.stream.GetLastMsgForSubject(ctx, s.metaSubject(id))
 	if err != nil {
 		return nil, fmt.Errorf("jetstream session: reading the meta record of run %q: %w", id, err)
@@ -477,6 +487,9 @@ func (s *store) summarize(ctx context.Context, id string) (*runstate.RunInfo, er
 	if meta.Meta.Version != runstate.Version {
 		return nil, fmt.Errorf("%w: run %q is version %d, supported %d", runstate.ErrVersion, id, meta.Meta.Version, runstate.Version)
 	}
+	if !filter.MatchesAgent(meta.Meta.Agent) {
+		return nil, nil
+	}
 
 	ri := &runstate.RunInfo{
 		RunID:   meta.Meta.RunID,
@@ -484,6 +497,7 @@ func (s *store) summarize(ctx context.Context, id string) (*runstate.RunInfo, er
 		Updated: first.Time,
 		Model:   meta.Meta.Fingerprint.Model,
 		Prompt:  meta.Meta.Prompt,
+		Agent:   meta.Meta.Agent,
 	}
 
 	// The last message on the run wildcard is the highest-stream-seq record, which is
