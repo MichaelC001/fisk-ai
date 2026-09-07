@@ -896,6 +896,173 @@ llm:
 		})
 	})
 
+	Describe("Web", func() {
+		It("Should be off unless the block is present", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.WebEnabled()).To(BeFalse())
+			Expect(cfg.WebOrigins()).To(BeNil())
+		})
+
+		It("Should default the listen address and the base path", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    web:
+      origins:
+        - http://localhost:5173
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.WebEnabled()).To(BeTrue())
+			Expect(cfg.WebListen()).To(Equal(DefaultWebListen))
+			Expect(cfg.WebBasePath()).To(Equal(DefaultWebBasePath))
+			Expect(cfg.WebOrigins()).To(Equal([]string{"http://localhost:5173"}))
+		})
+
+		It("Should take what the block sets", func() {
+			cfg, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    web:
+      listen: 0.0.0.0:9090
+      base_path: /agent
+      origins:
+        - https://console.example.com
+        - http://localhost:5173
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.WebListen()).To(Equal("0.0.0.0:9090"))
+			Expect(cfg.WebBasePath()).To(Equal("/agent"))
+			Expect(cfg.WebOrigins()).To(Equal([]string{"https://console.example.com", "http://localhost:5173"}))
+		})
+
+		// prepare() never runs for a Config an embedder builds in process, and an empty
+		// http.Server.Addr binds every interface on port 80, so the loopback default has
+		// to survive an empty field rather than living only in prepare().
+		It("Should default the listen address on a config prepare never ran over", func() {
+			cfg := &Config{Expose: &ExposeConfig{Agent: &AgentExpose{Web: &ExposedWebConfig{}}}}
+
+			Expect(cfg.WebListen()).To(Equal(DefaultWebListen))
+			Expect(cfg.WebBasePath()).To(Equal(DefaultWebBasePath))
+		})
+
+		// ServeMux reads a pattern without a leading slash as a host and a path, registers
+		// it, and then 404s every request.
+		It("Should refuse a base path without a leading slash", func() {
+			_, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    web:
+      base_path: fisk/v1
+      origins:
+        - http://localhost:5173
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).To(MatchError(ContainSubstring("expose.agent.web.base_path")))
+			Expect(err).To(MatchError(ContainSubstring("must start with a slash")))
+		})
+
+		// The list is the whole of what decides which page may read an answer.
+		It("Should refuse an empty origin list, a wildcard, and an entry a browser never sends", func() {
+			parse := func(origins string) error {
+				_, err := ParseConfig([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    web:
+` + origins + `
+llm:
+  model: claude-sonnet-4-6
+`))
+
+				return err
+			}
+
+			Expect(parse("      listen: 127.0.0.1:8080")).To(MatchError(ContainSubstring("expose.agent.web.origins is required")))
+			Expect(parse("      origins: []")).To(MatchError(ContainSubstring("expose.agent.web.origins is required")))
+			Expect(parse("      origins: ['*']")).To(MatchError(ContainSubstring("a wildcard would let any page read the answers")))
+			Expect(parse("      origins: ['http://localhost:5173/app']")).To(MatchError(ContainSubstring("scheme://host[:port] with no path")))
+			Expect(parse("      origins: ['localhost:5173']")).To(MatchError(ContainSubstring("scheme://host[:port] with no path")))
+		})
+
+		// A web turn runs the whole loop, and the identity is hashed into the journal a
+		// thread runs in, so a name derived from the application's basename is not enough.
+		It("Should require what a run needs, naming the block that asked", func() {
+			_, err := ParseConfigForMode([]byte(`
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    web:
+      origins: ['http://localhost:5173']
+llm:
+  model: claude-sonnet-4-6
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("identity is required when expose.agent.web is set")))
+
+			_, err = ParseConfigForMode([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+expose:
+  agent:
+    web:
+      origins: ['http://localhost:5173']
+llm:
+  model: claude-sonnet-4-6
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("prompt is required when expose.agent.web is set")))
+
+			_, err = ParseConfigForMode([]byte(`
+identity: agent1
+application_path: /usr/bin/nats
+system_prompt: do the thing
+expose:
+  agent:
+    web:
+      origins: ['http://localhost:5173']
+llm: {}
+`), ModeServe)
+			Expect(err).To(MatchError(ContainSubstring("llm.model is required when expose.agent.web is set")))
+		})
+
+		It("Should not inherit the MCP waiver on identity and prompt", func() {
+			_, err := ParseConfig([]byte(`
+application_path: /usr/bin/nats
+expose:
+  agent:
+    mcp:
+      port: 8080
+    web:
+      origins: ['http://localhost:5173']
+llm:
+  model: claude-sonnet-4-6
+`))
+			Expect(err).To(MatchError(ContainSubstring("prompt is required unless exposed over MCP")))
+		})
+	})
+
 	Describe("Jobs", func() {
 		It("Should be off unless the block is present", func() {
 			cfg, err := ParseConfig([]byte(`

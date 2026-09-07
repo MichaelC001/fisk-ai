@@ -1005,6 +1005,15 @@ type AgentExpose struct {
 	// SLACK_APP_TOKEN and SLACK_BOT_TOKEN, so a configuration file that is committed and
 	// shared never holds one.
 	Slack *ExposedSlackConfig `json:"slack,omitempty" yaml:"slack,omitempty"`
+	// Web opts this agent in to answering a browser over HTTP, one thread being one
+	// conversation. Its presence is the switch for the web channel of `fisk-ai serve`.
+	// listen and base_path default; origins does not, since the channel refuses to serve
+	// a page it was not told about.
+	//
+	// It differs in kind from MCP and A2A on the same terms Slack and Jobs do: it hands
+	// the agent a whole unit of work and runs the agent loop over it, so Tools below does
+	// NOT narrow it.
+	Web *ExposedWebConfig `json:"web,omitempty" yaml:"web,omitempty"`
 	// Jobs opts this agent in to taking whole units of work off a Choria asyncjobs work
 	// queue. Its presence is the switch for the queued-jobs intake of `fisk-ai serve`,
 	// which refuses to start without it, and every field under it has a default, so an
@@ -1275,6 +1284,42 @@ type ExposedSlackConfig struct {
 	// as a turn of its own: the cap bounds what one follow-up carries rather than
 	// licensing the loss of what somebody wrote.
 	MaxCoalesced int `json:"max_coalesced,omitempty" yaml:"max_coalesced,omitempty"`
+}
+
+// Defaults for the web channel.
+const (
+	// DefaultWebListen is the address the web channel listens on when none is set. It is
+	// loopback because an empty http.Server.Addr binds every interface on port 80.
+	DefaultWebListen = "127.0.0.1:8080"
+	// DefaultWebBasePath is the path prefix the formats are mounted under when none is
+	// set.
+	DefaultWebBasePath = "/fisk/v1"
+)
+
+// ExposedWebConfig configures the web channel: where it listens, the path prefix its
+// formats answer under, and the pages allowed to read the answers.
+//
+// What is deliberately not here is as much of the shape as what is. Every format is
+// mounted and none can be turned off, the session store is harness.sessions and the
+// per-tool bound is harness.tool_timeout, both shared with every other endpoint.
+type ExposedWebConfig struct {
+	// Listen is the host and port the channel binds. Read it through Config.WebListen,
+	// which supplies the loopback default for an unset key. A listener on any other
+	// address sits behind a TLS proxy, since a page served over https cannot call an http
+	// endpoint.
+	Listen string `json:"listen,omitempty" yaml:"listen,omitempty"`
+
+	// BasePath is the path prefix every format is mounted under, so the AI SDK format
+	// answers on <base_path>/vercel. It must start with a slash: ServeMux reads a pattern
+	// with none as a host and a path, registers it, and every request 404s.
+	BasePath string `json:"base_path,omitempty" yaml:"base_path,omitempty"`
+
+	// Origins lists the pages allowed to read the answers, each as a browser sends it in
+	// the Origin header: scheme, host and port with no path. It is required and takes no
+	// wildcard. A request carrying an Origin outside it is refused before its body is
+	// read, since a cross-origin POST still reaches the handler and would still run a
+	// turn with the browser only withholding the answer from the page.
+	Origins []string `json:"origins,omitempty" yaml:"origins,omitempty"`
 }
 
 // ExposedJobsConfig configures the queued-jobs intake: which work queue this agent
@@ -1898,7 +1943,7 @@ func ValidateForMode(cfg *Config, mode Mode) error {
 	// no key in the file.
 	mcpOnly := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.MCP != nil
 	jobs := cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.Jobs != nil
-	if !mcpOnly || jobs || cfg.A2APromptsEnabled() || cfg.SlackEnabled() {
+	if !mcpOnly || jobs || cfg.A2APromptsEnabled() || cfg.SlackEnabled() || cfg.WebEnabled() {
 		if cfg.Identity == "" {
 			return fmt.Errorf("identity is required unless exposed over MCP")
 		}
@@ -1958,6 +2003,20 @@ func validateServe(cfg *Config) error {
 		}
 		if cfg.LLM.Model == "" {
 			return fmt.Errorf("llm.model is required when expose.agent.slack is set")
+		}
+	}
+
+	// A web turn runs the whole agent loop, and the identity is hashed into the journal
+	// a thread runs in, on the terms the Slack block states.
+	if cfg.WebEnabled() {
+		if !cfg.IdentityIsNamed() {
+			return fmt.Errorf("identity is required when expose.agent.web is set: it names the journals this channel's threads run in, so it must be a name you chose rather than one derived from the application or left at the default")
+		}
+		if cfg.SystemPrompt == "" {
+			return fmt.Errorf("prompt is required when expose.agent.web is set")
+		}
+		if cfg.LLM.Model == "" {
+			return fmt.Errorf("llm.model is required when expose.agent.web is set")
 		}
 	}
 
@@ -2837,6 +2896,46 @@ func (c *Config) SlackMaxCoalesced() int {
 	return c.Expose.Agent.Slack.MaxCoalesced
 }
 
+// WebEnabled reports whether this agent answers a browser over HTTP, which is the
+// presence of expose.agent.web.
+func (c *Config) WebEnabled() bool {
+	return c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.Web != nil
+}
+
+// WebListen returns the address the web channel binds, from expose.agent.web.listen.
+//
+// It never returns an empty string, and the default is applied here rather than only
+// in Prepare(), which an embedder building a Config in process may not have called: an
+// empty http.Server.Addr binds every interface on port 80.
+func (c *Config) WebListen() string {
+	if !c.WebEnabled() || c.Expose.Agent.Web.Listen == "" {
+		return DefaultWebListen
+	}
+
+	return c.Expose.Agent.Web.Listen
+}
+
+// WebBasePath returns the path prefix the web channel mounts its formats under, or the
+// default when unset.
+func (c *Config) WebBasePath() string {
+	if !c.WebEnabled() || c.Expose.Agent.Web.BasePath == "" {
+		return DefaultWebBasePath
+	}
+
+	return c.Expose.Agent.Web.BasePath
+}
+
+// WebOrigins returns the pages allowed to read the web channel's answers. It is nil
+// when the channel is not configured; a configured block with none is refused by
+// Prepare.
+func (c *Config) WebOrigins() []string {
+	if !c.WebEnabled() {
+		return nil
+	}
+
+	return c.Expose.Agent.Web.Origins
+}
+
 // MCPBuiltins returns the built-in tools opted in to MCP exposure via
 // expose.agent.mcp.builtins, normalized and validated by Prepare. It is nil when
 // none are set.
@@ -2952,6 +3051,13 @@ func (c *Config) Prepare() error {
 			return err
 		}
 		c.Expose.Agent.Slack.AnswerGraceParsed = d
+	}
+
+	if c.Expose != nil && c.Expose.Agent != nil && c.Expose.Agent.Web != nil {
+		err := prepareWeb(c.Expose.Agent.Web)
+		if err != nil {
+			return err
+		}
 	}
 
 	// An unset key takes the default; an explicit 0s parses to zero and is how an
@@ -3414,6 +3520,52 @@ func prepareAnswerGrace(grace string) (time.Duration, error) {
 	}
 
 	return d, nil
+}
+
+// prepareWeb checks the shape of the web block. An unset listen and base_path are left
+// empty, which Config.WebListen and Config.WebBasePath read as the defaults.
+//
+// base_path without a leading slash is refused: ServeMux reads fisk/v1/vercel as a host
+// and a path, registers it without complaint, and every request 404s. origins is refused
+// empty and refused with a wildcard, since the list is what decides which page may read
+// an answer, and an entry with a path or no scheme is refused because a browser's Origin
+// header never carries either, so the entry could never match.
+func prepareWeb(web *ExposedWebConfig) error {
+	if web.BasePath != "" && !strings.HasPrefix(web.BasePath, "/") {
+		return fmt.Errorf("invalid expose.agent.web.base_path %q: it must start with a slash", web.BasePath)
+	}
+
+	if len(web.Origins) == 0 {
+		return fmt.Errorf("expose.agent.web.origins is required: list each page allowed to read the answers as scheme://host[:port], for example http://localhost:5173")
+	}
+
+	for _, origin := range web.Origins {
+		err := validateWebOrigin(origin)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateWebOrigin checks one entry of expose.agent.web.origins against what a browser
+// sends: a scheme, a host, an optional port and nothing else.
+func validateWebOrigin(origin string) error {
+	if origin == "*" {
+		return fmt.Errorf("invalid expose.agent.web.origins entry %q: a wildcard would let any page read the answers; list each page instead", origin)
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("invalid expose.agent.web.origins entry %q: %w", origin, err)
+	}
+
+	if u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("invalid expose.agent.web.origins entry %q: an origin is scheme://host[:port] with no path, as a browser sends it", origin)
+	}
+
+	return nil
 }
 
 // maxReasoningEffortRunes caps llm.reasoning_effort. A level is one short word, and
