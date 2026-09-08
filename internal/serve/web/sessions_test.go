@@ -16,8 +16,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
+	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // What every conversation in these specs was journaled with, so a row's creation time
@@ -41,6 +44,12 @@ var _ = Describe("The sessions API", func() {
 		opts := testOptions()
 		opts.Sessions = store
 		opts.Formats = []Mount{{Path: "fake", Format: &fakeFormat{}}}
+		// The tools a stored question is rendered from: one confirm-gated command, which
+		// a resume asks about, and one the resume runs on its own.
+		opts.CardTools = []toolkit.Tool{
+			&gatedTool{cardTool: &cardTool{name: "wipe"}, path: "stream rm", tags: []string{toolkit.ConfirmTag}},
+			&cardTool{name: "list"},
+		}
 		ch = newTestChannel(opts)
 	})
 
@@ -74,6 +83,93 @@ var _ = Describe("The sessions API", func() {
 
 		id := SessionFor("agent1", thread)
 		journal(id, "agent1", prompt, summary)
+
+		return id
+	}
+
+	// suspended journals a conversation whose last turn ended on a question: the
+	// assistant turn that made the call, and no result answering it.
+	suspended := func(thread, prompt string, calls ...llm.ContentBlock) string {
+		GinkgoHelper()
+
+		id := SessionFor("agent1", thread)
+
+		j, err := store.Create(ctx, id, runstate.MetaRecord{
+			RunID:   id,
+			Created: journaledAt,
+			Prompt:  prompt,
+			Agent:   "agent1",
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		err = j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{
+			Message: llm.Message{Role: llm.RoleAssistant, Content: calls},
+		}})
+		Expect(err).ToNot(HaveOccurred())
+
+		err = j.Append(ctx, 3, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+			Reason: runstate.ReasonSuspended,
+		}})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+
+		return id
+	}
+
+	// midBatch journals a conversation a run was killed part way through a batch of
+	// calls: the assistant turn, a result for its first call and nothing after it. It is
+	// the state a crash and a takeover both leave behind, and nobody was asked anything
+	// on the way to it.
+	midBatch := func(thread, prompt string, calls ...llm.ContentBlock) string {
+		GinkgoHelper()
+
+		id := SessionFor("agent1", thread)
+
+		j, err := store.Create(ctx, id, runstate.MetaRecord{
+			RunID:   id,
+			Created: journaledAt,
+			Prompt:  prompt,
+			Agent:   "agent1",
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		err = j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{
+			Message: llm.Message{Role: llm.RoleAssistant, Content: calls},
+		}})
+		Expect(err).ToNot(HaveOccurred())
+
+		first := calls[0].ToolUse.ID
+		err = j.Append(ctx, 3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{
+			ToolUseID: first,
+			Result:    llm.ToolResultBlock{ToolUseID: first, Content: "two streams"},
+		}})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+
+		return id
+	}
+
+	// failed journals a conversation whose last turn ended in an error, carrying the
+	// text the run reported.
+	failed := func(thread, prompt, message string) string {
+		GinkgoHelper()
+
+		id := SessionFor("agent1", thread)
+
+		j, err := store.Create(ctx, id, runstate.MetaRecord{
+			RunID:   id,
+			Created: journaledAt,
+			Prompt:  prompt,
+			Agent:   "agent1",
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		err = j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+			Reason:  runstate.ReasonError,
+			Message: message,
+		}})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
 
 		return id
 	}
@@ -240,6 +336,69 @@ var _ = Describe("The sessions API", func() {
 				`replay ` + id + ` "what is running"`,
 				"close reason=completed taken=true err=<nil>",
 			}))
+		})
+
+		// Nothing journals a question, so a page opening a suspended conversation would
+		// read a thread that ends mid-air unless the channel puts the question again.
+		It("Should put the question the conversation stopped on after the replay", func() {
+			id := suspended("t1", "wipe it", pendingCall("c1", "wipe", `{}`))
+
+			rec := call(http.MethodGet, "/fisk/v1/fake/sessions/"+id, nil)
+
+			Expect(rec.Code).To(Equal(http.StatusOK))
+			Expect(strings.Split(strings.TrimSpace(rec.Body.String()), "\n")).To(Equal([]string{
+				"open",
+				`replay ` + id + ` "wipe it"`,
+				"ask approve c1",
+				"close reason=suspended taken=true err=<nil>",
+			}))
+		})
+
+		It("Should put a human-in-the-loop question as the kind its tool asked", func() {
+			id := suspended("t2", "ask me", pendingCall("c1", config.AskHumanSelectToolName, `{"question":"which?","options":["a"]}`))
+
+			rec := call(http.MethodGet, "/fisk/v1/fake/sessions/"+id, nil)
+
+			Expect(rec.Code).To(Equal(http.StatusOK))
+			Expect(rec.Body.String()).To(ContainSubstring("ask select c1"))
+		})
+
+		// A run killed mid-batch leaves the same pending turn a suspend does, and the
+		// calls it left are ones the resume dispatches on its own, so the page is handed
+		// the conversation with nothing to answer.
+		It("Should ask nothing for a conversation journaled mid-batch on calls nobody is asked about", func() {
+			id := midBatch("t4", "list them",
+				pendingCall("c1", "list", `{}`),
+				pendingCall("c2", "list", `{}`),
+			)
+
+			rec := call(http.MethodGet, "/fisk/v1/fake/sessions/"+id, nil)
+
+			Expect(rec.Code).To(Equal(http.StatusOK))
+			Expect(strings.Split(strings.TrimSpace(rec.Body.String()), "\n")).To(Equal([]string{
+				"open",
+				`replay ` + id + ` "list them"`,
+				"close reason= taken=true err=<nil>",
+			}))
+		})
+
+		// The live turn sent the error the run reported, so a page reopening the
+		// conversation reads what failed rather than an ending that names no reason.
+		It("Should carry the error a conversation ended on", func() {
+			id := failed("t5", "wipe it", "the model refused the request")
+
+			rec := call(http.MethodGet, "/fisk/v1/fake/sessions/"+id, nil)
+
+			Expect(rec.Code).To(Equal(http.StatusOK))
+			Expect(rec.Body.String()).To(ContainSubstring("close reason=error taken=true err=the model refused the request"))
+		})
+
+		It("Should ask nothing for a conversation whose last turn finished", func() {
+			id := session("t3", "what is running", nil)
+
+			rec := call(http.MethodGet, "/fisk/v1/fake/sessions/"+id, nil)
+
+			Expect(rec.Body.String()).ToNot(ContainSubstring("ask "))
 		})
 
 		It("Should refuse a conversation another channel or another agent holds", func() {

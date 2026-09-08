@@ -128,6 +128,7 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 			Telemetry:   opts.Telemetry,
 		},
 		CardTools:        tools.Tools,
+		ConfirmTags:      cfg.ConfirmTags(),
 		Sessions:         opts.Sessions,
 		SuspendRequested: opts.SuspendRequested,
 		Logger:           opts.Logger,

@@ -207,6 +207,13 @@ type approvalInput struct {
 	Tag     string `json:"tag,omitempty"`
 }
 
+// userMessageData is one turn a person typed, as a replayed conversation carries it. The
+// stream is one assistant message and has no part for a user turn, so the page reads this
+// and draws the turn itself.
+type userMessageData struct {
+	Text string `json:"text"`
+}
+
 // questionData is a confirm, select or input question as the page receives it. It
 // carries the call an answer names, since the page sends it back in fiskAnswer.
 type questionData struct {

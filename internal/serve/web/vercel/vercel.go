@@ -37,6 +37,16 @@
 // there too, having no boolean in the SDK's own approval to travel in. A page that
 // never sets fiskAnswer answers an approval through the SDK's own approval-responded
 // part and gets a two-way allow or decline.
+//
+// # A stored conversation
+//
+// Replay writes one back as the parts a page reading it live would have received, each
+// text and reasoning block whole rather than in fragments, and each call followed by the
+// result that answered it. The stream is one assistant message, so a user turn goes as a
+// data-user-message part the page draws for itself. A conversation the run left waiting
+// on a question ends on the card it stopped at, which is Ask writing after Replay: the
+// approved call's part comes from the gate there, so the card is one tool part as it is
+// on a live turn.
 package vercel
 
 import (

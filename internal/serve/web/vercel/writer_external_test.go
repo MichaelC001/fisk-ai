@@ -292,21 +292,6 @@ var _ = Describe("The response", func() {
 		Expect(d.body()).To(ContainSubstring(`data: {"type":"finish","finishReason":"length"}`))
 	})
 
-	// Replay belongs to the item that opens a stored session, and the interface carries
-	// it because a Format implements it.
-	It("Should render nothing for a replay", func() {
-		d := decode(prompting)
-
-		d.writer.Open()
-		d.writer.Replay(&runstate.RunState{})
-		d.writer.Close(completed)
-
-		Expect(d.body()).To(Equal(sse(
-			`{"type":"start","messageId":"MID"}`,
-			`{"type":"finish","finishReason":"stop"}`,
-			`[DONE]`,
-		)))
-	})
 })
 
 // streamer is the writer's streaming half, which the runner asserts at run time.

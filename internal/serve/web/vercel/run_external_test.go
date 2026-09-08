@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -16,6 +17,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
@@ -24,30 +26,42 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve/web/vercel"
 )
 
-// gatedApp is an application of two commands, one confirmation-gated so a run that
-// calls it reaches the gate before the command executes, and one that runs on its own.
+// gatedApp is an application of three commands, two confirmation-gated so a run that
+// calls one reaches the gate before the command executes, and one that runs on its own.
+//
+// The gated subcommand is the tool stream_rm running the command "stream rm", so a spec
+// on the card a conversation stopped at tells the model's name for the tool from the
+// command path the operator approves.
 func gatedApp() *fisk.Application {
 	app := fisk.New("app", "an app")
 	app.Command("wipe", "delete everything").Tag("ai:confirm")
 	app.Command("list", "list everything")
+	app.Command("stream", "manage streams").Command("rm", "delete a stream").Tag("ai:confirm")
 
 	return app
 }
 
 // servedChannel is a web channel with this format mounted, sharing the store a spec
-// passes.
-func servedChannel(store runstate.Store) *web.Channel {
+// passes. It resolves the agent's tools the way a configured channel does, since a
+// conversation opened on an outstanding approval is rendered from the tool that runs the
+// command.
+func servedChannel(cfg *config.Config, store runstate.Store) *web.Channel {
 	GinkgoHelper()
 
+	tools, err := web.ResolveAgentTools(context.Background(), cfg, nil)
+	Expect(err).ToNot(HaveOccurred())
+
 	ch, err := web.New(web.Options{
-		Listen:   "127.0.0.1:0",
-		BasePath: "/fisk/v1",
-		Origins:  []string{"http://localhost:5173"},
-		Identity: "agent1",
-		Workers:  2,
-		Formats:  []web.Mount{vercel.Mount()},
-		Sessions: store,
-		Logger:   quietLogger(),
+		Listen:      "127.0.0.1:0",
+		BasePath:    "/fisk/v1",
+		Origins:     []string{"http://localhost:5173"},
+		Identity:    cfg.Identity,
+		Workers:     2,
+		Formats:     []web.Mount{vercel.Mount()},
+		CardTools:   tools.Tools,
+		ConfirmTags: cfg.ConfirmTags(),
+		Sessions:    store,
+		Logger:      quietLogger(),
 	})
 	Expect(err).ToNot(HaveOccurred())
 	DeferCleanup(func() { Expect(ch.Close()).To(Succeed()) })
@@ -57,7 +71,7 @@ func servedChannel(store runstate.Store) *web.Channel {
 
 // serveAll hosts the channel on a server driven by the scripted provider, and stops it
 // when the spec ends.
-func serveAll(store runstate.Store, provider llm.Provider, channels ...*web.Channel) {
+func serveAll(cfg *config.Config, store runstate.Store, provider llm.Provider, channels ...*web.Channel) {
 	GinkgoHelper()
 
 	hosted := make([]serve.Channel, 0, len(channels))
@@ -67,7 +81,7 @@ func serveAll(store runstate.Store, provider llm.Provider, channels ...*web.Chan
 
 	srv, err := serve.New(serve.Options{
 		Channels:     hosted,
-		Config:       agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), gatedApp()), agenttest.WithHITL()),
+		Config:       cfg,
 		ConfigFile:   "agent.yaml",
 		StoreDir:     GinkgoT().TempDir(),
 		Provider:     provider,
@@ -125,19 +139,43 @@ func prompt(chat string, text string) string {
 	return `{"id":"` + chat + `","messages":[{"role":"user","parts":[{"type":"text","text":"` + text + `"}]}]}`
 }
 
+// reopen is a page picking a conversation out of the rail: the session the thread ran in,
+// read back through the format that renders it.
+func reopen(cfg *config.Config, ch *web.Channel, thread string) (int, string) {
+	GinkgoHelper()
+
+	url := "http://" + ch.Addr() + "/fisk/v1/vercel/sessions/" + web.SessionFor(cfg.Identity, thread)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	Expect(err).ToNot(HaveOccurred())
+
+	resp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred())
+	defer resp.Body.Close()
+
+	read, err := io.ReadAll(resp.Body)
+	Expect(err).ToNot(HaveOccurred())
+
+	return resp.StatusCode, pinned(string(read))
+}
+
 // These drive the whole path: a page posts to the hosted channel, the run executes
 // against the scripted model and the fake application, and the bytes the page read are
 // what is asserted on.
 var _ = Describe("A served turn", func() {
-	var store *agenttest.FakeSessionStore
+	var (
+		store *agenttest.FakeSessionStore
+		cfg   *config.Config
+	)
 
 	BeforeEach(func() {
 		store = agenttest.NewFakeSessionStore(GinkgoTB())
+		cfg = agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), gatedApp()), agenttest.WithHITL())
 	})
 
 	It("Should stream an answer as the model writes it", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("hello there")), ch)
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("hello there")), ch)
 
 		resp := send(ch, prompt("t1", "say hello"))
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
@@ -161,8 +199,8 @@ var _ = Describe("A served turn", func() {
 	})
 
 	It("Should render a call and its result on one tool part", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "list", json.RawMessage(`{}`)),
 			agenttest.TextResponse("done"),
 		), ch)
@@ -177,8 +215,8 @@ var _ = Describe("A served turn", func() {
 	// The gate asks before the run traces the call, so the tool part the approval
 	// mutates is sent here or the client drops the approval in silence.
 	It("Should end the turn on the approval of a gated command", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("everything is gone"),
 		), ch)
@@ -197,9 +235,9 @@ var _ = Describe("A served turn", func() {
 	// The resume traces the call the answer named, and a second tool-input-available
 	// under that toolCallId would draw a second card for the one command.
 	It("Should leave out the traced call the answer named and run it", func() {
-		first := servedChannel(store)
-		second := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		first := servedChannel(cfg, store)
+		second := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("everything is gone"),
 		), first, second)
@@ -222,8 +260,8 @@ var _ = Describe("A served turn", func() {
 	// new message appends a second one, which leaves the answered question's card
 	// standing beside a copy of itself carrying the result.
 	It("Should write into the assistant message the answering request names", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("everything is gone"),
 		), ch)
@@ -242,8 +280,8 @@ var _ = Describe("A served turn", func() {
 	// A turn the page opened with a message of its own starts an assistant message,
 	// since there is nothing on the client to write into.
 	It("Should start a message when the newest message is the page's own", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("hello there")), ch)
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("hello there")), ch)
 
 		status, body := post(ch, `{"id":"t10","messages":[
 			{"id":"msg-3","role":"assistant","parts":[{"type":"text","text":"earlier"}]},
@@ -257,8 +295,8 @@ var _ = Describe("A served turn", func() {
 	// A page that never sets fiskAnswer answers through the SDK's own approval part,
 	// which is what makes a stock frontend work against this.
 	It("Should take an approval the client answered on the tool part", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("everything is gone"),
 		), ch)
@@ -279,8 +317,8 @@ var _ = Describe("A served turn", func() {
 	// why fiskAnswer takes an approval at all: the second gated call runs without the
 	// person being asked again.
 	It("Should stop asking about a tool the page allowed for the conversation", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.ToolUseResponse("c2", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("both are gone"),
@@ -297,8 +335,8 @@ var _ = Describe("A served turn", func() {
 	})
 
 	It("Should refuse a command the client declined and tell the model why", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("left alone then"),
 		), ch)
@@ -314,8 +352,8 @@ var _ = Describe("A served turn", func() {
 
 	DescribeTable("A human-in-the-loop question",
 		func(tool string, input string, question string, answer string) {
-			ch := servedChannel(store)
-			serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+			ch := servedChannel(cfg, store)
+			serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 				agenttest.ToolUseResponse("c1", tool, json.RawMessage(input)),
 				agenttest.TextResponse("thanks"),
 			), ch)
@@ -350,8 +388,8 @@ var _ = Describe("A served turn", func() {
 	// the question again and the run suspends without reaching a boundary that takes a
 	// user message.
 	It("Should tell the page a message the conversation did not take", func() {
-		ch := servedChannel(store)
-		serveAll(store, agenttest.NewScriptedProvider(GinkgoTB(),
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
 			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
 			agenttest.TextResponse("everything is gone"),
 		), ch)
@@ -363,5 +401,128 @@ var _ = Describe("A served turn", func() {
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).To(ContainSubstring(`data: {"type":"tool-approval-request","approvalId":"approval-c1"`), "the question is put again")
 		Expect(body).To(ContainSubstring(`data: {"type":"error","errorText":"your message was not delivered`))
+	})
+})
+
+// These drive the open route: a conversation is held by running turns against the hosted
+// channel, and what a page picking it out of the rail reads back is what is asserted on.
+var _ = Describe("A conversation opened from the rail", func() {
+	var (
+		store *agenttest.FakeSessionStore
+		cfg   *config.Config
+	)
+
+	BeforeEach(func() {
+		store = agenttest.NewFakeSessionStore(GinkgoTB())
+		cfg = agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), gatedApp()), agenttest.WithHITL())
+	})
+
+	It("Should read back the turns the conversation took", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "list", json.RawMessage(`{}`)),
+			agenttest.TextResponse("there are two"),
+		), ch)
+
+		status, _ := post(ch, prompt("t1", "list it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := reopen(cfg, ch, "t1")
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"data-user-message","id":"1","data":{"text":"list it"}}`))
+		Expect(body).To(ContainSubstring(`data: {"type":"tool-input-available","toolCallId":"c1","toolName":"list","input":{},"dynamic":true}`))
+		Expect(body).To(ContainSubstring(`data: {"type":"tool-output-available","toolCallId":"c1","output":"`))
+		Expect(body).To(ContainSubstring(`"delta":"there are two"`), "the assistant turn is written whole rather than in fragments")
+		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"stop"}`))
+	})
+
+	// Nothing journals the question, so what comes back is the channel rebuilding it from
+	// the call the run left unanswered and the tool that runs it. The card is one tool
+	// part, as the live turn's was, and it carries the command path rather than the name
+	// the model called the tool by.
+	It("Should come back on the approval card it was left on", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "stream_rm", json.RawMessage(`{}`)),
+			agenttest.TextResponse("everything is gone"),
+		), ch)
+
+		status, _ := post(ch, prompt("t2", "wipe it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := reopen(cfg, ch, "t2")
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(Equal(sse(
+			`{"type":"start","messageId":"MID"}`,
+			`{"type":"data-user-message","id":"1","data":{"text":"wipe it"}}`,
+			`{"type":"tool-input-available","toolCallId":"c1","toolName":"stream rm","input":{"command":"stream rm","tag":"ai:confirm"},"dynamic":true}`,
+			`{"type":"tool-approval-request","approvalId":"approval-c1","toolCallId":"c1","reason":"stream rm"}`,
+			`{"type":"finish","finishReason":"tool-calls"}`,
+			`[DONE]`,
+		)))
+	})
+
+	// The turn that failed sent the run's error, so a page picking the conversation out
+	// of the rail reads what failed rather than a finish reason with nothing behind it.
+	It("Should come back carrying the error the conversation failed with", func() {
+		provider := agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("never reached"))
+		provider.SetCallFault(1, agenttest.Fault{Err: errors.New("the provider refused the request")})
+
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, provider, ch)
+
+		status, _ := post(ch, prompt("t6", "list it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := reopen(cfg, ch, "t6")
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"error","errorText":"`))
+		Expect(body).To(ContainSubstring("the provider refused the request"))
+		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"error"}`))
+	})
+
+	It("Should come back on the human-in-the-loop question it was left on", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "ask_human_select", json.RawMessage(`{"question":"which one?","options":["ORDERS","EVENTS"]}`)),
+			agenttest.TextResponse("thanks"),
+		), ch)
+
+		status, _ := post(ch, prompt("t3", "ask me"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := reopen(cfg, ch, "t3")
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"data-question","id":"c1","data":{"toolUseId":"c1","kind":"select","question":"which one?","options":["ORDERS","EVENTS"]}}`))
+		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"tool-calls"}`))
+	})
+
+	// The turn that answers reaches the same conversation the open route read, which is
+	// what makes opening one a way back into it rather than a view of it.
+	It("Should answer the card it came back on and carry the conversation on", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("everything is gone"),
+		), ch)
+
+		status, _ := post(ch, prompt("t4", "wipe it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, _ = reopen(cfg, ch, "t4")
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := post(ch, `{"id":"t4","messages":[{"role":"user","parts":[{"type":"text","text":"wipe it"}]}],"fiskAnswer":{"toolUseId":"c1","kind":"approve","approval":"once"}}`)
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"tool-output-available","toolCallId":"c1","output":"`), "the command ran")
+		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"stop"}`))
+	})
+
+	It("Should answer a conversation this channel does not hold with a 404", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB()), ch)
+
+		status, _ := reopen(cfg, ch, "never-held")
+		Expect(status).To(Equal(http.StatusNotFound))
 	})
 })

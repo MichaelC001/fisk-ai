@@ -56,6 +56,13 @@ type turnWriter struct {
 	// than the suspend the run reports it as.
 	asked bool
 
+	// held holds the tool parts of the calls a replayed turn left unanswered. The gate
+	// sends its own part for the call it asks about, carrying the command path and the
+	// line the operator approves, so a part sent from the stored call as well would draw
+	// a second card under the same toolCallId. Ask sends these, leaving out the call it
+	// asks about, and Close sends them where no question is put.
+	held []toolInputPart
+
 	// continues is the assistant message the client is still building, which this
 	// response head names so the client writes into it rather than appending a second
 	// message beside it. Empty starts a message under a new id.
@@ -167,14 +174,20 @@ func (t *turnWriter) Message(resp llm.Response, _ bool) {
 			continue
 		}
 
-		id := t.mintID()
-
-		t.stream.part(boundaryPart{Type: kind + "-start", ID: id})
-		t.stream.part(deltaPart{Type: kind + "-delta", ID: id, Delta: text})
-		t.stream.part(boundaryPart{Type: kind + "-end", ID: id})
+		t.whole(kind, text)
 	}
 
 	clear(t.blocks)
+}
+
+// whole writes one text or reasoning block as its start, its text and its end together,
+// for a block no fragment arrived for.
+func (t *turnWriter) whole(kind string, text string) {
+	id := t.mintID()
+
+	t.stream.part(boundaryPart{Type: kind + "-start", ID: id})
+	t.stream.part(deltaPart{Type: kind + "-delta", ID: id, Delta: text})
+	t.stream.part(boundaryPart{Type: kind + "-end", ID: id})
 }
 
 // ToolCall renders a dispatched call with the arguments it was dispatched with.
@@ -189,13 +202,18 @@ func (t *turnWriter) ToolCall(trace agent.ToolTrace) {
 		return
 	}
 
-	t.stream.part(toolInputPart{
+	t.stream.part(toolPart(trace.ID, trace.Name, trace.Input))
+}
+
+// toolPart is the stream part one call is drawn as.
+func toolPart(id string, name string, input json.RawMessage) toolInputPart {
+	return toolInputPart{
 		Type:       "tool-input-available",
-		ToolCallID: trace.ID,
-		ToolName:   trace.Name,
-		Input:      toolInput(trace.Input),
+		ToolCallID: id,
+		ToolName:   name,
+		Input:      toolInput(input),
 		Dynamic:    true,
-	})
+	}
 }
 
 // ToolResult renders what a call returned, on the part the call opened.
@@ -224,15 +242,19 @@ func (t *turnWriter) ToolResult(trace agent.ToolResultTrace) {
 // An approval carries no part of its own: tool-approval-request mutates the tool part
 // its toolCallId names, and the client drops one naming a part it does not hold. The
 // gate runs before the call is traced, so that part is sent here, carrying the gate's
-// rendered command line and the tag that gated it.
+// rendered command line and the tag that gated it. A replay holding the stored call's
+// own part drops it, so the approval names the one part this call has.
 //
 // The other three questions have no shape in the AI SDK, so each goes as a data part
-// the page reads without a schema and answers in fiskAnswer.
+// the page reads without a schema and answers in fiskAnswer. Their call was dispatched
+// and the tool put the question, so its part is sent the way a live turn sends it.
 func (t *turnWriter) Ask(q web.Question) {
 	t.Open()
 	t.asked = true
 
 	if q.Kind == web.KindApprove {
+		t.sendHeld(q.ToolUseID)
+
 		input, err := json.Marshal(approvalInput{Command: q.Display, Tag: q.Tag})
 		if err != nil {
 			input = json.RawMessage("{}")
@@ -255,6 +277,8 @@ func (t *turnWriter) Ask(q web.Question) {
 
 		return
 	}
+
+	t.sendHeld("")
 
 	t.stream.part(dataPart{
 		Type: "data-question",
@@ -280,6 +304,7 @@ func (t *turnWriter) Ask(q web.Question) {
 // on the page beside the thing it is asking the person.
 func (t *turnWriter) Close(e web.Ending) {
 	t.Open()
+	t.sendHeld("")
 	t.closeBlocks()
 
 	switch {
@@ -295,9 +320,171 @@ func (t *turnWriter) Close(e web.Ending) {
 }
 
 // Replay writes a stored conversation as the parts the page would have seen while it
-// ran. It renders nothing: reading a runstate.RunState into UI message stream parts
-// is the work of the item that opens a stored session, and no caller replays yet.
-func (t *turnWriter) Replay(*runstate.RunState) {}
+// ran: what the person typed, what the model wrote, and each call with the result that
+// answered it.
+//
+// A stored turn is whole, so every text and reasoning block goes out as its start, its
+// text and its end together. Nothing streamed it and there is no fragment to reconcile.
+//
+// A call that was gated and approved is one tool part rather than the two a live turn
+// produced. The extra part the live turn sent exists so the approval has something to
+// mutate, and the conversation holds the call itself.
+//
+// The UI message stream is one assistant message and has no part for a person's turn, so
+// each user turn goes as a data part the page draws for itself, in the place the
+// conversation holds it.
+func (t *turnWriter) Replay(rs *runstate.RunState) {
+	if rs == nil {
+		return
+	}
+
+	for i, msg := range rs.Messages {
+		if msg.Role != llm.RoleAssistant {
+			t.replayUser(msg)
+
+			continue
+		}
+
+		// A journal stores every call of a turn in the assistant message and every result
+		// in the message after it, while a run sends each result behind the call it
+		// answers. The results are read from the next message so a replayed turn reads in
+		// the order a live one produced.
+		var results []llm.ToolResultBlock
+		if i+1 < len(rs.Messages) {
+			results = resultsOf(rs.Messages[i+1])
+		}
+
+		t.replayAssistant(msg, results)
+	}
+
+	// The turn the run left unfinished is not part of the committed conversation, and it
+	// is the one a resume continues, so it is the last thing the page is shown.
+	if rs.Pending != nil {
+		t.replayPending(rs.Pending)
+	}
+}
+
+// replayUser writes what a person typed. The tool results a stored user message also
+// carries are written with the calls they answer, so they are passed over here.
+func (t *turnWriter) replayUser(msg llm.Message) {
+	for _, block := range msg.Content {
+		if block.Text == nil || block.Text.Text == "" {
+			continue
+		}
+
+		t.stream.part(dataPart{
+			Type: "data-user-message",
+			ID:   t.mintID(),
+			Data: userMessageData{Text: block.Text.Text},
+		})
+	}
+}
+
+// replayAssistant writes one stored assistant turn, each call followed by the result that
+// answered it.
+//
+// A result whose call this turn does not hold is left out. The client mutates the tool
+// part a result names and raises a stream error when it holds none, which would end the
+// replay on the first orphan rather than lose one line of it.
+func (t *turnWriter) replayAssistant(msg llm.Message, results []llm.ToolResultBlock) {
+	for _, block := range msg.Content {
+		if block.ToolUse == nil {
+			kind, text := blockText(block)
+			if kind == "" || text == "" {
+				continue
+			}
+
+			t.whole(kind, text)
+
+			continue
+		}
+
+		t.stream.part(toolPart(block.ToolUse.ID, block.ToolUse.Name, block.ToolUse.Input))
+
+		result, answered := resultFor(results, block.ToolUse.ID)
+		if !answered {
+			continue
+		}
+
+		t.ToolResult(agent.ToolResultTrace{CallID: result.ToolUseID, Output: result.Content, IsError: result.IsError})
+	}
+}
+
+// replayPending writes the turn the run left unfinished, which is the one a resume
+// continues.
+//
+// A call it left unanswered is held rather than sent: the question the page is asked
+// after the replay is about one of them, and the gate sends that call's part itself. The
+// held parts go out when Ask has named the call it asks about, or when Close ends a
+// conversation nobody is being asked about.
+func (t *turnWriter) replayPending(pending *runstate.PendingTurn) {
+	for _, block := range pending.Assistant.Content {
+		if block.ToolUse == nil {
+			kind, text := blockText(block)
+			if kind == "" || text == "" {
+				continue
+			}
+
+			t.whole(kind, text)
+
+			continue
+		}
+
+		part := toolPart(block.ToolUse.ID, block.ToolUse.Name, block.ToolUse.Input)
+
+		result, answered := resultFor(pending.Results, block.ToolUse.ID)
+		if !answered {
+			t.held = append(t.held, part)
+
+			continue
+		}
+
+		t.stream.part(part)
+		t.ToolResult(agent.ToolResultTrace{CallID: result.ToolUseID, Output: result.Content, IsError: result.IsError})
+	}
+}
+
+// sendHeld sends the parts of the calls a replayed turn left unanswered, leaving out the
+// call asked names, and forgets them. An empty asked sends every one of them.
+func (t *turnWriter) sendHeld(asked string) {
+	for _, part := range t.held {
+		if part.ToolCallID == asked {
+			continue
+		}
+
+		t.stream.part(part)
+	}
+
+	t.held = nil
+}
+
+// resultsOf is the tool results a stored user message carries, which answer the calls of
+// the assistant turn before it.
+func resultsOf(msg llm.Message) []llm.ToolResultBlock {
+	var out []llm.ToolResultBlock
+
+	for _, block := range msg.Content {
+		if block.ToolResult == nil {
+			continue
+		}
+
+		out = append(out, *block.ToolResult)
+	}
+
+	return out
+}
+
+// resultFor is the stored result answering a call, and whether the call was answered at
+// all: a run that stopped mid-batch left the calls after it with none.
+func resultFor(results []llm.ToolResultBlock, id string) (llm.ToolResultBlock, bool) {
+	for _, result := range results {
+		if result.ToolUseID == id {
+			return result, true
+		}
+	}
+
+	return llm.ToolResultBlock{}, false
+}
 
 // The run reports these for an operator watching a terminal. The AI SDK client has no
 // part for an advisory, a request summary or a rotated session, and a panic's stack

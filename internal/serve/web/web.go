@@ -136,12 +136,18 @@ type Options struct {
 	// naming an identity other than the one it derives its sessions under.
 	Card a2a.CardOptions
 
-	// CardTools are the tools the card lists, resolved once by the caller. They are
-	// listed as given: this channel has an operator in front of it, so a confirm-gated
-	// command belongs on the card where a2a's own exposure policy drops it.
-	// ResolveAgentTools produces them from a configuration and the process's MCP
-	// sessions.
+	// CardTools are the agent's tools, resolved once by the caller. They are listed on
+	// the card as given: this channel has an operator in front of it, so a confirm-gated
+	// command belongs there where a2a's own exposure policy drops it. They are also what
+	// a stored conversation's outstanding question is rendered from, since a gated
+	// command's line comes from the tool that runs it. ResolveAgentTools produces them
+	// from a configuration and the process's MCP sessions.
 	CardTools []toolkit.Tool
+
+	// ConfirmTags are the operator's extra confirm tags, config.Config.ConfirmTags. They
+	// name the tag that gated a command the always-on ai:confirm did not, on the approval
+	// a page is shown when it opens a conversation waiting on one.
+	ConfirmTags []string
 
 	// Sessions is the run-journal store, borrowed and never closed here since the runs
 	// write to the same one. It is required: a thread is a conversation, and this
@@ -259,6 +265,11 @@ type Channel struct {
 	card      a2a.CardOptions
 	cardTools []toolkit.Tool
 
+	// tools is that same set keyed by name and confirmTags the operator's extra confirm
+	// tags, which together render the question a stored conversation stopped on.
+	tools       map[string]toolkit.Tool
+	confirmTags []string
+
 	// origins is the list as a set, for the check every request makes, and originList
 	// the list as configured, for the banner.
 	origins    map[string]struct{}
@@ -343,6 +354,8 @@ func New(opts Options) (*Channel, error) {
 		log:           log,
 		card:          card,
 		cardTools:     opts.CardTools,
+		tools:         toolsByName(opts.CardTools),
+		confirmTags:   opts.ConfirmTags,
 		origins:       make(map[string]struct{}, len(opts.Origins)),
 		originList:    append([]string(nil), opts.Origins...),
 		listener:      listener,

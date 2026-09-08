@@ -60,6 +60,25 @@ func decode(body string) decoded {
 	return out
 }
 
+// opened is one page opening a stored conversation: the writer the format replays into
+// and the recorder it writes to.
+type opened struct {
+	writer web.TurnWriter
+	rec    *httptest.ResponseRecorder
+}
+
+// body is what the recorder holds, with the minted message id pinned.
+func (o opened) body() string { return pinned(o.rec.Body.String()) }
+
+// open is the writer the channel replays a stored conversation into, which is what the
+// session open route asks the format for.
+func open() opened {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/fisk/v1/vercel/sessions/w-abc", nil)
+
+	return opened{writer: vercel.New().Replayer(rec, req), rec: rec}
+}
+
 // decodeErr is decode for the specs that assert on the refusal.
 func decodeErr(body string) (decoded, error) {
 	rec := httptest.NewRecorder()

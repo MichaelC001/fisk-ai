@@ -286,6 +286,11 @@ func pageLimit(r *http.Request) (int, error) {
 // does not hold is a 404 rather than a body that ends in an error. The writer then puts
 // the whole conversation and closes on what its last turn ended with, which is what a
 // page shows when a person picks a row in the rail.
+//
+// A conversation the run left waiting on a question is asked it again after the replay,
+// so a page opening a suspended conversation sees the card it stopped on rather than a
+// thread that ends mid-air. The question is rebuilt from the pending turn, since nothing
+// journals one.
 func (c *Channel) serveSessionOpen(f Format) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
@@ -299,15 +304,27 @@ func (c *Channel) serveSessionOpen(f Format) http.HandlerFunc {
 		}
 
 		// The ending is the one the conversation's last turn reached, so a page opening a
-		// finished conversation reads the same close it would have read live.
+		// finished conversation reads the same close it would have read live. The
+		// terminal record's message is the text of the error the run ended with, which
+		// the live turn sent as the outcome's own error.
 		ending := Ending{Outcome: serve.Outcome{ID: id, SessionID: id}}
 		if state.Terminal != nil {
 			ending.Outcome.Reason = state.Terminal.Reason
+			if state.Terminal.Message != "" {
+				ending.Outcome.Err = errors.New(state.Terminal.Message)
+			}
 		}
 
 		writer := f.Replayer(w, r)
 		writer.Open()
 		writer.Replay(state)
+
+		question, waiting := PendingQuestion(state, c.tools, c.confirmTags)
+		if waiting {
+			log.Info("Opening a conversation on the question it stopped at", "kind", question.Kind, "tool_use", question.ToolUseID, "remote", r.RemoteAddr)
+			writer.Ask(question)
+		}
+
 		writer.Close(ending)
 	}
 }

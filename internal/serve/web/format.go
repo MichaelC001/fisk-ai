@@ -186,9 +186,21 @@ type TurnWriter interface {
 	Ask(Question)
 
 	// Replay writes a stored conversation as the parts the page would have seen had it
-	// been reading while the conversation ran. It is here because it is on the interface
-	// a Format implements; the channel calls it when a page opens a stored session,
-	// which nothing does yet.
+	// been reading while the conversation ran: the user turns, the assistant turns, and
+	// the tool calls with their results. A stored turn is whole, so a format that streams
+	// a live turn in fragments writes a replayed one in one piece.
+	//
+	// The channel calls it once, when a page opens a stored conversation, between Open
+	// and Close. A conversation the run left waiting on a question is followed by Ask, so
+	// the page sees the card the conversation stopped on.
+	//
+	// It is not agent.TranscriptReplayer.ResumeTranscript, which fires on every turn
+	// after the first: a writer implementing that would send the whole history again on
+	// every message.
+	//
+	// It returns nothing for the reason Open and Close do. The response head is already
+	// written by the time it runs, so there is no status code left to change, and a
+	// format that cannot write its parts is a page that stopped reading.
 	Replay(*runstate.RunState)
 
 	// Close ends the body with what the turn ended on. It calls Open when nothing has,
