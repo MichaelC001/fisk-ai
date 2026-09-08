@@ -254,7 +254,7 @@ var _ = Describe("Spans", func() {
 		}}
 
 		sessions, err := Connect(ctx, Options{
-			Servers:  []config.MCPServer{{Name: "docs", Command: "unused"}},
+			Servers:  []config.MCPServer{{Name: "docs", Command: "unused", WatchTools: true}},
 			Identity: "fisk-test",
 			Version:  "0.0.1",
 			Dialer:   servers.dialer(),

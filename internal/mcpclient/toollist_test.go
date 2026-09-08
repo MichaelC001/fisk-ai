@@ -117,7 +117,7 @@ var _ = Describe("Tool list changes", func() {
 
 	Describe("OnToolListChanged", func() {
 		It("should hand a watcher the server's list as it stands after the change", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			watcher := &changeWatcher{}
 			DeferCleanup(sessions.OnToolListChanged(watcher.record))
@@ -134,7 +134,7 @@ var _ = Describe("Tool list changes", func() {
 		})
 
 		It("should report a tool the server took away", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			watcher := &changeWatcher{}
 			DeferCleanup(sessions.OnToolListChanged(watcher.record))
@@ -147,9 +147,10 @@ var _ = Describe("Tool list changes", func() {
 
 		It("should apply the entry's filters to the new list", func() {
 			sessions := connected(config.MCPServer{
-				Name:    "docs",
-				Command: "unused",
-				Exclude: &config.ToolFilter{Tools: []string{"^fetch$"}},
+				Name:       "docs",
+				Command:    "unused",
+				WatchTools: true,
+				Exclude:    &config.ToolFilter{Tools: []string{"^fetch$"}},
 			})
 
 			watcher := &changeWatcher{}
@@ -165,8 +166,8 @@ var _ = Describe("Tool list changes", func() {
 
 		It("should re-list only the server that changed", func() {
 			sessions := connected(
-				config.MCPServer{Name: "docs", Command: "unused"},
-				config.MCPServer{Name: "issues", Command: "unused"},
+				config.MCPServer{Name: "docs", Command: "unused", WatchTools: true},
+				config.MCPServer{Name: "issues", Command: "unused", WatchTools: true},
 			)
 
 			watcher := &changeWatcher{}
@@ -181,7 +182,7 @@ var _ = Describe("Tool list changes", func() {
 		})
 
 		It("should not list a server nobody is watching", func() {
-			connected(config.MCPServer{Name: "docs", Command: "unused"})
+			connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			addTool("docs", "summarize")
 
@@ -189,7 +190,7 @@ var _ = Describe("Tool list changes", func() {
 		})
 
 		It("should stop calling a watcher whose registration was dropped", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			dropped := &changeWatcher{}
 			stop := sessions.OnToolListChanged(dropped.record)
@@ -205,7 +206,7 @@ var _ = Describe("Tool list changes", func() {
 		})
 
 		It("should report a server that cannot be listed again", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			watcher := &changeWatcher{}
 			DeferCleanup(sessions.OnToolListChanged(watcher.record))
@@ -222,7 +223,7 @@ var _ = Describe("Tool list changes", func() {
 
 	Describe("ImportChanged", func() {
 		It("should name and build the tools the change carries", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			watcher := &changeWatcher{}
 			DeferCleanup(sessions.OnToolListChanged(watcher.record))
@@ -242,7 +243,7 @@ var _ = Describe("Tool list changes", func() {
 		})
 
 		It("should skip a claimed name and record it rather than failing the caller", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			watcher := &changeWatcher{}
 			DeferCleanup(sessions.OnToolListChanged(watcher.record))
@@ -269,7 +270,7 @@ var _ = Describe("Tool list changes", func() {
 		})
 
 		It("should skip a name a tool imported from a peer holds", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			watcher := &changeWatcher{}
 			DeferCleanup(sessions.OnToolListChanged(watcher.record))

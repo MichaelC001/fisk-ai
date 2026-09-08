@@ -1469,6 +1469,16 @@ type MCPServer struct {
 	// third party's server can do in a run, since an imported tool is never confirm
 	// gated locally. A tags filter is rejected: MCP tools carry no tags.
 	Include *ToolFilter `yaml:"include,omitempty" json:"include,omitempty"`
+	// WatchTools subscribes to this server's tool-list changes, so a tool it adds or
+	// removes mid-run reaches the model on its next call. It is off by default, and
+	// with it unset the list read when the session connects stands for the life of that
+	// session.
+	//
+	// The subscription is a long-lived stream the SDK reconnects when it ends, and a
+	// server that answers server/discover but refuses the resumption closes the whole
+	// session rather than only the subscription, which leaves the run with none of that
+	// server's tools. Turn it on for a server known to hold the stream open.
+	WatchTools bool `yaml:"watch_tools,omitempty" json:"watch_tools,omitempty"`
 	// TimeoutString is how long this server gets to start or be reached and finish the
 	// initialize handshake, and again how long it gets to list its tools, as a duration
 	// string (e.g. 30s, or 1d for the day, week, month and year units fisk parses on top
