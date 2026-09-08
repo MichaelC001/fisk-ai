@@ -168,7 +168,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 	// the server it came from.
 	It("Should offer an added tool on the next model call", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
@@ -227,7 +227,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 			mcpDescriptor("search", "Searches the documentation"),
 			mcpDescriptor("fetch", "Fetches a document"),
 		}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
@@ -285,7 +285,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 	// other one is left alone, tools and round trips both.
 	It("Should rebuild only the server that notified", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"}, config.MCPServer{Name: "wiki"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true}, config.MCPServer{Name: "wiki", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}, {Name: "wiki"}}
@@ -330,7 +330,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		application.Command("docs", "documentation commands").Command("status", "report the documentation status")
 
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), application))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
@@ -377,7 +377,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 	// offers the model the same tools on every call, and raises nothing.
 	It("Should run as before for a server that says nothing", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
@@ -410,7 +410,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 	// carries the new text and the operator is told which tool was redefined.
 	It("Should carry a rewritten description on the next model call", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
@@ -457,7 +457,7 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 	// call returned, and the operator still hears that the server moved.
 	It("Should report a change that arrives after the last model call", func() {
 		fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
-		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}

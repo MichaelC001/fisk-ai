@@ -518,19 +518,28 @@ func (s *Sessions) open(ctx context.Context, e *entry) error {
 // budget, and no elicitation handler, so nothing is advertised that no one here
 // answers yet.
 //
-// The tool-list handler is set whether or not anything is watching, because under
-// the 2026-07-28 protocol Connect subscribes to tools/list_changed only when the
-// handler is there: it opens the subscriptions/listen stream with the notifications
-// the client's handlers ask for, and a session connected without one is never told.
-// A run that registers with OnToolListChanged after the sessions were built, which
-// is every run under fisk serve, would have nothing to hear.
+// The tool-list handler is set only for a server whose entry sets WatchTools, and it
+// is set whether or not anything is watching yet: under the 2026-07-28 protocol
+// Connect subscribes to tools/list_changed only when the handler is there, opening
+// the subscriptions/listen stream with the notifications the client's handlers ask
+// for, and a session connected without one is never told. A run that registers with
+// OnToolListChanged after the sessions were built, which is every run under fisk
+// serve, would otherwise have nothing to hear.
+//
+// Without WatchTools no such stream is opened, and the list read at connect stands
+// for the life of the session. That is the default because the stream is long lived
+// and the SDK reconnects it: a server that answers server/discover and then refuses
+// the resumption fails the whole session, so a run against it starts with none of
+// its tools.
 func (s *Sessions) client(e *entry) *mcp.Client {
-	return mcp.NewClient(&mcp.Implementation{Name: s.opts.Identity, Version: s.opts.Version}, &mcp.ClientOptions{
-		Capabilities: &mcp.ClientCapabilities{},
-		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+	opts := &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}}
+	if e.server.WatchTools {
+		opts.ToolListChangedHandler = func(context.Context, *mcp.ToolListChangedRequest) {
 			s.toolListChanged(e)
-		},
-	})
+		}
+	}
+
+	return mcp.NewClient(&mcp.Implementation{Name: s.opts.Identity, Version: s.opts.Version}, opts)
 }
 
 // OnToolListChanged registers fn to hear that a server changed its tool list, with
@@ -548,6 +557,9 @@ func (s *Sessions) client(e *entry) *mcp.Client {
 // A notification that arrives while no one is registered is dropped without a round
 // trip: the list is read when a run starts, so nothing is lost by not reading it
 // while no run is watching.
+//
+// A registration hears from the servers whose entries set WatchTools and from no
+// others, since only those sessions subscribe to tool-list changes.
 func (s *Sessions) OnToolListChanged(fn func(ToolListChange)) func() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

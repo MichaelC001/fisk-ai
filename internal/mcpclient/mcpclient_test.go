@@ -324,7 +324,9 @@ var _ = Describe("Sessions", func() {
 		})
 
 		It("should close the session it replaces", func() {
-			sessions := connected(config.MCPServer{Name: "docs", Command: "unused"})
+			// watch_tools is what opens the subscriptions/listen stream this counts the
+			// watchers of.
+			sessions := connected(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
 
 			// The watcher of the live session's subscriptions/listen stream. Asserting it
 			// is running before anything is broken is what makes the count below evidence
@@ -624,6 +626,46 @@ var _ = Describe("Sessions", func() {
 			Expect(params).To(ContainSubstring(`"capabilities":{}`))
 			Expect(params).ToNot(ContainSubstring("roots"))
 			Expect(params).To(ContainSubstring(`"name":"fisk-test"`))
+		})
+	})
+
+	Describe("Tool list subscription", func() {
+		// What Connect subscribes to is settled by whether a tool-list handler is set,
+		// and only the bytes say whether the stream was opened.
+		subscribed := func(server config.MCPServer) func() []string {
+			GinkgoHelper()
+
+			clientSide, serverSide := mcp.NewInMemoryTransports()
+
+			srv := mcp.NewServer(&mcp.Implementation{Name: "docs", Version: "1"}, nil)
+			_, err := srv.Connect(context.Background(), serverSide, nil)
+			Expect(err).ToNot(HaveOccurred())
+
+			recorder := &recordingTransport{inner: clientSide}
+			sessions, err := Connect(ctx, Options{
+				Servers:  []config.MCPServer{server},
+				Identity: "fisk-test",
+				Dialer: func(context.Context, config.MCPServer) (mcp.Transport, error) {
+					return recorder, nil
+				},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(func() { Expect(sessions.Close(ctx)).To(Succeed()) })
+
+			return recorder.written
+		}
+
+		It("should open no listen stream with watch_tools unset", func() {
+			written := subscribed(config.MCPServer{Name: "docs", Command: "unused"})
+
+			Expect(written()).ToNot(BeEmpty())
+			Consistently(written, 300*time.Millisecond).ShouldNot(ContainElement(ContainSubstring("subscriptions/listen")))
+		})
+
+		It("should open a listen stream with watch_tools set", func() {
+			written := subscribed(config.MCPServer{Name: "docs", Command: "unused", WatchTools: true})
+
+			Eventually(written).Should(ContainElement(ContainSubstring(`"method":"subscriptions/listen"`)))
 		})
 	})
 })
