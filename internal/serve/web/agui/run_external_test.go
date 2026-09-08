@@ -141,18 +141,30 @@ func runs(thread string, run string, text string) string {
 }
 
 // resumes is the run input a client posts to answer the interrupt the run before it
-// ended on. It sends the thread again, as a client does, and this format takes the
-// answer alone.
+// ended on. It sends the thread again, as a client does, ending on the run that asked so
+// that nothing in it is a message the person typed.
 func resumes(thread string, run string, id string, payload string) string {
-	return `{"threadId":"` + thread + `","runId":"` + run + `","messages":[{"id":"m1","role":"user","content":"wipe it"}],` +
+	return `{"threadId":"` + thread + `","runId":"` + run + `","messages":[` + stoppedThread + `],` +
 		`"resume":[{"interruptId":"` + id + `","status":"resolved","payload":` + payload + `}]}`
 }
+
+// resumesSaying is that run input with a message the person typed while the card was up,
+// appended to the thread as a client appends one.
+func resumesSaying(thread string, run string, id string, payload string, text string) string {
+	return `{"threadId":"` + thread + `","runId":"` + run + `","messages":[` + stoppedThread +
+		`,{"id":"m3","role":"user","content":"` + text + `"}],` +
+		`"resume":[{"interruptId":"` + id + `","status":"resolved","payload":` + payload + `}]}`
+}
+
+// stoppedThread is the thread a client holds when a run has stopped on an interrupt: the
+// turn that asked, and what the assistant said before the question came.
+const stoppedThread = `{"id":"m1","role":"user","content":"wipe it"},{"id":"m2","role":"assistant","content":"one moment"}`
 
 // cancels is the run input a client posts when the person dismissed the card. It covers
 // the interrupt without settling it, which the spec requires of a resume and which a
 // plain prompt is not allowed to stand in for.
 func cancels(thread string, run string, id string) string {
-	return `{"threadId":"` + thread + `","runId":"` + run + `","messages":[{"id":"m1","role":"user","content":"wipe it"}],` +
+	return `{"threadId":"` + thread + `","runId":"` + run + `","messages":[` + stoppedThread + `],` +
 		`"resume":[{"interruptId":"` + id + `","status":"` + string(types.ResumeStatusCancelled) + `"}]}`
 }
 
@@ -426,6 +438,52 @@ var _ = Describe("A served run", func() {
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).To(ContainSubstring(`data: {"type":"CUSTOM","name":"fisk.prompt_not_taken"`))
 		Expect(body).To(ContainSubstring(`"interrupts":[{"id":"approve:c1"`), "the question is put again")
+	})
+
+	// Somebody who answers the interrupt and types in the same breath sends one run input
+	// carrying both. The answer runs the command, the turn it was part of finishes, and
+	// the message is the turn after it.
+	It("Should answer the interrupt and take the message sent with it", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("everything is gone"),
+			agenttest.TextResponse("there is nothing left to list"),
+		), ch)
+
+		status, _ := post(ch, runs("t12", "r1", "wipe it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := post(ch, resumesSaying("t12", "r2", "approve:c1", `{"approval":"once"}`, "and then list what is left"))
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`"type":"TOOL_CALL_RESULT","messageId":"r2-1","toolCallId":"c1"`), "the command ran")
+		Expect(body).To(ContainSubstring(`"delta":"everything "`))
+		Expect(body).To(ContainSubstring(`"delta":"there "`), "the message was delivered as the turn after the answered one")
+		Expect(body).ToNot(ContainSubstring(`"name":"fisk.prompt_not_taken"`))
+		Expect(body).To(ContainSubstring(`"outcome":{"type":"success"}`))
+		accepted(body)
+	})
+
+	// The answered command is followed by a second gated one, so the run stops on that
+	// interrupt without reaching a boundary that takes a user message. The message the
+	// same run input carried is neither journaled nor answered, and the client is told so.
+	It("Should tell the client a message sent with an answer the conversation did not take", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.ToolUseResponse("c2", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("both are gone"),
+		), ch)
+
+		status, _ := post(ch, runs("t13", "r1", "wipe it twice"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := post(ch, resumesSaying("t13", "r2", "approve:c1", `{"approval":"once"}`, "did it work?"))
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`"type":"TOOL_CALL_RESULT","messageId":"r2-1","toolCallId":"c1"`), "the answer ran the command it named")
+		Expect(body).To(ContainSubstring(`data: {"type":"CUSTOM","name":"fisk.prompt_not_taken"`))
+		Expect(body).To(ContainSubstring(`"interrupts":[{"id":"approve:c2"`), "the second command is asked about")
+		accepted(body)
 	})
 })
 

@@ -62,7 +62,7 @@ var _ = Describe("Prompter", func() {
 		// The abort ends the run, so a second question on one turn only arises on a
 		// resume where the first was answered from the request. The first recorded one is
 		// what the page sees; the second is put on the next request.
-		It("Should keep the first question when a second is asked", func() {
+		It("Should leave the first question in place when a second is asked", func() {
 			_, err := p.Confirm(callCtx("c1"), "First?")
 			Expect(err).To(MatchError(toolkit.ErrPromptAborted))
 

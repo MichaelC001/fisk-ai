@@ -47,7 +47,7 @@ const (
 // format renders, and the agent card and the session list the formats know nothing
 // about.
 //
-// The order is what a refused request costs. A drain and an unlisted Origin are refused
+// The order keeps a refusal cheap. A drain and an unlisted Origin are refused
 // on the headers alone, the Host check follows, and only a request that passed all
 // three reaches a format's decoder and the body.
 func (c *Channel) handler(formats []Mount) http.Handler {
@@ -132,8 +132,8 @@ func (c *Channel) allowOrigin(w http.ResponseWriter, r *http.Request) (string, b
 	h := w.Header()
 	h.Set("Access-Control-Allow-Origin", origin)
 	h.Add("Vary", "Origin")
-	// A format's own headers are what the page reads the protocol version off, and a
-	// browser hides every header but the simple ones unless told otherwise.
+	// The page reads the protocol version off a format's own headers, and a browser
+	// hides every header but the simple ones unless told otherwise.
 	h.Set("Access-Control-Expose-Headers", "*")
 
 	return origin, true
@@ -161,9 +161,9 @@ func (c *Channel) preflight(w http.ResponseWriter, r *http.Request) {
 // port.
 //
 // A page reaches a loopback listener as 127.0.0.1, ::1 or localhost, and every one of
-// them is accepted. What is refused is a name that resolved to loopback in the browser's
-// DNS, which is how a page on the internet reaches a listener that was never meant to
-// be reachable from it. On any other address the check is skipped: the proxy in front
+// them is accepted. A name that resolved to loopback in the browser's DNS is refused,
+// which is how a page on the internet reaches a listener that was never meant to be
+// reachable from it. On any other address the check is skipped: the proxy in front
 // owns the public name and passes the browser's Host through unchanged.
 func (c *Channel) refusesHost(host string) bool {
 	if !c.loopback {
@@ -188,9 +188,8 @@ func (c *Channel) refusesHost(host string) bool {
 // thread, hand it to the server and hold the response open until the run reports.
 //
 // The response head is not written here. A run that fails before its journal is claimed
-// reaches no event, and the ending then answers with a status code, which is what lets
-// a second turn on a thread already running be refused as a 409 rather than a 200 with
-// an empty body.
+// reaches no event, and the ending then answers with a status code, so a second turn on
+// a thread already running is refused as a 409 rather than a 200 with an empty body.
 func (c *Channel) serveTurn(f Format) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)

@@ -27,7 +27,7 @@ var streamHeaders = map[string]string{
 // Every event is written by the goroutine running one turn, in the order the run
 // produced them, so nothing here takes a lock.
 //
-// The first write failure is kept and every write after it does nothing. A browser
+// The first write failure is recorded and every write after it is skipped. A browser
 // going away mid-turn is the ordinary case rather than a fault, and the turn is worth
 // running out either way: the journal holds the conversation, not this response.
 type stream struct {
@@ -40,7 +40,7 @@ type stream struct {
 // is called.
 //
 // The SDK's writer logs a failed write, and a format reaches none of the channel's
-// loggers, so it is given one that discards: the first failure is kept here and the
+// loggers, so it is given one that discards: the first failure is recorded here and the
 // channel reports the turn's own outcome.
 func newStream(w http.ResponseWriter) *stream {
 	return &stream{

@@ -10,8 +10,8 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve/web"
 )
 
-// The reason on an interrupt is what a client switches on to render it, so each one
-// here is a value the protocol names. A reason of this agent's own would have to be
+// A client switches on the reason of an interrupt to render it, so each one here is a
+// value the protocol names. A reason of this agent's own would have to be
 // namespaced and would reach every client as the generic fallback.
 const (
 	// reasonToolCall is the interrupt of a command the model asked to run and the
@@ -27,8 +27,8 @@ const (
 // interruptFor is the AG-UI interrupt one question is raised as.
 //
 // The payload that answers it is described by a JSON Schema rather than left to a
-// client that knows this agent, which is what lets a frontend nobody here wrote render
-// an approval and the three human-in-the-loop questions.
+// client that knows this agent, which lets a frontend written elsewhere render an
+// approval and the three human-in-the-loop questions.
 //
 // The metadata names the kind, so a client branches on it without reading the id apart.
 // Everything else a client needs is in the schema.
@@ -105,7 +105,7 @@ func confirmSchema() map[string]any {
 //
 // The answer is the position rather than the option, because a run resumes with the
 // answer alone and the list the options came from is not sent back with it. The words
-// are in the schema as the title of each position, which is what a client renders, and
+// are in the schema as the title of each position, which a client renders, and
 // in the interrupt's metadata for a client that draws its own control.
 func selectSchema(options []string) map[string]any {
 	choices := make([]any, 0, len(options))

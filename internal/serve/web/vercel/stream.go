@@ -31,7 +31,7 @@ var streamHeaders = map[string]string{
 // Every part is written by the goroutine running one turn, in the order the run
 // produced them, so nothing here takes a lock.
 //
-// The first write failure is kept and every write after it does nothing. A browser
+// The first write failure is recorded and every write after it is skipped. A browser
 // going away mid-turn is the ordinary case rather than a fault, and the turn is worth
 // running out either way: the journal holds the conversation, not this response.
 type stream struct {
@@ -44,8 +44,8 @@ type stream struct {
 // open is called.
 //
 // A response that cannot be flushed is written to all the same and arrives when the
-// handler returns, which is what an httptest recorder and a proxy that buffers both
-// do to a stream.
+// handler returns, which an httptest recorder and a proxy that buffers both do to a
+// stream.
 func newStream(w http.ResponseWriter) *stream {
 	s := &stream{w: w}
 
@@ -69,9 +69,8 @@ func (s *stream) open() {
 
 // part sends one part as its own event.
 //
-// The flush is what makes this a stream. Without one per part the response is
-// buffered until the handler returns, and a turn that took a minute arrives all at
-// once at the end of it.
+// Without a flush per part the response is buffered until the handler returns, and a
+// turn that took a minute arrives all at once at the end of it.
 func (s *stream) part(p any) {
 	if s.err != nil {
 		return
@@ -152,8 +151,8 @@ type deltaPart struct {
 // written.
 //
 // Dynamic is always set. The page cannot know an agent's tool names when it is built,
-// and dynamic is what makes the client build a dynamic-tool part rather than a typed
-// one named after a tool it has no type for.
+// and dynamic makes the client build a dynamic-tool part rather than a typed one
+// named after a tool it has no type for.
 type toolInputPart struct {
 	Type       string          `json:"type"`
 	ToolCallID string          `json:"toolCallId"`
@@ -191,8 +190,7 @@ type approvalPart struct {
 }
 
 // dataPart carries a value the page reads for itself. A data-* part needs no schema
-// on the client, which is what makes it the place for a question the AI SDK has no
-// shape for.
+// on the client, which makes it the place for a question the AI SDK has no shape for.
 type dataPart struct {
 	Type string `json:"type"`
 	ID   string `json:"id,omitempty"`
@@ -200,8 +198,8 @@ type dataPart struct {
 }
 
 // approvalInput stands in for the arguments of a call waiting on approval. The gate
-// asks before the call is traced, so no arguments have been reported; the rendered
-// command line and the tag that gated it are what the page shows.
+// asks before the call is traced, so no arguments have been reported; the page shows
+// the rendered command line and the tag that gated it.
 type approvalInput struct {
 	Command string `json:"command"`
 	Tag     string `json:"tag,omitempty"`

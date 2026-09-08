@@ -41,8 +41,7 @@ type turn struct {
 	events   *turnEvents
 	prompter *prompter
 
-	// done is closed once the ending has been written, which is what lets the request
-	// return.
+	// done is closed once the ending has been written, which lets the request return.
 	done chan struct{}
 }
 
@@ -78,7 +77,7 @@ func (c *Channel) newTurn(in Turn, session string, held bool, w http.ResponseWri
 // PromptsMayBlock is false and PromptWait is unset, since no question is ever held: the
 // prompter answers from the request or ends the turn at once. HumanPaced is set because
 // the next turn of a thread arrives when somebody types it. The caller is the request's
-// own claim and is recorded unverified, this transport authenticating nobody.
+// own claim and is recorded unverified, since this transport authenticates nobody.
 func (t *turn) work() *serve.Work {
 	return &serve.Work{
 		ID:               t.id,
@@ -97,7 +96,7 @@ func (t *turn) work() *serve.Work {
 
 // runContext leaves the run on the server's own context rather than the request's. A
 // closed tab, a navigation away or React StrictMode's double mount would otherwise
-// cancel the run and record ReasonError for a conversation nobody abandoned.
+// cancel the run and record ReasonError for a conversation the person has not abandoned.
 func (t *turn) runContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return ctx, nil
 }
@@ -142,8 +141,8 @@ func (t *turn) finish(_ context.Context, out serve.Outcome) error {
 // refusalFor is the status code and the line for an outcome that ran nothing, and zero
 // for one that has to be written by the format.
 //
-// The busy answer is the claim record: the first append of a resume is written before
-// any model call, so the loser fails inside agent.Run with nothing streamed and
+// The busy answer comes from the claim record: the first append of a resume is written
+// before any model call, so the loser fails inside agent.Run with nothing streamed and
 // serve.ErrorCode places the wrapped runstate.ErrLocked.
 func refusalFor(out serve.Outcome) (int, string) {
 	switch {
@@ -159,7 +158,7 @@ func refusalFor(out serve.Outcome) (int, string) {
 }
 
 // The runner asserts this half at runtime, so a sink that stopped satisfying it would
-// stop streaming with no error raised anywhere.
+// silently stop streaming.
 var _ agent.MessageStreamer = (*turnEvents)(nil)
 
 // turnEvents stands between the server and the format's writer, and writes the response
@@ -225,7 +224,7 @@ func (e *turnEvents) forward(f func()) {
 }
 
 // Starting is the first event after the journal is claimed on a resume and created on
-// a first turn, so it is what opens the response.
+// a first turn, so it opens the response.
 func (e *turnEvents) Starting(info agent.RunInfo) {
 	e.open()
 	e.w.Starting(info)
@@ -244,7 +243,7 @@ func (e *turnEvents) Panicked(value any, stack []byte) {
 }
 
 // The optional halves of agent.Events are implemented unconditionally and forwarded
-// only to a writer that wants them, so a format that renders for a person keeps hearing
+// only to a writer that wants them, so a format that renders for a person still receives
 // them and one that does not is not made to implement them by sitting behind this.
 func (e *turnEvents) RemoteHostNotes(notes []remotetools.HostImport) {
 	reporter, ok := e.w.(agent.RemoteHostReporter)

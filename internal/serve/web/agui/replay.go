@@ -102,8 +102,8 @@ func (t *turnWriter) results(results []llm.ToolResultBlock) []types.Message {
 
 // result is one call's outcome as the message that answers it.
 //
-// A call that failed carries what the tool said in both fields: error is what marks the
-// failure, and content is what a client renders.
+// A call that failed carries what the tool said in both fields: error marks the failure,
+// and a client renders content.
 func (t *turnWriter) result(block llm.ToolResultBlock) types.Message {
 	out := types.Message{
 		ID:         t.mintID(),

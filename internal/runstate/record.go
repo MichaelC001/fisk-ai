@@ -346,7 +346,7 @@ const (
 type TerminalRecord struct {
 	Reason  TerminalReason `json:"reason"`
 	Message string         `json:"message,omitempty"`
-	// Summary is what the conversation had cost when this turn ended. A listing reads
+	// Summary is the conversation's cost when this turn ended. A listing reads
 	// it off this record, which it fetches anyway, instead of folding the journal.
 	//
 	// It is absent on a record written before the field existed, and RunInfo reports
@@ -368,10 +368,10 @@ type ConversationSummary struct {
 	// another.
 	Turns int64 `json:"turns"`
 	// ContextTokens is the input the last model call carried, the two prompt-cache tiers
-	// included, which is what the next turn sends again before adding its prompt. It is
+	// included, which the next turn sends again before adding its prompt. It is
 	// zero for a conversation that has made no model call.
 	ContextTokens int64 `json:"context_tokens"`
-	// Counters is what the conversation has spent, holding the tool call count a listing
-	// shows beside the turn count.
+	// Counters holds what the conversation has spent, including the tool call count a
+	// listing shows beside the turn count.
 	Counters Counters `json:"counters"`
 }

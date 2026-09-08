@@ -36,8 +36,8 @@ var (
 // bucket and in neither counter, so a counter is a subset of the bucket of the same kind
 // and never that bucket. agent.RunStats.ToolCallsByKind states the distinction in full,
 // and these counters seed those.
-// The JSON tags are what a ConversationSummary is stored under, so a name here is part
-// of the record format as well as of this API.
+// A ConversationSummary is stored under these JSON tags, so a name here is part of the
+// record format as well as of this API.
 type Counters struct {
 	LlmCalls  int64 `json:"llm_calls,omitempty"`
 	ToolCalls int64 `json:"tool_calls,omitempty"`
@@ -176,7 +176,7 @@ type RunState struct {
 	// a suspend instead of restarting.
 	Turns int64
 	// ContextTokens is the input the last assistant record carried, the two prompt-cache
-	// tiers included, which is what the next turn sends again before adding its prompt.
+	// tiers included, which the next turn sends again before adding its prompt.
 	// It is zero for a journal holding no assistant record.
 	ContextTokens int64
 

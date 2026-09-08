@@ -21,10 +21,10 @@ import (
 // on "/fisk/v1" answers GET /fisk/v1/card. A Format may not be mounted there.
 const CardPath = "card"
 
-// cardRefusal is what a request is told when the card cannot be built, which is an
-// icon URL an operator configured that must not reach a browser. It names neither the
-// value nor the worker.
-const cardRefusal = "this agent's card cannot be served; its configured icon url is not an https url"
+// cardRefusal is the body a request gets when the card cannot be built, which is a
+// configured icon url, display name or icon that a2a.BuildCard refuses. It names
+// neither the value nor the worker, and the log line beside it names the key.
+const cardRefusal = "this agent's card cannot be served; check its configured description, display name, icon and icon url"
 
 // AgentTools are the tools an agent card lists and what could not be listed.
 type AgentTools struct {
@@ -45,8 +45,8 @@ type AgentTools struct {
 // as the configuration filters them, and the tools of every connected MCP server.
 //
 // It is called once, when the channel is built, and the card is assembled from what it
-// returns on each request. The tools are never called through: their names,
-// descriptions, schemas and declared behavior are what a card carries.
+// returns on each request. The tools are never called through: a card carries their
+// names, descriptions, schemas and declared behavior.
 //
 // An MCP server whose tools cannot be listed leaves its tools off the card and gets a
 // note naming it, where a run refuses to start on the same failure. The two answers are

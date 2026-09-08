@@ -368,7 +368,7 @@ type fakeJournal struct {
 	held   bool
 	stolen bool
 	// created is the place this run holds in the order the store made its runs, which
-	// is what ListPage enumerates on and what its cursor carries.
+	// ListPage enumerates on and its cursor carries.
 	created uint64
 	// createdAt is the time the caller stamped on the meta record and updatedAt is when
 	// this journal last took a record. A listing row carries both, as it does from a

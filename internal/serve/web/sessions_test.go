@@ -366,7 +366,7 @@ var _ = Describe("The sessions API", func() {
 		// A run killed mid-batch leaves the same pending turn a suspend does, and the
 		// calls it left are ones the resume dispatches on its own, so the page is handed
 		// the conversation with nothing to answer.
-		It("Should ask nothing for a conversation journaled mid-batch on calls nobody is asked about", func() {
+		It("Should ask nothing for a conversation journaled mid-batch on calls no question was put about", func() {
 			id := midBatch("t4", "list them",
 				pendingCall("c1", "list", `{}`),
 				pendingCall("c2", "list", `{}`),

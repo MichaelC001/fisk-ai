@@ -58,18 +58,21 @@ type interrupted struct {
 // turn is what this request asks of the conversation, and the call the run that raised
 // the interrupt already sent to the client.
 //
-// That call is empty for everything but a resume of one of the three question kinds.
+// A run input carries an answer, a message the person typed, or both. Somebody who
+// answers an interrupt and types in the same breath sends the resume entry with the
+// message appended to the thread: the answer settles the interrupt and the message is the
+// turn after the answered one finishes.
+//
+// The call is empty for everything but a resume of one of the three question kinds.
 // Those are put by a tool that ran, so the run that asked traced the call and the client
 // holds it, and a client accumulates the argument fragments of a call rather than
 // replacing them: sending the call again would write its arguments into the thread
 // twice. The gate runs before the run traces a call, so an approval's call has not been
 // sent and the run that answers sends it for the first time.
 func (r *request) turn() (web.Turn, string, error) {
-	out := web.Turn{ThreadID: r.ThreadID}
+	out := web.Turn{ThreadID: r.ThreadID, Prompt: r.prompt()}
 
 	if len(r.Resume) == 0 {
-		out.Prompt = r.prompt()
-
 		return out, "", nil
 	}
 
@@ -102,17 +105,18 @@ func (r *request) turn() (web.Turn, string, error) {
 // withdrawn is what a canceled entry resumes the conversation with.
 //
 // Canceling covers an interrupt without settling it, so the conversation resumes, the
-// call is dispatched again and the question is put again. The channel takes a turn
-// carrying a prompt or an answer and this one carries no prompt, so it carries an
-// answer the run cannot spend: it names the interrupt rather than the call the question
-// was about, and the prompter spends an answer only on the call it names.
+// call is dispatched again and the question is put again. The channel refuses a turn
+// carrying neither a message nor an answer, and a client that canceled typed nothing, so
+// the turn carries an answer the run cannot spend: it names the interrupt rather than the
+// call the question was about, and the prompter spends an answer only on the call it
+// names.
 func withdrawn(resumed interrupted) *web.Answer {
 	return &web.Answer{ToolUseID: resumed.entry.InterruptID, Kind: resumed.kind}
 }
 
 // runID is the run this response is written under, minted when the client named none.
-// An AG-UI client mints one per run, and it is what makes the ids of the messages this
-// turn writes distinct from the ids of the turn before it.
+// An AG-UI client mints one per run, and it makes the ids of the messages this turn
+// writes distinct from the ids of the turn before it.
 func (r *request) runID() string {
 	if r.RunID != "" {
 		return r.RunID
@@ -142,21 +146,26 @@ func (r *request) resumed() (interrupted, bool) {
 	return interrupted{}, false
 }
 
-// prompt is the newest user message as one string.
+// prompt is the message the person typed on this request, as one string, and is empty
+// for a run that only answers an interrupt.
 //
-// An AG-UI client sends the whole thread on every run and its own docs treat that
-// thread as the conversation. This worker has an authoritative journal, so the turn
-// being asked for is what is read out of the body and nothing else in it is trusted.
+// The newest message is that message when it is the person's own, since a client appends
+// what somebody types to the end of the thread it accumulated. The thread behind it is not
+// read: this worker has an authoritative journal, and AG-UI's own docs treating the thread
+// as the conversation would let a client rewrite what the journal holds. So a client
+// answering an interrupt and asking for no new turn ends its thread on the run that asked,
+// and one whose thread ends on a message of the person's is asking for that message.
 func (r *request) prompt() string {
-	for i := len(r.Messages) - 1; i >= 0; i-- {
-		if r.Messages[i].Role != types.RoleUser {
-			continue
-		}
-
-		return strings.TrimSpace(messageText(r.Messages[i]))
+	if len(r.Messages) == 0 {
+		return ""
 	}
 
-	return ""
+	last := r.Messages[len(r.Messages)-1]
+	if last.Role != types.RoleUser {
+		return ""
+	}
+
+	return strings.TrimSpace(messageText(last))
 }
 
 // messageText is the text of one message.
@@ -197,7 +206,7 @@ func messageText(m types.Message) string {
 
 // answerFor reads one interrupt's payload as the answer to the question it was raised
 // for. Each kind takes the one field it is answered with, so a payload of the wrong
-// shape is refused here rather than reaching the run as a value nobody chose.
+// shape is refused here rather than reaching the run as a value the person never chose.
 func answerFor(kind web.QuestionKind, toolUseID string, raw any) (*web.Answer, error) {
 	payload, err := decodePayload(raw)
 	if err != nil {

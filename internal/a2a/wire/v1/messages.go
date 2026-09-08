@@ -581,10 +581,10 @@ type AgentCard struct {
 
 	// IconURL is an https URL of an image the agent asks to be drawn beside its name.
 	// It is decoration the agent asserts and nothing verifies, and it arrives from an
-	// arbitrary peer, so a reader holds it to CheckIconURL before putting it in front of
-	// a browser. Whether to fetch it at all is the reader's decision: fetching it
-	// directly discloses every viewer to the host the card named, and proxying it buys
-	// server-side request forgery.
+	// arbitrary peer, so a reader checks it with CheckIconURL before putting it in front
+	// of a browser. Whether to fetch it at all is the reader's decision: fetching it
+	// directly discloses every viewer to the host the card named, and proxying it creates
+	// a server-side request forgery.
 	IconURL string `json:"icon_url,omitempty"`
 
 	// Notes are what the agent could not put on this card, one sentence each. An MCP
@@ -654,7 +654,7 @@ var ErrIconURL = errors.New("icon url is not usable")
 // ErrCardField reports a card field longer than the protocol carries.
 var ErrCardField = errors.New("card field is too long")
 
-// CheckDisplayName holds an AgentCard.DisplayName to MaxDisplayNameLength. An empty
+// CheckDisplayName limits an AgentCard.DisplayName to MaxDisplayNameLength. An empty
 // name passes, leaving a reader to display the identity.
 func CheckDisplayName(name string) error {
 	if len(name) > MaxDisplayNameLength {
@@ -664,7 +664,7 @@ func CheckDisplayName(name string) error {
 	return nil
 }
 
-// CheckIcon holds an AgentCard.Icon to MaxIconLength. An empty icon passes.
+// CheckIcon limits an AgentCard.Icon to MaxIconLength. An empty icon passes.
 func CheckIcon(icon string) error {
 	if len(icon) > MaxIconLength {
 		return fmt.Errorf("%w: the icon is %d bytes, over the %d byte limit", ErrCardField, len(icon), MaxIconLength)
@@ -673,8 +673,8 @@ func CheckIcon(icon string) error {
 	return nil
 }
 
-// CheckIconURL holds an AgentCard.IconURL to what a browser may be handed: an https
-// URL naming a host, no longer than MaxIconURLLength. An empty string passes, since
+// CheckIconURL checks an AgentCard.IconURL against what a browser may be handed: an
+// https URL naming a host, no longer than MaxIconURLLength. An empty string passes, since
 // an agent that named no icon is not an agent that named a bad one.
 //
 // http is refused with every other scheme: a page served over https cannot load it,

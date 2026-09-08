@@ -14,7 +14,7 @@ import (
 )
 
 // The prompter is the whole of what this channel does with Work.Prompter, so a change
-// to that contract is a compile error here rather than a run that asks nobody.
+// to that contract is a compile error here rather than a run that puts no question.
 var _ toolkit.Prompter = (*prompter)(nil)
 
 // prompter ends a turn on a question and answers the next turn's question from the
@@ -44,7 +44,7 @@ type prompter struct {
 	// on its own.
 	held *Answer
 
-	// asked is the question this turn ended on. Only the first is kept: the abort ends
+	// asked is the question this turn ended on. Only the first is recorded: the abort ends
 	// the run, so a second question on one turn is asked on the next request, which is
 	// where the resume puts it once the first has its answer.
 	asked *Question
@@ -93,8 +93,8 @@ func (p *prompter) question() *Question {
 }
 
 // ask records the question and reports it unanswered, which ends the run with the call
-// unanswered. A second question on the turn keeps the first: the abort has already
-// ended the run, and the resume asks the second once the first has its answer.
+// unanswered. A second question on the turn leaves the first in place: the abort has
+// already ended the run, and the resume asks the second once the first has its answer.
 func (p *prompter) ask(q Question) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

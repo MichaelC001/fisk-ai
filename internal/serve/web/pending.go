@@ -35,7 +35,7 @@ import (
 // question themselves, so an unanswered one is outstanding and the call's input is the
 // question. Every other question is an approval, whose rendered command line is the
 // tool's own TraceLine for these arguments, or its Describer line where it has no
-// TraceLine, which is what the runner's gate presents at dispatch. tools is the agent's
+// TraceLine, the same line the runner's gate presents at dispatch. tools is the agent's
 // tool set keyed by name, resolved once where the channel is built.
 //
 // confirmTags are the operator's extra confirm tags, which name the tag that gated a
@@ -76,7 +76,7 @@ func PendingQuestion(state *runstate.RunState, tools map[string]toolkit.Tool, co
 // openCalls are the calls of a pending turn that have no result and are not deferred, in
 // the order a resume dispatches them.
 //
-// A deferred call is left out because nobody is being asked anything about it: the tool
+// A deferred call is left out because it puts no question: the tool
 // started the work and the answer arrives later, so a resume leaves it alone rather than
 // dispatching it again.
 func openCalls(pending *runstate.PendingTurn) []llm.ToolUseBlock {

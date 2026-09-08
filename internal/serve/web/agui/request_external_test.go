@@ -13,9 +13,12 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
-// resuming is a run input answering the interrupt of call c1 with the payload given.
+// resuming is a run input answering the interrupt of call c1 with the payload given. Its
+// thread ends on the run that asked, which is how a client says nobody typed anything.
 func resuming(id string, payload string) string {
-	return `{"threadId":"t1","runId":"r2","messages":[{"id":"m1","role":"user","content":"wipe it"}],` +
+	return `{"threadId":"t1","runId":"r2","messages":[` +
+		`{"id":"m1","role":"user","content":"wipe it"},` +
+		`{"id":"m2","role":"assistant","content":"one moment"}],` +
 		`"resume":[{"interruptId":"` + id + `","status":"resolved","payload":` + payload + `}]}`
 }
 
@@ -49,6 +52,22 @@ var _ = Describe("A decoded request", func() {
 
 		Expect(d.turn).To(Equal(web.Turn{
 			ThreadID: "t1",
+			Answer:   &web.Answer{ToolUseID: "c1", Kind: web.KindApprove, Approval: toolkit.ConfirmOnce},
+		}))
+	})
+
+	// Somebody who answers an interrupt and types in the same breath sends the resume
+	// entry with the message appended to the thread.
+	It("Should read a resume and the message sent with it", func() {
+		d := decode(`{"threadId":"t1","runId":"r2","messages":[
+			{"id":"m1","role":"user","content":"wipe it"},
+			{"id":"m2","role":"assistant","content":"one moment"},
+			{"id":"m3","role":"user","content":"and then list what is left"}
+		],"resume":[{"interruptId":"approve:c1","status":"resolved","payload":{"approval":"once"}}]}`)
+
+		Expect(d.turn).To(Equal(web.Turn{
+			ThreadID: "t1",
+			Prompt:   "and then list what is left",
 			Answer:   &web.Answer{ToolUseID: "c1", Kind: web.KindApprove, Approval: toolkit.ConfirmOnce},
 		}))
 	})

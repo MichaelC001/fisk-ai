@@ -38,8 +38,8 @@ func SessionFor(identity, threadID string) string {
 	return SessionPrefix + hex.EncodeToString(sum[:])
 }
 
-// held reports whether the store holds a conversation under sessionID, which is what
-// separates a request that opens one from a request that continues it.
+// held reports whether the store holds a conversation under sessionID, which separates
+// a request that opens one from a request that continues it.
 //
 // The store answers rather than a map in memory. A follow-up mistaken for an opening
 // turn resumes without FollowUp, which replaces the conversation with the journaled one
@@ -67,6 +67,12 @@ func (c *Channel) held(ctx context.Context, sessionID string) (bool, error) {
 // when it carried none. A held thread carrying only an answer resumes with neither: the
 // answer seeds the prompter and the resume dispatches the call the question guards
 // again, so nothing goes on the checkpoint for it.
+//
+// A request carrying both takes the FollowUp shape, the answer carried on the prompter
+// rather than on the checkpoint. The run spends it on the question it names and the
+// prompt enters where the conversation next takes a user message, which a run that
+// stopped on a second question never reaches: Outcome.FollowUpTaken reports that and the
+// ending carries PromptNotTaken.
 //
 // Force is set on every resuming shape. An operator restarting with a different model
 // moves the stored configuration under every open thread, and a resume across that is

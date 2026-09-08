@@ -27,6 +27,27 @@ import (
 // errBadBody is what a format refuses a request with in the specs that need one.
 var errBadBody = errors.New("the body is not a turn")
 
+// userTurns is the text of every user turn a stored conversation holds, which is what a
+// prompt delivered as a follow-up joins and one the conversation did not take never
+// reaches.
+func userTurns(rs *runstate.RunState) []string {
+	var out []string
+
+	for _, m := range rs.Messages {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+
+		for _, b := range m.Content {
+			if b.Text != nil {
+				out = append(out, b.Text.Text)
+			}
+		}
+	}
+
+	return out
+}
+
 // gatedApp is an application whose one command is confirmation-gated, so a run that
 // calls it reaches the gate before the command executes.
 func gatedApp() *fisk.Application {
@@ -215,6 +236,69 @@ var _ = Describe("A served turn", func() {
 		status, lines = post(ch, turnBody{Thread: "t3", Answer: &answerBody{ToolUse: "c1", Kind: "approve", Approval: int(toolkit.ConfirmOnce)}})
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(lines[len(lines)-1]).To(Equal("close reason=completed taken=true err=<nil>"))
+	})
+
+	// A request carrying an answer and a prompt is what a page sends when somebody answers
+	// a question and types in the same breath. The answer settles the question, and the
+	// prompt enters where the conversation next takes a user message.
+	It("Should answer the question and take the prompt sent with it", func() {
+		cfg := servedConfig()
+		ch, _ := servedChannel(store, 2)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("everything is gone"),
+			agenttest.TextResponse("there is nothing left to list"),
+		), ch)
+
+		status, lines := post(ch, turnBody{Thread: "t4", Prompt: "wipe it"})
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(lines).To(ContainElement("ask approve c1"))
+
+		status, lines = post(ch, turnBody{
+			Thread: "t4",
+			Prompt: "and then list what is left",
+			Answer: &answerBody{ToolUse: "c1", Kind: "approve", Approval: int(toolkit.ConfirmOnce)},
+		})
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(lines).To(ContainElement("tool c1 wipe"), "the answer ran the command it named")
+		Expect(lines).To(ContainElement(`message terminal=true "everything is gone"`))
+		Expect(lines).To(ContainElement(`message terminal=true "there is nothing left to list"`), "the prompt was the turn after the answered one")
+		Expect(lines[len(lines)-1]).To(Equal("close reason=completed taken=true err=<nil>"))
+
+		rs, err := store.Load(context.Background(), SessionFor("agent1", "t4"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(userTurns(rs)).To(Equal([]string{"wipe it", "and then list what is left"}))
+	})
+
+	// The answered command is followed by a second gated one, so the run stops on that
+	// question without reaching a boundary that takes a user message. The prompt the same
+	// request carried is neither journaled nor answered, and the page is told.
+	It("Should report a prompt sent with an answer the conversation did not take", func() {
+		cfg := servedConfig()
+		ch, _ := servedChannel(store, 2)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.ToolUseResponse("c2", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("both are gone"),
+		), ch)
+
+		status, lines := post(ch, turnBody{Thread: "t5", Prompt: "wipe it twice"})
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(lines).To(ContainElement("ask approve c1"))
+
+		status, lines = post(ch, turnBody{
+			Thread: "t5",
+			Prompt: "did it work?",
+			Answer: &answerBody{ToolUse: "c1", Kind: "approve", Approval: int(toolkit.ConfirmOnce)},
+		})
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(lines).To(ContainElement("tool c1 wipe"), "the answer ran the command it named")
+		Expect(lines).To(ContainElement("ask approve c2"), "the second command is asked about")
+		Expect(lines[len(lines)-1]).To(HavePrefix("close reason=suspended taken=false err=the operator did not answer"))
+
+		rs, err := store.Load(context.Background(), SessionFor("agent1", "t5"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(userTurns(rs)).To(Equal([]string{"wipe it twice"}), "the prompt was not journaled")
 	})
 
 	// Two turns on one thread would resume one journal at once. The claim record is the

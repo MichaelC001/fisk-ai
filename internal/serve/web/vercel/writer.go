@@ -18,8 +18,8 @@ import (
 )
 
 // The channel drives the writer through both halves, and the runner asserts the
-// streaming one at runtime, so a sink that stopped satisfying either would stop
-// streaming with no error raised anywhere.
+// streaming one at runtime, so a sink that stopped satisfying either would silently
+// stop streaming.
 var (
 	_ web.TurnWriter        = (*turnWriter)(nil)
 	_ agent.MessageStreamer = (*turnWriter)(nil)
@@ -111,8 +111,8 @@ func (t *turnWriter) Open() {
 	t.stream.part(startPart{Type: "start", MessageID: id})
 }
 
-// StreamDeltas asks for the fragments of each assistant turn, which is what makes the
-// page type rather than wait.
+// StreamDeltas asks for the fragments of each assistant turn, which makes the page
+// type rather than wait.
 func (t *turnWriter) StreamDeltas() bool { return true }
 
 // MessageDelta renders one fragment on the part its block index is open under,
@@ -416,7 +416,7 @@ func (t *turnWriter) replayAssistant(msg llm.Message, results []llm.ToolResultBl
 // A call it left unanswered is held rather than sent: the question the page is asked
 // after the replay is about one of them, and the gate sends that call's part itself. The
 // held parts go out when Ask has named the call it asks about, or when Close ends a
-// conversation nobody is being asked about.
+// conversation with no question outstanding.
 func (t *turnWriter) replayPending(pending *runstate.PendingTurn) {
 	for _, block := range pending.Assistant.Content {
 		if block.ToolUse == nil {
@@ -547,8 +547,8 @@ func (t *turnWriter) mintID() string {
 }
 
 // approvalID names one approval. The page answers by naming the call, so this is
-// derived from the call rather than minted and remembered, which is what lets a
-// second process serve the turn that answers.
+// derived from the call rather than minted and remembered, which lets a second
+// process serve the turn that answers.
 func approvalID(toolUseID string) string { return "approval-" + toolUseID }
 
 // partKind is the stream part a fragment's block kind is rendered as, empty for a
@@ -580,7 +580,7 @@ func blockText(b llm.ContentBlock) (string, string) {
 
 // toolInput is a call's arguments as the client parses them. It parses input as
 // unknown, so an absent one passes as null and leaves the page rendering that word;
-// an empty object is what a call with no arguments means.
+// an empty object is the input a call with no arguments carries.
 func toolInput(input json.RawMessage) json.RawMessage {
 	if len(input) == 0 {
 		return json.RawMessage("{}")

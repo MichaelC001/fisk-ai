@@ -139,6 +139,29 @@ func prompt(chat string, text string) string {
 	return `{"id":"` + chat + `","messages":[{"role":"user","parts":[{"type":"text","text":"` + text + `"}]}]}`
 }
 
+// The parts useChat holds for a card the run stopped on: the tool part an approval
+// mutates, and the data part one of the three human-in-the-loop questions arrives as.
+const (
+	approvalCard = `{"type":"dynamic-tool","toolCallId":"c1","state":"approval-requested"}`
+	questionCard = `{"type":"data-question","id":"c1"}`
+)
+
+// answering is the body useChat posts to answer a card: the history the client holds,
+// ending on the assistant message the card sits in, and then whatever the person typed
+// while it was up. An empty typed is a request that answers and asks for no new turn,
+// which is what the SDK's own approval submit sends.
+func answering(chat string, card string, answer string, typed string) string {
+	body := `{"id":"` + chat + `","messages":[` +
+		`{"role":"user","parts":[{"type":"text","text":"the turn that asked"}]},` +
+		`{"id":"msg-1","role":"assistant","parts":[` + card + `]}`
+
+	if typed != "" {
+		body += `,{"role":"user","parts":[{"type":"text","text":"` + typed + `"}]}`
+	}
+
+	return body + `],"fiskAnswer":` + answer + `}`
+}
+
 // reopen is a page picking a conversation out of the rail: the session the thread ran in,
 // read back through the format that renders it.
 func reopen(cfg *config.Config, ch *web.Channel, thread string) (int, string) {
@@ -247,7 +270,7 @@ var _ = Describe("A served turn", func() {
 
 		// The answer goes to a second channel on the same store, which is what a second
 		// process behind a load balancer is.
-		status, body := post(second, `{"id":"t3","messages":[{"role":"user","parts":[{"type":"text","text":"wipe it"}]}],"fiskAnswer":{"toolUseId":"c1","kind":"approve","approval":"once"}}`)
+		status, body := post(second, answering("t3", approvalCard, `{"toolUseId":"c1","kind":"approve","approval":"once"}`, ""))
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).ToNot(ContainSubstring(`"type":"tool-input-available"`), "the card the asking turn drew is the only one")
 		Expect(body).To(ContainSubstring(`data: {"type":"tool-output-available","toolCallId":"c1","output":"`), "the command ran")
@@ -327,7 +350,7 @@ var _ = Describe("A served turn", func() {
 		status, _ := post(ch, prompt("t8", "wipe it twice"))
 		Expect(status).To(Equal(http.StatusOK))
 
-		status, body := post(ch, `{"id":"t8","messages":[{"role":"user","parts":[{"type":"text","text":"wipe it twice"}]}],"fiskAnswer":{"toolUseId":"c1","kind":"approve","approval":"always"}}`)
+		status, body := post(ch, answering("t8", approvalCard, `{"toolUseId":"c1","kind":"approve","approval":"always"}`, ""))
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).To(ContainSubstring(`data: {"type":"tool-input-available","toolCallId":"c2","toolName":"wipe","input":{},"dynamic":true}`), "the second call was dispatched rather than asked about")
 		Expect(body).ToNot(ContainSubstring(`"type":"tool-approval-request"`))
@@ -344,7 +367,7 @@ var _ = Describe("A served turn", func() {
 		status, _ := post(ch, prompt("t5", "wipe it"))
 		Expect(status).To(Equal(http.StatusOK))
 
-		status, body := post(ch, `{"id":"t5","messages":[{"role":"user","parts":[{"type":"text","text":"wipe it"}]}],"fiskAnswer":{"toolUseId":"c1","kind":"approve","approval":"no"}}`)
+		status, body := post(ch, answering("t5", approvalCard, `{"toolUseId":"c1","kind":"approve","approval":"no"}`, ""))
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).ToNot(ContainSubstring(`"type":"tool-output-available"`), "the command did not run")
 		Expect(body).To(ContainSubstring(`"delta":"left "`), "the model was told the command was refused and answered")
@@ -364,7 +387,7 @@ var _ = Describe("A served turn", func() {
 			Expect(body).To(ContainSubstring(question))
 			Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"tool-calls"}`))
 
-			status, body = post(ch, `{"id":"t6","messages":[{"role":"user","parts":[{"type":"text","text":"ask me"}]}],"fiskAnswer":`+answer+`}`)
+			status, body = post(ch, answering("t6", questionCard, answer, ""))
 			Expect(status).To(Equal(http.StatusOK))
 			Expect(body).ToNot(ContainSubstring(`"type":"tool-input-available"`), "the card the asking turn drew is the only one")
 			Expect(body).To(ContainSubstring(`"delta":"thanks"`), "the answer reached the tool and the run went on")
@@ -400,6 +423,50 @@ var _ = Describe("A served turn", func() {
 		status, body := post(ch, prompt("t7", "did it work?"))
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).To(ContainSubstring(`data: {"type":"tool-approval-request","approvalId":"approval-c1"`), "the question is put again")
+		Expect(body).To(ContainSubstring(`data: {"type":"error","errorText":"your message was not delivered`))
+	})
+
+	// Somebody who answers the card and types in the same breath sends one POST carrying
+	// both. The answer runs the command, the turn it was part of finishes, and the message
+	// is the turn after it.
+	It("Should answer the card and take the message sent with it", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("everything is gone"),
+			agenttest.TextResponse("there is nothing left to list"),
+		), ch)
+
+		status, _ := post(ch, prompt("t12", "wipe it"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := post(ch, answering("t12", approvalCard, `{"toolUseId":"c1","kind":"approve","approval":"once"}`, "and then list what is left"))
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"tool-output-available","toolCallId":"c1","output":"`), "the command ran")
+		Expect(body).To(ContainSubstring(`"delta":"everything "`))
+		Expect(body).To(ContainSubstring(`"delta":"there "`), "the message was delivered as the turn after the answered one")
+		Expect(body).ToNot(ContainSubstring(`"errorText":"your message was not delivered`))
+		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"stop"}`))
+	})
+
+	// The answered command is followed by a second gated one, so the run stops on that
+	// question without reaching a boundary that takes a user message. The message the same
+	// POST carried is neither journaled nor answered, and the page is told so.
+	It("Should tell the page a message sent with an answer the conversation did not take", func() {
+		ch := servedChannel(cfg, store)
+		serveAll(cfg, store, agenttest.NewScriptedProvider(GinkgoTB(),
+			agenttest.ToolUseResponse("c1", "wipe", json.RawMessage(`{}`)),
+			agenttest.ToolUseResponse("c2", "wipe", json.RawMessage(`{}`)),
+			agenttest.TextResponse("both are gone"),
+		), ch)
+
+		status, _ := post(ch, prompt("t13", "wipe it twice"))
+		Expect(status).To(Equal(http.StatusOK))
+
+		status, body := post(ch, answering("t13", approvalCard, `{"toolUseId":"c1","kind":"approve","approval":"once"}`, "did it work?"))
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).To(ContainSubstring(`data: {"type":"tool-output-available","toolCallId":"c1","output":"`), "the answer ran the command it named")
+		Expect(body).To(ContainSubstring(`data: {"type":"tool-approval-request","approvalId":"approval-c2"`), "the second command is asked about")
 		Expect(body).To(ContainSubstring(`data: {"type":"error","errorText":"your message was not delivered`))
 	})
 })
@@ -512,7 +579,7 @@ var _ = Describe("A conversation opened from the rail", func() {
 		status, _ = reopen(cfg, ch, "t4")
 		Expect(status).To(Equal(http.StatusOK))
 
-		status, body := post(ch, `{"id":"t4","messages":[{"role":"user","parts":[{"type":"text","text":"wipe it"}]}],"fiskAnswer":{"toolUseId":"c1","kind":"approve","approval":"once"}}`)
+		status, body := post(ch, answering("t4", approvalCard, `{"toolUseId":"c1","kind":"approve","approval":"once"}`, ""))
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).To(ContainSubstring(`data: {"type":"tool-output-available","toolCallId":"c1","output":"`), "the command ran")
 		Expect(body).To(ContainSubstring(`data: {"type":"finish","finishReason":"stop"}`))

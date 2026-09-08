@@ -20,6 +20,10 @@
 // invite a server to rebuild the conversation from the messages the client sent, and
 // doing that here would let a page rewrite history the worker is authoritative for.
 //
+// The newest message is a message the person typed when it is the person's own, so a
+// client answering an interrupt and asking for no new turn ends its thread on the run
+// that asked. A run input carries an answer, a message, or both.
+//
 // # Questions
 //
 // A question ends the run as an AG-UI interrupt, carried on the run-finished event, and
@@ -36,10 +40,10 @@
 // was about. The tool ran on the turn that asked, so the client holds that call and
 // accumulates its argument fragments rather than replacing them, and the redispatch
 // would write the arguments into the thread a second time. An approval's call has not
-// been sent when the interrupt goes out, the gate running before the run traces it, so
-// the run that answers sends it for the first time.
+// been sent when the interrupt goes out, since the gate runs before the run traces it,
+// so the run that answers sends it for the first time.
 //
-// The three-way approval travels natively. The schema asks for no, once or always,
+// AG-UI carries the three-way approval itself. The schema asks for no, once or always,
 // where the AI SDK's own approval is a boolean and the standing allow needs a field of
 // this agent's own. A client that ignores the schema and sends the {"approved": bool}
 // AG-UI recommends gets a two-way allow or decline.
@@ -49,7 +53,7 @@
 // Replay writes the conversation back as one messages snapshot: the user turns, the
 // assistant turns, the calls and their results, in the order the journal holds them. A
 // conversation the run left waiting on a question ends on the interrupt it stopped at,
-// which is Ask writing after Replay.
+// which Ask writes after Replay.
 package agui
 
 import (
@@ -65,12 +69,12 @@ import (
 // a channel with a base path of /fisk/v1 serves it at POST /fisk/v1/agui.
 const MountPath = "agui"
 
-// ErrBadRequest is what Decode refuses a request with. The channel answers it as a 400
-// carrying the message, which describes the request and never this worker.
+// ErrBadRequest is the error Decode refuses a request with. The channel answers it as a
+// 400 carrying the message, which describes the request and never this worker.
 var ErrBadRequest = errors.New("the request is not a run this agent can answer")
 
 // Format renders AG-UI events. It holds nothing between requests and is safe for
-// concurrent use, every request being decoded into a writer of its own.
+// concurrent use, since every request is decoded into a writer of its own.
 type Format struct{}
 
 // New returns the format to mount.
@@ -82,10 +86,10 @@ func Mount() web.Mount { return web.Mount{Path: MountPath, Format: New()} }
 
 // Decode reads an AG-UI RunAgentInput into the turn it asks for.
 //
-// A body carrying a resume entry this agent minted the interrupt for asks for that
-// answer alone: an AG-UI client sends the whole thread on every run, so the newest user
-// message in one is a turn the journal already holds. A body carrying no such entry
-// asks for its newest user message as the next turn.
+// A resume entry this agent minted the interrupt for is the answer, and the newest
+// message is the next turn when the person typed it. A body carries one or both: an
+// answer alone resumes on the question the run stopped at, and an answer with a message
+// resumes on it and takes the message as the turn after the answered one finishes.
 //
 // The writer holds w and writes nothing until Open is called on it.
 func (f *Format) Decode(w http.ResponseWriter, r *http.Request) (web.Turn, web.TurnWriter, error) {

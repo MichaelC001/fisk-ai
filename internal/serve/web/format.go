@@ -126,8 +126,8 @@ type Question struct {
 // conversation.
 //
 // It is keyed by ToolUseID rather than by a question id: the question is put again on
-// every resume, so the call is what both ends agree the answer belongs to, and it is what
-// stops a resent or stale answer landing on whichever question the resume asks first.
+// every resume, so the call is what both ends agree the answer belongs to, and it stops a
+// resent or stale answer landing on whichever question the resume asks first.
 type Answer struct {
 	// ToolUseID names the call answered. Required.
 	ToolUseID string
@@ -154,10 +154,11 @@ type Ending struct {
 	Outcome serve.Outcome
 
 	// PromptNotTaken reports that the request carried a prompt and the conversation
-	// did not take it: it was waiting on an unanswered question, the resume put the
-	// question again, and the run suspended without reaching a boundary that takes a
-	// user message. The prompt was neither journaled nor answered, and the page has to
-	// send it again once the question is answered.
+	// did not take it: the run suspended on a question without reaching a boundary that
+	// takes a user message, which is the question the request left unanswered or the next
+	// one a resumed run asked after spending the answer it carried. The prompt was neither
+	// journaled nor answered, and the page has to send it again once the question is
+	// answered.
 	PromptNotTaken bool
 }
 
@@ -170,9 +171,9 @@ type Ending struct {
 // so an implementation needs no locking of its own.
 //
 // A run that fails before its journal is claimed reaches no event and no Open: the
-// channel answers with a status code and the writer is discarded unused. That is what
-// lets a second turn on a thread already running be refused as a 409 rather than a 200
-// with an empty body.
+// channel answers with a status code and the writer is discarded unused. So a second
+// turn on a thread already running is refused as a 409 rather than a 200 with an empty
+// body.
 type TurnWriter interface {
 	agent.Events
 
@@ -200,7 +201,7 @@ type TurnWriter interface {
 	//
 	// It returns nothing for the reason Open and Close do. The response head is already
 	// written by the time it runs, so there is no status code left to change, and a
-	// format that cannot write its parts is a page that stopped reading.
+	// format that cannot write its parts is writing to a page that stopped reading.
 	Replay(*runstate.RunState)
 
 	// Close ends the body with what the turn ended on. It calls Open when nothing has,

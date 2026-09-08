@@ -157,6 +157,19 @@ var _ = Describe("The agent card", func() {
 		readCard(newTestChannel(opts), http.StatusInternalServerError)
 	})
 
+	// The discovery reply schema limits both, so a card over either is one no peer could
+	// read. The web channel refuses it per request, where the a2a server refuses it at
+	// construction, since that one builds its card once.
+	It("Should refuse to serve a card whose display name or icon is over the length limit", func() {
+		opts := testOptions()
+		opts.Card.DisplayName = strings.Repeat("a", wire.MaxDisplayNameLength+1)
+		readCard(newTestChannel(opts), http.StatusInternalServerError)
+
+		opts = testOptions()
+		opts.Card.Icon = strings.Repeat("a", wire.MaxIconLength+1)
+		readCard(newTestChannel(opts), http.StatusInternalServerError)
+	})
+
 	It("Should refuse a format mounted where the card answers", func() {
 		opts := testOptions()
 		opts.Formats = []Mount{{Path: CardPath, Format: &fakeFormat{}}}

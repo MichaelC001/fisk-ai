@@ -27,7 +27,7 @@ type request struct {
 
 	// FiskAnswer carries the answer to a question the AI SDK has no approval flow for,
 	// which is the three human-in-the-loop kinds, and the standing allow of a confirm
-	// gate, which has no boolean in the SDK's own approval to travel in.
+	// gate, which the SDK's own boolean approval cannot carry.
 	FiskAnswer *fiskAnswer `json:"fiskAnswer"`
 }
 
@@ -74,23 +74,19 @@ type fiskAnswer struct {
 // person answered.
 const approvedState = "approval-responded"
 
-// turn is what this request asks of the conversation.
+// turn is what this request asks of the conversation: the answer the body carries, the
+// message the person typed, or both.
+//
+// useChat posts a body carrying both when somebody answers a card and types in the same
+// breath. The answer is spent on the question it names and the message is the turn after
+// the answered one finishes, as the channel does with a Turn carrying both.
 func (r *request) turn() (web.Turn, error) {
 	answer, err := r.answer()
 	if err != nil {
 		return web.Turn{}, err
 	}
 
-	out := web.Turn{ThreadID: r.ID}
-	if answer != nil {
-		out.Answer = answer
-
-		return out, nil
-	}
-
-	out.Prompt = r.prompt()
-
-	return out, nil
+	return web.Turn{ThreadID: r.ID, Prompt: r.prompt(), Answer: answer}, nil
 }
 
 // answer is the answer this request carries, nil for one that only prompts.
@@ -164,35 +160,39 @@ func (r *request) continues() string {
 	return last.ID
 }
 
-// prompt is the newest user message as one string.
+// prompt is the message the person typed on this request, as one string, and is empty
+// for a request that only answers a question.
 //
-// useChat resends the whole history on every POST and the AI SDK's own documentation
-// treats that history as the conversation. This worker has an authoritative journal,
-// so the turn being asked for is what is read out of the body and nothing else in it
-// is trusted.
+// The newest message is that message when it is the person's own. useChat resends the
+// whole history on every POST and appends what somebody types to the end of it, while the
+// submit that carries an approval ends on the assistant message the client is still
+// building. The history behind the newest message is not read: this worker has an
+// authoritative journal, and the AI SDK's own documentation treating that history as the
+// conversation would let a page rewrite what the journal holds.
 func (r *request) prompt() string {
-	for i := len(r.Messages) - 1; i >= 0; i-- {
-		if r.Messages[i].Role != "user" {
-			continue
-		}
-
-		var text []string
-
-		for _, p := range r.Messages[i].Parts {
-			if p.Type == "text" && p.Text != "" {
-				text = append(text, p.Text)
-			}
-		}
-
-		return strings.TrimSpace(strings.Join(text, "\n"))
+	if len(r.Messages) == 0 {
+		return ""
 	}
 
-	return ""
+	last := r.Messages[len(r.Messages)-1]
+	if last.Role != "user" {
+		return ""
+	}
+
+	var text []string
+
+	for _, p := range last.Parts {
+		if p.Type == "text" && p.Text != "" {
+			text = append(text, p.Text)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(text, "\n"))
 }
 
 // answer is the answer in the shape the channel holds for the prompter. Each kind
 // carries the one field it is answered with, so an answer of the wrong shape is
-// refused here rather than reaching the run as a value nobody chose.
+// refused here rather than reaching the run as a value the person never chose.
 func (a *fiskAnswer) answer() (*web.Answer, error) {
 	out := &web.Answer{ToolUseID: a.ToolUseID, Kind: web.QuestionKind(a.Kind)}
 

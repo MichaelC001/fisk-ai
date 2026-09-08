@@ -20,8 +20,8 @@ import (
 )
 
 // The channel drives the writer through both halves, and the runner asserts the
-// streaming one at runtime, so a sink that stopped satisfying either would stop
-// streaming with no error raised anywhere.
+// streaming one at runtime, so a sink that stopped satisfying either would silently
+// stop streaming.
 var (
 	_ web.TurnWriter        = (*turnWriter)(nil)
 	_ agent.MessageStreamer = (*turnWriter)(nil)
@@ -62,9 +62,9 @@ type humanInTheLoop struct {
 
 // warningValue is one advisory the run raised.
 //
-// The kind and its fields travel rather than a sentence about them, so the wording
-// belongs to whatever renders it and a client that does not know a kind still has
-// something to show. The kind's stable name is sent rather than its value, which is a
+// The event carries the kind and its fields rather than a sentence about them, so the
+// wording belongs to whatever renders it and a client that does not know a kind still
+// has something to show. The kind's stable name is sent rather than its value, which is a
 // position in a list.
 type warningValue struct {
 	Kind   string   `json:"kind"`
@@ -108,7 +108,7 @@ type turnWriter struct {
 	ids    int
 
 	// interrupts are the questions the turn ended on, carried on the run-finished
-	// event. A Fisk run raises one at a time, its prompter running on the loop's own
+	// event. A Fisk run raises one at a time, since its prompter runs on the loop's own
 	// goroutine, and the protocol takes a list.
 	interrupts []types.Interrupt
 
@@ -156,8 +156,8 @@ func (t *turnWriter) Open() {
 	})))
 }
 
-// StreamDeltas asks for the fragments of each assistant turn, which is what makes the
-// page type rather than wait.
+// StreamDeltas asks for the fragments of each assistant turn, which makes the page
+// type rather than wait.
 func (t *turnWriter) StreamDeltas() bool { return true }
 
 // MessageDelta renders one fragment on the message its block index is open under,
@@ -235,8 +235,8 @@ func (t *turnWriter) whole(reasoning bool, text string) {
 	t.endBlock(b)
 }
 
-// ToolCall renders a dispatched call as the call it is and the arguments it was
-// dispatched with, which AG-UI streams and this run reports whole.
+// ToolCall renders a dispatched call and the arguments it was dispatched with, which
+// AG-UI streams and this run reports whole.
 //
 // The call a resumed question was about is left out. Its tool ran on the turn that
 // asked, so the client already holds the call, and a client accumulates a call's
@@ -297,8 +297,8 @@ func (t *turnWriter) Warn(w agent.Warning) {
 }
 
 // Ask holds the question the turn ended on. It is carried on the run-finished event
-// Close sends, since an AG-UI interrupt is what a run finishes with rather than
-// something sent during it.
+// Close sends, since a run finishes with an AG-UI interrupt rather than sending one
+// during it.
 //
 // Nothing is synthesized before it. The gate runs before the run traces the call, so no
 // tool call has been sent for the command being approved, and the interrupt carries the
@@ -361,8 +361,8 @@ func (t *turnWriter) runError(e web.Ending) events.Event {
 // assistant turns, and the calls with the results that answered them, in the order the
 // journal holds them.
 //
-// A snapshot is what AG-UI has for a conversation that is already over, so nothing is
-// re-narrated as the events a live turn produced and a client that renders a thread
+// AG-UI has a snapshot for a conversation that is already over, so nothing is
+// re-narrated as the events a live turn produced, and a client that renders a thread
 // renders this one without knowing it was read back.
 //
 // A conversation the run left waiting on a question is followed by Ask, which puts the
@@ -386,9 +386,14 @@ func (t *turnWriter) SessionRotated(string)  {}
 func (t *turnWriter) Panicked(any, []byte)   {}
 
 // startBlock tells the client a message started.
+//
+// A reasoning message carries the reasoning role rather than the assistant one. The Go
+// SDK asks only that the role is set, where the TypeScript core every browser client
+// parses through requires this exact value, so an assistant role here reaches a page as
+// a validation failure rather than as thinking.
 func (t *turnWriter) startBlock(b *blockPart) {
 	if b.reasoning {
-		t.stream.event(events.NewReasoningMessageStartEvent(b.id, string(types.RoleAssistant)))
+		t.stream.event(events.NewReasoningMessageStartEvent(b.id, string(types.RoleReasoning)))
 
 		return
 	}
@@ -430,9 +435,9 @@ func (t *turnWriter) endBlock(b *blockPart) {
 	t.stream.event(events.NewTextMessageEndEvent(b.id))
 }
 
-// mintID names one message of this thread. The run id is in it because a client keeps
-// the messages of every run of a thread, and two runs numbering from one would have the
-// second run's first message written into the first run's.
+// mintID names one message of this thread. The run id is in it because a client
+// accumulates the messages of every run of a thread, and two runs numbering from one
+// would have the second run's first message written into the first run's.
 func (t *turnWriter) mintID() string {
 	t.ids++
 

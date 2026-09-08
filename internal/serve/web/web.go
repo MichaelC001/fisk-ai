@@ -22,8 +22,8 @@
 //
 // # A question ends the turn
 //
-// A page is not an operator. It is reading the response, so it cannot answer until the
-// response is over. A question the run asks is therefore put on the response that ends
+// A page is reading the response, so it cannot answer until the response is over. A
+// question the run asks is therefore put on the response that ends
 // the turn, the call it belongs to is left unanswered, and the answer arrives on the
 // page's next request, which resumes the conversation and dispatches the same call
 // again. Nothing persists a question or its answer: the answer is held for the one turn
@@ -31,8 +31,8 @@
 //
 // # No per-thread state
 //
-// Several processes may serve one page behind a load balancer, so nothing here is
-// remembered between requests. A thread is a session in the store, a held answer lives
+// Several processes may serve one page behind a load balancer, so the channel holds
+// nothing between requests. A thread is a session in the store, a held answer lives
 // for one turn, and a second turn on a thread already running is refused by the
 // journal's own claim rather than by a map in one process.
 //
@@ -41,8 +41,8 @@
 // A cross-origin POST still reaches the handler and still runs a turn; the browser only
 // withholds the answer from the page. So a request carrying an Origin outside the
 // configured list is refused before its body is read, and a listener on a loopback
-// address refuses a request whose Host is not that address, which is what stops a page
-// reaching it through DNS rebinding. On any other address the Host check is skipped,
+// address refuses a request whose Host is not that address, so a page cannot reach it
+// through DNS rebinding. On any other address the Host check is skipped,
 // since a deployment there sits behind a TLS proxy that passes the browser's Host
 // through unchanged.
 package web
@@ -109,8 +109,7 @@ type Options struct {
 
 	// Origins lists the pages allowed to read the answers, each as a browser sends it
 	// in the Origin header: scheme, host and port with no path. Required, and a
-	// wildcard is refused: the list is the whole of what decides which page may read an
-	// answer.
+	// wildcard is refused: this list alone decides which page may read an answer.
 	Origins []string
 
 	// Identity is the agent name hashed into every session this channel derives, so two
@@ -138,9 +137,9 @@ type Options struct {
 
 	// CardTools are the agent's tools, resolved once by the caller. They are listed on
 	// the card as given: this channel has an operator in front of it, so a confirm-gated
-	// command belongs there where a2a's own exposure policy drops it. They are also what
-	// a stored conversation's outstanding question is rendered from, since a gated
-	// command's line comes from the tool that runs it. ResolveAgentTools produces them
+	// command belongs there where a2a's own exposure policy drops it. They also render a
+	// stored conversation's outstanding question, since a gated command's line comes from
+	// the tool that runs it. ResolveAgentTools produces them
 	// from a configuration and the process's MCP sessions.
 	CardTools []toolkit.Tool
 
@@ -156,7 +155,7 @@ type Options struct {
 
 	// Conversations answers the sessions API: the past conversations a page lists,
 	// opens and deletes. Nil reads them from Sessions, scoped to this channel's
-	// sessions and to Identity, which is what a process running its own agent wants.
+	// sessions and to Identity, as a process running its own agent wants.
 	//
 	// It is a field so that a process fronting an agent another process runs supplies
 	// the conversations that process holds, with the endpoints above it unchanged.
@@ -292,7 +291,7 @@ type Channel struct {
 	inFlight int
 
 	// faults carries the report that the listener has stopped answering. It is buffered
-	// by one and written once, the first fault being what ends the worker.
+	// by one and written once, and the first fault ends the worker.
 	faults    chan error
 	faultOnce sync.Once
 
@@ -421,7 +420,7 @@ func (c *Channel) Next(ctx context.Context) (*serve.Work, error) {
 	}
 }
 
-// start serves the listener once. A listener that stops for a reason nobody asked for
+// start serves the listener once. A listener that stops for any reason but a Close
 // faults the worker, since no request can arrive again.
 func (c *Channel) start() {
 	c.startOnce.Do(func() {
@@ -439,8 +438,8 @@ func (c *Channel) start() {
 	})
 }
 
-// Faults reports that the listener has stopped answering for a reason nobody asked
-// for.
+// Faults reports that the listener has stopped answering for a reason other than a
+// Close.
 func (c *Channel) Faults() <-chan error { return c.faults }
 
 // fault records that the listener has stopped. It is called from the serving goroutine,
@@ -490,9 +489,9 @@ func (c *Channel) draining() bool {
 	}
 }
 
-// suspendRequested is what every turn's run reads at each loop boundary: the worker's
-// own drain signal, and this channel being closed. Each parks the run somewhere a later
-// request on the thread continues from.
+// suspendRequested carries the worker's own drain signal and this channel being closed,
+// and every turn's run reads it at each loop boundary. Each parks the run somewhere a
+// later request on the thread continues from.
 func (c *Channel) suspendRequested() bool {
 	if c.suspend != nil && c.suspend() {
 		return true

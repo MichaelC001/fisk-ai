@@ -62,12 +62,12 @@ type RunInfo struct {
 	// Terminal is the reason the run ended, or empty if it is still open (was
 	// suspended or crashed).
 	Terminal TerminalReason
-	// Summary is what the conversation had cost when its last turn ended, read off the
+	// Summary is the conversation's cost when its last turn ended, read off the
 	// terminal record that turn wrote.
 	//
 	// It is nil for a conversation whose last turn ended before the field existed, and
 	// for one with a turn in flight, which has written no terminal record to carry it.
-	// Nil is not zero: a caller shows an empty slot for a conversation nobody summarized
+	// Nil is not zero: a caller shows an empty slot for a conversation with no summary
 	// rather than a turn count of none.
 	Summary *ConversationSummary
 }
@@ -284,7 +284,7 @@ type Store interface {
 	// did not mint is ErrInvalidCursor.
 	//
 	// The order is creation order, oldest first, and a run keeps its place as the
-	// store grows, which is what lets a cursor outlive the call that returned it.
+	// store grows, which lets a cursor outlive the call that returned it.
 	//
 	// A page costs the work its own rows cost rather than the work the store holds.
 	// List summarizes every stored run before a caller can drop one, so a store of

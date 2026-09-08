@@ -43,8 +43,8 @@ type CardOptions struct {
 	// Icon is an emoji to draw beside the name.
 	Icon string
 
-	// IconURL is an https URL of an image to draw beside the name. BuildCard holds it
-	// to wire.CheckIconURL and refuses a card carrying anything else, since the card
+	// IconURL is an https URL of an image to draw beside the name. BuildCard checks it
+	// with wire.CheckIconURL and refuses a card carrying anything else, since the card
 	// reaches a browser.
 	IconURL string
 
@@ -55,12 +55,12 @@ type CardOptions struct {
 
 	// Telemetry is the resolved provider, which the card reports export off. It is read
 	// rather than a configuration value, so a veto or an endpoint that was refused does
-	// not leave the card promising an export nobody will make. Nil reports neither.
+	// not leave the card promising an export that will not happen. Nil reports neither.
 	Telemetry *telemetry.Provider
 }
 
-// BuildCard assembles an agent card from opts and tools. It is what both the a2a
-// server and an HTTP channel publish, so one place decides what a card contains.
+// BuildCard assembles an agent card from opts and tools. Both the a2a server and an
+// HTTP channel publish it, so one place decides what a card contains.
 //
 // It applies no exposure policy: every tool given is listed, confirm-gated tools
 // included. a2a filters its own set with selectExposed before it gets here, because a

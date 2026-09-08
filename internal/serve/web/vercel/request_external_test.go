@@ -42,11 +42,11 @@ var _ = Describe("Decode", func() {
 			]
 		}`)
 
-		Expect(out.turn.Prompt).To(BeEmpty(), "the newest user message is a turn the journal already holds")
+		Expect(out.turn.Prompt).To(BeEmpty(), "the newest message is the assistant's, so nobody typed anything")
 		Expect(out.turn.Answer).To(Equal(&web.Answer{ToolUseID: "c1", Kind: web.KindApprove, Approval: toolkit.ConfirmOnce}))
 	})
 
-	It("Should read a declined approval as the decline it is", func() {
+	It("Should read an approval answered false as a decline", func() {
 		out := decode(`{
 			"id": "chat-1",
 			"messages": [
@@ -98,12 +98,36 @@ var _ = Describe("Decode", func() {
 	It("Should read the standing allow out of fiskAnswer", func() {
 		out := decode(`{
 			"id": "chat-1",
-			"messages": [{"role": "user", "parts": [{"type": "text", "text": "wipe it"}]}],
+			"messages": [
+				{"role": "user", "parts": [{"type": "text", "text": "wipe it"}]},
+				{"id": "msg-1", "role": "assistant", "parts": [
+					{"type": "dynamic-tool", "toolCallId": "c1", "state": "approval-requested"}
+				]}
+			],
 			"fiskAnswer": {"toolUseId": "c1", "kind": "approve", "approval": "always"}
 		}`)
 
-		Expect(out.turn.Prompt).To(BeEmpty())
+		Expect(out.turn.Prompt).To(BeEmpty(), "the thread ends on the message the card sits in, so nobody typed anything")
 		Expect(out.turn.Answer).To(Equal(&web.Answer{ToolUseID: "c1", Kind: web.KindApprove, Approval: toolkit.ConfirmAlways}))
+	})
+
+	// Somebody who answers a card and types in the same breath submits one body carrying
+	// both, and the message is appended to the history behind the card.
+	It("Should read an answer and the message sent with it", func() {
+		out := decode(`{
+			"id": "chat-1",
+			"messages": [
+				{"role": "user", "parts": [{"type": "text", "text": "wipe it"}]},
+				{"id": "msg-1", "role": "assistant", "parts": [
+					{"type": "dynamic-tool", "toolCallId": "c1", "state": "approval-requested"}
+				]},
+				{"role": "user", "parts": [{"type": "text", "text": "and then list what is left"}]}
+			],
+			"fiskAnswer": {"toolUseId": "c1", "kind": "approve", "approval": "once"}
+		}`)
+
+		Expect(out.turn.Prompt).To(Equal("and then list what is left"))
+		Expect(out.turn.Answer).To(Equal(&web.Answer{ToolUseID: "c1", Kind: web.KindApprove, Approval: toolkit.ConfirmOnce}))
 	})
 
 	It("Should read a confirm answer", func() {
@@ -144,7 +168,7 @@ var _ = Describe("Decode", func() {
 		Expect(err.Error()).To(ContainSubstring(`this one says "yes"`))
 	})
 
-	It("Should refuse a selection of an option nobody was offered", func() {
+	It("Should refuse a selection outside the options offered", func() {
 		_, err := decodeErr(`{"id": "chat-1", "fiskAnswer": {"toolUseId": "c1", "kind": "select", "index": -1}}`)
 
 		Expect(err).To(MatchError(vercel.ErrBadRequest))

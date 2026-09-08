@@ -58,16 +58,16 @@ const (
 
 // Conversations are the stored conversations this channel lists, opens and deletes.
 //
-// The channel holds this rather than runstate.Store, because what answers it is a
-// property of where the agent runs. Backed by the store, as NewStoreConversations backs
+// The channel holds this rather than runstate.Store, because where the agent runs
+// decides what answers it. Backed by the store, as NewStoreConversations backs
 // it, the process serving the page is the process that journaled the conversation.
 // Backed by messages to a worker, the conversations are the worker's and this process
 // holds none of them, and nothing above this interface changes.
 //
 // Every implementation answers for one channel's conversations alone: an id outside them
 // is runstate.ErrNotFound from Load and Delete, and List never returns a row for one.
-// The channel maps that error to a 404, so an id this list does not show is one nobody
-// can open or delete through it.
+// The channel maps that error to a 404, so an id this list does not show can be neither
+// opened nor deleted through it.
 type Conversations interface {
 	// List returns at most limit conversations from cursor, oldest first, with the
 	// cursor the next page resumes from. An empty cursor starts at the oldest.
@@ -88,9 +88,9 @@ type Conversations interface {
 // StoreConversations answers Conversations from the run store this process writes.
 //
 // It scopes every call two ways, and the store applies both rather than this type
-// dropping rows it already paid to read. The prefix is what keeps a Slack thread and a
-// peer's prompt out of a browser's rail, since one store is handed to every channel. The
-// agent identity is what keeps two agents sharing one JetStream stream apart, and a
+// dropping rows it already paid to read. The prefix keeps a Slack thread and a peer's
+// prompt out of a browser's rail, since one store is handed to every channel. The agent
+// identity keeps two agents sharing one JetStream stream apart, and a
 // conversation journaled before that field existed is shown, which is
 // runstate.ListFilter.MatchesAgent's rule.
 type StoreConversations struct {
@@ -149,7 +149,7 @@ func (c *StoreConversations) Delete(ctx context.Context, id string) error {
 
 // Conversation is one row of the session list, as a page reads it.
 type Conversation struct {
-	// ID is the session id, which is what opens and deletes the conversation.
+	// ID is the session id, which opens and deletes the conversation.
 	ID string `json:"id"`
 	// Title is the first prompt, cut to one line. A model wrote none: nothing stored
 	// names a conversation, so this is what the person asked for first.
@@ -163,7 +163,7 @@ type Conversation struct {
 	// Terminal is why the last turn ended, empty for a conversation with a turn in
 	// flight.
 	Terminal runstate.TerminalReason `json:"terminal,omitempty"`
-	// Summary is what the conversation had cost when its last turn ended. It is absent
+	// Summary is the conversation's cost when its last turn ended. It is absent
 	// for a conversation whose last turn ended before a turn recorded one, and a page
 	// shows an empty slot for that rather than counts of zero.
 	Summary *ConversationCounts `json:"summary,omitempty"`
@@ -173,8 +173,8 @@ type Conversation struct {
 type ConversationCounts struct {
 	// Turns is how many turns the conversation has taken.
 	Turns int64 `json:"turns"`
-	// ContextTokens is the input the last model call carried, which is what the next
-	// turn sends again before adding its prompt.
+	// ContextTokens is the input the last model call carried, which the next turn sends
+	// again before adding its prompt.
 	ContextTokens int64 `json:"context_tokens"`
 	// ToolCalls is how many tool calls the conversation has made.
 	ToolCalls int64 `json:"tool_calls"`
@@ -185,7 +185,7 @@ type ConversationList struct {
 	// Sessions are the page's conversations, oldest first.
 	Sessions []Conversation `json:"sessions"`
 	// Cursor asks for the page after this one and is absent once the listing has
-	// reached the end. It is the store's own value: a page keeps it and hands it back
+	// reached the end. It is the store's own value: a page stores it and hands it back
 	// unchanged, and it stays good across a reload and a restart.
 	Cursor string `json:"cursor,omitempty"`
 }
@@ -284,8 +284,8 @@ func pageLimit(r *http.Request) (int, error) {
 //
 // The conversation is read before the response head is written, so an id this channel
 // does not hold is a 404 rather than a body that ends in an error. The writer then puts
-// the whole conversation and closes on what its last turn ended with, which is what a
-// page shows when a person picks a row in the rail.
+// the whole conversation and closes on what its last turn ended with, and a page shows
+// that when a person picks a row in the rail.
 //
 // A conversation the run left waiting on a question is asked it again after the replay,
 // so a page opening a suspended conversation sees the card it stopped on rather than a
@@ -333,7 +333,7 @@ func (c *Channel) serveSessionOpen(f Format) http.HandlerFunc {
 //
 // It is the one destructive verb here and serve.Caller.Verified is false on this
 // transport, so anyone who reaches this endpoint deletes any conversation this channel
-// holds. What the prefix and the identity stop is a delete reaching another channel's
+// holds. The prefix and the identity stop a delete reaching another channel's
 // conversation or another agent's; a deployment that has to stop it reaching another
 // person's puts an authenticating proxy in front of this listener.
 func (c *Channel) serveSessionDelete(w http.ResponseWriter, r *http.Request) {

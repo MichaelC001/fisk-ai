@@ -99,7 +99,10 @@ var _ = Describe("The response", func() {
 		d.writer.Close(completed)
 
 		Expect(d.body()).To(Equal(frames("t1", "r1",
-			`{"type":"REASONING_MESSAGE_START","messageId":"r1-1","role":"assistant"}`,
+			// The role is the reasoning one rather than the assistant one: the TypeScript
+			// core every browser client parses through requires this exact value, where the
+			// Go SDK asks only that a role is set.
+			`{"type":"REASONING_MESSAGE_START","messageId":"r1-1","role":"reasoning"}`,
 			`{"type":"REASONING_MESSAGE_CONTENT","messageId":"r1-1","delta":"let me think"}`,
 			`{"type":"TEXT_MESSAGE_START","messageId":"r1-2","role":"assistant"}`,
 			`{"type":"TEXT_MESSAGE_CONTENT","messageId":"r1-2","delta":"the answer"}`,

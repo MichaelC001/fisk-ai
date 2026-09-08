@@ -317,8 +317,8 @@ func (s *FileStore) List(ctx context.Context, filter runstate.ListFilter) ([]run
 //
 // Ordering a directory of journals needs each run's creation time, which is on the meta
 // record every journal opens with, so this reads the first line of each and orders on
-// what it finds. Only the page's runs are then folded. The whole-journal read List makes
-// of every run is what the page is spared, and it is the read that grows with a
+// what it finds. Only the page's runs are then folded. The page is spared the
+// whole-journal read List makes of every run, which is the read that grows with a
 // conversation.
 //
 // Two runs can carry the same creation time, so the run id orders those and the cursor
@@ -404,8 +404,8 @@ type position struct {
 	agent string
 }
 
-// precedes reports whether other comes after p in creation order, which is what a page
-// resuming at p takes.
+// precedes reports whether other comes after p in creation order, which a page resuming
+// at p takes.
 func (p position) precedes(other position) bool {
 	if !other.created.Equal(p.created) {
 		return other.created.After(p.created)
