@@ -173,6 +173,18 @@ type MetaRecord struct {
 	// It is the caller's own claim. Nothing verifies it and nothing decides on it, so
 	// it is a label for a person reading a journal and never evidence of who owns one.
 	Caller string `json:"caller,omitempty"`
+	// Agent names the agent that produced this run, taken from the configured identity
+	// of the process that created the journal. Two agents pointed at one store write
+	// into it together, and this is what a listing tells their conversations apart by.
+	//
+	// It is empty on a record written before the field existed, which is a conversation
+	// held before anyone recorded an agent rather than one belonging to no agent.
+	// ListFilter.MatchesAgent holds what a listing does with that.
+	//
+	// It is the serving agent's label for itself. Nothing verifies it and nothing
+	// decides access on it, as with Caller. A store an operator wants genuinely
+	// separated is a separate store.
+	Agent string `json:"agent,omitempty"`
 }
 
 // AssistantRecord is one assistant turn in the neutral model, so thinking blocks
@@ -251,6 +263,17 @@ type DeferredRecord struct {
 	ToolName  string `json:"tool_name"`
 	Note      string `json:"note,omitempty"`
 	Handle    string `json:"handle,omitempty"`
+	// Kind is the toolkit.Kind token of the provider that took the call, and Dispatched
+	// marks a call that reached that provider rather than one a prompter deferred before
+	// it ran. AnswerDeferredCall copies both onto the ToolResult record it writes, since
+	// whoever supplies the answer knows neither, and the fold then counts the call under
+	// the provider that served it.
+	//
+	// Additive and omitempty. A record written before they existed carries neither, so
+	// its answer folds under the unknown kind and not dispatched, which is what such a
+	// journal has always reported.
+	Kind       string `json:"kind,omitempty"`
+	Dispatched bool   `json:"dispatched,omitempty"`
 }
 
 // DecisionRecord is a standing approval the operator granted for a named tool,
@@ -323,4 +346,32 @@ const (
 type TerminalRecord struct {
 	Reason  TerminalReason `json:"reason"`
 	Message string         `json:"message,omitempty"`
+	// Summary is the conversation's cost when this turn ended. A listing reads
+	// it off this record, which it fetches anyway, instead of folding the journal.
+	//
+	// It is absent on a record written before the field existed, and RunInfo reports
+	// that as absent rather than as zeros, so a rail draws an empty slot for an older
+	// conversation rather than a count of nothing.
+	Summary *ConversationSummary `json:"summary,omitempty"`
+}
+
+// ConversationSummary is the conversation's size and cost at the moment a turn ended,
+// carried on that turn's TerminalRecord.
+//
+// Fold remains the authority on every number in it. The runner takes them from what it
+// counts during the turn, seeded on resume from the journal, and copies them here, so
+// writing one reads no records. Folding the journal up to this record gives the same
+// Turns, ContextTokens and Counters.
+type ConversationSummary struct {
+	// Turns is how many turns the conversation has taken, this one included. The prompt
+	// that opened the journal is the first, and each user turn journaled after it is
+	// another.
+	Turns int64 `json:"turns"`
+	// ContextTokens is the input the last model call carried, the two prompt-cache tiers
+	// included, which the next turn sends again before adding its prompt. It is
+	// zero for a conversation that has made no model call.
+	ContextTokens int64 `json:"context_tokens"`
+	// Counters holds what the conversation has spent, including the tool call count a
+	// listing shows beside the turn count.
+	Counters Counters `json:"counters"`
 }

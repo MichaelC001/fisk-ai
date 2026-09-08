@@ -66,7 +66,7 @@ func recordsOf(tb testing.TB, store runstate.Store, id string) []runstate.Record
 func currentSessionID(tb testing.TB, store *agenttest.FakeSessionStore) string {
 	tb.Helper()
 
-	runs, err := store.List(context.Background())
+	runs, err := store.List(context.Background(), runstate.ListFilter{})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(runs).To(HaveLen(1))
 

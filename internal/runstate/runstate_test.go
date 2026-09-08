@@ -142,6 +142,37 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Caller).To(BeEmpty())
 		})
 
+		It("restores the agent that produced the run", func() {
+			rec := meta()
+			rec.Meta.Agent = "agent-a"
+
+			rs, err := Fold([]Record{rec})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Agent).To(Equal("agent-a"))
+		})
+
+		// The field is omitempty, so a build that predates it wrote a meta record with no
+		// agent key at all. That record folds with an empty agent at the version it was
+		// written under, which is why adding the field moved no version.
+		It("folds a meta record written before the agent field existed", func() {
+			body := `{"seq":1,"protocol":"io.choria.fisk-ai.v1.session.meta","meta":{"version":1,"run_id":"r1","created":"2026-01-01T00:00:00Z","fingerprint":{"model":"claude-opus-4-8"},"prompt":"start here"}}`
+
+			var rec Record
+			Expect(json.Unmarshal([]byte(body), &rec)).To(Succeed())
+			Expect(rec.Meta.Version).To(Equal(Version), "the record predates the agent field, not this build's version")
+
+			rs, err := Fold([]Record{rec})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rs.Agent).To(BeEmpty())
+			Expect(rs.Prompt).To(Equal("start here"))
+		})
+
+		It("writes no agent key for a run nobody recorded an agent for", func() {
+			data, err := json.Marshal(meta())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(bytes.Contains(data, []byte(`"agent"`))).To(BeFalse())
+		})
+
 		claim := func(seq uint64) Record {
 			return Record{Seq: seq, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-a", Claimed: time.Now().UTC()}}
 		}
@@ -525,6 +556,104 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Completed()).To(BeTrue())
 		})
 
+		Describe("the numbers a terminal record's summary carries", func() {
+			It("counts the opening prompt and every user record as a turn", func() {
+				rs, err := Fold([]Record{meta()})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Turns).To(Equal(int64(1)), "the prompt on the meta record")
+
+				rs, err = Fold([]Record{
+					meta(),
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "one")},
+					{Seq: 3, Protocol: UserProtocol, User: userRecord("second question")},
+					{Seq: 4, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "two")},
+					{Seq: 5, Protocol: UserProtocol, User: userRecord("third question")},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Turns).To(Equal(int64(3)))
+			})
+
+			// Two follow-ups after an errored turn merge into one message, which the API
+			// requires, and the operator still typed twice.
+			It("counts merged user records apart", func() {
+				rs, err := Fold([]Record{
+					meta(),
+					{Seq: 2, Protocol: UserProtocol, User: userRecord("one")},
+					{Seq: 3, Protocol: UserProtocol, User: userRecord("two")},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Messages).To(HaveLen(1))
+				Expect(rs.Turns).To(Equal(int64(3)))
+			})
+
+			It("takes the context size from the last model call, cache tiers included", func() {
+				rs, err := Fold([]Record{
+					meta(),
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: &AssistantRecord{
+						Iteration: 0, Message: assistantMessage(textBlock("a")),
+						InTokens: 10, OutTokens: 5, CacheReadTokens: 100, CacheCreateTokens: 40,
+					}},
+					{Seq: 3, Protocol: AssistantProtocol, Assistant: &AssistantRecord{
+						Iteration: 1, Message: assistantMessage(textBlock("b")),
+						InTokens: 2, OutTokens: 3, CacheReadTokens: 200,
+					}},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.ContextTokens).To(Equal(int64(202)), "the last call's whole input, not the sum over the run")
+			})
+
+			It("reports no context size for a conversation that has made no model call", func() {
+				rs, err := Fold([]Record{meta()})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.ContextTokens).To(BeZero())
+			})
+
+			// The field is omitempty, so a terminal record written before it existed has no
+			// summary key. It folds with none rather than with zeros, which is what lets a
+			// listing say a conversation was never summarized.
+			It("folds a terminal record written before the summary existed", func() {
+				body := `{"seq":2,"protocol":"io.choria.fisk-ai.v1.session.terminal","terminal":{"reason":"completed"}}`
+
+				var rec Record
+				Expect(json.Unmarshal([]byte(body), &rec)).To(Succeed())
+
+				rs, err := Fold([]Record{meta(), rec})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Terminal).NotTo(BeNil())
+				Expect(rs.Terminal.Summary).To(BeNil())
+			})
+
+			It("writes no summary key for a terminal record that carries none", func() {
+				data, err := json.Marshal(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(bytes.Contains(data, []byte(`"summary"`))).To(BeFalse())
+			})
+
+			It("stores the counters under their own names", func() {
+				data, err := json.Marshal(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{
+					Reason: ReasonCompleted,
+					Summary: &ConversationSummary{
+						Turns:         2,
+						ContextTokens: 4096,
+						Counters: Counters{
+							LlmCalls: 3, ToolCalls: 1, InTokens: 900, OutTokens: 40,
+							ToolCallsByKind: map[toolkit.Kind]int64{toolkit.KindApplication: 1},
+						},
+					},
+				}})
+				Expect(err).NotTo(HaveOccurred())
+
+				var back Record
+				Expect(json.Unmarshal(data, &back)).To(Succeed())
+				Expect(back.Terminal.Summary.Turns).To(Equal(int64(2)))
+				Expect(back.Terminal.Summary.ContextTokens).To(Equal(int64(4096)))
+				Expect(back.Terminal.Summary.Counters.LlmCalls).To(Equal(int64(3)))
+				Expect(back.Terminal.Summary.Counters.ToolCallsByKind).To(HaveKeyWithValue(toolkit.KindApplication, int64(1)))
+				Expect(bytes.Contains(data, []byte(`"llm_calls":3`))).To(BeTrue())
+				Expect(bytes.Contains(data, []byte(`"context_tokens":4096`))).To(BeTrue())
+			})
+		})
+
 		It("rejects any version other than the current one", func() {
 			for _, v := range []int{Version - 1, Version + 1} {
 				r := meta()
@@ -669,6 +798,48 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Completed()).To(BeFalse())
 			Expect(rs.NextIteration).To(Equal(int64(2)))
 			Expect(userTexts(rs)).To(Equal([]string{"start here", "again"}))
+		})
+	})
+
+	// Every backend answers an agent filter through this, so the three answers are
+	// pinned once here and each backend's suite proves it calls this rather than
+	// comparing the two strings itself.
+	Describe("ListFilter.MatchesAgent", func() {
+		It("takes every run when the filter names no agent", func() {
+			var f ListFilter
+			Expect(f.MatchesAgent("agent-a")).To(BeTrue())
+			Expect(f.MatchesAgent("")).To(BeTrue())
+		})
+
+		It("takes the named agent's run and leaves another agent's out", func() {
+			f := ListFilter{Agent: "agent-a"}
+			Expect(f.MatchesAgent("agent-a")).To(BeTrue())
+			Expect(f.MatchesAgent("agent-b")).To(BeFalse())
+		})
+
+		// A run with no agent was journaled before anyone recorded one, so it is shown:
+		// hiding it would empty the rail of an operator who has been running an agent
+		// since before the field existed.
+		It("takes a run that carries no agent", func() {
+			Expect(ListFilter{Agent: "agent-a"}.MatchesAgent("")).To(BeTrue())
+		})
+	})
+
+	// A channel derives its run ids under a marker of its own, and every backend drops a
+	// run this excludes before it reads a record.
+	Describe("ListFilter.MatchesID", func() {
+		It("takes every run when the filter names no prefix", func() {
+			var f ListFilter
+			Expect(f.MatchesID("w-abc")).To(BeTrue())
+			Expect(f.MatchesID("")).To(BeTrue())
+		})
+
+		It("takes a run under the prefix and leaves every other run out", func() {
+			f := ListFilter{Prefix: "w-"}
+			Expect(f.MatchesID("w-abc")).To(BeTrue())
+			Expect(f.MatchesID("w-")).To(BeTrue())
+			Expect(f.MatchesID("slack-abc")).To(BeFalse())
+			Expect(f.MatchesID("")).To(BeFalse())
 		})
 	})
 

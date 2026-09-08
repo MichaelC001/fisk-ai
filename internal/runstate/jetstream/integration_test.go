@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	natsd "github.com/nats-io/nats-server/v2/server"
@@ -79,6 +81,42 @@ func terminalRec(reason runstate.TerminalReason) runstate.Record {
 		Protocol: runstate.TerminalProtocol,
 		Terminal: &runstate.TerminalRecord{Reason: reason},
 	}
+}
+
+// countRecordReads runs work and reports how many stored records it read. Each read is
+// one request on '$JS.API.STREAM.MSG.GET.<stream>', or on '$JS.API.DIRECT.GET.<stream>'
+// where the stream allows a direct get, so a wildcard subscription counts them.
+//
+// The sentinel is the barrier. Every read the work made had its reply in hand before the
+// sentinel was published, and the server fans out to this subscription in the order it
+// processed the requests, so the sentinel arrives after the reads it followed.
+func countRecordReads(nc *nats.Conn, work func()) int {
+	GinkgoHelper()
+
+	const sentinel = "fisk.test.reads.sentinel"
+
+	var reads atomic.Int64
+	done := make(chan struct{})
+
+	sub, err := nc.Subscribe(">", func(m *nats.Msg) {
+		switch {
+		case m.Subject == sentinel:
+			close(done)
+		case strings.HasPrefix(m.Subject, "$JS.API.STREAM.MSG.GET."), strings.HasPrefix(m.Subject, "$JS.API.DIRECT.GET."):
+			reads.Add(1)
+		}
+	})
+	Expect(err).ToNot(HaveOccurred())
+	defer sub.Unsubscribe()
+	Expect(nc.Flush()).To(Succeed())
+
+	work()
+
+	Expect(nc.Publish(sentinel, nil)).To(Succeed())
+	Expect(nc.Flush()).To(Succeed())
+	Eventually(done).Should(BeClosed())
+
+	return int(reads.Load())
 }
 
 // goodStream is a stream configuration the backend accepts: a single <prefix>.>
@@ -411,7 +449,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jg.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].RunID).To(Equal(good))
@@ -432,11 +470,11 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			canceled, cancel := context.WithCancel(ctx)
 			cancel()
 
-			infos, err := store.List(canceled)
+			infos, err := store.List(canceled, runstate.ListFilter{})
 			Expect(err).To(MatchError(context.Canceled))
 			Expect(infos).To(BeEmpty())
 
-			infos, err = store.List(ctx)
+			infos, err = store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(2), "both runs are there, so the refusal was the cancel")
 		})
@@ -451,7 +489,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(jB.Append(ctx, 2, assistantRec(0))).To(Succeed())
 			Expect(jB.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(2))
 
@@ -465,6 +503,54 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			}
 		})
 
+		// Two agents on one operator-owned stream is the deployment the agent field
+		// exists for. The subjects carry the run id and the seq and nothing else, so the
+		// filter is answered from the meta record the listing already reads.
+		Describe("listing by agent", func() {
+			createFor := func(agent string) string {
+				GinkgoHelper()
+
+				id := newID()
+				meta := newMeta(id)
+				meta.Agent = agent
+
+				j, err := store.Create(ctx, id, meta)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Close()).To(Succeed())
+
+				return id
+			}
+
+			agentsByID := func(infos []runstate.RunInfo) map[string]string {
+				out := map[string]string{}
+				for _, info := range infos {
+					out[info.RunID] = info.Agent
+				}
+
+				return out
+			}
+
+			It("Should carry the agent on every row and list every run for a zero filter", func() {
+				a := createFor("agent-a")
+				b := createFor("agent-b")
+				unstamped := createFor("")
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(agentsByID(infos)).To(Equal(map[string]string{a: "agent-a", b: "agent-b", unstamped: ""}))
+			})
+
+			It("Should list one agent's runs and the runs nobody recorded an agent for", func() {
+				a := createFor("agent-a")
+				createFor("agent-b")
+				unstamped := createFor("")
+
+				infos, err := store.List(ctx, runstate.ListFilter{Agent: "agent-a"})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(agentsByID(infos)).To(Equal(map[string]string{a: "agent-a", unstamped: ""}))
+			})
+		})
+
 		It("Should report the ending off the last record", func() {
 			id := newID()
 			j, err := store.Create(ctx, id, newMeta(id))
@@ -473,10 +559,318 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, 3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+		})
+
+		Describe("listing the conversation summary", func() {
+			It("Should carry the summary off the terminal record", func() {
+				want := &runstate.ConversationSummary{
+					Turns:         3,
+					ContextTokens: 4096,
+					Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2, InTokens: 900},
+				}
+
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+
+				rec := terminalRec(runstate.ReasonCompleted)
+				rec.Terminal.Summary = want
+				Expect(j.Append(ctx, 3, rec)).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Summary).To(Equal(want))
+			})
+
+			It("Should report no summary for a conversation whose last turn wrote none", func() {
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+				Expect(infos[0].Summary).To(BeNil())
+			})
+		})
+
+		// A meta record's stream sequence is assigned when the run is created and the
+		// stream forbids rewriting the subject, so enumerating the meta subjects forward
+		// is creation order.
+		Describe("paging the listing", func() {
+			createFor := func(agent string) string {
+				GinkgoHelper()
+
+				id := newID()
+				meta := newMeta(id)
+				meta.Agent = agent
+
+				j, err := store.Create(ctx, id, meta)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				return id
+			}
+
+			idsOf := func(page runstate.RunPage) []string {
+				out := make([]string, 0, len(page.Runs))
+				for _, info := range page.Runs {
+					out = append(out, info.RunID)
+				}
+
+				return out
+			}
+
+			// walk pages the whole store the way a caller does: it hands back the cursor
+			// it was given until a page carries none.
+			walk := func(filter runstate.ListFilter, limit int) []string {
+				GinkgoHelper()
+
+				var out []string
+				cursor := ""
+				for range 20 {
+					page, err := store.ListPage(ctx, filter, limit, cursor)
+					Expect(err).ToNot(HaveOccurred())
+					out = append(out, idsOf(page)...)
+					if page.Cursor == "" {
+						return out
+					}
+					cursor = page.Cursor
+				}
+
+				Fail("the walk never reached a page without a cursor")
+
+				return nil
+			}
+
+			It("Should return a page smaller than the store, oldest first, with a cursor", func() {
+				first := createFor("")
+				second := createFor("")
+				createFor("")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{first, second}))
+				Expect(page.Cursor).ToNot(BeEmpty())
+			})
+
+			It("Should continue at the run the page ended on, repeating none and skipping none", func() {
+				var want []string
+				for range 5 {
+					want = append(want, createFor(""))
+				}
+
+				Expect(walk(runstate.ListFilter{}, 2)).To(Equal(want))
+				Expect(walk(runstate.ListFilter{}, 3)).To(Equal(want))
+				Expect(walk(runstate.ListFilter{}, 1)).To(Equal(want))
+			})
+
+			It("Should carry the same row a full listing does", func() {
+				createFor("agent-a")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+				Expect(err).ToNot(HaveOccurred())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(page.Runs).To(Equal(infos))
+			})
+
+			It("Should end the walk on a page carrying no cursor", func() {
+				createFor("")
+				createFor("")
+				third := createFor("")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+
+				page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{third}))
+				Expect(page.Cursor).To(BeEmpty())
+			})
+
+			// A page that fills at the newest run cannot tell that nothing follows
+			// without another fetch, so it carries a cursor and the caller finds an
+			// empty page there.
+			It("Should hand a full page a cursor at the end of the store and answer it with an empty page", func() {
+				createFor("")
+				createFor("")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(page.Runs).To(HaveLen(2))
+				Expect(page.Cursor).ToNot(BeEmpty())
+
+				page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(page.Runs).To(BeEmpty())
+				Expect(page.Cursor).To(BeEmpty())
+			})
+
+			It("Should skip another agent's runs without shortening the page", func() {
+				a1 := createFor("agent-a")
+				createFor("agent-b")
+				a2 := createFor("agent-a")
+				createFor("agent-b")
+				a3 := createFor("agent-a")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{Agent: "agent-a"}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{a1, a2}))
+
+				Expect(walk(runstate.ListFilter{Agent: "agent-a"}, 2)).To(Equal([]string{a1, a2, a3}))
+			})
+
+			// One store is handed to every channel, and a run id is a subject token, so
+			// a channel listing on its own prefix drops another channel's run from the
+			// delivered meta record without reading anything else.
+			It("Should skip a run outside the prefix without shortening the page", func() {
+				createID := func(prefix string) string {
+					GinkgoHelper()
+
+					id := prefix + newID()
+					meta := newMeta(id)
+
+					j, err := store.Create(ctx, id, meta)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(j.Close()).To(Succeed())
+
+					return id
+				}
+
+				w1 := createID("w-")
+				createID("slack-")
+				w2 := createID("w-")
+				createID("slack-")
+				w3 := createID("w-")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{Prefix: "w-"}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{w1, w2}))
+
+				Expect(walk(runstate.ListFilter{Prefix: "w-"}, 2)).To(Equal([]string{w1, w2, w3}))
+
+				infos, err := store.List(ctx, runstate.ListFilter{Prefix: "w-"})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(3))
+			})
+
+			It("Should return an empty page and no cursor for an empty store", func() {
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(page.Runs).To(BeEmpty())
+				Expect(page.Cursor).To(BeEmpty())
+			})
+
+			It("Should return the whole store, and no cursor, under a limit larger than it", func() {
+				var want []string
+				for range 3 {
+					want = append(want, createFor(""))
+				}
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal(want))
+				Expect(page.Cursor).To(BeEmpty())
+			})
+
+			It("Should leave out a run deleted between two pages", func() {
+				first := createFor("")
+				second := createFor("")
+				third := createFor("")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 1, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{first}))
+
+				Expect(store.Delete(ctx, second)).To(Succeed())
+
+				page, err = store.ListPage(ctx, runstate.ListFilter{}, 1, page.Cursor)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{third}))
+			})
+
+			// A conversation started after the page was read sits after its cursor, so a
+			// caller holding one reads what has been created since.
+			It("Should enumerate a run created after the page at the cursor it returned", func() {
+				createFor("")
+				createFor("")
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(page.Cursor).ToNot(BeEmpty())
+
+				later := createFor("")
+
+				page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{later}))
+			})
+
+			It("Should leave a run of an unsupported version out of a page without shortening it", func() {
+				good, bad, alsoGood := newID(), newID(), newID()
+
+				jg, err := store.Create(ctx, good, newMeta(good))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(jg.Close()).To(Succeed())
+
+				meta := newMeta(bad)
+				meta.Version = runstate.Version + 1
+				body, err := json.Marshal(runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
+				Expect(err).ToNot(HaveOccurred())
+				_, err = js.Publish(ctx, jg.(*journal).store.metaSubject(bad), body)
+				Expect(err).ToNot(HaveOccurred())
+
+				ja, err := store.Create(ctx, alsoGood, newMeta(alsoGood))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ja.Close()).To(Succeed())
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(page)).To(Equal([]string{good, alsoGood}))
+			})
+
+			It("Should refuse a limit no page can hold", func() {
+				_, err := store.ListPage(ctx, runstate.ListFilter{}, 0, "")
+				Expect(err).To(MatchError(runstate.ErrInvalidLimit))
+
+				_, err = store.ListPage(ctx, runstate.ListFilter{}, -1, "")
+				Expect(err).To(MatchError(runstate.ErrInvalidLimit))
+			})
+
+			// The file backend's cursor is a base64 position, which is no stream
+			// sequence, so it is refused rather than read as the start of the stream.
+			It("Should refuse a cursor it did not mint", func() {
+				createFor("")
+
+				for _, cursor := range []string{"MTcwMDAwMDAwMHxydW4x", "not a cursor", "0"} {
+					_, err := store.ListPage(ctx, runstate.ListFilter{}, 2, cursor)
+					Expect(err).To(MatchError(runstate.ErrInvalidCursor), cursor)
+				}
+			})
+
+			It("Should refuse a page on a context canceled before the call", func() {
+				createFor("")
+
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+
+				_, err := store.ListPage(canceled, runstate.ListFilter{}, 2, "")
+				Expect(err).To(MatchError(context.Canceled))
+			})
 		})
 
 		// The one thing a listing reads differently from a fold. A fold keeps the last
@@ -494,7 +888,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, 5, assistantRec(1))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(BeEmpty())
@@ -524,7 +918,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, seq, terminalRec(runstate.ReasonSuspended))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			infos, err := store.List(ctx)
+			infos, err := store.List(ctx, runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].RunID).To(Equal(id))
@@ -582,6 +976,99 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(jsRS).To(Equal(fileRS))
+		})
+	})
+
+	// The saving the paged listing exists for, counted rather than asserted. A row costs
+	// one read, the run's last record, because the meta record arrives as the fetched
+	// message. List costs two reads of every stored run before the caller sees a row.
+	Describe("what a page costs", func() {
+		fill := func(stream, prefix string, runs int) runstate.Store {
+			GinkgoHelper()
+
+			createStream(goodStream(stream, prefix+".>"))
+			store, err := newStoreFor(stream)
+			Expect(err).ToNot(HaveOccurred())
+
+			for range runs {
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+			}
+
+			return store
+		}
+
+		It("Should read a page of rows rather than a store of runs", func() {
+			const (
+				small = 5
+				large = 40
+				page  = 5
+			)
+
+			smallStore := fill("SMALL", "small", small)
+			largeStore := fill("LARGE", "large", large)
+
+			pageOnSmall := countRecordReads(nc, func() {
+				_, err := smallStore.ListPage(ctx, runstate.ListFilter{}, page, "")
+				Expect(err).ToNot(HaveOccurred())
+			})
+			pageOnLarge := countRecordReads(nc, func() {
+				_, err := largeStore.ListPage(ctx, runstate.ListFilter{}, page, "")
+				Expect(err).ToNot(HaveOccurred())
+			})
+			doublePage := countRecordReads(nc, func() {
+				_, err := largeStore.ListPage(ctx, runstate.ListFilter{}, 2*page, "")
+				Expect(err).ToNot(HaveOccurred())
+			})
+			listSmall := countRecordReads(nc, func() {
+				_, err := smallStore.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+			})
+			listLarge := countRecordReads(nc, func() {
+				_, err := largeStore.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			Expect(pageOnLarge).To(Equal(page), "one read per row, the run's last record")
+			Expect(pageOnSmall).To(Equal(pageOnLarge), "a page of five costs five reads whether the store holds five runs or forty")
+			Expect(doublePage-pageOnLarge).To(Equal(page), "each further row costs one further read")
+
+			Expect(listSmall).To(Equal(2*small), "a full listing reads the meta record and the last record of every run")
+			Expect(listLarge).To(Equal(2*large), "and the store is what it grows with")
+			Expect(pageOnLarge).To(BeNumerically("<", listLarge))
+		})
+
+		// A conversation that ran for a while costs a page no more than a conversation
+		// that answered once: neither the fetch nor the tail read grows with the journal.
+		It("Should read a long conversation and a short one at the same cost", func() {
+			createStream(goodStream("MIXED", "mixed.>"))
+			store, err := newStoreFor("MIXED")
+			Expect(err).ToNot(HaveOccurred())
+
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			seq := uint64(2)
+			for i := range 40 {
+				Expect(j.Append(ctx, seq, assistantRec(int64(i), "tu_x"))).To(Succeed())
+				seq++
+				Expect(j.Append(ctx, seq, toolResultRec("tu_x"))).To(Succeed())
+				seq++
+			}
+			Expect(j.Append(ctx, seq, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			reads := countRecordReads(nc, func() {
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 5, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(page.Runs).To(HaveLen(1))
+				Expect(page.Runs[0].Terminal).To(Equal(runstate.ReasonCompleted))
+			})
+
+			Expect(reads).To(Equal(1), "eighty one records in the journal, one read to summarize it")
 		})
 	})
 })

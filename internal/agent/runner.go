@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -158,6 +159,28 @@ type runner struct {
 	// iter, which counts model calls and continues across turns; a turn is the unit an
 	// operator recognizes and one turn spans many iterations.
 	turn int64
+	// turns is how many turns the whole conversation has taken, which is what the
+	// terminal record's summary carries. It counts the same events Fold counts, the
+	// prompt that opened the journal and each user turn journaled since, so a resume
+	// seeded from the journal continues the count rather than restarting it. A run
+	// finishing a turn a previous one left unanswered adds no turn, because no user
+	// prompt entered the conversation.
+	//
+	// turn counts this run's entries into the loop instead, and the two differ on every
+	// resume.
+	turns int64
+	// contextTokens is the input the last model call carried, both prompt-cache tiers
+	// included, taken from the reply's own usage. It is seeded on resume from the
+	// journal, so a turn that ends before making a call still reports how large the
+	// conversation is.
+	contextTokens int64
+	// summaryBase is the counter total this conversation started from, subtracted from
+	// the run's cumulative stats to give what the current journal holds. It is zero for
+	// the whole of an ordinary run, including a resume, whose stats are seeded from the
+	// journal it continues. A session rotation moves it to the total so far, because the
+	// journal it opens is a new conversation while the stats keep climbing to report the
+	// sitting, which is what budgetBase does for the token allowance.
+	summaryBase runstate.Counters
 	// telemetry records the run's spans and metrics. Nil records nothing and every
 	// method on it is nil-safe, so the loop calls it without asking whether it is on.
 	telemetry *telemetry.Provider
@@ -336,6 +359,103 @@ func (r *runner) journalMemoryRevisions(ctx context.Context) {
 	})
 	if jerr != nil {
 		r.events.Warn(Warning{Kind: WarnJournalMemoryRevisions, Err: jerr})
+	}
+}
+
+// conversationSummary is what a terminal record carries: the size and cost of the
+// conversation this journal holds, as of now.
+//
+// Every number comes from what the run counted during the turn, so writing one reads
+// nothing back. runstate.Fold derives the same three from the records, which is what
+// keeps the journal the authority and this a copy.
+func (r *runner) conversationSummary() *runstate.ConversationSummary {
+	return &runstate.ConversationSummary{
+		Turns:         r.turns,
+		ContextTokens: r.contextTokens,
+		Counters:      r.conversationCounters(),
+	}
+}
+
+// conversationCounters is what the current journal has spent: the run's cumulative
+// stats less the base a session rotation left behind. A runner assembled without
+// counters, which several of this package's own tests build, spends nothing.
+func (r *runner) conversationCounters() runstate.Counters {
+	if r.stats == nil {
+		return runstate.Counters{}
+	}
+
+	c := runstate.Counters{
+		LlmCalls:          r.stats.LlmCalls - r.summaryBase.LlmCalls,
+		ToolCalls:         r.stats.ToolCalls - r.summaryBase.ToolCalls,
+		RemoteToolCalls:   r.stats.RemoteToolCalls - r.summaryBase.RemoteToolCalls,
+		MCPToolCalls:      r.stats.MCPToolCalls - r.summaryBase.MCPToolCalls,
+		InTokens:          r.stats.InTokens - r.summaryBase.InTokens,
+		OutTokens:         r.stats.OutTokens - r.summaryBase.OutTokens,
+		CacheReadTokens:   r.stats.CacheReadTokens - r.summaryBase.CacheReadTokens,
+		CacheCreateTokens: r.stats.CacheCreateTokens - r.summaryBase.CacheCreateTokens,
+		ThinkingTokens:    r.stats.ThinkingTokens - r.summaryBase.ThinkingTokens,
+	}
+
+	// A kind whose whole count belongs to a rotated-away conversation leaves no key, so
+	// the map is nil where the journal recorded no tool result, which is what a fold of
+	// it gives.
+	for kind, n := range r.stats.ToolCallsByKind {
+		n -= r.summaryBase.ToolCallsByKind[kind]
+		if n <= 0 {
+			continue
+		}
+		if c.ToolCallsByKind == nil {
+			c.ToolCallsByKind = make(map[toolkit.Kind]int64)
+		}
+		c.ToolCallsByKind[kind] = n
+	}
+
+	return c
+}
+
+// countToolResult counts one answered tool call against the run, applying the rule Fold
+// applies to one ToolResult record: the kind buckets take the call whatever became of
+// it, and a dispatch counter takes it only where it reached its provider. See
+// RunStats.ToolCallsByKind.
+//
+// executeTool calls it for every call it answers and for no other, which is what keeps
+// the live totals equal to a fold of the journal: the caller writes a ToolResult record
+// for exactly those calls.
+func (r *runner) countToolResult(kind toolkit.Kind, dispatched bool) {
+	r.stats.ToolCalls++
+	r.stats.CountToolKind(kind)
+
+	if !dispatched {
+		return
+	}
+
+	switch kind {
+	case toolkit.KindRemote:
+		r.stats.RemoteToolCalls++
+	case toolkit.KindMCP:
+		r.stats.MCPToolCalls++
+	}
+}
+
+// rawCounters is the sitting's running totals in the shape a summary carries, before
+// the current conversation's base is taken off them. It is what rawTokens is for the
+// token allowance, and a session rotation records it as the next conversation's base.
+func (r *runner) rawCounters() runstate.Counters {
+	if r.stats == nil {
+		return runstate.Counters{}
+	}
+
+	return runstate.Counters{
+		LlmCalls:          r.stats.LlmCalls,
+		ToolCalls:         r.stats.ToolCalls,
+		RemoteToolCalls:   r.stats.RemoteToolCalls,
+		MCPToolCalls:      r.stats.MCPToolCalls,
+		ToolCallsByKind:   maps.Clone(r.stats.ToolCallsByKind),
+		InTokens:          r.stats.InTokens,
+		OutTokens:         r.stats.OutTokens,
+		CacheReadTokens:   r.stats.CacheReadTokens,
+		CacheCreateTokens: r.stats.CacheCreateTokens,
+		ThinkingTokens:    r.stats.ThinkingTokens,
 	}
 }
 
@@ -668,6 +788,11 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 				reason, err = runstate.ReasonError, jerr
 				break
 			}
+
+			// Counted where the record lands rather than where the turn runs, so the count
+			// matches the one a fold of this journal gives. A record the append lost is a
+			// turn the conversation does not hold.
+			r.turns++
 		}
 
 		r.maxIter += r.cfg.LLM.Budget.MaxIterations
@@ -675,7 +800,7 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	}
 
 	if r.journal != nil {
-		tr := &runstate.TerminalRecord{Reason: reason}
+		tr := &runstate.TerminalRecord{Reason: reason, Summary: r.conversationSummary()}
 		if err != nil {
 			tr.Message = err.Error()
 		}
@@ -742,6 +867,9 @@ func (r *runner) followUpTurn(ctx context.Context) (runstate.TerminalReason, err
 		return runstate.ReasonError, jerr
 	}
 
+	// The delivered turn is now in the conversation, so the summary this run writes
+	// counts it. See the same increment on the interactive follow-up.
+	r.turns++
 	r.followUpTaken = true
 	r.maxIter = r.iter + r.cfg.LLM.Budget.MaxIterations
 
@@ -847,7 +975,12 @@ func (r *runner) rotateSession(ctx context.Context, prompt string) error {
 	// Finalize the outgoing session on its own journal before swapping. A failed terminal
 	// write is not fatal: the journal still ends on an assistant turn, so the session stays
 	// resumable, only unmarked; warn and proceed with the swap.
-	terr := r.emit(ctx, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}})
+	terr := r.emit(ctx, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+		Reason: runstate.ReasonSuspended,
+		// Taken before the swap below, so it describes the conversation being left rather
+		// than the one being opened.
+		Summary: r.conversationSummary(),
+	}})
 	if terr != nil {
 		r.events.Warn(Warning{Kind: WarnJournalTerminal, Err: terr})
 	}
@@ -861,6 +994,11 @@ func (r *runner) rotateSession(ctx context.Context, prompt string) error {
 	// The new journal is a new conversation, so its token allowance is whole. The stats
 	// keep climbing to report the sitting, which is what this subtracts from.
 	r.budgetBase = r.rawTokens()
+	// The same move for the summary: prompt is the new conversation's first turn, it has
+	// made no model call, and what it has spent is what the stats climb past this base.
+	r.turns = 1
+	r.contextTokens = 0
+	r.summaryBase = r.rawCounters()
 	r.messages = []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: prompt}}}}}
 	r.contentFrom = 0
 	// The new journal is a new conversation, separately resumable, and a grant belongs
@@ -1117,6 +1255,11 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 		r.stats.CacheCreateTokens += resp.Usage.CacheCreate
 		r.stats.ThinkingTokens += resp.Usage.Thinking
 
+		// How large the conversation was for this call, which is what the next one sends
+		// again before adding to it. Assigned rather than added: the tiers of one reply's
+		// input are the whole prompt, and the next reply's are the whole of the next.
+		r.contextTokens = resp.Usage.In + resp.Usage.CacheRead + resp.Usage.CacheCreate
+
 		// Append the assistant turn to the conversation. The neutral blocks preserve
 		// any server-side tool_search blocks intact alongside text and tool_use.
 		asst := llm.Message{Role: llm.RoleAssistant, Content: resp.Content}
@@ -1212,7 +1355,7 @@ func (r *runner) loop(ctx context.Context) (runstate.TerminalReason, error) {
 					// A tool answering later is not a failure. The rest of the batch still
 					// runs, because those results are journaled and then never re-run, so
 					// running them now costs nothing a resume would not cost anyway.
-					was, jerr := r.journalDeferral(ctx, use, herr)
+					was, jerr := r.journalDeferral(ctx, use, kind, dispatched, herr)
 					if jerr != nil {
 						return runstate.ReasonError, jerr
 					}
@@ -1310,7 +1453,7 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 
 		result, dispatched, kind, herr := r.executeTool(ctx, *block.ToolUse)
 		if herr != nil {
-			was, jerr := r.journalDeferral(ctx, *block.ToolUse, herr)
+			was, jerr := r.journalDeferral(ctx, *block.ToolUse, kind, dispatched, herr)
 			if jerr != nil {
 				return false, jerr
 			}
@@ -1347,7 +1490,7 @@ func (r *runner) completePending(ctx context.Context) (bool, error) {
 // The record is what a resume reads to leave the call alone: without it a tool_use
 // with no result is indistinguishable from one a crash interrupted, and the tool
 // would be dispatched again for work it has already started.
-func (r *runner) journalDeferral(ctx context.Context, use llm.ToolUseBlock, err error) (bool, error) {
+func (r *runner) journalDeferral(ctx context.Context, use llm.ToolUseBlock, kind toolkit.Kind, dispatched bool, err error) (bool, error) {
 	d, ok := toolkit.IsDeferred(err)
 	if !ok {
 		return false, nil
@@ -1360,11 +1503,16 @@ func (r *runner) journalDeferral(ctx context.Context, use llm.ToolUseBlock, err 
 		Handle:    d.Handle,
 	})
 
+	// Nothing is counted here. The call has no result yet, so a fold of this journal
+	// counts it only once the answer is written, and the two are counted together where
+	// AnswerDeferredCall writes that record from the kind and the flag recorded here.
 	jerr := r.emit(ctx, runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{
-		ToolUseID: use.ID,
-		ToolName:  use.Name,
-		Note:      d.Note,
-		Handle:    d.Handle,
+		ToolUseID:  use.ID,
+		ToolName:   use.Name,
+		Note:       d.Note,
+		Handle:     d.Handle,
+		Kind:       kind.String(),
+		Dispatched: dispatched,
 	}})
 	if jerr != nil {
 		return true, jerr
@@ -1449,12 +1597,27 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 		toolSpan.Finish(ctx, outcome)
 	}()
 
+	// Counted from here rather than at each of the eight returns, so a rewritten call is
+	// accounted under the tool that actually ran and every answered call is counted once.
+	//
+	// A call this answers is one the caller journals a ToolResult record for, and the
+	// three ways out that answer nothing (a hook that aborted the run, a question the
+	// operator never answered, a tool that deferred) journal none. Counting a dispatch
+	// instead would put a deferred call in the totals with no record behind it, and the
+	// summary on the suspend's terminal record would claim a call a fold of that journal
+	// does not. runstate.Counters says the journal is the authority.
+	defer func() {
+		if herr != nil {
+			return
+		}
+
+		r.countToolResult(kind, dispatched)
+	}()
+
 	if !ok {
 		// An unknown tool never resolves to a kind or a PreToolUse snapshot, so it is
-		// counted under KindUnknown and answered with an error result before any hook,
-		// exactly as before.
-		r.stats.ToolCalls++
-		r.stats.CountToolKind(toolkit.KindUnknown)
+		// answered with an error result before any hook and counted under KindUnknown
+		// where the caller journals that result.
 		r.events.Warn(Warning{Kind: WarnUnknownTool, Name: use.Name})
 		return llm.ToolResultBlock{ToolUseID: use.ID, Content: fmt.Sprintf("unknown tool %q", use.Name), IsError: true}, false, toolkit.KindUnknown, nil
 	}
@@ -1489,8 +1652,6 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	// ignored when Deny.
 	if pre.Deny {
 		outcome.Outcome = telemetry.ToolOutcomePolicyDenied
-		r.stats.ToolCalls++
-		r.stats.CountToolKind(origInfo.Kind)
 		reason := pre.DenyReason
 		if reason == "" {
 			reason = "the tool call was denied by a policy hook"
@@ -1527,12 +1688,6 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 	if pre.RewriteTool != "" || pre.RewriteInput != nil {
 		effInfo = describeCall(effTool, effInput)
 	}
-
-	// Count once, now that the effective tool is resolved, so a rewritten call is
-	// accounted under the tool that actually runs and the by-kind buckets still partition
-	// tool_calls. RemoteToolCalls is incremented only on an actual remote dispatch below.
-	r.stats.ToolCalls++
-	r.stats.CountToolKind(effInfo.Kind)
 
 	// From here the effective call is what runs, so the span reports it rather than what
 	// the model originally asked for. The name is still registry-validated: a rewrite
@@ -1612,19 +1767,9 @@ func (r *runner) executeTool(ctx context.Context, use llm.ToolUseBlock) (result 
 
 	// Every path above answers the call without it leaving this process, so this is
 	// where a call becomes one that happened and every return below reports it as
-	// dispatched. The two first-class dispatch counters are incremented here rather than
-	// beside CountToolKind, which is what makes them count calls that were made while
-	// the buckets count calls the model asked for. See RunStats.ToolCallsByKind.
-	//
-	// Both are keyed on the provider kind and never on the agent name, which an a2a
-	// peer and an MCP server both set while being accounted under their own kind.
+	// dispatched. The flag reaches the journal on the result record, and countToolResult
+	// turns it into the two dispatch counters where that record is written.
 	dispatched = true
-	switch effInfo.Kind {
-	case toolkit.KindRemote:
-		r.stats.RemoteToolCalls++
-	case toolkit.KindMCP:
-		r.stats.MCPToolCalls++
-	}
 
 	remote := effInfo.Kind == toolkit.KindRemote
 	outcome.Remote = remote

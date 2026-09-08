@@ -129,6 +129,10 @@ var _ = Describe("subject helpers", func() {
 		Expect(s.subjectForSeq("abc", 1)).To(Equal("runs.abc._meta"))
 	})
 
+	It("Should enumerate the store over the meta subjects", func() {
+		Expect(s.metaWildcard()).To(Equal("runs.*._meta"))
+	})
+
 	It("Should place later records at their numeric seq subject", func() {
 		Expect(s.subjectForSeq("abc", 2)).To(Equal("runs.abc.2"))
 		Expect(s.subjectForSeq("abc", 42)).To(Equal("runs.abc.42"))
@@ -164,5 +168,33 @@ var _ = Describe("subject helpers", func() {
 		Entry("a record subject is not a meta subject", "runs.abc.2", "", false),
 		Entry("a subject outside the prefix is ignored", "other.abc._meta", "", false),
 		Entry("an id with a dot is not a valid run id", "runs.a.b._meta", "", false),
+	)
+})
+
+// The cursor is a stream sequence written as decimal. It needs no server to read back,
+// and what it refuses is what keeps a file store's cursor from being taken here as the
+// beginning of the stream.
+var _ = Describe("the paging cursor", func() {
+	It("Should start an empty cursor at the first record on the stream", func() {
+		seq, err := parseCursor("")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seq).To(Equal(uint64(1)))
+	})
+
+	It("Should read back the sequence it wrote", func() {
+		seq, err := parseCursor(formatCursor(4096))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seq).To(Equal(uint64(4096)))
+	})
+
+	DescribeTable("refuses a cursor this store did not mint",
+		func(cursor string) {
+			_, err := parseCursor(cursor)
+			Expect(err).To(MatchError(runstate.ErrInvalidCursor))
+		},
+		Entry("a file store's position", "MTcwMDAwMDAwMHxydW4x"),
+		Entry("a sequence no record has", "0"),
+		Entry("a negative number", "-1"),
+		Entry("text", "next"),
 	)
 })

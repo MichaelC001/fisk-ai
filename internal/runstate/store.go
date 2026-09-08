@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,12 @@ var (
 	ErrLocked = errors.New("run is already locked (by another process or a concurrent run of the same id)")
 	// ErrSeqGap is returned by Append when a seq skips ahead of the journal.
 	ErrSeqGap = errors.New("record seq gap")
+	// ErrInvalidCursor is returned by ListPage for a cursor the store cannot read: one
+	// another backend minted, or one a caller built or edited. A caller holding one
+	// lists from the start again.
+	ErrInvalidCursor = errors.New("invalid list cursor")
+	// ErrInvalidLimit is returned by ListPage for a page limit of zero or below.
+	ErrInvalidLimit = errors.New("invalid page limit")
 )
 
 // RunInfo is a summary of a stored run, for listing.
@@ -49,9 +56,106 @@ type RunInfo struct {
 	Updated time.Time
 	Model   string
 	Prompt  string
+	// Agent is MetaRecord.Agent, so a listing says which agent a conversation belongs
+	// to without loading the run. Empty for a run journaled before that field existed.
+	Agent string
 	// Terminal is the reason the run ended, or empty if it is still open (was
 	// suspended or crashed).
 	Terminal TerminalReason
+	// Summary is the conversation's cost when its last turn ended, read off the
+	// terminal record that turn wrote.
+	//
+	// It is nil for a conversation whose last turn ended before the field existed, and
+	// for one with a turn in flight, which has written no terminal record to carry it.
+	// Nil is not zero: a caller shows an empty slot for a conversation with no summary
+	// rather than a turn count of none.
+	Summary *ConversationSummary
+}
+
+// ListFilter narrows a listing. A zero ListFilter selects every stored run.
+type ListFilter struct {
+	// Agent selects the runs one agent produced, matched by MatchesAgent. Empty
+	// selects every run whichever agent produced it.
+	Agent string
+
+	// Prefix selects the runs whose id starts with it, matched by MatchesID. A channel
+	// that derives its session ids under a marker of its own lists the conversations it
+	// minted with this and leaves every other channel's out. Empty selects every run
+	// whatever its id.
+	Prefix string
+}
+
+// MatchesAgent reports whether a run stamped with agent belongs in this listing.
+//
+// A filter naming no agent takes every run. A run carrying no agent is taken by every
+// filter: journals existed before Store.Create began stamping the field, so an empty
+// value is a conversation held before anyone recorded an agent rather than one another
+// agent produced. An operator who has been running an agent since before the field
+// keeps their conversations in the listing; an operator who has been sharing a store
+// sees, beside their own, the older ones either agent could have written.
+//
+// Every backend answers through this rather than comparing the two strings itself, so
+// the three answers cannot drift apart between listings.
+func (f ListFilter) MatchesAgent(agent string) bool {
+	return f.Agent == "" || agent == "" || f.Agent == agent
+}
+
+// MatchesID reports whether a run belongs in this listing by its id, which every backend
+// has without decoding a record: the file store as the journal's name, the JetStream
+// store as a token of the meta subject.
+//
+// What that saves differs by path. The file store drops an excluded run while it reads
+// the directory, and the JetStream store's List drops one while it enumerates the meta
+// subjects, so neither reads a record of it. The JetStream store's ListPage fetches a
+// batch of meta records and decides on each delivered subject, so an excluded run is
+// still delivered and the prefix saves the second read a row costs.
+//
+// A filter naming no prefix takes every run.
+func (f ListFilter) MatchesID(id string) bool {
+	return strings.HasPrefix(id, f.Prefix)
+}
+
+// RunPage is one page of a paged listing, returned by Store.ListPage.
+type RunPage struct {
+	// Runs are the page's rows, oldest first. It is empty for a store holding no run
+	// after the cursor the page started from.
+	Runs []RunInfo
+	// Cursor starts the next page at the run after the last row in Runs, and is empty
+	// once the store has no run left to enumerate. A page that filled to its limit
+	// always carries one, including a page whose last row is the newest run in the
+	// store, so a caller reads one more page and gets an empty one.
+	//
+	// It is the backend's own value and only the backend that minted it reads it: a
+	// stream sequence in the JetStream store, a position in the directory ordering in
+	// the file store. A caller stores it and hands it back unchanged. Handing one
+	// store's cursor to another is ErrInvalidCursor.
+	//
+	// It survives a restart. Whether a run created after the page was read is
+	// enumerated after the cursor is the backend's answer rather than this type's:
+	//
+	// The JetStream store enumerates on the stream sequence the server assigns each
+	// meta record in write order, so every later run sorts after the cursor and a
+	// caller that kept the last cursor it saw reads what has been created since rather
+	// than listing again.
+	//
+	// The file store enumerates on the creation time the caller stamped on the meta
+	// record, which no store controls. A run created after the page but stamped
+	// earlier than the run the page ended on sorts before the cursor, and a walk
+	// resumed there never reaches it. Two agents whose clocks disagree, or one clock
+	// stepped backwards, both reach that. A caller on this backend that must see every
+	// run walks from an empty cursor.
+	Cursor string
+}
+
+// CheckPageLimit rejects a page limit no store can answer. Every backend calls it, so
+// ListPage refuses the same limits everywhere rather than each store deciding for
+// itself what a limit of zero asks for.
+func CheckPageLimit(limit int) error {
+	if limit <= 0 {
+		return fmt.Errorf("%w: %d, a page holds at least one run", ErrInvalidLimit, limit)
+	}
+
+	return nil
 }
 
 // Journal is an append-only record log for a single run. Append is idempotent on
@@ -160,14 +264,37 @@ type Store interface {
 	// It stamps meta.Version, so a caller leaves that field zero; a meta record
 	// carrying a version this build does not write fails with ErrVersion. An
 	// implementation gets both from PrepareMeta, which it calls before the append.
+	//
+	// Every other field is written as the caller supplied it, meta.Agent among them:
+	// a store holds no identity of its own, so the process that has the configuration
+	// puts its identity there before it calls this.
 	Create(ctx context.Context, id string, meta MetaRecord) (Journal, error)
 	// Open locks an existing run's journal for appending (resume). It fails with
 	// ErrNotFound if the id is unknown.
 	Open(ctx context.Context, id string) (Journal, error)
 	// Load reads and folds a run without locking it, for inspection and listing.
 	Load(ctx context.Context, id string) (*RunState, error)
-	// List summarizes all stored runs.
-	List(ctx context.Context) ([]RunInfo, error)
+	// List summarizes the stored runs filter selects, applying it inside the store
+	// rather than leaving the caller to drop rows it already paid to read. A zero
+	// ListFilter summarizes every run.
+	List(ctx context.Context, filter ListFilter) ([]RunInfo, error)
+	// ListPage summarizes at most limit of the runs filter selects and returns the
+	// cursor the next page resumes from. An empty cursor starts at the oldest run in
+	// the store. A limit of zero or below is ErrInvalidLimit and a cursor this store
+	// did not mint is ErrInvalidCursor.
+	//
+	// The order is creation order, oldest first, and a run keeps its place as the
+	// store grows, which lets a cursor outlive the call that returned it.
+	//
+	// A page costs the work its own rows cost rather than the work the store holds.
+	// List summarizes every stored run before a caller can drop one, so a store of
+	// five thousand conversations answers a rail of twenty at five thousand runs'
+	// worth of reads; this reads the twenty. The filter is applied here for the same
+	// reason: a caller that dropped rows afterwards would have paid to read them.
+	//
+	// Deleting a run between two pages leaves it out of the second, and no row is
+	// repeated or skipped by that.
+	ListPage(ctx context.Context, filter ListFilter, limit int, cursor string) (RunPage, error)
 	// Delete removes a run's journal and lock.
 	Delete(ctx context.Context, id string) error
 }

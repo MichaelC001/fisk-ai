@@ -141,7 +141,7 @@ var _ = Describe("--root-dir", func() {
 			Expect(err).ToNot(HaveOccurred())
 			defer releaseSession()
 
-			infos, err := sessionStore.List(context.Background())
+			infos, err := sessionStore.List(context.Background(), runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].RunID).To(Equal("root-session-1"))
@@ -159,7 +159,7 @@ var _ = Describe("--root-dir", func() {
 			Expect(err).ToNot(HaveOccurred())
 			defer releaseElsewhere()
 
-			infos, err = elsewhere.List(context.Background())
+			infos, err = elsewhere.List(context.Background(), runstate.ListFilter{})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(BeEmpty())
 		})

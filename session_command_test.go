@@ -76,7 +76,7 @@ var _ = Describe("openSessionStore", func() {
 		Expect(store).ToNot(BeNil())
 		defer cleanup()
 
-		infos, err := store.List(context.Background())
+		infos, err := store.List(context.Background(), runstate.ListFilter{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(infos).To(BeEmpty())
 	})

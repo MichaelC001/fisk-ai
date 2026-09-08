@@ -22,6 +22,30 @@
     "description": {
       "type": "string"
     },
+    "display_name": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "The human name for the agent, where name is the identity a caller addresses it by. It is bounded because a receiver displays it. Absent from an agent whose operator wrote none, which displays name."
+    },
+    "icon": {
+      "type": "string",
+      "maxLength": 16,
+      "description": "An emoji the agent asks to be drawn beside its name."
+    },
+    "icon_url": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^https://",
+      "description": "An https URL of an image the agent asks to be drawn beside its name. It is decoration the agent asserts and nothing verifies, so a reader decides whether to fetch it: fetching it directly discloses every viewer to the host the card named, and proxying it buys server-side request forgery."
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "description": "What the agent could not put on this card, one sentence each, such as an MCP server whose tools could not be listed. A tool missing from tools is then a source being down rather than a tool that was removed."
+    },
     "model": {
       "type": "string",
       "maxLength": 128,

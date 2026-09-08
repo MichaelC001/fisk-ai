@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -163,12 +164,354 @@ var _ = Describe("FakeSessionStore", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rs.Prompt).To(Equal("the first prompt"))
 
-		infos, err := store.List(ctx)
+		infos, err := store.List(ctx, runstate.ListFilter{})
 		Expect(err).ToNot(HaveOccurred())
-		Expect(infos).To(ConsistOf(
-			runstate.RunInfo{RunID: "run1", Prompt: "the first prompt"},
-			runstate.RunInfo{RunID: "run2", Prompt: "the second prompt"},
-		))
+
+		prompts := map[string]string{}
+		for _, info := range infos {
+			prompts[info.RunID] = info.Prompt
+		}
+		Expect(prompts).To(Equal(map[string]string{"run1": "the first prompt", "run2": "the second prompt"}))
+	})
+
+	// A rail draws the creation time, the last activity and the model beside the title,
+	// so a row this fake hands an embedder carries what a file or JetStream store puts
+	// there rather than year-one dates and an empty model.
+	Describe("listing the times and the model", func() {
+		created := time.Now().Add(-time.Hour).UTC()
+
+		BeforeEach(func() {
+			j, err := store.Create(ctx, "run1", runstate.MetaRecord{
+				RunID:       "run1",
+				Created:     created,
+				Prompt:      "list the streams",
+				Fingerprint: runstate.Fingerprint{Model: "claude-sonnet-4-6"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		})
+
+		assertRow := func(info runstate.RunInfo) {
+			GinkgoHelper()
+
+			Expect(info.Created).To(BeTemporally("==", created), "the time the caller stamped on the meta record")
+			Expect(info.Updated).To(BeTemporally(">=", created), "when the journal last took a record")
+			Expect(info.Model).To(Equal("claude-sonnet-4-6"))
+		}
+
+		It("Should carry them on a full listing", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			assertRow(infos[0])
+		})
+
+		It("Should carry them on a page", func() {
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(HaveLen(1))
+			assertRow(page.Runs[0])
+		})
+	})
+
+	// An embedder tests a rail against this fake, so it has to give the same three
+	// answers a file or JetStream store gives: the named agent's runs, none of another
+	// agent's, and the runs journaled before anyone recorded one.
+	Describe("listing by agent", func() {
+		createFor := func(id, agent string) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{RunID: id, Prompt: "do the thing", Agent: agent})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		agentsByID := func(infos []runstate.RunInfo) map[string]string {
+			out := map[string]string{}
+			for _, info := range infos {
+				out[info.RunID] = info.Agent
+			}
+
+			return out
+		}
+
+		BeforeEach(func() {
+			createFor("run-a", "agent-a")
+			createFor("run-b", "agent-b")
+			createFor("run-unstamped", "")
+		})
+
+		It("Should carry the agent on every row and list every run for a zero filter", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(agentsByID(infos)).To(Equal(map[string]string{"run-a": "agent-a", "run-b": "agent-b", "run-unstamped": ""}))
+		})
+
+		It("Should list one agent's runs and the runs nobody recorded an agent for", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{Agent: "agent-a"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(agentsByID(infos)).To(Equal(map[string]string{"run-a": "agent-a", "run-unstamped": ""}))
+		})
+	})
+
+	// An embedder's channel derives its run ids under a marker of its own and lists on
+	// it, so the fake has to leave another channel's runs out the way a real store does.
+	Describe("listing by id prefix", func() {
+		createID := func(id string) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{RunID: id, Prompt: "do the thing"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		idsOf := func(infos []runstate.RunInfo) []string {
+			out := make([]string, len(infos))
+			for i, info := range infos {
+				out[i] = info.RunID
+			}
+
+			return out
+		}
+
+		BeforeEach(func() {
+			createID("w-one")
+			createID("slack-two")
+			createID("w-three")
+		})
+
+		It("Should list the runs under one prefix", func() {
+			infos, err := store.List(ctx, runstate.ListFilter{Prefix: "w-"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(infos)).To(ConsistOf("w-one", "w-three"))
+		})
+
+		It("Should fill a page from the runs under the prefix rather than shortening it", func() {
+			page, err := store.ListPage(ctx, runstate.ListFilter{Prefix: "w-"}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page.Runs)).To(Equal([]string{"w-one", "w-three"}))
+		})
+	})
+
+	// The same reason as the agent filter: an embedder's rail reads the turn count, the
+	// context size and the tool call count off this fake, and a conversation nobody
+	// summarized has to read as absent here as it does in a real store.
+	Describe("listing the conversation summary", func() {
+		end := func(id string, summary *runstate.ConversationSummary) {
+			GinkgoHelper()
+
+			j := create(id, "do the thing")
+			err := j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+				Reason:  runstate.ReasonCompleted,
+				Summary: summary,
+			}})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		It("Should carry the summary off the terminal record", func() {
+			want := &runstate.ConversationSummary{
+				Turns:         3,
+				ContextTokens: 4096,
+				Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2, InTokens: 900},
+			}
+			end("run1", want)
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Summary).To(Equal(want))
+		})
+
+		It("Should report no summary for a conversation whose last turn wrote none", func() {
+			end("run1", nil)
+			create("run2", "still running")
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(2))
+			for _, info := range infos {
+				Expect(info.Summary).To(BeNil(), "run %q", info.RunID)
+			}
+		})
+	})
+
+	// An embedder pages this fake the way it pages a real store, so the fake enumerates
+	// oldest first, applies the filter itself, and mints a cursor only it can read.
+	Describe("paging the listing", func() {
+		createFor := func(id, agent string) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{RunID: id, Prompt: "do the thing", Agent: agent})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		idsOf := func(page runstate.RunPage) []string {
+			out := make([]string, 0, len(page.Runs))
+			for _, info := range page.Runs {
+				out = append(out, info.RunID)
+			}
+
+			return out
+		}
+
+		walk := func(filter runstate.ListFilter, limit int) []string {
+			GinkgoHelper()
+
+			var out []string
+			cursor := ""
+			for range 20 {
+				page, err := store.ListPage(ctx, filter, limit, cursor)
+				Expect(err).ToNot(HaveOccurred())
+				out = append(out, idsOf(page)...)
+				if page.Cursor == "" {
+					return out
+				}
+				cursor = page.Cursor
+			}
+
+			Fail("the walk never reached a page without a cursor")
+
+			return nil
+		}
+
+		It("Should return a page smaller than the store, oldest first, with a cursor", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+			createFor("run3", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run1", "run2"}))
+			Expect(page.Cursor).ToNot(BeEmpty())
+		})
+
+		It("Should continue at the run the page ended on, repeating none and skipping none", func() {
+			want := []string{"run1", "run2", "run3", "run4", "run5"}
+			for _, id := range want {
+				createFor(id, "")
+			}
+
+			Expect(walk(runstate.ListFilter{}, 2)).To(Equal(want))
+			Expect(walk(runstate.ListFilter{}, 3)).To(Equal(want))
+			Expect(walk(runstate.ListFilter{}, 1)).To(Equal(want))
+		})
+
+		It("Should carry the same row a full listing does", func() {
+			createFor("run1", "agent-a")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+			Expect(err).ToNot(HaveOccurred())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(Equal(infos))
+		})
+
+		It("Should end the walk on a page carrying no cursor", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+			createFor("run3", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+
+			page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run3"}))
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should hand a full page a cursor at the end of the store and answer it with an empty page", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Cursor).ToNot(BeEmpty())
+
+			page, err = store.ListPage(ctx, runstate.ListFilter{}, 2, page.Cursor)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(BeEmpty())
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should skip another agent's runs without shortening the page", func() {
+			createFor("run-a1", "agent-a")
+			createFor("run-b1", "agent-b")
+			createFor("run-a2", "agent-a")
+			createFor("run-b2", "agent-b")
+			createFor("run-a3", "agent-a")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{Agent: "agent-a"}, 2, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run-a1", "run-a2"}))
+
+			Expect(walk(runstate.ListFilter{Agent: "agent-a"}, 2)).To(Equal([]string{"run-a1", "run-a2", "run-a3"}))
+		})
+
+		It("Should return an empty page and no cursor for an empty store", func() {
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(page.Runs).To(BeEmpty())
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should return the whole store, and no cursor, under a limit larger than it", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 20, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run1", "run2"}))
+			Expect(page.Cursor).To(BeEmpty())
+		})
+
+		It("Should leave out a run deleted between two pages", func() {
+			createFor("run1", "")
+			createFor("run2", "")
+			createFor("run3", "")
+
+			page, err := store.ListPage(ctx, runstate.ListFilter{}, 1, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run1"}))
+
+			Expect(store.Delete(ctx, "run2")).To(Succeed())
+
+			page, err = store.ListPage(ctx, runstate.ListFilter{}, 1, page.Cursor)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(page)).To(Equal([]string{"run3"}))
+		})
+
+		It("Should refuse a limit no page can hold", func() {
+			_, err := store.ListPage(ctx, runstate.ListFilter{}, 0, "")
+			Expect(err).To(MatchError(runstate.ErrInvalidLimit))
+
+			_, err = store.ListPage(ctx, runstate.ListFilter{}, -1, "")
+			Expect(err).To(MatchError(runstate.ErrInvalidLimit))
+		})
+
+		// A cursor from a real store must not answer here. The JetStream store's is a
+		// decimal stream sequence and the file store's is base64, and reading either as a
+		// place in this fake's creation order would hand an embedder a page from a
+		// position neither cursor meant.
+		It("Should refuse a cursor it did not mint", func() {
+			createFor("run1", "")
+
+			for _, cursor := range []string{"1", "12", "MTcwMDAwMDAwMHxydW4x", "fake-", "fake-x", "next"} {
+				_, err := store.ListPage(ctx, runstate.ListFilter{}, 2, cursor)
+				Expect(err).To(MatchError(runstate.ErrInvalidCursor), cursor)
+			}
+		})
+
+		It("Should refuse a page on a canceled context", func() {
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			_, err := store.ListPage(canceled, runstate.ListFilter{}, 2, "")
+			Expect(err).To(MatchError(context.Canceled))
+		})
 	})
 
 	It("Should forget a deleted run", func() {
@@ -203,7 +546,7 @@ var _ = Describe("FakeSessionStore", func() {
 		_, err = store.Load(canceled, "run1")
 		Expect(err).To(MatchError(context.Canceled))
 
-		_, err = store.List(canceled)
+		_, err = store.List(canceled, runstate.ListFilter{})
 		Expect(err).To(MatchError(context.Canceled))
 
 		Expect(store.Delete(canceled, "run1")).To(MatchError(context.Canceled))
@@ -245,7 +588,7 @@ var _ = Describe("FakeSessionStore", func() {
 				_, err = store.Load(ctx, id)
 				Expect(err).ToNot(HaveOccurred())
 
-				_, err = store.List(ctx)
+				_, err = store.List(ctx, runstate.ListFilter{})
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(j.Close()).To(Succeed())
@@ -254,7 +597,7 @@ var _ = Describe("FakeSessionStore", func() {
 
 		wg.Wait()
 
-		infos, err := store.List(ctx)
+		infos, err := store.List(ctx, runstate.ListFilter{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(infos).To(HaveLen(runs))
 	})

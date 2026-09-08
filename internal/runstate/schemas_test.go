@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 var _ = Describe("Validator", func() {
@@ -42,6 +43,20 @@ var _ = Describe("Validator", func() {
 
 		It("Should accept a terminal record with no message", func() {
 			Expect(v.ValidateRecord(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended}})).To(Succeed())
+		})
+
+		It("Should accept the conversation summary a turn writes on its terminal record", func() {
+			Expect(v.ValidateRecord(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{
+				Reason: ReasonCompleted,
+				Summary: &ConversationSummary{
+					Turns:         2,
+					ContextTokens: 4096,
+					Counters: Counters{
+						LlmCalls: 3, ToolCalls: 1, InTokens: 900,
+						ToolCallsByKind: map[toolkit.Kind]int64{toolkit.KindApplication: 1},
+					},
+				},
+			}})).To(Succeed())
 		})
 	})
 
@@ -142,6 +157,7 @@ func metaRecord() Record {
 			Prompt:            "do the thing",
 			ConversationToken: "3Hzmp8VqrKL42NmXcPd7bTgWfR1",
 			Caller:            "peer1",
+			Agent:             "agent-a",
 		},
 	}
 }

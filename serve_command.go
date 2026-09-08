@@ -24,6 +24,9 @@ import (
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
 	ajchannel "github.com/choria-io/fisk-ai/internal/serve/asyncjobs"
 	slackchannel "github.com/choria-io/fisk-ai/internal/serve/slack"
+	webchannel "github.com/choria-io/fisk-ai/internal/serve/web"
+	"github.com/choria-io/fisk-ai/internal/serve/web/agui"
+	"github.com/choria-io/fisk-ai/internal/serve/web/vercel"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 )
 
@@ -102,7 +105,7 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	if !cfg.JobsEnabled() && !cfg.A2AEnabled() && !cfg.SlackEnabled() {
+	if !cfg.JobsEnabled() && !cfg.A2AEnabled() && !cfg.SlackEnabled() && !cfg.WebEnabled() {
 		return c.noEndpointError()
 	}
 
@@ -173,7 +176,8 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 		Logger:           log,
 		Telemetry:        tel,
 		Sessions:         resources.SessionStore,
-	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder(), slackchannel.Builder()})
+		MCPSessions:      resources.MCPSessions,
+	}, []serve.EndpointBuilder{ajchannel.Builder(), a2aendpoint.Builder(), slackchannel.Builder(), webchannel.Builder(vercel.Mount(), agui.Mount())})
 	if err != nil {
 		return err
 	}
@@ -314,8 +318,18 @@ expose:
     slack: {}
 
 Every field under it defaults too. It needs SLACK_APP_TOKEN and SLACK_BOT_TOKEN in the
-environment, which is where its credentials come from rather than this file`,
-		c.configFile, config.DefaultJobsQueue, config.DefaultJobsTaskType)
+environment, which is where its credentials come from rather than this file.
+
+To answer a browser, add a web block naming the pages allowed to read the answers:
+
+expose:
+  agent:
+    web:
+      origins:
+        - http://localhost:5173
+
+listen defaults to %s and base_path to %s; origins has no default`,
+		c.configFile, config.DefaultJobsQueue, config.DefaultJobsTaskType, config.DefaultWebListen, config.DefaultWebBasePath)
 }
 
 // banner describes what the worker resolved, which is an operator's only chance to see

@@ -29,6 +29,9 @@
         },
         "message": {
           "type": "string"
+        },
+        "summary": {
+          "$ref": "session.common.json#/$defs/conversation_summary"
         }
       }
     }

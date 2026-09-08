@@ -33,6 +33,14 @@
         "handle": {
           "type": "string",
           "description": "The tool's own identifier for the outstanding work. Never interpreted here."
+        },
+        "kind": {
+          "type": "string",
+          "description": "The provider that took the call: application, builtin, remote, custom, mcp or unknown. Copied onto the tool_result record that answers it, since whoever supplies the answer does not know it. Additive and optional; a record written before it existed answers under the unknown kind."
+        },
+        "dispatched": {
+          "type": "boolean",
+          "description": "Set when the call reached its provider, absent when a prompter deferred it before it ran. Copied onto the answering tool_result record, where it separates the calls that were made from the calls that were asked for."
         }
       }
     }

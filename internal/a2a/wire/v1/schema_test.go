@@ -86,6 +86,10 @@ func everyMessage() []any {
 
 	discoveryReply := NewDiscoveryReply("agent-a", "1.2.3")
 	discoveryReply.Description = "manages nats auth"
+	discoveryReply.DisplayName = "NATS Auth"
+	discoveryReply.Icon = "\U0001f510"
+	discoveryReply.IconURL = "https://example.net/agent.png"
+	discoveryReply.Notes = []string{`the tools of the mcp server "github" could not be listed`}
 	discoveryReply.Model = "claude-sonnet-5"
 	discoveryReply.Protocols = []string{ProtocolNamespace}
 	discoveryReply.Telemetry = true
