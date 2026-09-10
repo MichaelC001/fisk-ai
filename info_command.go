@@ -25,7 +25,6 @@ import (
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
-	"github.com/choria-io/fisk-ai/internal/tui"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
 )
@@ -34,10 +33,14 @@ import (
 // the info table before an ellipsis is appended.
 const maxInfoDescriptionLen = 50
 
+// promptIndent is the indent columns applies to a free-form line inside a Section:
+// one indent level of 2, plus the 2 a line takes inside a section. Taking it off
+// the terminal width leaves the wrap budget and the space on screen agreeing.
+const promptIndent = 4
+
 func registerInfoAction(cmd *fisk.Application) {
 	info := cmd.Command("info", "Shows the tools and prompt loaded from a configuration").Action(infoAction)
 	info.Flag("config", "Path to the agent configuration file").Default("agent.yaml").StringVar(&configFile)
-	info.Flag("no-color", "Disable markdown rendering of the prompt, emitting raw text").Envar("NO_COLOR").UnNegatableBoolVar(&noColor)
 }
 
 // infoAction reports, without contacting the LLM, the tools that the
@@ -235,11 +238,14 @@ func infoAction(_ *fisk.ParseContext) error {
 	}
 
 	c.Section("Prompt", func(c *columns.Document) {
-		if len(cfg.SystemPrompt) > 0 {
-			c.Print(tui.RenderAnswer(cfg.SystemPrompt, noColor))
-		} else {
+		if len(cfg.SystemPrompt) == 0 {
 			c.Print("No system_prompt defined")
+			return
 		}
+
+		// Off a terminal stdoutWidth is 0, so wrapText leaves the prompt as the
+		// config wrote it and a redirect or a pipe carries the text itself.
+		c.Print(wrapText(cfg.SystemPrompt, stdoutWidth()-promptIndent))
 	})
 
 	return nil
