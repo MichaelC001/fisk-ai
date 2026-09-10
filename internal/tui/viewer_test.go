@@ -35,8 +35,16 @@ func (f *finiCounter) Fini() { f.calls++ }
 func drawViewer(meta Meta, lines []Line) string {
 	GinkgoHelper()
 
+	return drawViewerColor(meta, lines, true)
+}
+
+// drawViewerColor is drawViewer with the color choice in the caller's hands, for a
+// spec that needs the styled markdown path glamour only takes when color is on.
+func drawViewerColor(meta Meta, lines []Line, noColor bool) string {
+	GinkgoHelper()
+
 	sim := tcell.NewSimulationScreen("")
-	v := newViewer(meta, lines, true, false)
+	v := newViewer(meta, lines, noColor, false)
 	v.app.SetScreen(sim)
 	v.app.SetRoot(v.pages, true).SetFocus(v.view)
 
@@ -446,6 +454,19 @@ var _ = Describe("transcript viewer", func() {
 			// If the tag were interpreted the brackets would be consumed; seeing the
 			// literal bracketed text on screen proves the escaping held.
 			Expect(text).To(ContainSubstring("[red]danger"))
+		})
+
+		It("Should render a wiki link in colored narration without a stray bracket", func() {
+			// Colored glamour output puts an escape sequence between the brackets, and
+			// tview.Escape's pattern matches a CSI sequence as readily as a tview tag, so
+			// escaping the whole string rewrote the sequence and drew "[[gateway[]]".
+			text := drawViewerColor(Meta{Title: "r"}, []Line{
+				{Kind: LineNarration, Text: "(in [[gateway]]) and [[mirrors-and-sources]]"},
+			}, false)
+
+			Expect(text).To(ContainSubstring("(in [[gateway]])"))
+			Expect(text).To(ContainSubstring("[[mirrors-and-sources]]"))
+			Expect(text).ToNot(ContainSubstring("gateway[]"))
 		})
 
 		It("Should follow the tail as lines are appended to a live view", func() {
