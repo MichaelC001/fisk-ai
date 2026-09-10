@@ -698,14 +698,20 @@ func (v *viewer) revealForMatch(i int) {
 }
 
 // markup renders one line to viewport markup. Narration goes through glamour at
-// the current width; the resulting ANSI is escaped (so a literal "[" in the model
-// text cannot open a tag) and then translated into tview's own color tags. Other
-// kinds keep the fixed plain styling.
+// the current width; the text between the resulting escape sequences is escaped (so
+// a literal "[" in the model text cannot open a tag) and the whole is then
+// translated into tview's own color tags. Other kinds keep the fixed plain styling.
+//
+// The escaping runs per text run rather than over the whole string because
+// tview.Escape's pattern also matches a CSI sequence: glamour colors each run
+// separately, so "[[x]]" arrives as an escape sequence followed by "x]", and
+// escaping the pair together rewrote the sequence and put a stray "[]" on the
+// screen.
 func (v *viewer) markup(l Line, width int) string {
 	switch l.Kind {
 	case LineNarration:
 		md := RenderMarkdownWidth(sanitize.ForDisplay(l.Text), width, v.noColor)
-		return tview.TranslateANSI(tview.Escape(md))
+		return tview.TranslateANSI(sanitize.MapText(md, tview.Escape))
 	case LineToolCall:
 		// A tool-call line keeps its full command when it fits the row and falls back to
 		// the elided form only when it would wrap; the choice is made here, at render
