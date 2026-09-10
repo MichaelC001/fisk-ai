@@ -6,6 +6,7 @@ package rag
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -131,14 +132,38 @@ func (p *sectionPacker) add(block string, indivisible bool) {
 	}
 
 	if !indivisible && len(block) > maxChunkBytes {
-		for start := 0; start < len(block); start += targetChunkBytes {
-			end := min(start+targetChunkBytes, len(block))
+		for start := 0; start < len(block); {
+			end := runeBoundary(block, start, min(start+targetChunkBytes, len(block)))
 			p.appendBlock(block[start:end])
+			start = end
 		}
 		return
 	}
 
 	p.appendBlock(block)
+}
+
+// runeBoundary moves a hard split back to the start of the rune it lands inside, so
+// a multi-byte character is never cut in half. Both halves of a cut rune are invalid
+// UTF-8 and the embedder refuses them, which failed a whole index over one arrow or
+// dash sitting on the split offset.
+//
+// end is returned as it came when it is already the start of a rune, when it is the
+// end of the block, and when no boundary is found before start, which happens only on
+// text that was not valid UTF-8 to begin with. The index walk refuses such a file, so
+// that case is a caller of ChunkDocument rather than anything indexing reaches.
+func runeBoundary(block string, start, end int) int {
+	if end >= len(block) {
+		return end
+	}
+
+	for i := end; i > start; i-- {
+		if utf8.RuneStart(block[i]) {
+			return i
+		}
+	}
+
+	return end
 }
 
 // appendBlock adds one block to the pending buffer, completing the current chunk

@@ -6,6 +6,7 @@ package rag
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -46,6 +47,26 @@ var _ = Describe("Chunking", func() {
 			}
 		}
 		Expect(fenced).To(Equal(1))
+	})
+
+	It("hard-splits an oversized paragraph on a rune boundary", func() {
+		// The arrow's three bytes sit at 1199, 1200 and 1201, so a split at the target
+		// size lands inside it. Cut there, both halves are invalid UTF-8 and the
+		// embedder refuses the whole batch, which is what failed an index of the NATS
+		// wiki on one table.
+		block := strings.Repeat("a", targetChunkBytes-1) + "→" + strings.Repeat("b", maxChunkBytes)
+		chunks := ChunkDocument("# Wide\n\n" + block + "\n")
+
+		Expect(len(chunks)).To(BeNumerically(">", 1))
+
+		var joined strings.Builder
+		for _, c := range chunks {
+			Expect(utf8.ValidString(c.Body)).To(BeTrue(), "a chunk body reaches the embedder and must be valid UTF-8")
+			joined.WriteString(c.Body)
+		}
+
+		// Backing off to the boundary must move the split, not drop the bytes before it.
+		Expect(joined.String()).To(Equal(block))
 	})
 
 	It("does not treat a # inside a code fence as a heading", func() {
