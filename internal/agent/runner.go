@@ -1960,7 +1960,9 @@ func argumentKeys(input json.RawMessage) []string {
 // here is a function, a remote agent's tool included: that is client-side from the
 // model's point of view.
 func isKnowledgeTool(name string) bool {
-	return name == config.KnowledgeSearchToolName || name == config.KnowledgeEnumerateToolName
+	return name == config.KnowledgeSearchToolName ||
+		name == config.KnowledgeEnumerateToolName ||
+		name == config.KnowledgeReadToolName
 }
 
 // confirmGated reports whether a tool is confirm-gated for the run's tags: it opts into

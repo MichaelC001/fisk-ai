@@ -234,6 +234,19 @@ var _ = Describe("knowledge_search tool", func() {
 			Expect(out).To(HaveLen(1))
 			Expect(out[0].Path).To(Equal("docs/note.md"))
 		})
+
+		// With expand_to_section off no hit carries a span, and the payload is what it
+		// was before the field existed.
+		It("carries a span only for a hit that grew past the section that ranked", func() {
+			hits := []rag.Hit{{Citation: "docs/note.md#3", Content: "text"}}
+
+			out, err := json.Marshal(capHits(hits, 1000))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(out)).ToNot(ContainSubstring("span"))
+
+			hits[0].Span = "docs/note.md#2..#5"
+			Expect(capHits(hits, 1000)[0].Span).To(Equal("docs/note.md#2..#5"))
+		})
 	})
 
 	Describe("against a real lexical store", func() {

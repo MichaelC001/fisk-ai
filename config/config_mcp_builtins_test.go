@@ -43,6 +43,21 @@ var _ = Describe("MCP builtins allowlist", func() {
 		Expect(cfg.MCPExposesKnowledge()).To(BeTrue())
 	})
 
+	// knowledge_read has a gate of its own, so an operator who allowlisted it without
+	// setting the key would be served the other two and told nothing.
+	It("rejects knowledge_read when read_tool is not set", func() {
+		cfg := build([]string{"knowledge_read"}, true)
+		Expect(cfg.Prepare()).To(MatchError(ContainSubstring("harness.knowledge.read_tool is not set")))
+	})
+
+	It("accepts knowledge_read when read_tool is set", func() {
+		cfg := build([]string{"knowledge_search", "knowledge_read"}, true)
+		cfg.Harness.RAG.ReadTool = true
+		Expect(cfg.Prepare()).To(Succeed())
+		Expect(cfg.MCPBuiltins()).To(Equal([]string{"knowledge_search", "knowledge_read"}))
+		Expect(cfg.MCPExposesKnowledge()).To(BeTrue())
+	})
+
 	It("rejects a real but unexposable built-in, naming the accepted set", func() {
 		cfg := build([]string{"ask_human_confirm"}, true)
 		err := cfg.Prepare()

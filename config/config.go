@@ -597,6 +597,19 @@ type RAGConfig struct {
 	// MaxInjectedTokens caps the total retrieved text fed to the model in one search
 	// result. It defaults to 6000.
 	MaxInjectedTokens int `json:"max_injected_tokens,omitempty" yaml:"max_injected_tokens,omitempty"`
+	// ExpandToSection widens each search result from the chunk that ranked to the
+	// chunks around it that sit in the same heading section, so a section packed into
+	// several chunks is returned whole. It defaults to false, which returns the ranked
+	// chunk alone. Each result may grow to an equal share of max_injected_tokens, so a
+	// search returns no more text than it does today; at top_k 20 that share is one
+	// chunk and nothing grows. Ranking is unaffected and no reindex is needed.
+	ExpandToSection bool `json:"expand_to_section,omitempty" yaml:"expand_to_section,omitempty"`
+	// ReadTool offers the model knowledge_read, which returns the chunk a citation
+	// names and as many chunks either side of it as the model asks for. It defaults to
+	// false. Where ExpandToSection widens every hit within its heading section, this
+	// widens the one document the model chose and crosses heading boundaries doing it.
+	// One call returns at most half of MaxInjectedTokens.
+	ReadTool bool `json:"read_tool,omitempty" yaml:"read_tool,omitempty"`
 	// Embeddings, when present, turns on the hybrid vector tier. Its absence leaves
 	// the feature lexical-only, needing no model and no external service.
 	Embeddings *RAGEmbeddingsConfig `json:"embeddings,omitempty" yaml:"embeddings,omitempty"`
@@ -817,20 +830,29 @@ const (
 	// without returning their text. Its argument is query. It answers a matched
 	// count, documents and the terms it actually queried.
 	KnowledgeEnumerateToolName = "knowledge_enumerate"
+
+	// KnowledgeReadToolName returns the indexed text a citation names, with as many
+	// chunks either side of it as the caller asks for. Its arguments are index_ref,
+	// before and after. It answers a status, the citation pair, the path, the span the
+	// text covers and the content. It is served only when harness.knowledge.read_tool
+	// is set.
+	KnowledgeReadToolName = "knowledge_read"
 )
 
 // mcpExposableBuiltins are the built-in tools an operator may name in
-// expose.agent.mcp.builtins. Both are read-only knowledge tools that need no
+// expose.agent.mcp.builtins. All three are read-only knowledge tools that need no
 // operator at a terminal, which is what the memory and ask_human_* built-ins
 // cannot say. Membership here is only the selection half: a tool must also declare
 // MCP exposure on its own spec, so this list can never widen what is servable.
 //
-// They are two halves of one capability and are meant to be served together.
+// knowledge_search and knowledge_enumerate are meant to be served together.
 // knowledge_search ranks and so cannot tell absence from a low score, which is the
 // question knowledge_enumerate answers; a client given only the first has the
-// defect the second exists to fix. Each is nonetheless selectable on its own,
-// because selection stays per tool and an operator who wants one gets one.
-var mcpExposableBuiltins = []string{KnowledgeSearchToolName, KnowledgeEnumerateToolName}
+// defect the second exists to fix. knowledge_read answers a third question, what a
+// citation a client already holds says in full, and stands on its own. Each is
+// selectable on its own, because selection stays per tool and an operator who wants
+// one gets one.
+var mcpExposableBuiltins = []string{KnowledgeSearchToolName, KnowledgeEnumerateToolName, KnowledgeReadToolName}
 
 // HumanInTheLoopConfig configures the built-in human-in-the-loop tools, which let
 // the model ask the operator a question at the terminal during an agent run.
@@ -2384,6 +2406,14 @@ func (c *Config) RAGEnabled() bool {
 	return c.Harness.RAG != nil && c.Harness.RAG.Enabled
 }
 
+// RAGReadToolEnabled reports whether the built-in knowledge_read tool is offered:
+// knowledge enabled and harness.knowledge.read_tool set. It is a second gate over
+// the same index rather than a separate feature, so a config that turns it on
+// without enabling knowledge offers nothing.
+func (c *Config) RAGReadToolEnabled() bool {
+	return c.RAGEnabled() && c.Harness.RAG.ReadTool
+}
+
 // RAGVectorEnabled reports whether the opt-in vector tier is on: RAG enabled and
 // an embeddings sub-block present. It is the second, independent gate; a lexical
 // index needs neither a model nor a server.
@@ -3394,6 +3424,13 @@ func (c *Config) normalizeMCPBuiltins(names []string) ([]string, error) {
 
 	if len(out) > 0 && !c.RAGEnabled() {
 		return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but knowledge is not enabled; add a harness.knowledge block with 'enabled: true' or remove them from builtins", strings.Join(out, ", "))
+	}
+
+	// knowledge_read has a second gate of its own, so an allowlist entry for it with
+	// that key unset selects a tool nothing builds and the operator is served two
+	// tools where they asked for three.
+	if slices.Contains(out, KnowledgeReadToolName) && !c.RAGReadToolEnabled() {
+		return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but harness.knowledge.read_tool is not set; add 'read_tool: true' to harness.knowledge or remove it from builtins", KnowledgeReadToolName)
 	}
 
 	return out, nil

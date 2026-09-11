@@ -52,6 +52,19 @@ var _ = Describe("knowledge JSON rendering", func() {
 			Expect(out.Hits[0].MappedCitation).To(Equal("https://example.net/design#cancellation"))
 		})
 
+		// A consumer deciding whether to read more of the document needs the range
+		// whether or not it asked for the text, so span is carried without --full.
+		It("carries a span only for a hit that grew past the chunk that ranked", func() {
+			out := newRAGSearchJSON("cancel", &rag.SearchResult{Status: rag.StatusOK, Hits: []rag.Hit{hit}}, true, false)
+			Expect(out.Hits[0].Span).To(BeEmpty())
+
+			expanded := hit
+			expanded.Span = "docs/design.md#2..#5"
+
+			out = newRAGSearchJSON("cancel", &rag.SearchResult{Status: rag.StatusOK, Hits: []rag.Hit{expanded}}, true, false)
+			Expect(out.Hits[0].Span).To(Equal("docs/design.md#2..#5"))
+		})
+
 		// The tier cannot be read off Degraded: a store with no embeddings is lexical
 		// and has not degraded.
 		It("reports the configured tier separately from a degradation", func() {

@@ -84,6 +84,13 @@ type Hit struct {
 	HeadingPath string
 	Content     string
 
+	// Span is the range of chunks Content covers, <relpath>#<low>..#<high>, set when
+	// harness.knowledge.expand_to_section grew this hit past the chunk that ranked. It
+	// is empty for a hit returned as the single chunk it ranked as. Citation stays that
+	// chunk either way, so the span is what tells a reader the text is wider than the
+	// citation.
+	Span string
+
 	// MappedCitation is how this chunk is cited outside the corpus, rendered from
 	// the configured citation rules: a URL where the rules publish one, and whatever
 	// else a rule renders otherwise. It is the Citation token itself when no rule
@@ -142,7 +149,7 @@ type result struct {
 // result's Status rather than as errors. A transient embeddings outage degrades to
 // lexical with Degraded set; a genuine index/config mismatch (dimension) or a DB
 // error is returned as an error.
-// The span it opens covers every one of the nine ways this returns, through a deferred
+// The span it opens covers every one of the ten ways this returns, through a deferred
 // Finish over the named returns. That is safe here only because every failing path
 // returns a nil result explicitly: the deferred read then sees nil and reports a
 // failure, where reading a partially assembled local would report the status the result
@@ -215,6 +222,13 @@ func (s *Store) Search(ctx context.Context, query string, requestedTopK int) (re
 	hits, err := s.hydrate(ctx, truncate(fused, topK))
 	if err != nil {
 		return nil, err
+	}
+
+	if s.expandToSection {
+		hits, err = s.expandSections(ctx, hits, topK)
+		if err != nil {
+			return nil, err
+		}
 	}
 	res.Hits = hits
 
