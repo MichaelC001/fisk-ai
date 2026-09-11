@@ -24,17 +24,21 @@ import (
 )
 
 var (
-	knowledgePaths    []string
-	knowledgeReindex  bool
-	knowledgeDryRun   bool
-	knowledgeQuery    string
-	knowledgeTopK     int
-	knowledgeFull     bool
-	knowledgeJSON     bool
-	knowledgeCitation string
-	knowledgeSources  []string
-	knowledgeForce    bool
-	knowledgeStoreDir string
+	knowledgePaths   []string
+	knowledgeReindex bool
+	knowledgeDryRun  bool
+	knowledgeQuery   string
+	knowledgeTopK    int
+	knowledgeFull    bool
+	knowledgeJSON    bool
+	knowledgeExpand  bool
+	// knowledgeExpandSet separates --expand and --no-expand from neither, which is
+	// the state that follows harness.knowledge.expand_to_section.
+	knowledgeExpandSet bool
+	knowledgeCitation  string
+	knowledgeSources   []string
+	knowledgeForce     bool
+	knowledgeStoreDir  string
 )
 
 // registerRAGCommand registers the user-facing knowledge command and its
@@ -69,6 +73,11 @@ func registerRAGCommand(cmd *fisk.Application) {
 	search.Arg("query", "The search query").Required().StringVar(&knowledgeQuery)
 	search.Flag("top-k", "Maximum number of results to return").IntVar(&knowledgeTopK)
 	search.Flag("full", "Print the full chunk content instead of a snippet").UnNegatableBoolVar(&knowledgeFull)
+	// Negatable, so --expand and --no-expand both reach a configuration that set the
+	// key either way. Running the one query both ways is how an operator sees what
+	// expansion does to their own corpus before setting the key for every agent run.
+	search.Flag("expand", "Expand each result to the section it sits in, overriding harness.knowledge.expand_to_section").
+		IsSetByUser(&knowledgeExpandSet).BoolVar(&knowledgeExpand)
 	search.Flag("json", "Render the result as a single JSON object for scripting; chunk bodies are carried only with --full").UnNegatableBoolVar(&knowledgeJSON)
 
 	registerRAGMatchCommand(k)
@@ -431,6 +440,17 @@ func printIndexStats(stats *rag.IndexStats, dryRun bool) {
 	fmt.Println(")")
 }
 
+// knowledgeExpandOption renders the --expand and --no-expand pair as the override
+// rag.Options takes: the value the operator typed, or nil when they typed neither
+// and the store follows harness.knowledge.expand_to_section.
+func knowledgeExpandOption() *bool {
+	if !knowledgeExpandSet {
+		return nil
+	}
+
+	return &knowledgeExpand
+}
+
 func knowledgeSearchAction(_ *fisk.ParseContext) error {
 	ctx, cancel := interruptContext()
 	defer cancel()
@@ -440,7 +460,7 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{})
+	store, err := rag.Open(cfg, knowledgeStoreDir, rag.Options{ExpandToSection: knowledgeExpandOption()})
 	if err != nil {
 		return knowledgeAdvice(err)
 	}
@@ -492,11 +512,15 @@ func knowledgeSearchAction(_ *fisk.ParseContext) error {
 
 // renderSearchHits adds one section per hit.
 //
-// The raw citation stays the section heading so it can be pasted straight into
-// knowledge show, which accepts only that token: a citation rule is a regular
-// expression and is not reversible, so a published URL resolves back to no chunk.
-// The mapped citation is a field under it, and only when a rule matched, because a
-// line repeating the path is noise on a corpus that is mostly unpublished.
+// The raw citation opens the section heading so it can be pasted into knowledge
+// show, which accepts only that token: a citation rule is a regular expression and
+// is not reversible, so a published URL resolves back to no chunk. The mapped
+// citation is a field under it, and only when a rule matched, because a line
+// repeating the path is noise on a corpus that is mostly unpublished.
+//
+// Where --expand grew a hit past the chunk that ranked, Span is a field under the
+// heading giving the range the printed text covers, which keeps the heading itself
+// pasteable.
 //
 // A citation carries a corpus path and a mapped citation can carry the document's
 // own heading, so both are sanitized on the way out.
@@ -505,6 +529,9 @@ func renderSearchHits(c *columns.Document, hits []rag.Hit, full bool) {
 		c.Section(terminalToken(h.Citation), func(c *columns.Document) {
 			if h.Mapped {
 				c.Item("Mapped", terminalToken(h.MappedCitation))
+			}
+			if h.Span != "" {
+				c.Item("Span", terminalToken(h.Span))
 			}
 			c.ItemUnlessZero("Section", h.HeadingPath)
 			if full {

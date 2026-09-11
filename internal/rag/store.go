@@ -170,6 +170,10 @@ type Store struct {
 
 	topK              int
 	maxInjectedTokens int
+	// expandToSection turns on the walk that grows each search hit to the section it
+	// sits in, resolved from harness.knowledge.expand_to_section or from the option
+	// that overrides it.
+	expandToSection bool
 
 	// citations renders the mapped citation of every result this store returns. It
 	// is built in newStore, since a store keeps no *config.Config to build one from
@@ -282,6 +286,17 @@ func resolvedMaxInjectedTokens(cfg *config.RAGConfig) int {
 	return cfg.MaxInjectedTokens
 }
 
+// resolvedExpandToSection settles whether this store's searches grow a hit to its
+// section: the caller's override when it set one, else
+// harness.knowledge.expand_to_section.
+func resolvedExpandToSection(cfg *config.RAGConfig, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+
+	return cfg.ExpandToSection
+}
+
 // Options carries what a caller supplies to Open and OpenWriter alongside the
 // configuration and the store directory. Options{} opens the store the
 // configuration alone describes.
@@ -302,6 +317,12 @@ type Options struct {
 	// at all is refused with ErrEmbeddingsAbsent, so an index built with a supplied
 	// Embedder needs one on every open.
 	Embedder Embedder
+
+	// ExpandToSection overrides harness.knowledge.expand_to_section for this store.
+	// A nil pointer takes the configured value, true grows every hit to the section it
+	// sits in and false returns the chunk that ranked alone, so a caller can run one
+	// query both ways against one configuration.
+	ExpandToSection *bool
 }
 
 // newStore builds every part of a Store that comes from the config and the
@@ -336,6 +357,7 @@ func newStore(cfg *config.Config, storeDir string, readOnly bool, opts Options) 
 		root:              cfg.RootDirectory,
 		topK:              resolvedTopK(cfg.Harness.RAG),
 		maxInjectedTokens: resolvedMaxInjectedTokens(cfg.Harness.RAG),
+		expandToSection:   resolvedExpandToSection(cfg.Harness.RAG, opts.ExpandToSection),
 		citations:         NewCitationMapper(cfg.RAGCitationRules()),
 	}, nil
 }
@@ -785,6 +807,12 @@ func ensureBaseSchema(ctx context.Context, ex execer) error {
 			ordinal      INTEGER,
 			body         TEXT NOT NULL
 		)`,
+		// The walk that grows a search hit to its section fetches the chunk either side
+		// of the hit by (document_id, ordinal), which nothing else indexes. It is left
+		// out of baseSchemaObjects: that gate refuses an index whose shape changes the
+		// answers, and this one changes the speed, so an index built before it answers
+		// the same and gains it on the next indexing run.
+		`CREATE INDEX IF NOT EXISTS chunks_document_ordinal ON chunks(document_id, ordinal)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 			body,
 			heading_path,

@@ -40,6 +40,13 @@ type ragSearchHitJSON struct {
 	MappedCitation string `json:"mapped_citation,omitempty"`
 	Mapped         bool   `json:"mapped"`
 
+	// Span is the range of chunks the content covers, <relpath>#<low>..#<high>,
+	// present when expansion grew this result past the chunk that ranked. It is the
+	// field knowledge_search returns under the same name, so a preview and what the
+	// model reads have one shape. Unlike content it is carried without --full: it is
+	// a token, and a consumer deciding whether to fetch the rest needs it either way.
+	Span string `json:"span,omitempty"`
+
 	// Content is the whole chunk and appears only under --full. The screen
 	// rendering truncates to a snippet, which reads well and would be a lie in a
 	// field named content, so this format carries the chunk or carries nothing.
@@ -123,6 +130,7 @@ func newRAGSearchJSON(query string, res *rag.SearchResult, vectorEnabled bool, f
 			DocPath:     h.DocPath,
 			Ordinal:     h.Ordinal,
 			HeadingPath: h.HeadingPath,
+			Span:        h.Span,
 			Mapped:      h.Mapped,
 		}
 		if h.Mapped {

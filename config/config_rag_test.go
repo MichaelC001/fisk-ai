@@ -30,6 +30,53 @@ var _ = Describe("Knowledge (RAG) config", func() {
 		Expect(cfg.RAGVectorEnabled()).To(BeTrue())
 	})
 
+	It("leaves section expansion off unless the key turns it on", func() {
+		base := `
+application_path: /bin/ls
+identity: kb
+system_prompt: hello
+llm:
+  model: claude-opus-4-8
+harness:
+  knowledge:
+    enabled: true
+`
+		cfg, err := ParseConfig([]byte(base))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cfg.Harness.RAG.ExpandToSection).To(BeFalse())
+
+		cfg, err = ParseConfig([]byte(base + "    expand_to_section: true\n"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cfg.Harness.RAG.ExpandToSection).To(BeTrue())
+	})
+
+	It("leaves the read tool off unless the key turns it on", func() {
+		base := `
+application_path: /bin/ls
+identity: kb
+system_prompt: hello
+llm:
+  model: claude-opus-4-8
+harness:
+  knowledge:
+    enabled: true
+`
+		cfg, err := ParseConfig([]byte(base))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cfg.Harness.RAG.ReadTool).To(BeFalse())
+		Expect(cfg.RAGReadToolEnabled()).To(BeFalse())
+
+		cfg, err = ParseConfig([]byte(base + "    read_tool: true\n"))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cfg.RAGReadToolEnabled()).To(BeTrue())
+	})
+
+	// The key reads the index knowledge itself built, so it offers nothing on its own.
+	It("offers no read tool with knowledge disabled", func() {
+		cfg := &Config{Harness: HarnessConfig{RAG: &RAGConfig{ReadTool: true}}}
+		Expect(cfg.RAGReadToolEnabled()).To(BeFalse())
+	})
+
 	It("parses the embeddings timeout and defaults it when unset", func() {
 		data := []byte(`
 application_path: /bin/ls
