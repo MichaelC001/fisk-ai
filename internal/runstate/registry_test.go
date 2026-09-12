@@ -26,6 +26,9 @@ func (stubStore) List(context.Context, ListFilter) ([]RunInfo, error) { return n
 func (stubStore) ListPage(context.Context, ListFilter, int, string) (RunPage, error) {
 	return RunPage{}, nil
 }
+func (stubStore) Describe(context.Context, ListFilter, []string) ([]RunInfo, error) {
+	return nil, nil
+}
 func (stubStore) Delete(context.Context, string) error { return nil }
 
 // The fake backend is registered once for the whole test binary so New has

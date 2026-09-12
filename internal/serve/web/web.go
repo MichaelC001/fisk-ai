@@ -16,9 +16,10 @@
 // built per request from a tool set resolved once, so a console reloading a restarted
 // worker reads what that worker is running.
 //
-// Under SessionsPath it lists the past conversations, deletes one, and hands one to a
-// format to render. Picking a conversation is outside what either frontend protocol has
-// words for, so these routes are Fisk's own and every format shares them.
+// Under SessionsPath it lists the past conversations, answers the rows for a set a caller
+// names, deletes one, and hands one to a format to render. Picking a conversation is
+// outside what either frontend protocol has words for, so these routes are Fisk's own and
+// every format shares them.
 //
 // # A question ends the turn
 //

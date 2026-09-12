@@ -395,6 +395,74 @@ func (s *FileStore) ListPage(ctx context.Context, filter runstate.ListFilter, li
 	return page, nil
 }
 
+// Describe implements runstate.Store.
+//
+// Each row reads and folds one journal, the read a listing row makes here: the terminal
+// record carrying the ending and the summary is the last line of the file and nothing
+// reaches it without the lines before it. So a row costs the conversation's length,
+// where the JetStream backend answers the same row in two direct gets.
+//
+// The caller supplied the ids, so this reads no directory and a store of five thousand
+// journals costs what a store of twelve costs.
+//
+// A journal that is not there is left out, which is the id this store holds no run for.
+// So is one whose read fails with runstate.ErrCorrupt or runstate.ErrVersion, because
+// List and ListPage skip such a journal: an agent killed between Create taking the id and
+// the meta record landing leaves a zero-length journal, and it reads that way for as long
+// as it is stored.
+//
+// Every other failure fails the call rather than shortening the answer, so an id a caller
+// named and read no row for is a run this store has nothing readable under rather than a
+// row a failed read dropped.
+func (s *FileStore) Describe(ctx context.Context, filter runstate.ListFilter, ids []string) ([]runstate.RunInfo, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]runstate.RunInfo, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+
+	for _, id := range ids {
+		err = ctx.Err()
+		if err != nil {
+			return nil, err
+		}
+
+		_, repeated := seen[id]
+		if repeated {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		err = runstate.ValidateID(id)
+		if err != nil {
+			continue
+		}
+		// The prefix is answered from the id, before the journal is opened.
+		if !filter.MatchesID(id) {
+			continue
+		}
+
+		info, err := s.summarize(id)
+		switch {
+		case os.IsNotExist(err),
+			errors.Is(err, runstate.ErrCorrupt),
+			errors.Is(err, runstate.ErrVersion):
+			continue
+		case err != nil:
+			return nil, err
+		}
+		if !filter.MatchesAgent(info.Agent) {
+			continue
+		}
+
+		out = append(out, *info)
+	}
+
+	return out, nil
+}
+
 // position is where a page ended: the run it ended on, in the order runs are enumerated.
 type position struct {
 	created time.Time
@@ -507,8 +575,8 @@ func (s *FileStore) creationOrder(ctx context.Context, filter runstate.ListFilte
 	return out, nil
 }
 
-// summarize folds one run into a listing row. Both listings build a row here, so the two
-// cannot describe the same run differently.
+// summarize folds one run into a listing row. The two listings and Describe build a row
+// here, so the three cannot describe the same run differently.
 func (s *FileStore) summarize(id string) (*runstate.RunInfo, error) {
 	path := s.journalPath(id)
 

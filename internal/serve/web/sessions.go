@@ -35,6 +35,11 @@ const (
 	MaxPageLimit = 100
 )
 
+// MaxSessionIDs is how many conversations one request may name to hydrate, and a request
+// naming more is refused. A session id is 66 characters and the request carries them in
+// the URL, so fifty of them keep the request line under the 4KB a server accepts.
+const MaxSessionIDs = 50
+
 // MaxTitleRunes is how much of a first prompt a title carries. A longer prompt is cut
 // there and marked, since a rail shows one line per conversation.
 const MaxTitleRunes = 80
@@ -53,6 +58,7 @@ const (
 const (
 	limitField    = "limit"
 	cursorField   = "cursor"
+	idField       = "id"
 	titleEllipsis = "..."
 )
 
@@ -75,6 +81,16 @@ type Conversations interface {
 	// The order is creation order and the caller sorts nothing: a caller that ordered
 	// the whole listing would first have to read the whole listing.
 	List(ctx context.Context, limit int, cursor string) (runstate.RunPage, error)
+
+	// Describe returns the listing rows for ids, in the order the caller named them,
+	// for a caller that holds the ids already and has nothing to enumerate. A UI
+	// server keeping its own map of who owns which conversation asks this to draw a
+	// rail.
+	//
+	// An id outside these conversations is left out, exactly as List leaves it out,
+	// so a caller reads nothing about a conversation it may not see. An id named twice
+	// is described once, where it was first named.
+	Describe(ctx context.Context, ids []string) ([]runstate.RunInfo, error)
 
 	// Load reads a conversation for a Format to render. It returns the folded state
 	// rather than a rendering, since a browser reads AI SDK parts or AG-UI messages and
@@ -114,6 +130,13 @@ func NewStoreConversations(store runstate.Store, identity string) *StoreConversa
 // List implements Conversations.
 func (c *StoreConversations) List(ctx context.Context, limit int, cursor string) (runstate.RunPage, error) {
 	return c.store.ListPage(ctx, c.filter, limit, cursor)
+}
+
+// Describe implements Conversations. The store applies the prefix and the identity, the
+// pair the listing applies, so an id under another channel's prefix and a conversation
+// another agent journaled are left out of the rows without this type reading either.
+func (c *StoreConversations) Describe(ctx context.Context, ids []string) ([]runstate.RunInfo, error) {
+	return c.store.Describe(ctx, c.filter, ids)
 }
 
 // Load implements Conversations. An id outside this channel's prefix is refused before
@@ -187,6 +210,9 @@ type ConversationList struct {
 	// Cursor asks for the page after this one and is absent once the listing has
 	// reached the end. It is the store's own value: a page stores it and hands it back
 	// unchanged, and it stays good across a reload and a restart.
+	//
+	// An answer to a request naming ids carries none: it holds the conversations the
+	// caller named and there is nothing after them to ask for.
 	Cursor string `json:"cursor,omitempty"`
 }
 
@@ -229,8 +255,26 @@ func TitleFor(prompt string) string {
 	return strings.TrimRight(string(runes[:MaxTitleRunes]), " ") + titleEllipsis
 }
 
-// serveSessionList answers a page of this channel's conversations.
+// serveSessionList answers this channel's conversations: the ones a request names by id,
+// or a page of them from a cursor when it names none.
+//
+// A UI server in front of this channel holds its own map of who owns which conversation,
+// so it enumerates nothing and asks for the rows of the ids it already has. A named row
+// and a listed row are the same Conversation, so a console holds one renderer.
 func (c *Channel) serveSessionList(w http.ResponseWriter, r *http.Request) {
+	ids, err := sessionIDs(r)
+	if err != nil {
+		c.log.Warn("Refusing a listing request", "error", err, "remote", r.RemoteAddr)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+	if len(ids) > 0 {
+		c.describeSessions(w, r, ids)
+
+		return
+	}
+
 	limit, err := pageLimit(r)
 	if err != nil {
 		c.log.Warn("Refusing a listing request", "error", err, "remote", r.RemoteAddr)
@@ -259,6 +303,52 @@ func (c *Channel) serveSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.writeJSON(w, r, out, listRefusal)
+}
+
+// describeSessions answers the rows for the conversations a request named.
+//
+// An id this channel does not hold is left out of the answer rather than reported per id,
+// which is what Load answers for an id outside the prefix or under another agent: a
+// caller reads the rows it may see and learns nothing about the rest.
+func (c *Channel) describeSessions(w http.ResponseWriter, r *http.Request, ids []string) {
+	rows, err := c.conversations.Describe(r.Context(), ids)
+	if err != nil {
+		c.log.Error("Reading the named conversations failed", "error", err, "ids", len(ids), "remote", r.RemoteAddr)
+		http.Error(w, listRefusal, http.StatusInternalServerError)
+
+		return
+	}
+
+	out := ConversationList{Sessions: make([]Conversation, len(rows))}
+	for i, info := range rows {
+		out.Sessions[i] = conversationFor(info)
+	}
+
+	c.writeJSON(w, r, out, listRefusal)
+}
+
+// sessionIDs reads the conversations a request names, returning none for a request that
+// names no id and lists a page instead.
+//
+// Naming ids and asking for a page are two different requests, so one carrying both is
+// refused rather than resolved: twelve ids and a limit of twenty ask for two different
+// answers and this endpoint would have to pick one.
+func sessionIDs(r *http.Request) ([]string, error) {
+	query := r.URL.Query()
+
+	ids := query[idField]
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	if query.Has(cursorField) || query.Has(limitField) {
+		return nil, errors.New("a request naming conversations lists those and pages nothing; send id, or send cursor and limit")
+	}
+	if len(ids) > MaxSessionIDs {
+		return nil, fmt.Errorf("a request names at most %d conversations and this one names %d; ask for the rest in a second request", MaxSessionIDs, len(ids))
+	}
+
+	return ids, nil
 }
 
 // pageLimit reads how many conversations a request asks for, taking DefaultPageLimit

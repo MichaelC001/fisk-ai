@@ -83,19 +83,21 @@ func terminalRec(reason runstate.TerminalReason) runstate.Record {
 	}
 }
 
-// countRecordReads runs work and reports how many stored records it read. Each read is
-// one request on '$JS.API.STREAM.MSG.GET.<stream>', or on '$JS.API.DIRECT.GET.<stream>'
-// where the stream allows a direct get, so a wildcard subscription counts them.
+// countRecordReads runs work and reports how many stored records it read and how many
+// consumers it created. A read is one request on '$JS.API.STREAM.MSG.GET.<stream>', or on
+// '$JS.API.DIRECT.GET.<stream>' where the stream allows a direct get, and a consumer is
+// one request on '$JS.API.CONSUMER.CREATE.<stream>', so a wildcard subscription counts
+// both.
 //
 // The sentinel is the barrier. Every read the work made had its reply in hand before the
 // sentinel was published, and the server fans out to this subscription in the order it
 // processed the requests, so the sentinel arrives after the reads it followed.
-func countRecordReads(nc *nats.Conn, work func()) int {
+func countRecordReads(nc *nats.Conn, work func()) (int, int) {
 	GinkgoHelper()
 
 	const sentinel = "fisk.test.reads.sentinel"
 
-	var reads atomic.Int64
+	var reads, consumers atomic.Int64
 	done := make(chan struct{})
 
 	sub, err := nc.Subscribe(">", func(m *nats.Msg) {
@@ -104,6 +106,8 @@ func countRecordReads(nc *nats.Conn, work func()) int {
 			close(done)
 		case strings.HasPrefix(m.Subject, "$JS.API.STREAM.MSG.GET."), strings.HasPrefix(m.Subject, "$JS.API.DIRECT.GET."):
 			reads.Add(1)
+		case strings.HasPrefix(m.Subject, "$JS.API.CONSUMER.CREATE."):
+			consumers.Add(1)
 		}
 	})
 	Expect(err).ToNot(HaveOccurred())
@@ -116,7 +120,7 @@ func countRecordReads(nc *nats.Conn, work func()) int {
 	Expect(nc.Flush()).To(Succeed())
 	Eventually(done).Should(BeClosed())
 
-	return int(reads.Load())
+	return int(reads.Load()), int(consumers.Load())
 }
 
 // goodStream is a stream configuration the backend accepts: a single <prefix>.>
@@ -873,6 +877,189 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			})
 		})
 
+		// A caller holding the ids enumerates nothing: no consumer is built, no subject is
+		// listed, and each row is the two reads a listing row already makes.
+		Describe("describing a named set of runs", func() {
+			createEnded := func(prefix, agent string, summary *runstate.ConversationSummary) string {
+				GinkgoHelper()
+
+				id := prefix + newID()
+				meta := newMeta(id)
+				meta.Agent = agent
+
+				j, err := store.Create(ctx, id, meta)
+				Expect(err).ToNot(HaveOccurred())
+
+				rec := terminalRec(runstate.ReasonCompleted)
+				rec.Terminal.Summary = summary
+				Expect(j.Append(ctx, 2, rec)).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				return id
+			}
+
+			idsOf := func(infos []runstate.RunInfo) []string {
+				out := make([]string, len(infos))
+				for i, info := range infos {
+					out[i] = info.RunID
+				}
+
+				return out
+			}
+
+			It("Should answer in the order the caller named the ids", func() {
+				one := createEnded("w-", "agent-a", nil)
+				two := createEnded("w-", "agent-a", nil)
+				three := createEnded("w-", "agent-a", nil)
+
+				infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{three, one, two})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(infos)).To(Equal([]string{three, one, two}))
+			})
+
+			It("Should carry the times, the model, the ending and the summary", func() {
+				want := &runstate.ConversationSummary{
+					Turns:         3,
+					ContextTokens: 4096,
+					Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2},
+				}
+				id := createEnded("w-", "agent-a", want)
+
+				infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Created).ToNot(BeZero())
+				Expect(infos[0].Updated).To(BeTemporally(">=", infos[0].Created))
+				Expect(infos[0].Model).To(Equal("claude-opus-4-8"))
+				Expect(infos[0].Prompt).To(Equal("hello"))
+				Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+				Expect(infos[0].Summary).To(Equal(want))
+			})
+
+			It("Should report no summary for a conversation whose last turn wrote none", func() {
+				id := createEnded("w-", "agent-a", nil)
+
+				infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Summary).To(BeNil())
+			})
+
+			It("Should carry the same row a full listing does", func() {
+				id := createEnded("w-", "agent-a", nil)
+
+				infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+				Expect(err).ToNot(HaveOccurred())
+
+				listed, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(Equal(listed))
+			})
+
+			It("Should leave out an id outside the prefix, another agent's run and a run it holds none of", func() {
+				mine := createEnded("w-", "agent-a", nil)
+				other := createEnded("slack-", "agent-a", nil)
+				theirs := createEnded("w-", "agent-b", nil)
+				unstamped := createEnded("w-", "", nil)
+
+				filter := runstate.ListFilter{Agent: "agent-a", Prefix: "w-"}
+				infos, err := store.Describe(ctx, filter, []string{mine, other, theirs, "w-" + newID(), unstamped})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(infos)).To(Equal([]string{mine, unstamped}))
+			})
+
+			It("Should describe an id named twice once, where it was first named", func() {
+				one := createEnded("w-", "agent-a", nil)
+				two := createEnded("w-", "agent-a", nil)
+
+				infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{one, two, one})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(infos)).To(Equal([]string{one, two}))
+			})
+
+			// The claim the endpoint above this is built on, counted rather than asserted:
+			// a row is the meta record and the run's last record, a run the filter
+			// excludes by its id is read at all, and the caller's ids leave nothing to
+			// enumerate, so no consumer is created.
+			It("Should read two records per row, nothing for an excluded id and create no consumer", func() {
+				named := []string{
+					createEnded("w-", "agent-a", nil),
+					createEnded("w-", "agent-a", nil),
+					createEnded("w-", "agent-a", nil),
+				}
+				excluded := createEnded("slack-", "agent-a", nil)
+
+				reads, consumers := countRecordReads(nc, func() {
+					infos, err := store.Describe(ctx, runstate.ListFilter{Prefix: "w-"}, append(named, excluded))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(infos).To(HaveLen(3))
+				})
+
+				Expect(reads).To(Equal(2*len(named)), "the meta record and the last record of each named run")
+				Expect(consumers).To(BeZero(), "the ids came from the caller, so nothing is enumerated")
+			})
+
+			// Both listings page past a run this build cannot read, and every run stored
+			// under an earlier version is one, so naming such a run among ids that are
+			// fine reads the other rows rather than failing the request.
+			It("Should leave out a run of a version it does not read and one whose meta record is unreadable", func() {
+				one := createEnded("w-", "agent-a", nil)
+				two := createEnded("w-", "agent-a", nil)
+
+				// Create refuses a version this build does not write, so both bad runs are
+				// published straight onto the stream. What Describe has to survive is a
+				// record already stored, whichever build stored it.
+				throwaway := newID()
+				j, err := store.Create(ctx, throwaway, newMeta(throwaway))
+				Expect(err).ToNot(HaveOccurred())
+				subjects := j.(*journal).store
+				Expect(j.Close()).To(Succeed())
+
+				old := "w-" + newID()
+				meta := newMeta(old)
+				meta.Version = runstate.Version + 1
+				body, err := json.Marshal(runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
+				Expect(err).ToNot(HaveOccurred())
+				_, err = js.Publish(ctx, subjects.metaSubject(old), body)
+				Expect(err).ToNot(HaveOccurred())
+
+				garbled := "w-" + newID()
+				_, err = js.Publish(ctx, subjects.metaSubject(garbled), []byte("not json at all"))
+				Expect(err).ToNot(HaveOccurred())
+
+				infos, err := store.Describe(ctx, runstate.ListFilter{Prefix: "w-"}, []string{one, old, garbled, two})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(infos)).To(Equal([]string{one, two}))
+
+				listed, err := store.List(ctx, runstate.ListFilter{Prefix: "w-"})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idsOf(listed)).To(ConsistOf(one, two), "the listing skips the same two runs")
+			})
+
+			// A caller naming twelve ids and reading eight rows takes the four it did not
+			// read as runs this store has nothing readable under, so a read that failed for
+			// any other reason fails the call instead of shortening the answer.
+			It("Should fail the call when a read fails for any other reason", func() {
+				id := createEnded("w-", "agent-a", nil)
+
+				Expect(js.DeleteStream(ctx, "SESSIONS")).To(Succeed())
+
+				_, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+				Expect(err).To(HaveOccurred())
+				Expect(err).ToNot(MatchError(runstate.ErrCorrupt))
+			})
+
+			It("Should refuse a call on a context canceled before it", func() {
+				id := createEnded("w-", "agent-a", nil)
+
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+
+				_, err := store.Describe(canceled, runstate.ListFilter{}, []string{id})
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
 		// The one thing a listing reads differently from a fold. A fold keeps the last
 		// terminal record it saw until another replaces it, so a conversation whose next
 		// turn is under way still reads as completed; the last record says what is
@@ -1011,26 +1198,30 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			smallStore := fill("SMALL", "small", small)
 			largeStore := fill("LARGE", "large", large)
 
-			pageOnSmall := countRecordReads(nc, func() {
+			pageOnSmall, pageConsumers := countRecordReads(nc, func() {
 				_, err := smallStore.ListPage(ctx, runstate.ListFilter{}, page, "")
 				Expect(err).ToNot(HaveOccurred())
 			})
-			pageOnLarge := countRecordReads(nc, func() {
+			pageOnLarge, _ := countRecordReads(nc, func() {
 				_, err := largeStore.ListPage(ctx, runstate.ListFilter{}, page, "")
 				Expect(err).ToNot(HaveOccurred())
 			})
-			doublePage := countRecordReads(nc, func() {
+			doublePage, _ := countRecordReads(nc, func() {
 				_, err := largeStore.ListPage(ctx, runstate.ListFilter{}, 2*page, "")
 				Expect(err).ToNot(HaveOccurred())
 			})
-			listSmall := countRecordReads(nc, func() {
+			listSmall, _ := countRecordReads(nc, func() {
 				_, err := smallStore.List(ctx, runstate.ListFilter{})
 				Expect(err).ToNot(HaveOccurred())
 			})
-			listLarge := countRecordReads(nc, func() {
+			listLarge, _ := countRecordReads(nc, func() {
 				_, err := largeStore.List(ctx, runstate.ListFilter{})
 				Expect(err).ToNot(HaveOccurred())
 			})
+
+			// The consumer a page builds to enumerate is what Describe is counted
+			// against, so the count that has to be zero there fires here.
+			Expect(pageConsumers).To(BeNumerically(">", 0), "a page enumerates the meta subjects through a consumer")
 
 			Expect(pageOnLarge).To(Equal(page), "one read per row, the run's last record")
 			Expect(pageOnSmall).To(Equal(pageOnLarge), "a page of five costs five reads whether the store holds five runs or forty")
@@ -1061,7 +1252,7 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(j.Append(ctx, seq, terminalRec(runstate.ReasonCompleted))).To(Succeed())
 			Expect(j.Close()).To(Succeed())
 
-			reads := countRecordReads(nc, func() {
+			reads, _ := countRecordReads(nc, func() {
 				page, err := store.ListPage(ctx, runstate.ListFilter{}, 5, "")
 				Expect(err).ToNot(HaveOccurred())
 				Expect(page.Runs).To(HaveLen(1))
