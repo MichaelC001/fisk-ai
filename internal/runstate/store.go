@@ -295,6 +295,32 @@ type Store interface {
 	// Deleting a run between two pages leaves it out of the second, and no row is
 	// repeated or skipped by that.
 	ListPage(ctx context.Context, filter ListFilter, limit int, cursor string) (RunPage, error)
+	// Describe summarizes the runs filter selects from ids, in the order the caller
+	// named them. It answers a caller that already holds the ids and has nothing to
+	// enumerate. The store applies the filter, as it does for the two listings: a
+	// caller that dropped rows afterwards would have paid to read them.
+	//
+	// It leaves out an id the filter excludes and an id this store holds no run for,
+	// which is what Load answers for the same two cases, so a caller reads nothing
+	// about a conversation it may not see. It also leaves out a run whose read fails
+	// with ErrCorrupt or ErrVersion, because List and ListPage skip such a run: one
+	// stored run would otherwise be a skipped row through those two and a failed call
+	// through this one. An agent killed between Create taking an id and the meta
+	// record landing leaves a run that reads that way for as long as it is stored.
+	//
+	// Every other failure fails the call rather than shortening the answer, so an id a
+	// caller named and read no row for is a run this store has nothing readable under
+	// rather than a row a failed read dropped. A canceled call returns no rows.
+	//
+	// An id named twice is read once and described once, where it was first named, so
+	// the result is a set of rows rather than an answer per name.
+	//
+	// What a row costs differs by backend and neither is a promise of the other. The
+	// JetStream store reads the meta record and the run's last record, two direct gets
+	// whatever the conversation's length. The file store reads and folds the whole
+	// journal, since the terminal record is the last line of the file, which is what a
+	// listing row costs there.
+	Describe(ctx context.Context, filter ListFilter, ids []string) ([]RunInfo, error)
 	// Delete removes a run's journal and lock.
 	Delete(ctx context.Context, id string) error
 }

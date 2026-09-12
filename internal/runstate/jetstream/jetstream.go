@@ -576,6 +576,63 @@ func (s *store) ListPage(ctx context.Context, filter runstate.ListFilter, limit 
 	return page, nil
 }
 
+// Describe implements runstate.Store.
+//
+// Each row is the two direct gets summarize makes, the meta record and the run's last
+// record, so twelve ids cost twenty four reads whatever the stream holds and however long
+// those conversations ran. The caller supplied the ids, so this builds no consumer and
+// lists no subject.
+//
+// A run whose meta record is absent is left out, which is the id this store holds no run
+// for. So is one whose meta record is unreadable or carries a record version this build
+// does not read, because List and ListPage skip such a run: the day runstate.Version
+// moves, every run already on the stream reads that way.
+//
+// Every other failure fails the call rather than shortening the answer, so an id a caller
+// named and read no row for is a run this store has nothing readable under rather than a
+// row a failed read dropped.
+func (s *store) Describe(ctx context.Context, filter runstate.ListFilter, ids []string) ([]runstate.RunInfo, error) {
+	opCtx, cancel := opContext(ctx)
+	defer cancel()
+
+	out := make([]runstate.RunInfo, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+
+	for _, id := range ids {
+		_, repeated := seen[id]
+		if repeated {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		err := runstate.ValidateID(id)
+		if err != nil {
+			continue
+		}
+		// The id is a subject token, so an excluded run costs no read at all.
+		if !filter.MatchesID(id) {
+			continue
+		}
+
+		ri, err := s.summarize(opCtx, id, filter)
+		switch {
+		case errors.Is(err, jetstream.ErrMsgNotFound),
+			errors.Is(err, runstate.ErrCorrupt),
+			errors.Is(err, runstate.ErrVersion):
+			continue
+		case err != nil:
+			return nil, err
+		}
+		if ri == nil {
+			continue
+		}
+
+		out = append(out, *ri)
+	}
+
+	return out, nil
+}
+
 // metaMsg is one run's meta record as the paging consumer delivered it: the record body
 // and where it sits on the stream.
 type metaMsg struct {

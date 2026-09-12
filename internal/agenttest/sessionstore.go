@@ -7,6 +7,7 @@ package agenttest
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -292,8 +293,68 @@ func (s *FakeSessionStore) ListPage(ctx context.Context, filter runstate.ListFil
 	return page, nil
 }
 
-// runInfoFor builds one listing row, so List and ListPage cannot describe the same run
-// differently. The ending and the summary come off the terminal record the way both real
+// Describe implements runstate.Store, answering the ids in the order the caller named
+// them and reading nothing for an id it holds no run for.
+//
+// The filter is answered through runstate.ListFilter.MatchesID and MatchesAgent, the
+// calls both real backends make, and a row is built by the call the two listings build
+// one with. So an embedder hydrating a list against this fake reads the creation time,
+// the last activity, the model, the ending and the summary a real store hands back, and
+// a run outside the prefix or under another agent is left out here as it is there.
+//
+// A run that folds to runstate.ErrCorrupt or runstate.ErrVersion is left out, which is
+// what a file or JetStream store does with such a run in Describe and in both listings.
+// Every other failure fails the call rather than shortening the answer, so an id an
+// embedder named and read no row for is a run this store has nothing readable under
+// rather than a row a failed read dropped.
+func (s *FakeSessionStore) Describe(ctx context.Context, filter runstate.ListFilter, ids []string) ([]runstate.RunInfo, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]runstate.RunInfo, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+
+	for _, id := range ids {
+		_, repeated := seen[id]
+		if repeated {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		if !filter.MatchesID(id) {
+			continue
+		}
+
+		j, ok := s.runs[id]
+		if !ok {
+			continue
+		}
+
+		rs, err := runstate.Fold(j.snapshot())
+		switch {
+		case errors.Is(err, runstate.ErrCorrupt), errors.Is(err, runstate.ErrVersion):
+			continue
+		case err != nil:
+			return nil, err
+		}
+		if !filter.MatchesAgent(rs.Agent) {
+			continue
+		}
+
+		created, updated := j.stamps()
+		out = append(out, runInfoFor(id, rs, created, updated))
+	}
+
+	return out, nil
+}
+
+// runInfoFor builds one listing row, so List, ListPage and Describe cannot describe the
+// same run differently. The ending and the summary come off the terminal record the way both real
 // backends read them, and stay absent for a conversation whose last turn wrote none.
 //
 // It fills every field a real backend fills. created is the time the caller stamped on

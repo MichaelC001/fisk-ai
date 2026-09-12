@@ -10,6 +10,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -323,6 +325,152 @@ var _ = Describe("The sessions API", func() {
 		})
 	})
 
+	// A UI server in front of this channel holds its own map of who owns which
+	// conversation, so it enumerates nothing and asks for the rows of the ids it has.
+	Describe("Hydrating a named set", func() {
+		query := func(ids ...string) string {
+			out := ""
+			for i, id := range ids {
+				sep := "&"
+				if i == 0 {
+					sep = "?"
+				}
+				out += sep + "id=" + url.QueryEscape(id)
+			}
+
+			return out
+		}
+
+		It("Should answer the rows in the order the request named the ids", func() {
+			one := session("t1", "the first", nil)
+			two := session("t2", "the second", nil)
+			three := session("t3", "the third", nil)
+
+			page := list(query(three, one, two))
+			Expect(listedIDs(page)).To(Equal([]string{three, one, two}))
+		})
+
+		It("Should carry no cursor, since the answer holds what the request named", func() {
+			id := session("t1", "the first", nil)
+
+			Expect(list(query(id)).Cursor).To(BeEmpty())
+		})
+
+		// The row is Conversation unchanged, so a console renders a hydrated row and a
+		// listed row with one renderer.
+		It("Should carry the creation time, the last activity, the model, the ending and the summary", func() {
+			id := session("t1", "list the streams", &runstate.ConversationSummary{
+				Turns:         3,
+				ContextTokens: 4096,
+				Counters:      runstate.Counters{ToolCalls: 7, LlmCalls: 9},
+			})
+
+			page := list(query(id))
+			Expect(page.Sessions).To(HaveLen(1))
+
+			row := page.Sessions[0]
+			Expect(row.ID).To(Equal(id))
+			Expect(row.Title).To(Equal("list the streams"))
+			Expect(row.Created).To(BeTemporally("==", journaledAt))
+			Expect(row.Updated).To(BeTemporally(">=", journaledAt))
+			Expect(row.Model).To(Equal(journaledModel))
+			Expect(row.Terminal).To(Equal(runstate.ReasonCompleted))
+			Expect(row.Summary).To(Equal(&ConversationCounts{Turns: 3, ContextTokens: 4096, ToolCalls: 7}))
+		})
+
+		It("Should leave the summary out for a conversation whose last turn recorded none", func() {
+			id := session("t1", "held before a turn counted anything", nil)
+
+			page := list(query(id))
+			Expect(page.Sessions).To(HaveLen(1))
+			Expect(page.Sessions[0].Summary).To(BeNil())
+
+			rec := call(http.MethodGet, "/fisk/v1/sessions"+query(id), nil)
+			Expect(rec.Body.String()).ToNot(ContainSubstring("summary"))
+		})
+
+		// An id this channel does not hold is left out rather than reported, which tells a
+		// caller nothing about what the store holds beyond what it may already see.
+		It("Should leave out another channel's conversation, another agent's and one nobody journaled", func() {
+			mine := session("t1", "mine", nil)
+			journal("slack-1a2b", "agent1", "a slack thread", nil)
+			theirs := SessionFor("agent2", "t2")
+			journal(theirs, "agent2", "another agent's", nil)
+
+			page := list(query(mine, "slack-1a2b", theirs, SessionFor("agent1", "never-held")))
+			Expect(listedIDs(page)).To(Equal([]string{mine}))
+		})
+
+		It("Should answer an id named twice with one row", func() {
+			one := session("t1", "the first", nil)
+			two := session("t2", "the second", nil)
+
+			Expect(listedIDs(list(query(one, two, one)))).To(Equal([]string{one, two}))
+		})
+
+		It("Should refuse a request naming more conversations than it may", func() {
+			ids := make([]string, MaxSessionIDs+1)
+			for i := range ids {
+				ids[i] = SessionFor("agent1", strconv.Itoa(i))
+			}
+
+			rec := call(http.MethodGet, "/fisk/v1/sessions"+query(ids...), nil)
+			Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			Expect(rec.Body.String()).To(ContainSubstring("a second request"))
+		})
+
+		It("Should answer a request naming exactly as many as it may", func() {
+			ids := make([]string, MaxSessionIDs)
+			for i := range ids {
+				ids[i] = session("t"+strconv.Itoa(i), "one of many", nil)
+			}
+
+			Expect(listedIDs(list(query(ids...)))).To(Equal(ids))
+		})
+
+		// Naming ids and asking for a page are two different requests, so one carrying
+		// both is refused rather than resolved.
+		It("Should refuse a request naming ids and a cursor or a limit", func() {
+			id := session("t1", "mine", nil)
+
+			for _, query := range []string{"?id=" + id + "&cursor=x", "?id=" + id + "&limit=5", "?id=" + id + "&limit="} {
+				rec := call(http.MethodGet, "/fisk/v1/sessions"+query, nil)
+
+				Expect(rec.Code).To(Equal(http.StatusBadRequest), query)
+				Expect(rec.Body.String()).To(ContainSubstring("send id, or send cursor and limit"))
+			}
+		})
+
+		It("Should page as before for a request naming no id", func() {
+			one := session("t1", "the first", nil)
+			session("t2", "the second", nil)
+
+			page := list("?limit=1")
+			Expect(listedIDs(page)).To(Equal([]string{one}))
+			Expect(page.Cursor).ToNot(BeEmpty())
+		})
+
+		It("Should pass the checks every route passes", func() {
+			id := session("t1", "mine", nil)
+			path := "/fisk/v1/sessions" + query(id)
+
+			Expect(call(http.MethodGet, path, map[string]string{"Origin": "http://evil.example"}).Code).To(Equal(http.StatusForbidden))
+
+			allowed := call(http.MethodGet, path, map[string]string{"Origin": testOrigin})
+			Expect(allowed.Code).To(Equal(http.StatusOK))
+			Expect(allowed.Header().Get("Access-Control-Allow-Origin")).To(Equal(testOrigin))
+
+			req := httptest.NewRequest(http.MethodGet, "http://"+ch.Addr()+path, nil)
+			req.Host = "agent.evil.example:" + ch.port
+			rebound := httptest.NewRecorder()
+			ch.server.Handler.ServeHTTP(rebound, req)
+			Expect(rebound.Code).To(Equal(http.StatusForbidden))
+
+			Expect(ch.Close()).To(Succeed())
+			Expect(call(http.MethodGet, path, nil).Code).To(Equal(http.StatusServiceUnavailable))
+		})
+	})
+
 	Describe("Opening", func() {
 		It("Should hand a conversation this channel minted to the format", func() {
 			id := session("t1", "what is running", nil)
@@ -561,6 +709,10 @@ func (c *failingConversations) List(context.Context, int, string) (runstate.RunP
 	return runstate.RunPage{}, c.err
 }
 
+func (c *failingConversations) Describe(context.Context, []string) ([]runstate.RunInfo, error) {
+	return nil, c.err
+}
+
 func (c *failingConversations) Load(context.Context, string) (*runstate.RunState, error) {
 	return nil, c.err
 }
@@ -594,6 +746,23 @@ var _ = Describe("The conversations a channel is given", func() {
 			Expect(rec.Body.String()).To(ContainSubstring("ask again in a moment"))
 			Expect(rec.Body.String()).ToNot(ContainSubstring("unreachable"))
 		}
+	})
+
+	// A store the channel cannot reach is the one thing left that fails a request naming
+	// ids: a conversation this channel does not hold is left out of the answer, and a
+	// conversation stored under a version or a journal the store cannot read is too.
+	It("Should report a failure to read the named conversations without naming it", func() {
+		opts := testOptions()
+		opts.Conversations = &failingConversations{err: errors.New("the stream is unreachable")}
+		ch := newTestChannel(opts)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "http://"+ch.Addr()+"/fisk/v1/sessions?id=w-abc&id=w-def", nil)
+		ch.server.Handler.ServeHTTP(rec, req)
+
+		Expect(rec.Code).To(Equal(http.StatusInternalServerError))
+		Expect(rec.Body.String()).To(ContainSubstring("ask again in a moment"))
+		Expect(rec.Body.String()).ToNot(ContainSubstring("unreachable"))
 	})
 })
 

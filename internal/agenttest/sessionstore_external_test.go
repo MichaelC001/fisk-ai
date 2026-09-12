@@ -514,6 +514,137 @@ var _ = Describe("FakeSessionStore", func() {
 		})
 	})
 
+	// An embedder hydrating a list of ids it already holds reads these rows, so the fake
+	// answers the order, the filter and the missing id the way a file or JetStream store
+	// answers them.
+	Describe("describing a named set of runs", func() {
+		created := time.Now().Add(-time.Hour).UTC()
+
+		end := func(id, agent string, summary *runstate.ConversationSummary) {
+			GinkgoHelper()
+
+			j, err := store.Create(ctx, id, runstate.MetaRecord{
+				RunID:       id,
+				Created:     created,
+				Prompt:      "list the streams",
+				Agent:       agent,
+				Fingerprint: runstate.Fingerprint{Model: "claude-sonnet-4-6"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			err = j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+				Reason:  runstate.ReasonCompleted,
+				Summary: summary,
+			}})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+		}
+
+		idsOf := func(infos []runstate.RunInfo) []string {
+			out := make([]string, len(infos))
+			for i, info := range infos {
+				out[i] = info.RunID
+			}
+
+			return out
+		}
+
+		It("Should answer in the order the caller named the ids", func() {
+			end("w-one", "agent-a", nil)
+			end("w-two", "agent-a", nil)
+			end("w-three", "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{"w-three", "w-one", "w-two"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{"w-three", "w-one", "w-two"}))
+		})
+
+		It("Should carry the times, the model, the ending and the summary", func() {
+			want := &runstate.ConversationSummary{
+				Turns:         3,
+				ContextTokens: 4096,
+				Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2},
+			}
+			end("w-one", "agent-a", want)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{"w-one"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Created).To(BeTemporally("==", created))
+			Expect(infos[0].Updated).To(BeTemporally(">=", created))
+			Expect(infos[0].Model).To(Equal("claude-sonnet-4-6"))
+			Expect(infos[0].Prompt).To(Equal("list the streams"))
+			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+			Expect(infos[0].Summary).To(Equal(want))
+		})
+
+		It("Should report no summary for a conversation whose last turn wrote none", func() {
+			end("w-one", "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{"w-one"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Summary).To(BeNil())
+		})
+
+		It("Should leave out an id outside the prefix, another agent's run and a run it holds none of", func() {
+			end("w-one", "agent-a", nil)
+			end("slack-two", "agent-a", nil)
+			end("w-three", "agent-b", nil)
+			end("w-unstamped", "", nil)
+
+			filter := runstate.ListFilter{Agent: "agent-a", Prefix: "w-"}
+			infos, err := store.Describe(ctx, filter, []string{"w-one", "slack-two", "w-three", "w-missing", "w-unstamped"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{"w-one", "w-unstamped"}))
+		})
+
+		It("Should describe an id named twice once, where it was first named", func() {
+			end("w-one", "agent-a", nil)
+			end("w-two", "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{"w-one", "w-two", "w-one"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{"w-one", "w-two"}))
+		})
+
+		// A file or JetStream store pages past a run it cannot fold, so an embedder that
+		// named one among ids that are fine reads the other rows rather than a failure.
+		It("Should leave out a run it cannot fold and answer the rest", func() {
+			end("w-one", "agent-a", nil)
+			end("w-two", "agent-a", nil)
+
+			j, err := store.Open(ctx, "w-two")
+			Expect(err).ToNot(HaveOccurred())
+			// An assistant record with no payload is a sequence Fold refuses, which is
+			// the ErrCorrupt a real store reads off a torn journal.
+			Expect(j.Append(ctx, 3, runstate.Record{Protocol: runstate.AssistantProtocol})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{"w-one", "w-two"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{"w-one"}))
+		})
+
+		It("Should answer no rows for no ids", func() {
+			end("w-one", "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, nil)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(BeEmpty())
+		})
+
+		It("Should refuse a call made on a canceled context", func() {
+			end("w-one", "agent-a", nil)
+
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			_, err := store.Describe(canceled, runstate.ListFilter{}, []string{"w-one"})
+			Expect(err).To(MatchError(context.Canceled))
+		})
+	})
+
 	It("Should forget a deleted run", func() {
 		create("run1", "do the thing")
 

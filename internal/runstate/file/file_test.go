@@ -362,6 +362,174 @@ var _ = Describe("FileStore", func() {
 		})
 	})
 
+	// A caller holding the ids enumerates nothing, so the directory is never read and the
+	// rows come back in the order it named them.
+	Describe("describing a named set of runs", func() {
+		created := time.Unix(1700000000, 0).UTC()
+
+		createEnded := func(id, agent string, summary *runstate.ConversationSummary) string {
+			GinkgoHelper()
+
+			meta := newMeta(id)
+			meta.Created = created
+			meta.Agent = agent
+
+			j, err := store.Create(ctx, id, meta)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{
+				Reason:  runstate.ReasonCompleted,
+				Summary: summary,
+			}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+
+			return id
+		}
+
+		idsOf := func(infos []runstate.RunInfo) []string {
+			out := make([]string, len(infos))
+			for i, info := range infos {
+				out[i] = info.RunID
+			}
+
+			return out
+		}
+
+		It("answers in the order the caller named the ids", func() {
+			one := createEnded("w-"+newID(), "agent-a", nil)
+			two := createEnded("w-"+newID(), "agent-a", nil)
+			three := createEnded("w-"+newID(), "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{three, one, two})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{three, one, two}))
+		})
+
+		It("carries the times, the model, the ending and the summary", func() {
+			want := &runstate.ConversationSummary{
+				Turns:         3,
+				ContextTokens: 4096,
+				Counters:      runstate.Counters{LlmCalls: 5, ToolCalls: 2},
+			}
+			id := createEnded("w-"+newID(), "agent-a", want)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Created).To(BeTemporally("==", created))
+			Expect(infos[0].Updated).ToNot(BeZero())
+			Expect(infos[0].Model).To(Equal("claude-opus-4-8"))
+			Expect(infos[0].Prompt).To(Equal("hello"))
+			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+			Expect(infos[0].Summary).To(Equal(want))
+		})
+
+		It("reports no summary for a conversation whose last turn wrote none", func() {
+			id := createEnded("w-"+newID(), "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Summary).To(BeNil())
+		})
+
+		It("leaves out an id outside the prefix, another agent's run and a run it holds none of", func() {
+			mine := createEnded("w-"+newID(), "agent-a", nil)
+			other := createEnded("slack-"+newID(), "agent-a", nil)
+			theirs := createEnded("w-"+newID(), "agent-b", nil)
+			unstamped := createEnded("w-"+newID(), "", nil)
+
+			filter := runstate.ListFilter{Agent: "agent-a", Prefix: "w-"}
+			infos, err := store.Describe(ctx, filter, []string{mine, other, theirs, "w-" + newID(), unstamped})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{mine, unstamped}))
+		})
+
+		It("describes an id named twice once, where it was first named", func() {
+			one := createEnded("w-"+newID(), "agent-a", nil)
+			two := createEnded("w-"+newID(), "agent-a", nil)
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{one, two, one})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{one, two}))
+		})
+
+		It("leaves out an id no journal could be stored under", func() {
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{"../../etc/passwd"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(BeEmpty())
+		})
+
+		// The two listings page past a corrupt journal, so naming one among ids that are
+		// fine reads the other rows rather than failing the request. An agent killed
+		// between taking an id and writing the meta record leaves a zero-length journal,
+		// which is this case.
+		It("leaves out a corrupt journal and an empty one and answers the rest", func() {
+			one := createEnded("w-"+newID(), "agent-a", nil)
+			corrupt := createEnded("w-"+newID(), "agent-a", nil)
+			two := createEnded("w-"+newID(), "agent-a", nil)
+
+			f, err := os.OpenFile(store.journalPath(corrupt), os.O_WRONLY|os.O_APPEND, 0o600)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = f.WriteString("not json at all\n{\"seq\":3,\"protocol\":\"io.choria.fisk-ai.v1.session.terminal\",\"terminal\":{\"reason\":\"completed\"}}\n")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(f.Close()).To(Succeed())
+
+			empty := "w-" + newID()
+			Expect(os.WriteFile(store.journalPath(empty), nil, 0o600)).To(Succeed())
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{one, corrupt, empty, two})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{one, two}))
+
+			listed, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(listed)).To(ConsistOf(one, two), "the listing skips the same two journals")
+		})
+
+		// A journal written under a version this build does not read is skipped by the
+		// listings, so it is skipped here rather than failing every id named beside it.
+		It("leaves out a journal of a version it does not read", func() {
+			one := createEnded("w-"+newID(), "agent-a", nil)
+
+			old := "w-" + newID()
+			meta := newMeta(old)
+			meta.Version = runstate.Version + 1
+			rec, err := json.Marshal(runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(store.journalPath(old), append(rec, '\n'), 0o600)).To(Succeed())
+
+			infos, err := store.Describe(ctx, runstate.ListFilter{}, []string{one, old})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(infos)).To(Equal([]string{one}))
+		})
+
+		// A caller naming twelve ids and reading eight rows takes the four it did not read
+		// as runs this store has nothing readable under, so a read that failed for any
+		// other reason fails the call instead of shortening the answer.
+		It("fails the call for a journal it cannot read at all", func() {
+			one := createEnded("w-"+newID(), "agent-a", nil)
+
+			unreadable := "w-" + newID()
+			Expect(os.Mkdir(store.journalPath(unreadable), 0o750)).To(Succeed())
+
+			_, err := store.Describe(ctx, runstate.ListFilter{}, []string{one, unreadable})
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(runstate.ErrCorrupt))
+		})
+
+		It("refuses a call on a canceled context", func() {
+			id := createEnded("w-"+newID(), "agent-a", nil)
+
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			_, err := store.Describe(canceled, runstate.ListFilter{}, []string{id})
+			Expect(err).To(MatchError(context.Canceled))
+		})
+	})
+
 	It("refuses a listing on a context canceled before the call", func() {
 		id := newID()
 		j, err := store.Create(ctx, id, newMeta(id))
