@@ -53,6 +53,10 @@ var (
 type RunInfo struct {
 	RunID   string
 	Created time.Time
+	// Updated is the time on the run's last record, so the field means the same thing
+	// whichever store answered. A journal whose last record predates Record.Time is
+	// dated from what the backend holds instead: the file's modification time, or the
+	// stream's store time.
 	Updated time.Time
 	Model   string
 	Prompt  string

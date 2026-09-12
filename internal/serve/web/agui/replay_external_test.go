@@ -6,6 +6,7 @@ package agui_test
 
 import (
 	"encoding/json"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -67,6 +68,38 @@ func reason(text string) llm.ContentBlock {
 
 func calls(id, name, input string) llm.ContentBlock {
 	return llm.ContentBlock{ToolUse: &llm.ToolUseBlock{ID: id, Name: name, Input: json.RawMessage(input)}}
+}
+
+// at is the nth second of a fixed minute, so a spec can pin the timestamps a replay
+// writes.
+func at(n int) time.Time {
+	return time.Date(2026, 1, 1, 0, 0, n, 0, time.UTC)
+}
+
+// dated stamps a folded conversation the way a fold of a journal written since
+// runstate.Record.Time does: one time per message a second apart, each tool result dated
+// from the message carrying it, and the unfinished turn after the last message.
+func dated(rs *runstate.RunState) *runstate.RunState {
+	rs.Times = make([]time.Time, len(rs.Messages))
+	rs.ResultTimes = map[string]time.Time{}
+
+	for i, msg := range rs.Messages {
+		rs.Times[i] = at(i + 1)
+
+		for _, block := range msg.Content {
+			if block.ToolResult == nil {
+				continue
+			}
+
+			rs.ResultTimes[block.ToolResult.ToolUseID] = at(i + 1)
+		}
+	}
+
+	if rs.Pending != nil {
+		rs.Pending.Time = at(len(rs.Messages) + 1)
+	}
+
+	return rs
 }
 
 // replayed is a stored conversation read back through the open route's writer, and the
@@ -160,6 +193,43 @@ var _ = Describe("A replayed conversation", func() {
 		Expect(body).To(ContainSubstring(`"toolCalls":[{"id":"c1","type":"function","function":{"name":"list","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"list","arguments":"{}"}}]`))
 		Expect(body).To(ContainSubstring(`{"id":"open-w-abc-3","role":"tool","content":"two streams","toolCallId":"c1"}`))
 		Expect(body).ToNot(ContainSubstring(`"toolCallId":"c2"`))
+	})
+
+	// The snapshot stays one event, so a client renders a conversation that is already
+	// over rather than a turn being narrated. The times follow it as custom events, in the
+	// SDK's own time slot.
+	Describe("the times the journal holds", func() {
+		It("Should follow the snapshot with one timestamped event per dated message", func() {
+			body := replayed(dated(folded("list the streams",
+				assistant(prose("let me look"), calls("c1", "list", `{}`)),
+				answered("c1", "two streams", false),
+				assistant(prose("there are two")),
+			)))
+
+			Expect(body).To(ContainSubstring(`data: {"type":"MESSAGES_SNAPSHOT"`))
+			Expect(body).To(ContainSubstring(`data: {"type":"CUSTOM","timestamp":1767225601000,"name":"fisk.message_time","value":"open-w-abc-1"}`))
+			Expect(body).To(ContainSubstring(`data: {"type":"CUSTOM","timestamp":1767225602000,"name":"fisk.message_time","value":"open-w-abc-2"}`))
+			Expect(body).To(ContainSubstring(`data: {"type":"CUSTOM","timestamp":1767225603000,"name":"fisk.message_time","value":"open-w-abc-3"}`))
+			Expect(body).To(ContainSubstring(`data: {"type":"CUSTOM","timestamp":1767225604000,"name":"fisk.message_time","value":"open-w-abc-4"}`))
+			accepted(body)
+		})
+
+		It("Should date the reasoning message apart from the prose of the same turn", func() {
+			body := replayed(dated(folded("think first",
+				assistant(reason("let me think"), prose("here it is")),
+			)))
+
+			Expect(body).To(ContainSubstring(`"name":"fisk.message_time","value":"open-w-abc-2"}`))
+			Expect(body).To(ContainSubstring(`"name":"fisk.message_time","value":"open-w-abc-3"}`))
+		})
+
+		It("Should send no timestamped event for a conversation carrying no times", func() {
+			body := replayed(folded("list the streams",
+				assistant(prose("there are two")),
+			))
+
+			Expect(body).ToNot(ContainSubstring("fisk.message_time"))
+		})
 	})
 
 	// A conversation that never ran writes the run frame and nothing between it.

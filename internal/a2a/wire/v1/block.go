@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // BlockType is the kind of one content block, carried as the suffix of the event's
@@ -57,6 +58,8 @@ type ThinkingBlock struct {
 	// Trimmed reports that Text was cut to MaxBlockText, on the terms
 	// TextBlock.Trimmed states.
 	Trimmed bool `json:"trimmed,omitempty"`
+	// Time is when this block was journaled, on the terms TextBlock.Time states.
+	Time time.Time `json:"time,omitzero"`
 }
 
 func (ThinkingBlock) blockType() BlockType { return BlockThinking }
@@ -89,6 +92,12 @@ type TextBlock struct {
 	// capped in aggregate, so for a long answer they are the more complete copy and
 	// discarding them for this block would lose text.
 	Trimmed bool `json:"trimmed,omitempty"`
+	// Time is when the record carrying this block was journaled, in UTC.
+	//
+	// A block a live run sends carries none: the event header already says when the
+	// message was produced, and only a replay knows a time that is not now. A replayed
+	// block whose record predates runstate.Record.Time carries none either.
+	Time time.Time `json:"time,omitzero"`
 }
 
 func (TextBlock) blockType() BlockType { return BlockText }
@@ -156,6 +165,8 @@ func (ThinkingDeltaBlock) blockType() BlockType { return BlockThinkingDelta }
 // carries both halves rather than an agent talking to itself.
 type PromptBlock struct {
 	Text string `json:"text"`
+	// Time is when this turn was journaled, on the terms TextBlock.Time states.
+	Time time.Time `json:"time,omitzero"`
 }
 
 func (PromptBlock) blockType() BlockType { return BlockPrompt }
@@ -184,6 +195,9 @@ type ToolCallBlock struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input,omitempty"`
+	// Time is when the turn that made this call was journaled, on the terms
+	// TextBlock.Time states.
+	Time time.Time `json:"time,omitzero"`
 }
 
 func (ToolCallBlock) blockType() BlockType { return BlockToolCall }
@@ -192,6 +206,8 @@ func (ToolCallBlock) blockType() BlockType { return BlockToolCall }
 // carrying the shared ToolResult outcome.
 type ToolResultBlock struct {
 	CallID string `json:"call_id"`
+	// Time is when this result was journaled, on the terms TextBlock.Time states.
+	Time time.Time `json:"time,omitzero"`
 	ToolResult
 }
 

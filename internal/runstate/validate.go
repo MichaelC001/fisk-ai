@@ -7,6 +7,7 @@ package runstate
 import (
 	"fmt"
 	"regexp"
+	"time"
 )
 
 // idPattern constrains a run id to a safe, single path component. It is also a
@@ -54,6 +55,20 @@ func PrepareMeta(meta *MetaRecord) error {
 	}
 
 	return nil
+}
+
+// PrepareRecord stamps Record.Time with the current time in UTC on a record whose Time
+// is zero, and leaves a time the caller supplied alone. Every Journal calls it in
+// Append, after CheckAppend has accepted the seq, so a crash-retry of the last record
+// does not restamp what is already stored.
+//
+// It is here rather than in each caller so that every writer in a tree journals a time
+// without knowing it does, and so that both backends stamp in UTC: a journal read on a
+// machine in another zone then reports the times the run was journaled at.
+func PrepareRecord(rec *Record) {
+	if rec.Time.IsZero() {
+		rec.Time = time.Now().UTC()
+	}
 }
 
 // CheckAppend is the append contract shared by every Journal: it decides, from the

@@ -95,6 +95,16 @@ type Record struct {
 	Seq      uint64   `json:"seq"`
 	Protocol Protocol `json:"protocol"`
 
+	// Time is when the record was appended, in UTC. PrepareRecord stamps it inside
+	// Append, so a caller leaves it zero unless it holds the instant the event
+	// happened, which it then keeps.
+	//
+	// It is zero on a record written before the field existed. Fold carries it onto
+	// RunState, and a reader leaves an undated turn undated rather than substituting
+	// the run's creation time, so a journal holding both kinds says which turns it
+	// knows the time of.
+	Time time.Time `json:"time,omitzero"`
+
 	// Optional marks a record a reader may skip when it does not recognize the
 	// protocol. It may be set only on a record whose absence is fail-safe, meaning a
 	// reader that skips it behaves more conservatively rather than differently. A

@@ -83,6 +83,26 @@ func terminalRec(reason runstate.TerminalReason) runstate.Record {
 	}
 }
 
+// publishUnstamped puts a run's records on the stream directly, bypassing Append, so a
+// spec can hold a journal whose records carry no time. Every journal written before
+// Record.Time existed is that shape.
+func publishUnstamped(ctx context.Context, s runstate.Store, js jetstream.JetStream, id string, recs ...runstate.Record) {
+	GinkgoHelper()
+
+	backend, ok := s.(*store)
+	Expect(ok).To(BeTrue())
+
+	for _, rec := range recs {
+		Expect(rec.Time).To(BeZero())
+
+		body, err := json.Marshal(rec)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = js.Publish(ctx, backend.subjectForSeq(id, rec.Seq), body)
+		Expect(err).ToNot(HaveOccurred())
+	}
+}
+
 // countRecordReads runs work and reports how many stored records it read and how many
 // consumers it created. A read is one request on '$JS.API.STREAM.MSG.GET.<stream>', or on
 // '$JS.API.DIRECT.GET.<stream>' where the stream allows a direct get, and a consumer is
@@ -1115,6 +1135,71 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(infos[0].Updated).To(BeTemporally(">=", infos[0].Created))
 		})
 
+		Describe("the time a record is appended at", func() {
+			It("Should stamp every record it publishes and keep a time the caller stamped", func() {
+				at := time.Unix(1700000000, 0).UTC()
+
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
+
+				answered := toolResultRec("tu_1")
+				answered.Time = at
+				Expect(j.Append(ctx, 3, answered)).To(Succeed())
+
+				recs, err := j.Records(ctx)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Close()).To(Succeed())
+
+				Expect(recs).To(HaveLen(3))
+				Expect(recs[0].Time).ToNot(BeZero(), "the meta record is stamped too")
+				Expect(recs[1].Time).ToNot(BeZero())
+				Expect(recs[1].Time.Location()).To(Equal(time.UTC))
+				Expect(recs[2].Time).To(BeTemporally("==", at))
+			})
+
+			It("Should date a listing row from the last record", func() {
+				at := time.Unix(1700000000, 0).UTC()
+
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+
+				ending := terminalRec(runstate.ReasonCompleted)
+				ending.Time = at
+				Expect(j.Append(ctx, 2, ending)).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Updated).To(BeTemporally("==", at))
+			})
+
+			// Every journal written before the field existed is this shape, and the
+			// stream's store time is what this store has always reported for one.
+			It("Should date a journal whose records carry no time from the stream", func() {
+				id := newID()
+				meta := newMeta(id)
+				meta.Version = runstate.Version
+
+				before := time.Now().UTC()
+				publishUnstamped(ctx, store, js, id,
+					runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta},
+					runstate.Record{Seq: 2, Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}},
+				)
+				after := time.Now().UTC()
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+				Expect(infos[0].Updated).To(BeTemporally(">=", before))
+				Expect(infos[0].Updated).To(BeTemporally("<=", after))
+			})
+		})
+
 		It("Should delete a run idempotently", func() {
 			id := newID()
 			j, err := store.Create(ctx, id, newMeta(id))
@@ -1161,6 +1246,15 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(fj.Close()).To(Succeed())
 			fileRS, err := fstore.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
+
+			// Each store stamped its own records as it appended them, so the two runs are
+			// dated the milliseconds apart they were written. The times are compared for
+			// shape and then dropped, leaving the conversation both folds derived from the
+			// same records.
+			Expect(jsRS.Times).To(HaveLen(len(fileRS.Times)))
+			Expect(jsRS.ResultTimes).To(HaveLen(len(fileRS.ResultTimes)))
+			jsRS.Times, fileRS.Times = nil, nil
+			jsRS.ResultTimes, fileRS.ResultTimes = nil, nil
 
 			Expect(jsRS).To(Equal(fileRS))
 		})

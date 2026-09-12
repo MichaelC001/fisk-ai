@@ -766,9 +766,12 @@ func decodeMetaRow(id string, data []byte, stored time.Time, filter runstate.Lis
 	}, nil
 }
 
-// readEnding puts the run's last record on a listing row: its store time is when the run
-// was last touched, and a terminal payload on it is why the run stopped. A tail that
-// cannot be read leaves the row as the meta record made it.
+// readEnding puts the run's last record on a listing row: the time it carries is when
+// the run was last touched, and a terminal payload on it is why the run stopped. A tail
+// that cannot be read leaves the row as the meta record made it.
+//
+// A record written before Record.Time existed dates the row from the stream's store
+// time, which is what this store has always reported.
 //
 // A run with a turn in flight ends on whatever that turn last wrote, which carries no
 // terminal payload, so it is reported as open. That is the one thing a listing reads
@@ -784,7 +787,14 @@ func (s *store) readEnding(ctx context.Context, id string, ri *runstate.RunInfo)
 
 	var rec runstate.Record
 	err = json.Unmarshal(last.Data, &rec)
-	if err == nil && rec.Terminal != nil {
+	if err != nil {
+		return
+	}
+
+	if !rec.Time.IsZero() {
+		ri.Updated = rec.Time
+	}
+	if rec.Terminal != nil {
 		ri.Terminal = rec.Terminal.Reason
 		ri.Summary = rec.Terminal.Summary
 	}
@@ -958,6 +968,7 @@ func (j *journal) Append(ctx context.Context, seq uint64, rec runstate.Record) e
 		return nil
 	}
 	rec.Seq = seq
+	runstate.PrepareRecord(&rec)
 
 	body, err := json.Marshal(rec)
 	if err != nil {

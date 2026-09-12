@@ -431,9 +431,9 @@ type fakeJournal struct {
 	// created is the place this run holds in the order the store made its runs, which
 	// ListPage enumerates on and its cursor carries.
 	created uint64
-	// createdAt is the time the caller stamped on the meta record and updatedAt is when
-	// this journal last took a record. A listing row carries both, as it does from a
-	// file or JetStream store.
+	// createdAt is the time the caller stamped on the meta record and updatedAt is the
+	// Time on the last record this journal took. A listing row carries both, as it does
+	// from a file or JetStream store.
 	createdAt time.Time
 	updatedAt time.Time
 	records   []runstate.Record
@@ -482,8 +482,10 @@ func (j *fakeJournal) Append(ctx context.Context, seq uint64, rec runstate.Recor
 
 // append is the unlocked core, also called from Create while the journal is not yet
 // published and so cannot be contended. It uses the same seq accounting as the file
-// backend: runstate.CheckAppend folds a duplicate and rejects a gap, and the record's
-// Seq is stamped from the seq argument so a fold sees a strictly increasing sequence.
+// backend: runstate.CheckAppend folds a duplicate and rejects a gap, the record's Seq
+// is stamped from the seq argument so a fold sees a strictly increasing sequence, and
+// runstate.PrepareRecord stamps its Time. A duplicate seq returns above both stamps, so
+// a crash-retry of the last record leaves the stored one as it was.
 func (j *fakeJournal) append(seq uint64, rec runstate.Record) error {
 	skip, err := runstate.CheckAppend(j.lastSeq, seq)
 	if err != nil {
@@ -493,9 +495,10 @@ func (j *fakeJournal) append(seq uint64, rec runstate.Record) error {
 		return nil
 	}
 	rec.Seq = seq
+	runstate.PrepareRecord(&rec)
 	j.records = append(j.records, rec)
 	j.lastSeq = seq
-	j.updatedAt = time.Now()
+	j.updatedAt = rec.Time
 
 	return nil
 }

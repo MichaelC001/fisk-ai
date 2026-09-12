@@ -85,6 +85,19 @@ func assistantText(iter int64, stop, text string) *AssistantRecord {
 	}
 }
 
+// at is the nth of a run of distinct times, so a spec can say which record a folded time
+// came from.
+func at(n int) time.Time {
+	return time.Unix(1700000000+int64(n), 0).UTC()
+}
+
+// stamp dates a record the way an append does, at the nth time.
+func stamp(rec Record, n int) Record {
+	rec.Time = at(n)
+
+	return rec
+}
+
 // userTexts returns the concatenated text blocks of every user message in the folded
 // conversation, so a test can assert the reconstructed follow-ups without depending on
 // block ordering within a message.
@@ -798,6 +811,109 @@ var _ = Describe("runstate", func() {
 			Expect(rs.Completed()).To(BeFalse())
 			Expect(rs.NextIteration).To(Equal(int64(2)))
 			Expect(userTexts(rs)).To(Equal([]string{"start here", "again"}))
+		})
+
+		// A caller renders a stored conversation from Messages and dates each turn from
+		// Times, so the two staying the same length is what makes an index usable at all.
+		Describe("the times a journal was written at", func() {
+			It("keeps Times aligned with Messages across every shape the fold builds", func() {
+				rs, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}, 2),
+					stamp(Record{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")}, 3),
+					stamp(Record{Seq: 4, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "there they are")}, 4),
+					stamp(Record{Seq: 5, Protocol: UserProtocol, User: userRecord("and the consumers?")}, 5),
+					stamp(Record{Seq: 6, Protocol: AssistantProtocol, Assistant: assistantText(2, "end_turn", "two of those")}, 6),
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rs.Messages).To(HaveLen(6))
+				Expect(rs.Times).To(HaveLen(len(rs.Messages)))
+				Expect(rs.Times).To(Equal([]time.Time{at(1), at(2), at(3), at(4), at(5), at(6)}))
+			})
+
+			// The batch is one message and each result is its own record, so the message is
+			// dated when the batch was complete and the conversation moved on.
+			It("dates a batch of results from the last result record", func() {
+				rs, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")}, 2),
+					stamp(Record{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")}, 3),
+					stamp(Record{Seq: 4, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_2")}, 4),
+					stamp(Record{Seq: 5, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "both done")}, 5),
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rs.Times).To(Equal([]time.Time{at(1), at(2), at(4), at(5)}))
+			})
+
+			It("keeps the earlier time when a follow-up merges into a trailing user message", func() {
+				rs, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}, 2),
+					stamp(Record{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")}, 3),
+					stamp(Record{Seq: 4, Protocol: UserProtocol, User: userRecord("carry on")}, 4),
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rs.Messages).To(HaveLen(3))
+				Expect(rs.Times).To(Equal([]time.Time{at(1), at(2), at(3)}))
+			})
+
+			It("dates every result of a committed batch and of the pending turn", func() {
+				rs, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}, 2),
+					stamp(Record{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")}, 3),
+					stamp(Record{Seq: 4, Protocol: AssistantProtocol, Assistant: assistantWithTools(1, "tu_2", "tu_3")}, 4),
+					stamp(Record{Seq: 5, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_2")}, 5),
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rs.ResultTimes).To(Equal(map[string]time.Time{"tu_1": at(3), "tu_2": at(5)}))
+				Expect(rs.Pending).ToNot(BeNil())
+				Expect(rs.Pending.Time).To(BeTemporally("==", at(4)))
+			})
+
+			It("reads Ended from the last terminal record and leaves a turn in flight undated", func() {
+				ended, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "answer one")}, 2),
+					stamp(Record{Seq: 3, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended}}, 3),
+					stamp(Record{Seq: 4, Protocol: UserProtocol, User: userRecord("again")}, 4),
+					stamp(Record{Seq: 5, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "answer two")}, 5),
+					stamp(Record{Seq: 6, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}}, 6),
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ended.Ended).To(BeTemporally("==", at(6)))
+
+				running, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}, 2),
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(running.Ended).To(BeZero())
+			})
+
+			// Every journal written before the field existed is this shape, and the prompt
+			// is dated from the meta record's Created, which is the same instant.
+			It("folds a journal carrying no times, dating the prompt from the meta record", func() {
+				created := time.Unix(1699000000, 0).UTC()
+				first := meta()
+				first.Meta.Created = created
+
+				rs, err := Fold([]Record{
+					first,
+					{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+					{Seq: 3, Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")},
+					{Seq: 4, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rs.Times).To(Equal([]time.Time{created, {}, {}}))
+				Expect(rs.ResultTimes).To(BeNil())
+				Expect(rs.Ended).To(BeZero())
+			})
 		})
 	})
 

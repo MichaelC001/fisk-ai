@@ -594,9 +594,17 @@ func (s *FileStore) summarize(id string) (*runstate.RunInfo, error) {
 	}
 
 	info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt, Agent: rs.Agent}
-	fi, err := os.Stat(path)
-	if err == nil {
-		info.Updated = fi.ModTime()
+
+	// The last record says when the journal was last written, which is what the
+	// JetStream store reports too. A journal whose records predate Record.Time falls
+	// back to the file's modification time, which is what this store has always
+	// reported.
+	info.Updated = recs[len(recs)-1].Time
+	if info.Updated.IsZero() {
+		fi, err := os.Stat(path)
+		if err == nil {
+			info.Updated = fi.ModTime()
+		}
 	}
 	if rs.Terminal != nil {
 		info.Terminal = rs.Terminal.Reason
@@ -691,6 +699,7 @@ func (j *fileJournal) Append(ctx context.Context, seq uint64, rec runstate.Recor
 		return nil
 	}
 	rec.Seq = seq
+	runstate.PrepareRecord(&rec)
 
 	line, err := json.Marshal(rec)
 	if err != nil {

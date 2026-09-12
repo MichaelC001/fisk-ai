@@ -19,6 +19,7 @@ package transcript
 import (
 	"bytes"
 	"encoding/json"
+	"time"
 
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/llm"
@@ -79,6 +80,9 @@ func (t Turns) Tail(n int) (blocks []wire.Block, truncated bool) {
 // would have trimmed is trimmed the same way rather than exceeding the message cap and
 // being dropped.
 //
+// Each block carries the time of the record it came from, and carries none where that
+// record predates runstate.Record.Time.
+//
 // A nil run returns nil, which is the same answer a run holding no messages gives: a
 // caller that looked for a stored run and found none renders an empty conversation
 // rather than checking first.
@@ -93,12 +97,12 @@ func Of(rs *runstate.RunState) Turns {
 		msg := rs.Messages[i]
 
 		if msg.Role != llm.RoleAssistant {
-			turns = turns.add(blocksOf(msg))
+			turns = turns.add(blocksOf(msg, messageTime(rs, i), rs.ResultTimes))
 
 			continue
 		}
 
-		turn := blocksOf(msg)
+		turn := blocksOf(msg, messageTime(rs, i), rs.ResultTimes)
 
 		// A journal stores every call of a turn in the assistant message and every
 		// result in the message after it, while a run dispatches its tools one at a
@@ -107,7 +111,7 @@ func Of(rs *runstate.RunState) Turns {
 		// in an order no run ever produced, and a tail rounded to a turn boundary could
 		// open on a result whose call was left behind.
 		if i+1 < len(rs.Messages) {
-			results, rest := resultsOf(rs.Messages[i+1])
+			results, rest := resultsOf(rs.Messages[i+1], messageTime(rs, i+1), rs.ResultTimes)
 			if len(results) > 0 {
 				i++
 				turns = turns.add(interleave(turn, results))
@@ -131,13 +135,24 @@ func Of(rs *runstate.RunState) Turns {
 	if rs.Pending != nil {
 		results := make([]toolResult, 0, len(rs.Pending.Results))
 		for _, res := range rs.Pending.Results {
-			results = append(results, toolResult{call: res.ToolUseID, block: resultBlock(res)})
+			results = append(results, toolResult{call: res.ToolUseID, block: resultBlock(res, rs.ResultTimes[res.ToolUseID])})
 		}
 
-		turns = turns.add(interleave(blocksOf(rs.Pending.Assistant), results))
+		turns = turns.add(interleave(blocksOf(rs.Pending.Assistant, rs.Pending.Time, rs.ResultTimes), results))
 	}
 
 	return turns
+}
+
+// messageTime is when the message at i was journaled, zero where the run carries no time
+// for it. RunState.Times is index aligned with Messages where Fold built it, and a
+// RunState assembled by hand may carry none at all.
+func messageTime(rs *runstate.RunState, i int) time.Time {
+	if i >= len(rs.Times) {
+		return time.Time{}
+	}
+
+	return rs.Times[i]
 }
 
 // add appends a turn, dropping an empty one so a message that rendered nothing does
@@ -158,7 +173,11 @@ type toolResult struct {
 
 // resultsOf splits a stored message into the tool results it carries and everything
 // else it holds, so the results can join the turn that called them.
-func resultsOf(msg llm.Message) ([]toolResult, []wire.Block) {
+//
+// at is when this message was journaled and dates what is left over, which is a
+// follow-up somebody typed while the results were still being appended. Each result is
+// dated from resultTimes, since a batch is one message and each result is its own record.
+func resultsOf(msg llm.Message, at time.Time, resultTimes map[string]time.Time) ([]toolResult, []wire.Block) {
 	var (
 		results []toolResult
 		rest    llm.Message
@@ -172,10 +191,11 @@ func resultsOf(msg llm.Message) ([]toolResult, []wire.Block) {
 			continue
 		}
 
-		results = append(results, toolResult{call: block.ToolResult.ToolUseID, block: resultBlock(*block.ToolResult)})
+		id := block.ToolResult.ToolUseID
+		results = append(results, toolResult{call: id, block: resultBlock(*block.ToolResult, resultTimes[id])})
 	}
 
-	return results, blocksOf(rest)
+	return results, blocksOf(rest, at, resultTimes)
 }
 
 // interleave puts each result behind the call it answers.
@@ -223,6 +243,10 @@ func interleave(turn []wire.Block, results []toolResult) []wire.Block {
 // A turn that called a tool is left alone however its results were stored. The model
 // meant to continue, so its text is narration on the way to an answer rather than the
 // answer, which is the distinction a live run's terminal flag draws.
+//
+// The flag is set on the block that was found rather than a new block being built from
+// its text. That keeps the time the block was journaled at, and it keeps the Trimmed
+// flag blocksOf set on text it cut.
 func markFinal(turn []wire.Block) []wire.Block {
 	for _, block := range turn {
 		if _, ok := block.Content().(wire.ToolCallBlock); ok {
@@ -236,7 +260,8 @@ func markFinal(turn []wire.Block) []wire.Block {
 			continue
 		}
 
-		turn[i] = wire.NewFinalTextBlock(text.Text)
+		text.Final = true
+		turn[i] = wire.NewBlock(text)
 
 		return turn
 	}
@@ -247,7 +272,11 @@ func markFinal(turn []wire.Block) []wire.Block {
 // blocksOf renders one stored message. A user message is a prompt, tool results, or
 // both: a follow-up typed while the previous turn's results were still being appended
 // folds into one message, and each half is rendered as what it is.
-func blocksOf(msg llm.Message) []wire.Block {
+//
+// at is when the record carrying this message was journaled and dates every block it
+// produces, zero for a message the journal holds no time for. A tool result is dated
+// from resultTimes instead, each result being its own record.
+func blocksOf(msg llm.Message, at time.Time, resultTimes map[string]time.Time) []wire.Block {
 	var out []wire.Block
 
 	for _, block := range msg.Content {
@@ -257,13 +286,13 @@ func blocksOf(msg llm.Message) []wire.Block {
 				continue
 			}
 			if msg.Role == llm.RoleUser {
-				out = append(out, wire.NewBlock(wire.PromptBlock{Text: wire.TrimBlockText(block.Text.Text)}))
+				out = append(out, wire.NewBlock(wire.PromptBlock{Text: wire.TrimBlockText(block.Text.Text), Time: at}))
 
 				continue
 			}
 
 			text, cut := wire.TrimmedBlockText(block.Text.Text)
-			out = append(out, wire.NewBlock(wire.TextBlock{Text: text, Trimmed: cut}))
+			out = append(out, wire.NewBlock(wire.TextBlock{Text: text, Trimmed: cut, Time: at}))
 
 		case block.Thinking != nil:
 			if block.Thinking.Text == "" {
@@ -271,22 +300,34 @@ func blocksOf(msg llm.Message) []wire.Block {
 			}
 
 			text, cut := wire.TrimmedBlockText(block.Thinking.Text)
-			out = append(out, wire.NewBlock(wire.ThinkingBlock{Text: text, Trimmed: cut}))
+			out = append(out, wire.NewBlock(wire.ThinkingBlock{Text: text, Trimmed: cut, Time: at}))
 
 		case block.ToolUse != nil:
-			out = append(out, wire.NewToolCallBlock(block.ToolUse.ID, block.ToolUse.Name, objectInput(block.ToolUse.Input)))
+			out = append(out, wire.NewBlock(wire.ToolCallBlock{
+				ID:    block.ToolUse.ID,
+				Name:  block.ToolUse.Name,
+				Input: objectInput(block.ToolUse.Input),
+				Time:  at,
+			}))
 
 		case block.ToolResult != nil:
-			out = append(out, resultBlock(*block.ToolResult))
+			out = append(out, resultBlock(*block.ToolResult, resultTimes[block.ToolResult.ToolUseID]))
 		}
 	}
 
 	return out
 }
 
-// resultBlock renders one tool result.
-func resultBlock(res llm.ToolResultBlock) wire.Block {
-	return wire.NewToolResultBlock(res.ToolUseID, wire.TrimBlockText(res.Content), res.IsError)
+// resultBlock renders one tool result, dated at when the journal holds its time.
+func resultBlock(res llm.ToolResultBlock, at time.Time) wire.Block {
+	return wire.NewBlock(wire.ToolResultBlock{
+		CallID: res.ToolUseID,
+		Time:   at,
+		ToolResult: wire.ToolResult{
+			Output:  wire.TrimBlockText(res.Content),
+			IsError: res.IsError,
+		},
+	})
 }
 
 // objectInput carries a call's arguments only when they are a JSON object, which is

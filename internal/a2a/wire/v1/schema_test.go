@@ -54,8 +54,13 @@ func everyMessage() []any {
 	read, err := NewRead(NewID(), 20)
 	Expect(err).ToNot(HaveOccurred())
 
+	// journaled is the time a replayed block carries. Only a replay sends one, so a
+	// sample sets it: without that the drift specs see no time property at all.
+	journaled := time.Unix(1700000000, 0).UTC()
+
 	toolResult := NewBlock(ToolResultBlock{
 		CallID:     "c1",
+		Time:       journaled,
 		ToolResult: ToolResult{Output: "ok", Exec: &ExecResult{Command: "nats server info", ExitCode: 0}},
 	})
 
@@ -135,11 +140,11 @@ func everyMessage() []any {
 		NewAnswerRequest(NewID(), &Answer{ToolUseID: "toolu_1", Kind: ElicitSelect, Answer: AnswerValue, Value: "east"}),
 		NewResume(NewID()),
 		read,
-		NewEvent(NewThinkingBlock("hmm")),
-		NewEvent(NewTextBlock("answer")),
-		NewEvent(NewBlock(PromptBlock{Text: "do the thing"})),
+		NewEvent(NewBlock(ThinkingBlock{Text: "hmm", Time: journaled})),
+		NewEvent(NewBlock(TextBlock{Text: "answer", Time: journaled})),
+		NewEvent(NewBlock(PromptBlock{Text: "do the thing", Time: journaled})),
 		NewEvent(NewBlock(WarningBlock{Kind: "tool_dropped", Name: "ls", Count: 1, Params: []string{"ai:deny"}, Error: "refused"})),
-		NewEvent(NewToolCallBlock("c1", "nats_server_info", json.RawMessage(`{"id":1}`))),
+		NewEvent(NewBlock(ToolCallBlock{ID: "c1", Name: "nats_server_info", Input: json.RawMessage(`{"id":1}`), Time: journaled})),
 		NewEvent(toolResult),
 		NewEvent(NewBlock(AgentCallBlock{ID: "a1", Name: "remote", Task: NewID()})),
 		NewEvent(NewBlock(StatusBlock{Iteration: 2, Phase: "calling-llm", Usage: &Usage{InputTokens: 1}})),

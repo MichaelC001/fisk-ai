@@ -41,6 +41,26 @@ var _ = Describe("Validator", func() {
 			Expect(v.ValidateRecord(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: asst})).To(Succeed())
 		})
 
+		// Every record schema pulls the envelope in through allOf and closes on
+		// unevaluatedProperties, so a stamped record fails validation until the envelope
+		// names the property. Every append writes one.
+		It("Should accept the append time on every record type, and a record carrying none", func() {
+			for _, rec := range everyRecordType() {
+				Expect(v.ValidateRecord(rec)).To(Succeed(), "protocol %s", rec.Protocol)
+
+				PrepareRecord(&rec)
+				Expect(rec.Time).ToNot(BeZero())
+				Expect(v.ValidateRecord(rec)).To(Succeed(), "stamped protocol %s", rec.Protocol)
+			}
+		})
+
+		It("Should reject a time that is not a string", func() {
+			data := tamperRecord(metaRecord(), func(m map[string]any) {
+				m["time"] = 1700000000
+			})
+			Expect(v.Validate(data)).ToNot(Succeed())
+		})
+
 		It("Should accept a terminal record with no message", func() {
 			Expect(v.ValidateRecord(Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended}})).To(Succeed())
 		})
