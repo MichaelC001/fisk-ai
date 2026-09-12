@@ -14,6 +14,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
+	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
@@ -28,10 +29,11 @@ const cardRefusal = "this agent's card cannot be served; check its configured de
 
 // AgentTools are the tools an agent card lists and what could not be listed.
 type AgentTools struct {
-	// Tools are the agent's own tools, in the order they were resolved: the
-	// application's commands first, then the tools of each configured MCP server. They
-	// are listed whatever their tags say, confirm-gated commands included, since the
-	// channel has an operator in front of it to approve one.
+	// Tools are the agent's own tools, in the order a run resolves them: the
+	// application's commands first, then the built-ins the configuration enables, then
+	// the tools of each configured MCP server. They are listed whatever their tags say,
+	// confirm-gated commands included, since the channel has an operator in front of it
+	// to approve one.
 	Tools []toolkit.Tool
 
 	// Notes name each source whose tools are missing, one sentence each, and go on the
@@ -42,7 +44,12 @@ type AgentTools struct {
 }
 
 // ResolveAgentTools names the agent's tools outside a run: the application's commands
-// as the configuration filters them, and the tools of every connected MCP server.
+// as the configuration filters them, the human-in-the-loop, memory and knowledge
+// built-ins the configuration enables, and the tools of every connected MCP server.
+//
+// The built-ins are enumerated with a nil store, since a card carries no handler, and
+// they claim their names before the MCP import so a clashing MCP tool is prefixed on
+// the card exactly as a run would name it.
 //
 // It is called once, when the channel is built, and the card is assembled from what it
 // returns on each request. The tools are never called through: a card carries their
@@ -64,13 +71,22 @@ func ResolveAgentTools(ctx context.Context, cfg *config.Config, sessions *mcpcli
 
 	out := AgentTools{Tools: toolkit.Tools(commands)}
 
+	builtins := builtin.HITLTools(cfg)
+	builtins = append(builtins, builtin.MemoryTools(cfg, nil)...)
+	builtins = append(builtins, builtin.RAGTools(cfg, nil)...)
+
+	out.Tools = append(out.Tools, toolkit.Tools(builtins)...)
+
 	if sessions == nil {
 		return out, nil
 	}
 
-	taken := make(map[string]bool, len(commands))
+	taken := make(map[string]bool, len(commands)+len(builtins))
 	for _, t := range commands {
 		taken[t.Name()] = true
+	}
+	for _, b := range builtins {
+		taken[b.Name()] = true
 	}
 
 	// The error is read off each server's own outcome rather than from the return: the

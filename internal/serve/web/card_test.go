@@ -14,8 +14,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
@@ -205,5 +207,42 @@ var _ = Describe("The agent card", func() {
 		rec := cardRequest(newTestChannel(testOptions()), http.MethodGet, map[string]string{"Origin": testOrigin})
 		Expect(rec.Code).To(Equal(http.StatusOK))
 		Expect(rec.Header().Get("Access-Control-Allow-Origin")).To(Equal(testOrigin))
+	})
+})
+
+var _ = Describe("ResolveAgentTools", func() {
+	toolNames := func(tools AgentTools) []string {
+		names := make([]string, len(tools.Tools))
+		for i, t := range tools.Tools {
+			names[i] = t.Name()
+		}
+
+		return names
+	}
+
+	// A run injects these alongside the application's commands, so a card built from the
+	// commands alone names fewer tools than the agent behind it calls.
+	It("Should list the built-ins the configuration enables", func() {
+		cfg := agenttest.Config(GinkgoTB(), nil, agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG())
+
+		tools, err := ResolveAgentTools(context.Background(), cfg, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(toolNames(tools)).To(ConsistOf(
+			config.AskHumanConfirmToolName,
+			config.AskHumanSelectToolName,
+			config.AskHumanInputToolName,
+			config.MemoryListToolName,
+			config.MemoryReadToolName,
+			config.MemoryWriteToolName,
+			config.MemoryDeleteToolName,
+			config.KnowledgeSearchToolName,
+			config.KnowledgeEnumerateToolName,
+		))
+	})
+
+	It("Should list no built-in the configuration leaves off", func() {
+		tools, err := ResolveAgentTools(context.Background(), agenttest.Config(GinkgoTB(), nil), nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tools.Tools).To(BeEmpty())
 	})
 })
