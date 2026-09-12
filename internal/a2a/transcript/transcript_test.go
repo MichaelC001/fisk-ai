@@ -7,6 +7,7 @@ package transcript_test
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -16,6 +17,12 @@ import (
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
+
+// at is the nth of a run of distinct times, so a spec can say which record a block's
+// time came from.
+func at(n int) time.Time {
+	return time.Unix(1700000000+int64(n), 0).UTC()
+}
 
 // conversation is a stored run of three turns: a prompt, an assistant turn that
 // thinks and calls a tool, the result of that call, and the answer.
@@ -212,6 +219,83 @@ var _ = Describe("Transcript", func() {
 		blocks, truncated = turns.Tail(-1)
 		Expect(blocks).To(HaveLen(5))
 		Expect(truncated).To(BeFalse())
+	})
+
+	// A client draws a stored conversation against the clock, so each block carries the
+	// time of the record it came from and a live run's blocks carry none.
+	Describe("the times the journal holds", func() {
+		// dated is the conversation with a time on every message and on the result, which
+		// is what a fold of a journal written since runstate.Record.Time hands back.
+		dated := func() *runstate.RunState {
+			rs := conversation()
+			rs.Times = []time.Time{at(1), at(2), at(3), at(4)}
+			rs.ResultTimes = map[string]time.Time{"toolu_1": at(3)}
+
+			return rs
+		}
+
+		It("Should carry each block's own record time", func() {
+			blocks := transcript.Of(dated()).Blocks()
+
+			Expect(blocks[0].Content().(wire.PromptBlock).Time).To(BeTemporally("==", at(1)))
+			Expect(blocks[1].Content().(wire.ThinkingBlock).Time).To(BeTemporally("==", at(2)))
+			Expect(blocks[2].Content().(wire.ToolCallBlock).Time).To(BeTemporally("==", at(2)))
+			Expect(blocks[3].Content().(wire.ToolResultBlock).Time).To(BeTemporally("==", at(3)))
+			Expect(blocks[4].Content().(wire.TextBlock).Time).To(BeTemporally("==", at(4)))
+		})
+
+		It("Should date the turn a run left unfinished and its results", func() {
+			rs := dated()
+			rs.Pending = &runstate.PendingTurn{
+				Time: at(5),
+				Assistant: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+					{ToolUse: &llm.ToolUseBlock{ID: "toolu_2", Name: "stream_rm"}},
+				}},
+				Results: []llm.ToolResultBlock{{ToolUseID: "toolu_2", Content: "removed"}},
+			}
+			rs.ResultTimes["toolu_2"] = at(6)
+
+			turns := transcript.Of(rs)
+			last := turns[len(turns)-1]
+
+			Expect(last).To(HaveLen(2))
+			Expect(last[0].Content().(wire.ToolCallBlock).Time).To(BeTemporally("==", at(5)))
+			Expect(last[1].Content().(wire.ToolResultBlock).Time).To(BeTemporally("==", at(6)))
+		})
+
+		// The answer is marked on the block that was found rather than a new block being
+		// built from its text, which is what carries the time and the trim flag through.
+		// Index rides along for the same reason, and a replayed block is left at zero.
+		It("Should keep a final text block's time and trim flag", func() {
+			rs := dated()
+			huge := strings.Repeat("x", wire.MaxBlockText*2)
+			rs.Messages[3].Content[0].Text.Text = huge
+
+			blocks := transcript.Of(rs).Blocks()
+			answer := blocks[4].Content().(wire.TextBlock)
+
+			Expect(answer.Final).To(BeTrue())
+			Expect(answer.Trimmed).To(BeTrue())
+			Expect(answer.Text).To(Equal(wire.TrimBlockText(huge)))
+			Expect(answer.Time).To(BeTemporally("==", at(4)))
+		})
+
+		// A journal written before the field existed folds to no times at all, and a
+		// RunState a caller assembled itself carries none either.
+		It("Should render a conversation carrying no times as it does today", func() {
+			blocks := transcript.Of(conversation()).Blocks()
+
+			Expect(blocks).To(HaveLen(5))
+			Expect(blocks[0].Content().(wire.PromptBlock).Time).To(BeZero())
+			Expect(blocks[3].Content().(wire.ToolResultBlock).Time).To(BeZero())
+			Expect(blocks[4].Content().(wire.TextBlock).Time).To(BeZero())
+
+			// A time nobody set is left out of the block on the wire rather than sent as
+			// the zero instant.
+			data, err := json.Marshal(blocks[4])
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(data)).ToNot(ContainSubstring("time"))
+		})
 	})
 
 	It("Should tolerate an empty run", func() {

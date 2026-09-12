@@ -6,6 +6,7 @@ package runstate
 
 import (
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -51,6 +52,26 @@ var _ = Describe("PrepareMeta", func() {
 			Expect(err).To(MatchError(ErrVersion), "version %d must be rejected", v)
 			Expect(meta.Version).To(Equal(v), "a rejected record is not restamped")
 		}
+	})
+})
+
+var _ = Describe("PrepareRecord", func() {
+	It("Should stamp a record the caller left unstamped, in UTC", func() {
+		rec := Record{Seq: 2, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted}}
+
+		before := time.Now().UTC()
+		PrepareRecord(&rec)
+
+		Expect(rec.Time).To(BeTemporally(">=", before))
+		Expect(rec.Time.Location()).To(Equal(time.UTC))
+	})
+
+	It("Should leave a time the caller supplied alone", func() {
+		at := time.Unix(1700000000, 0).UTC()
+		rec := Record{Seq: 2, Protocol: TerminalProtocol, Time: at, Terminal: &TerminalRecord{Reason: ReasonCompleted}}
+
+		PrepareRecord(&rec)
+		Expect(rec.Time).To(BeTemporally("==", at))
 	})
 })
 

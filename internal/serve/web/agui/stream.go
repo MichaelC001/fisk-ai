@@ -63,19 +63,30 @@ func (s *stream) open() {
 	}
 }
 
-// event sends one AG-UI event as its own server-sent event, and flushes: without a
-// flush per event the response is buffered until the handler returns, and a turn that
-// took a minute arrives all at once at the end of it.
+// event sends one AG-UI event.
 //
 // The timestamp the SDK stamps when it builds an event is cleared first. It says when
 // this process made the value, which on a replayed conversation is now rather than when
 // the conversation happened, and the field is optional in the protocol.
 func (s *stream) event(e events.Event) {
+	e.GetBaseEvent().TimestampMs = nil
+
+	s.send(e)
+}
+
+// dated sends one AG-UI event under the timestamp its caller put on it, which is when
+// the record the event is about was journaled.
+func (s *stream) dated(e events.Event) {
+	s.send(e)
+}
+
+// send writes one event as its own server-sent event, and flushes: without a flush per
+// event the response is buffered until the handler returns, and a turn that took a
+// minute arrives all at once at the end of it.
+func (s *stream) send(e events.Event) {
 	if s.err != nil {
 		return
 	}
-
-	e.GetBaseEvent().TimestampMs = nil
 
 	body, err := e.ToJSON()
 	if err != nil {

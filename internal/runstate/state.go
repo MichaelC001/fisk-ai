@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
@@ -123,6 +124,10 @@ type PendingTurn struct {
 	// the work, so running it again would start it twice. An id present here and in
 	// Answered has had its answer supplied, and Answered is what decides.
 	Deferred map[string]DeferredRecord
+	// Time is when this turn's assistant record was journaled, zero on a record written
+	// before Record.Time existed. The results gathered so far are dated in
+	// RunState.ResultTimes with every other result.
+	Time time.Time
 }
 
 // OpenDeferrals returns the deferred calls that have no result yet, in tool_use id
@@ -169,6 +174,30 @@ type RunState struct {
 	// turn with all tool_use answered by a following user results turn). An
 	// in-flight turn lives in Pending, not here.
 	Messages []llm.Message
+	// Times is when each message of Messages was journaled, one entry per message and
+	// index aligned with it: len(Times) == len(Messages) for every RunState Fold
+	// returns. An entry is zero where the record that produced the message carried no
+	// time, which is every record written before Record.Time existed.
+	//
+	// The prompt message takes the meta record's time, falling back to
+	// MetaRecord.Created for the same instant. An assistant message takes its own
+	// record's time, the synthetic message carrying a batch of tool results takes the
+	// last result record's time, and a user message takes its user record's time. A
+	// follow-up merged into a trailing user message leaves that message's entry alone,
+	// so a merge keeps the earlier of the two.
+	Times []time.Time
+	// ResultTimes is when each tool result was journaled, keyed by tool_use id. A batch
+	// of results is one message while each result is its own record, and a renderer
+	// draws each result under the call it answers, so the per-message slice cannot hold
+	// this. It covers a pending turn's results as well as a committed turn's.
+	//
+	// An id is absent where its record carried no time, and the map is nil for a journal
+	// holding no dated tool result.
+	ResultTimes map[string]time.Time
+	// Ended is the terminal record's time, zero for a conversation with a turn in
+	// flight and for one whose terminal record predates Record.Time. A later terminal
+	// record replaces an earlier one, as Terminal does.
+	Ended    time.Time
 	Counters Counters
 	// Turns is how many turns the conversation has taken: the prompt on the Meta record
 	// is the first, and each User record after it is another. A run that continues this
@@ -255,6 +284,9 @@ func Fold(records []Record) (*RunState, error) {
 		Caller:            meta.Caller,
 		Agent:             meta.Agent,
 		Messages:          []llm.Message{userTextMessage(meta.Prompt)},
+		// The meta record's own time and MetaRecord.Created are the same instant, so a
+		// journal written before Record.Time existed still dates its first turn.
+		Times: []time.Time{promptTime(first)},
 		// The prompt on the Meta record is the conversation's first turn. Every later
 		// turn arrives as a User record and is counted where those are folded.
 		Turns: 1,
@@ -269,6 +301,11 @@ func Fold(records []Record) (*RunState, error) {
 		curResults  []llm.ToolResultBlock
 		curAnswer   map[string]bool
 		curDeferred map[string]DeferredRecord
+		// curTime is the assistant record's own time and curResultTime the time of the
+		// last result appended to this turn, which is when the batch was complete and the
+		// conversation moved on.
+		curTime       time.Time
+		curResultTime time.Time
 	)
 
 	// lastIter/lastStop track the resume position (NextIteration) and the final stop
@@ -287,8 +324,10 @@ func Fold(records []Record) (*RunState, error) {
 	// previous turn's tools are all answered.
 	commit := func() {
 		rs.Messages = append(rs.Messages, curMsg)
+		rs.Times = append(rs.Times, curTime)
 		if len(curResults) > 0 {
 			rs.Messages = append(rs.Messages, userResultsMessage(curResults))
+			rs.Times = append(rs.Times, curResultTime)
 		}
 	}
 
@@ -315,6 +354,8 @@ func Fold(records []Record) (*RunState, error) {
 			curResults = nil
 			curAnswer = map[string]bool{}
 			curDeferred = map[string]DeferredRecord{}
+			curTime = r.Time
+			curResultTime = time.Time{}
 			lastIter = r.Assistant.Iteration
 			lastStop = r.Assistant.StopReason
 			sawAssistant = true
@@ -344,7 +385,7 @@ func Fold(records []Record) (*RunState, error) {
 				curAnswer = nil
 				curDeferred = nil
 			}
-			appendOrMergeUser(rs, r.User.Message)
+			appendOrMergeUser(rs, r.User.Message, r.Time)
 			// Counted per record rather than per message. Two consecutive follow-ups merge
 			// into one message, which the API requires, and the operator still typed twice.
 			rs.Turns++
@@ -358,6 +399,8 @@ func Fold(records []Record) (*RunState, error) {
 			}
 			curResults = append(curResults, r.ToolResult.Result)
 			curAnswer[r.ToolResult.ToolUseID] = true
+			curResultTime = r.Time
+			rs.dateResult(r.ToolResult.ToolUseID, r.Time)
 			rs.Counters.ToolCalls++
 
 			// The record carries the kind of every call and a flag for the ones that were
@@ -418,6 +461,7 @@ func Fold(records []Record) (*RunState, error) {
 				return nil, fmt.Errorf("%w: terminal record with no payload at seq %d", ErrCorrupt, r.Seq)
 			}
 			rs.Terminal = r.Terminal
+			rs.Ended = r.Time
 			// A one-shot approval the run did not reach is spent here rather than carried
 			// into the next resume, where a later question going unanswered would leave it
 			// authorizing a dispatch nobody approved. A standing grant is not: it covers
@@ -467,6 +511,7 @@ func Fold(records []Record) (*RunState, error) {
 				Results:    curResults,
 				Answered:   curAnswer,
 				Deferred:   curDeferred,
+				Time:       curTime,
 			}
 		}
 	}
@@ -486,7 +531,10 @@ func Fold(records []Record) (*RunState, error) {
 // content into a trailing user message when the last message is already a user turn.
 // This keeps the roles alternating (the API rejects two user messages in a row) and
 // reconstructs both the runtime appendUserPrompt fold and consecutive User records.
-func appendOrMergeUser(rs *RunState, msg llm.Message) {
+//
+// at is when the record carrying msg was journaled. A merge leaves the message's entry
+// in Times alone, so the merged message keeps the earlier of the two times.
+func appendOrMergeUser(rs *RunState, msg llm.Message, at time.Time) {
 	n := len(rs.Messages)
 	if n > 0 && rs.Messages[n-1].Role == llm.RoleUser {
 		rs.Messages[n-1].Content = append(rs.Messages[n-1].Content, msg.Content...)
@@ -494,6 +542,33 @@ func appendOrMergeUser(rs *RunState, msg llm.Message) {
 	}
 
 	rs.Messages = append(rs.Messages, msg)
+	rs.Times = append(rs.Times, at)
+}
+
+// dateResult records when one tool result was journaled, allocating the map on the first
+// dated result. A record carrying no time is left out rather than stored as a zero, so a
+// caller reading the map finds the results the journal knows the time of.
+func (s *RunState) dateResult(toolUseID string, at time.Time) {
+	if at.IsZero() {
+		return
+	}
+
+	if s.ResultTimes == nil {
+		s.ResultTimes = make(map[string]time.Time)
+	}
+
+	s.ResultTimes[toolUseID] = at
+}
+
+// promptTime is when the conversation's first turn was journaled: the meta record's own
+// time, or MetaRecord.Created where the record predates that field. The two are the same
+// instant rather than one standing in for the other.
+func promptTime(meta Record) time.Time {
+	if !meta.Time.IsZero() {
+		return meta.Time
+	}
+
+	return meta.Meta.Created
 }
 
 // unansweredToolUses returns the ids of tool_use blocks in msg that have no result

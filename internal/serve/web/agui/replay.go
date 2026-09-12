@@ -6,6 +6,7 @@ package agui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/types"
 
@@ -23,16 +24,27 @@ import (
 func (t *turnWriter) snapshot(rs *runstate.RunState) []types.Message {
 	var out []types.Message
 
-	for _, msg := range rs.Messages {
-		out = append(out, t.messagesOf(msg)...)
+	for i, msg := range rs.Messages {
+		out = append(out, t.messagesOf(msg, messageTime(rs, i), rs.ResultTimes)...)
 	}
 
 	if rs.Pending != nil {
-		out = append(out, t.messagesOf(rs.Pending.Assistant)...)
-		out = append(out, t.results(rs.Pending.Results)...)
+		out = append(out, t.messagesOf(rs.Pending.Assistant, rs.Pending.Time, rs.ResultTimes)...)
+		out = append(out, t.results(rs.Pending.Results, rs.ResultTimes)...)
 	}
 
 	return out
+}
+
+// messageTime is when the message at i was journaled, zero where the run carries no time
+// for it. RunState.Times is index aligned with Messages where Fold built it, and a
+// RunState assembled by hand may carry none at all.
+func messageTime(rs *runstate.RunState, i int) time.Time {
+	if i >= len(rs.Times) {
+		return time.Time{}
+	}
+
+	return rs.Times[i]
 }
 
 // messagesOf is one stored message as the AG-UI messages it holds.
@@ -40,7 +52,11 @@ func (t *turnWriter) snapshot(rs *runstate.RunState) []types.Message {
 // A journal message is a list of blocks and an AG-UI message is one role's turn, so a
 // message carrying prose and reasoning is two of them and a user message carrying the
 // results of the calls before it is one per result.
-func (t *turnWriter) messagesOf(msg llm.Message) []types.Message {
+//
+// at is when the record carrying this message was journaled and dates every message it
+// produces. A tool result is dated from resultTimes instead, each result being its own
+// record.
+func (t *turnWriter) messagesOf(msg llm.Message, at time.Time, resultTimes map[string]time.Time) []types.Message {
 	var (
 		out       []types.Message
 		prose     []string
@@ -51,7 +67,7 @@ func (t *turnWriter) messagesOf(msg llm.Message) []types.Message {
 	for _, block := range msg.Content {
 		switch {
 		case block.ToolResult != nil:
-			out = append(out, t.result(*block.ToolResult))
+			out = append(out, t.result(*block.ToolResult, resultTimes[block.ToolResult.ToolUseID]))
 
 		case block.ToolUse != nil:
 			calls = append(calls, types.ToolCall{
@@ -69,8 +85,11 @@ func (t *turnWriter) messagesOf(msg llm.Message) []types.Message {
 	}
 
 	if len(reasoning) > 0 {
+		id := t.mintID()
+		t.date(id, at)
+
 		out = append(out, types.Message{
-			ID:      t.mintID(),
+			ID:      id,
 			Role:    types.RoleReasoning,
 			Content: strings.Join(reasoning, "\n"),
 		})
@@ -80,7 +99,10 @@ func (t *turnWriter) messagesOf(msg llm.Message) []types.Message {
 		return out
 	}
 
-	turn := types.Message{ID: t.mintID(), Role: role(msg.Role), ToolCalls: calls}
+	id := t.mintID()
+	t.date(id, at)
+
+	turn := types.Message{ID: id, Role: role(msg.Role), ToolCalls: calls}
 	if len(prose) > 0 {
 		turn.Content = strings.Join(prose, "\n")
 	}
@@ -90,23 +112,27 @@ func (t *turnWriter) messagesOf(msg llm.Message) []types.Message {
 
 // results is the stored results of the calls a pending turn made, which the journal
 // holds beside that turn rather than in the message after it.
-func (t *turnWriter) results(results []llm.ToolResultBlock) []types.Message {
+func (t *turnWriter) results(results []llm.ToolResultBlock, resultTimes map[string]time.Time) []types.Message {
 	out := make([]types.Message, 0, len(results))
 
 	for _, result := range results {
-		out = append(out, t.result(result))
+		out = append(out, t.result(result, resultTimes[result.ToolUseID]))
 	}
 
 	return out
 }
 
-// result is one call's outcome as the message that answers it.
+// result is one call's outcome as the message that answers it, dated at when the journal
+// holds its time.
 //
 // A call that failed carries what the tool said in both fields: error marks the failure,
 // and a client renders content.
-func (t *turnWriter) result(block llm.ToolResultBlock) types.Message {
+func (t *turnWriter) result(block llm.ToolResultBlock, at time.Time) types.Message {
+	id := t.mintID()
+	t.date(id, at)
+
 	out := types.Message{
-		ID:         t.mintID(),
+		ID:         id,
 		Role:       types.RoleTool,
 		Content:    block.Content,
 		ToolCallID: block.ToolUseID,

@@ -324,6 +324,11 @@
       "type": "boolean",
       "description": "The text was cut to 64 KiB and the rest of it is only in the serving worker's run journal. A receiver holding delta fragments of this block needs it: the fragments were never capped in aggregate, so for a long answer they are the more complete copy."
     },
+    "block_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the record carrying this block was journaled, in UTC. A block a live run sends carries none: the header already says when the message was produced, and only a replay knows a time that is not now. A replayed block the worker's journal holds no time for carries none either."
+    },
     "thinkingBlock": {
       "type": "object",
       "description": "Each block definition below is referenced by the event schema of one protocol id. What kind of block it is travels as that id, so nothing in the block itself names its kind.",
@@ -347,6 +352,9 @@
         },
         "trimmed": {
           "$ref": "#/$defs/block_trimmed"
+        },
+        "time": {
+          "$ref": "#/$defs/block_time"
         }
       }
     },
@@ -368,6 +376,9 @@
         },
         "trimmed": {
           "$ref": "#/$defs/block_trimmed"
+        },
+        "time": {
+          "$ref": "#/$defs/block_time"
         }
       }
     },
@@ -441,6 +452,9 @@
         "input": {
           "type": "object",
           "description": "Tool arguments."
+        },
+        "time": {
+          "$ref": "#/$defs/block_time"
         }
       }
     },
@@ -463,6 +477,9 @@
         },
         "exec": {
           "$ref": "#/$defs/exec_result"
+        },
+        "time": {
+          "$ref": "#/$defs/block_time"
         }
       }
     },
@@ -522,6 +539,9 @@
       "properties": {
         "text": {
           "type": "string"
+        },
+        "time": {
+          "$ref": "#/$defs/block_time"
         }
       }
     },

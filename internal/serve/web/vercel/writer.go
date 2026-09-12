@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/segmentio/ksuid"
 
@@ -67,6 +68,11 @@ type turnWriter struct {
 	// response head names so the client writes into it rather than appending a second
 	// message beside it. Empty starts a message under a new id.
 	continues string
+
+	// times is when each replayed turn was journaled, keyed by the part id the page
+	// holds it by. Replay fills it as it writes the parts and sends it as one metadata
+	// part at the end, so nothing is walked twice.
+	times map[string]string
 }
 
 // blockPart is one content block's stream part: which kind it is, the id it was
@@ -181,13 +187,16 @@ func (t *turnWriter) Message(resp llm.Response, _ bool) {
 }
 
 // whole writes one text or reasoning block as its start, its text and its end together,
-// for a block no fragment arrived for.
-func (t *turnWriter) whole(kind string, text string) {
+// for a block no fragment arrived for. It returns the id the three parts were sent
+// under, which a replay dates the block by.
+func (t *turnWriter) whole(kind string, text string) string {
 	id := t.mintID()
 
 	t.stream.part(boundaryPart{Type: kind + "-start", ID: id})
 	t.stream.part(deltaPart{Type: kind + "-delta", ID: id, Delta: text})
 	t.stream.part(boundaryPart{Type: kind + "-end", ID: id})
+
+	return id
 }
 
 // ToolCall renders a dispatched call with the arguments it was dispatched with.
@@ -333,6 +342,8 @@ func (t *turnWriter) Close(e web.Ending) {
 // The UI message stream is one assistant message and has no part for a person's turn, so
 // each user turn goes as a data part the page draws for itself, in the place the
 // conversation holds it.
+//
+// One metadata part closes the replay, carrying when each turn it wrote was journaled.
 func (t *turnWriter) Replay(rs *runstate.RunState) {
 	if rs == nil {
 		return
@@ -340,7 +351,7 @@ func (t *turnWriter) Replay(rs *runstate.RunState) {
 
 	for i, msg := range rs.Messages {
 		if msg.Role != llm.RoleAssistant {
-			t.replayUser(msg)
+			t.replayUser(msg, messageTime(rs, i))
 
 			continue
 		}
@@ -354,27 +365,32 @@ func (t *turnWriter) Replay(rs *runstate.RunState) {
 			results = resultsOf(rs.Messages[i+1])
 		}
 
-		t.replayAssistant(msg, results)
+		t.replayAssistant(msg, messageTime(rs, i), results, rs.ResultTimes)
 	}
 
 	// The turn the run left unfinished is not part of the committed conversation, and it
 	// is the one a resume continues, so it is the last thing the page is shown.
 	if rs.Pending != nil {
-		t.replayPending(rs.Pending)
+		t.replayPending(rs.Pending, rs.ResultTimes)
 	}
+
+	t.sendTimes()
 }
 
 // replayUser writes what a person typed. The tool results a stored user message also
 // carries are written with the calls they answer, so they are passed over here.
-func (t *turnWriter) replayUser(msg llm.Message) {
+func (t *turnWriter) replayUser(msg llm.Message, at time.Time) {
 	for _, block := range msg.Content {
 		if block.Text == nil || block.Text.Text == "" {
 			continue
 		}
 
+		id := t.mintID()
+		t.stamp(id, at)
+
 		t.stream.part(dataPart{
 			Type: "data-user-message",
-			ID:   t.mintID(),
+			ID:   id,
 			Data: userMessageData{Text: block.Text.Text},
 		})
 	}
@@ -386,7 +402,7 @@ func (t *turnWriter) replayUser(msg llm.Message) {
 // A result whose call this turn does not hold is left out. The client mutates the tool
 // part a result names and raises a stream error when it holds none, which would end the
 // replay on the first orphan rather than lose one line of it.
-func (t *turnWriter) replayAssistant(msg llm.Message, results []llm.ToolResultBlock) {
+func (t *turnWriter) replayAssistant(msg llm.Message, at time.Time, results []llm.ToolResultBlock, resultTimes map[string]time.Time) {
 	for _, block := range msg.Content {
 		if block.ToolUse == nil {
 			kind, text := blockText(block)
@@ -394,11 +410,13 @@ func (t *turnWriter) replayAssistant(msg llm.Message, results []llm.ToolResultBl
 				continue
 			}
 
-			t.whole(kind, text)
+			id := t.whole(kind, text)
+			t.stamp(id, at)
 
 			continue
 		}
 
+		t.stamp(block.ToolUse.ID, cardTime(at, resultTimes[block.ToolUse.ID]))
 		t.stream.part(toolPart(block.ToolUse.ID, block.ToolUse.Name, block.ToolUse.Input))
 
 		result, answered := resultFor(results, block.ToolUse.ID)
@@ -417,7 +435,7 @@ func (t *turnWriter) replayAssistant(msg llm.Message, results []llm.ToolResultBl
 // after the replay is about one of them, and the gate sends that call's part itself. The
 // held parts go out when Ask has named the call it asks about, or when Close ends a
 // conversation with no question outstanding.
-func (t *turnWriter) replayPending(pending *runstate.PendingTurn) {
+func (t *turnWriter) replayPending(pending *runstate.PendingTurn, resultTimes map[string]time.Time) {
 	for _, block := range pending.Assistant.Content {
 		if block.ToolUse == nil {
 			kind, text := blockText(block)
@@ -425,12 +443,14 @@ func (t *turnWriter) replayPending(pending *runstate.PendingTurn) {
 				continue
 			}
 
-			t.whole(kind, text)
+			id := t.whole(kind, text)
+			t.stamp(id, pending.Time)
 
 			continue
 		}
 
 		part := toolPart(block.ToolUse.ID, block.ToolUse.Name, block.ToolUse.Input)
+		t.stamp(block.ToolUse.ID, cardTime(pending.Time, resultTimes[block.ToolUse.ID]))
 
 		result, answered := resultFor(pending.Results, block.ToolUse.ID)
 		if !answered {
@@ -456,6 +476,59 @@ func (t *turnWriter) sendHeld(asked string) {
 	}
 
 	t.held = nil
+}
+
+// stamp records when the turn the page holds under id was journaled. A turn the journal
+// holds no time for gets no entry, so the page dates what the journal dated and nothing
+// else.
+func (t *turnWriter) stamp(id string, at time.Time) {
+	if at.IsZero() {
+		return
+	}
+
+	if t.times == nil {
+		t.times = map[string]string{}
+	}
+
+	t.times[id] = at.UTC().Format(time.RFC3339Nano)
+}
+
+// sendTimes closes the replay with the metadata part carrying every time it collected. A
+// conversation whose records carry no time sends no part.
+func (t *turnWriter) sendTimes() {
+	if len(t.times) == 0 {
+		return
+	}
+
+	t.stream.part(messageMetadataPart{
+		Type:            "message-metadata",
+		MessageMetadata: messageMetadata{Times: t.times},
+	})
+
+	t.times = nil
+}
+
+// cardTime is when the card one call is drawn as was journaled. The client mutates the
+// part a result names rather than making a second one, so the call and its result are one
+// card under one time: the result's, where the journal answered the call, and the turn
+// that made it where nothing has.
+func cardTime(turn time.Time, result time.Time) time.Time {
+	if !result.IsZero() {
+		return result
+	}
+
+	return turn
+}
+
+// messageTime is when the message at i was journaled, zero where the run carries no time
+// for it. RunState.Times is index aligned with Messages where Fold built it, and a
+// RunState assembled by hand may carry none at all.
+func messageTime(rs *runstate.RunState, i int) time.Time {
+	if i >= len(rs.Times) {
+		return time.Time{}
+	}
+
+	return rs.Times[i]
 }
 
 // resultsOf is the tool results a stored user message carries, which answer the calls of

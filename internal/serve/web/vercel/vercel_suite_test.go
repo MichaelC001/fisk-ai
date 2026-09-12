@@ -39,6 +39,16 @@ func pinned(body string) string {
 	return messageIDs.ReplaceAllString(body, `"messageId":"MID"`)
 }
 
+// journalTimes matches the times a replayed conversation's metadata part carries.
+var journalTimes = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[0-9:.]+Z`)
+
+// undated replaces those times with a fixed marker, for a spec reading back a
+// conversation a real run journaled: when it was written differs on every run, and the
+// ids the times are keyed by are still pinned.
+func undated(body string) string {
+	return journalTimes.ReplaceAllString(body, "TIME")
+}
+
 // decoded is one request through the format: the turn it asked for, the writer the
 // response is written with, and the recorder that writer writes to.
 type decoded struct {

@@ -7,6 +7,7 @@ package vercel_test
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -69,6 +70,37 @@ func reason(text string) llm.ContentBlock {
 
 func calls(id, name, input string) llm.ContentBlock {
 	return llm.ContentBlock{ToolUse: &llm.ToolUseBlock{ID: id, Name: name, Input: json.RawMessage(input)}}
+}
+
+// at is the nth second of a fixed minute, so a spec can pin the times a replay writes.
+func at(n int) time.Time {
+	return time.Date(2026, 1, 1, 0, 0, n, 0, time.UTC)
+}
+
+// dated stamps a folded conversation the way a fold of a journal written since
+// runstate.Record.Time does: one time per message a second apart, each tool result dated
+// from the message carrying it, and the unfinished turn after the last message.
+func dated(rs *runstate.RunState) *runstate.RunState {
+	rs.Times = make([]time.Time, len(rs.Messages))
+	rs.ResultTimes = map[string]time.Time{}
+
+	for i, msg := range rs.Messages {
+		rs.Times[i] = at(i + 1)
+
+		for _, block := range msg.Content {
+			if block.ToolResult == nil {
+				continue
+			}
+
+			rs.ResultTimes[block.ToolResult.ToolUseID] = at(i + 1)
+		}
+	}
+
+	if rs.Pending != nil {
+		rs.Pending.Time = at(len(rs.Messages) + 1)
+	}
+
+	return rs
 }
 
 var _ = Describe("A replayed conversation", func() {
@@ -230,6 +262,71 @@ var _ = Describe("A replayed conversation", func() {
 
 		Expect(o.body()).To(ContainSubstring(`data: {"type":"tool-input-available","toolCallId":"c2","toolName":"wipe","input":{},"dynamic":true}`))
 		Expect(o.body()).ToNot(ContainSubstring(`"toolCallId":"c2","output"`), "the call the run stopped at answered nothing")
+	})
+
+	// The stream sends one start for the whole response, so a replay and the live turn
+	// after it are one assistant message and the times attach to the message.
+	Describe("the times the journal holds", func() {
+		It("Should close the replay with one entry per dated turn", func() {
+			o := open()
+
+			o.writer.Open()
+			o.writer.Replay(dated(folded("list the streams",
+				assistant(prose("let me look"), calls("c1", "list", `{}`)),
+				answered("c1", "two streams", false),
+				assistant(prose("there are two")),
+			)))
+			o.writer.Close(completed)
+
+			Expect(o.body()).To(Equal(sse(
+				`{"type":"start","messageId":"MID"}`,
+				`{"type":"data-user-message","id":"1","data":{"text":"list the streams"}}`,
+				`{"type":"text-start","id":"2"}`,
+				`{"type":"text-delta","id":"2","delta":"let me look"}`,
+				`{"type":"text-end","id":"2"}`,
+				`{"type":"tool-input-available","toolCallId":"c1","toolName":"list","input":{},"dynamic":true}`,
+				`{"type":"tool-output-available","toolCallId":"c1","output":"two streams","dynamic":true}`,
+				`{"type":"text-start","id":"3"}`,
+				`{"type":"text-delta","id":"3","delta":"there are two"}`,
+				`{"type":"text-end","id":"3"}`,
+				// The prompt, each block of prose, and the card the call and its result
+				// share, which is dated from the result.
+				`{"type":"message-metadata","messageMetadata":{"times":{`+
+					`"1":"2026-01-01T00:00:01Z",`+
+					`"2":"2026-01-01T00:00:02Z",`+
+					`"3":"2026-01-01T00:00:04Z",`+
+					`"c1":"2026-01-01T00:00:03Z"}}}`,
+				`{"type":"finish","finishReason":"stop"}`,
+				`[DONE]`,
+			)))
+		})
+
+		// The page holds the call the run stopped at under its own toolCallId, whether the
+		// card came from the stored call or from the gate, so the turn that made it dates
+		// the entry.
+		It("Should date a call the conversation left unanswered from the turn that made it", func() {
+			o := open()
+
+			o.writer.Open()
+			o.writer.Replay(dated(folded("wipe it",
+				assistant(calls("c1", "stream_rm", `{}`)),
+			)))
+			o.writer.Close(completed)
+
+			Expect(o.body()).To(ContainSubstring(`data: {"type":"message-metadata","messageMetadata":{"times":{"1":"2026-01-01T00:00:01Z","c1":"2026-01-01T00:00:02Z"}}}`))
+		})
+
+		It("Should send no metadata part for a conversation carrying no times", func() {
+			o := open()
+
+			o.writer.Open()
+			o.writer.Replay(folded("list the streams",
+				assistant(prose("there are two")),
+			))
+			o.writer.Close(completed)
+
+			Expect(o.body()).ToNot(ContainSubstring("message-metadata"))
+		})
 	})
 
 	It("Should write nothing for a conversation it was handed none of", func() {

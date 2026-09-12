@@ -869,6 +869,103 @@ var _ = Describe("FileStore", func() {
 		})
 	})
 
+	Describe("the time a record is appended at", func() {
+		recordsOf := func(id string) []runstate.Record {
+			GinkgoHelper()
+
+			recs, err := readRecords(store.journalPath(id))
+			Expect(err).NotTo(HaveOccurred())
+
+			return recs
+		}
+
+		It("stamps every record it writes, the meta record included", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			for _, rec := range recordsOf(id) {
+				Expect(rec.Time).ToNot(BeZero(), "seq %d", rec.Seq)
+				Expect(rec.Time.Location()).To(Equal(time.UTC), "seq %d", rec.Seq)
+			}
+		})
+
+		It("keeps a time the caller stamped", func() {
+			at := time.Unix(1700000000, 0).UTC()
+
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Time: at, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			Expect(recordsOf(id)[1].Time).To(BeTemporally("==", at))
+		})
+
+		// A crash-retry of the last record re-appends the same seq, which the append
+		// contract folds. The stamp is placed after that decision, so what is stored keeps
+		// the time it was stored at.
+		It("leaves the stored record alone when the same seq is appended again", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+
+			rec := runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")}
+			Expect(j.Append(ctx, 2, rec)).To(Succeed())
+			stored := recordsOf(id)[1].Time
+
+			Expect(j.Append(ctx, 2, rec)).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			recs := recordsOf(id)
+			Expect(recs).To(HaveLen(2), "the retry wrote no second record")
+			Expect(recs[1].Time).To(BeTemporally("==", stored))
+		})
+
+		It("dates a listing row from the last record", func() {
+			at := time.Unix(1700000000, 0).UTC()
+
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Updated).To(BeTemporally("==", at))
+		})
+
+		// Every journal written before the field existed is this shape, and the file's
+		// modification time is what this store has always reported for one.
+		It("dates a journal whose records carry no time from the file", func() {
+			id := newID()
+			meta := newMeta(id)
+			meta.Version = runstate.Version
+			meta.Created = time.Unix(1700000000, 0).UTC()
+
+			first, err := json.Marshal(runstate.Record{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &meta})
+			Expect(err).NotTo(HaveOccurred())
+			last, err := json.Marshal(runstate.Record{Seq: 2, Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})
+			Expect(err).NotTo(HaveOccurred())
+
+			path := store.journalPath(id)
+			lines := append(append(first, '\n'), append(last, '\n')...)
+			Expect(os.WriteFile(path, lines, 0o600)).To(Succeed())
+
+			modified := time.Unix(1700000500, 0)
+			Expect(os.Chtimes(path, modified, modified)).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Updated).To(BeTemporally("==", modified))
+		})
+	})
+
 	It("does not leak a sensitive prompt into the fingerprint on disk", func() {
 		id := newID()
 		meta := newMeta(id)

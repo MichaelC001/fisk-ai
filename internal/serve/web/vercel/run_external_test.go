@@ -519,9 +519,12 @@ var _ = Describe("A conversation opened from the rail", func() {
 
 		status, body := reopen(cfg, ch, "t2")
 		Expect(status).To(Equal(http.StatusOK))
-		Expect(body).To(Equal(sse(
+		Expect(undated(body)).To(Equal(sse(
 			`{"type":"start","messageId":"MID"}`,
 			`{"type":"data-user-message","id":"1","data":{"text":"wipe it"}}`,
+			// The prompt is dated from the meta record and the call from the assistant
+			// record that made it, which is the turn the gate stopped.
+			`{"type":"message-metadata","messageMetadata":{"times":{"1":"TIME","c1":"TIME"}}}`,
 			`{"type":"tool-input-available","toolCallId":"c1","toolName":"stream rm","input":{"command":"stream rm","tag":"ai:confirm"},"dynamic":true}`,
 			`{"type":"tool-approval-request","approvalId":"approval-c1","toolCallId":"c1","reason":"stream rm"}`,
 			`{"type":"finish","finishReason":"tool-calls"}`,

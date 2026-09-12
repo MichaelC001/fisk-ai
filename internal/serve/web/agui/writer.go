@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/events"
 	"github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/types"
@@ -34,6 +35,11 @@ const (
 	customCapabilities   = "fisk.capabilities"
 	customWarning        = "fisk.warning"
 	customPromptNotTaken = "fisk.prompt_not_taken"
+	// customMessageTime dates one message of a replayed snapshot: its value is that
+	// message's id and the event's own timestamp is when the record behind it was
+	// journaled. A snapshot is one event with no slot per message, and a client that
+	// branches on the three names it already knows renders what it renders today.
+	customMessageTime = "fisk.message_time"
 )
 
 // promptNotTakenText is what a page is told when its message did not enter the
@@ -117,6 +123,16 @@ type turnWriter struct {
 	// remembered, so any process can serve the run that resumes, and it is spent on
 	// the first call that matches.
 	resent string
+
+	// times is the snapshot messages whose record carried a time, filled while the
+	// snapshot is built and sent as the custom events that follow it.
+	times []datedMessage
+}
+
+// datedMessage is one snapshot message and when the record behind it was journaled.
+type datedMessage struct {
+	id string
+	at time.Time
 }
 
 // blockPart is one content block's message: whether it is prose or reasoning, the id it
@@ -368,12 +384,42 @@ func (t *turnWriter) runError(e web.Ending) events.Event {
 // A conversation the run left waiting on a question is followed by Ask, which puts the
 // interrupt on the run-finished event. The pending turn is in the snapshot, so the call
 // the interrupt names is a call the client holds.
+//
+// Each snapshot message the journal holds a time for is followed by one
+// fisk.message_time event carrying it.
 func (t *turnWriter) Replay(rs *runstate.RunState) {
 	if rs == nil {
 		return
 	}
 
 	t.stream.event(events.NewMessagesSnapshotEvent(t.snapshot(rs)))
+	t.sendTimes()
+}
+
+// sendTimes dates the messages of the snapshot just sent: one custom event per message
+// the journal holds a time for, its value that message's id and its own timestamp the
+// record's time in Unix milliseconds. The SDK's own time slot carries the time, so
+// nothing here invents a format.
+func (t *turnWriter) sendTimes() {
+	for _, m := range t.times {
+		event := events.NewCustomEvent(customMessageTime, events.WithValue(m.id))
+		event.SetTimestamp(m.at.UnixMilli())
+
+		t.stream.dated(event)
+	}
+
+	t.times = nil
+}
+
+// date records when the message under id was journaled, for sendTimes to write. A
+// message whose record carried no time is left undated rather than dated from anything
+// else.
+func (t *turnWriter) date(id string, at time.Time) {
+	if at.IsZero() {
+		return
+	}
+
+	t.times = append(t.times, datedMessage{id: id, at: at})
 }
 
 // The run reports these for an operator watching a terminal. AG-UI has no event for the

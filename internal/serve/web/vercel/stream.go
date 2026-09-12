@@ -124,6 +124,30 @@ type finishPart struct {
 	FinishReason string `json:"finishReason,omitempty"`
 }
 
+// messageMetadataPart carries values the client attaches to the assistant message this
+// response writes. The AI SDK merges a metadata part into the message as the stream
+// runs, and the client types the value with metadataSchema.
+type messageMetadataPart struct {
+	Type            string          `json:"type"`
+	MessageMetadata messageMetadata `json:"messageMetadata"`
+}
+
+// messageMetadata is what this channel puts on the message.
+//
+// It is one part for the whole response because Open sends one start for it, so a replay
+// and the live turn after it are one assistant message and metadata attaches to the
+// message rather than to a turn.
+type messageMetadata struct {
+	// Times is when each replayed turn was journaled, in UTC as RFC3339 text, keyed by
+	// the id the page already holds that turn by: the data-user-message part's id for a
+	// person's turn, the text-start or reasoning-start id for a block of prose or
+	// reasoning, and the toolCallId for a call and its result.
+	//
+	// A turn the journal holds no time for has no entry. A live turn is happening now
+	// and carries none at all.
+	Times map[string]string `json:"times,omitempty"`
+}
+
 // errorPart is the run saying something went wrong, which the client renders in place
 // rather than as a failed request.
 type errorPart struct {
