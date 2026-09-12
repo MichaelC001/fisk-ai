@@ -387,3 +387,25 @@ var _ = Describe("printSessionsSection", func() {
 		Expect(render(cfg)).To(ContainSubstring("(default)"))
 	})
 })
+
+var _ = Describe("printSamplePromptsSection", func() {
+	render := func(cfg *config.Config) string {
+		c := columns.New()
+		printSamplePromptsSection(c, cfg)
+
+		return c.String()
+	}
+
+	It("Should list every prompt the operator published on the card", func() {
+		cfg := &config.Config{Prompts: []string{"who can publish to ORDERS?", "what changed in the auth config today?"}}
+
+		out := render(cfg)
+		Expect(out).To(ContainSubstring("Sample prompts"))
+		Expect(out).To(ContainSubstring("who can publish to ORDERS?"))
+		Expect(out).To(ContainSubstring("what changed in the auth config today?"))
+	})
+
+	It("Should omit the section for a configuration that names none", func() {
+		Expect(render(&config.Config{})).ToNot(ContainSubstring("Sample prompts"))
+	})
+})

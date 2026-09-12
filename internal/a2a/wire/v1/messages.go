@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"time"
+	"unicode/utf8"
 )
 
 // Request is one of the four things a caller asks of an agent: a prompt to run, an answer
@@ -587,6 +588,12 @@ type AgentCard struct {
 	// a server-side request forgery.
 	IconURL string `json:"icon_url,omitempty"`
 
+	// Prompts are things a person can ask this agent, in the operator's own words, for
+	// a reader to put in front of somebody who has not used this agent before. They are
+	// the operator's suggestions rather than the only prompts the agent answers. A card
+	// whose operator wrote none carries none.
+	Prompts []string `json:"prompts,omitempty"`
+
 	// Notes are what the agent could not put on this card, one sentence each. An MCP
 	// server whose tools could not be listed names that server, so a tool missing from
 	// Tools reads as a source being down rather than a tool that was removed. A card
@@ -645,6 +652,13 @@ const (
 	// MaxIconLength limits AgentCard.Icon, which holds an emoji and whose limit counts
 	// the bytes of one, since a single emoji reaches four and a joined sequence more.
 	MaxIconLength = 16
+	// MaxPromptLength limits one entry of AgentCard.Prompts to a sentence a reader can
+	// draw as a single suggestion. It counts characters, the unit the schema's
+	// maxLength counts, so a prompt written in a script that takes three bytes a
+	// character is measured the way every peer's validator measures it.
+	MaxPromptLength = 256
+	// MaxPrompts limits how many entries AgentCard.Prompts carries.
+	MaxPrompts = 8
 )
 
 // ErrIconURL reports an AgentCard.IconURL a reader must not put in front of a
@@ -668,6 +682,23 @@ func CheckDisplayName(name string) error {
 func CheckIcon(icon string) error {
 	if len(icon) > MaxIconLength {
 		return fmt.Errorf("%w: the icon is %d bytes, over the %d byte limit", ErrCardField, len(icon), MaxIconLength)
+	}
+
+	return nil
+}
+
+// CheckPrompts limits AgentCard.Prompts to MaxPrompts entries, each of
+// MaxPromptLength. An empty list passes, leaving a reader to suggest nothing.
+func CheckPrompts(prompts []string) error {
+	if len(prompts) > MaxPrompts {
+		return fmt.Errorf("%w: there are %d sample prompts, over the limit of %d", ErrCardField, len(prompts), MaxPrompts)
+	}
+
+	for _, prompt := range prompts {
+		count := utf8.RuneCountInString(prompt)
+		if count > MaxPromptLength {
+			return fmt.Errorf("%w: a sample prompt is %d characters, over the %d character limit", ErrCardField, count, MaxPromptLength)
+		}
 	}
 
 	return nil

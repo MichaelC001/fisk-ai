@@ -64,6 +64,7 @@ func newService(held *sharedTransport, opts Options) (*Service, error) {
 		DisplayName: opts.DisplayName,
 		Icon:        opts.Icon,
 		IconURL:     opts.IconURL,
+		Prompts:     opts.SamplePrompts,
 		ConfirmTags: opts.Tools.ConfirmTags,
 		Concurrency: concurrency,
 		CallTimeout: callTimeout,

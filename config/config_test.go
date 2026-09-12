@@ -906,6 +906,9 @@ description: manages nats auth
 display_name: NATS Auth
 icon: "\U0001F510"
 icon_url: https://example.net/agent.png
+prompts:
+  - who can publish to ORDERS?
+  - add a user for the billing service
 llm:
   model: claude-sonnet-4-6
 `))
@@ -914,6 +917,7 @@ llm:
 			Expect(cfg.DisplayName).To(Equal("NATS Auth"))
 			Expect(cfg.Icon).To(Equal("\U0001f510"))
 			Expect(cfg.IconURL).To(Equal("https://example.net/agent.png"))
+			Expect(cfg.Prompts).To(Equal([]string{"who can publish to ORDERS?", "add a user for the billing service"}))
 		})
 
 		It("Should leave every field empty where the operator wrote none", func() {
@@ -929,6 +933,7 @@ llm:
 			Expect(cfg.DisplayName).To(BeEmpty())
 			Expect(cfg.Icon).To(BeEmpty())
 			Expect(cfg.IconURL).To(BeEmpty())
+			Expect(cfg.Prompts).To(BeEmpty())
 		})
 	})
 

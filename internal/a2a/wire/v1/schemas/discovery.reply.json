@@ -38,6 +38,15 @@
       "pattern": "^https://",
       "description": "An https URL of an image the agent asks to be drawn beside its name. It is decoration the agent asserts and nothing verifies, so a reader decides whether to fetch it: fetching it directly discloses every viewer to the host the card named, and proxying it buys server-side request forgery."
     },
+    "prompts": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "description": "Things a person can ask this agent, written by its operator, for a reader to offer somebody who has not used it before. They are suggestions rather than the only prompts the agent answers. Absent from an agent whose operator wrote none."
+    },
     "notes": {
       "type": "array",
       "items": {

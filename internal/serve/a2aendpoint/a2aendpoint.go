@@ -131,6 +131,15 @@ type Options struct {
 	Icon        string
 	IconURL     string
 
+	// SamplePrompts are things a person can ask this agent, in the operator's own
+	// words, published on the card so a console can offer them to somebody who has
+	// never used it. wire.CheckPrompts states how many and how long, and a list it
+	// refuses refuses the endpoint at construction.
+	//
+	// Prompts, the field that builds the prompt channel, is what this agent does with a
+	// prompt once one arrives; these are the words to send.
+	SamplePrompts []string
+
 	// Logger receives the endpoints' progress, which is a line per served call and per
 	// prompt. Nil discards it, since a library that reached for a default logger would
 	// write to an embedder's stderr uninvited.
@@ -398,16 +407,17 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 	}
 
 	built := Options{
-		Transport:   transport,
-		Faults:      faults,
-		Identity:    cfg.Identity,
-		Version:     opts.Version,
-		Description: cfg.Description,
-		DisplayName: cfg.DisplayName,
-		Icon:        cfg.Icon,
-		IconURL:     cfg.IconURL,
-		Logger:      opts.Logger,
-		Telemetry:   opts.Telemetry,
+		Transport:     transport,
+		Faults:        faults,
+		Identity:      cfg.Identity,
+		Version:       opts.Version,
+		Description:   cfg.Description,
+		DisplayName:   cfg.DisplayName,
+		Icon:          cfg.Icon,
+		IconURL:       cfg.IconURL,
+		SamplePrompts: cfg.Prompts,
+		Logger:        opts.Logger,
+		Telemetry:     opts.Telemetry,
 	}
 
 	if cfg.A2APromptsEnabled() {
@@ -475,6 +485,7 @@ func serveCard(held *sharedTransport, opts Options) error {
 		DisplayName:   opts.DisplayName,
 		Icon:          opts.Icon,
 		IconURL:       opts.IconURL,
+		Prompts:       opts.SamplePrompts,
 		Logger:        opts.Logger,
 		Telemetry:     opts.Telemetry,
 		DiscoveryOnly: true,

@@ -69,10 +69,10 @@ comments are contracts we intend to keep.
     optional interfaces that are conventions rather than named types.
   - `agenttest` is an embedder's test surface, not ours alone. A fake nobody outside this
     repository can use is a fake that has not been designed.
-- **`a2a`, `mcpserver`, `serve/asyncjobs` and `tasks` are not there yet.** Their shape is not
-  settled, so do not hold work on them to the same bar and do not treat their current API as a
-  contract. `serve/asyncjobs` is one channel implementation among the several section 12 of the
-  Network Serve summary expects, and `tasks` has no importer yet.
+- **`a2a`, `mcpserver` and `serve/asyncjobs` are not there yet.** Their shape is not settled, so do
+  not hold work on them to the same bar and do not treat their current API as a contract.
+  `serve/asyncjobs` is one channel implementation among the several section 12 of the Network Serve
+  summary expects.
 - **`remotetools` and `tui` are not libraries.** `tui` is terminal presentation that happens not
   to live in `main`, and `remotetools` is agent's own run-path helper.
 
@@ -108,3 +108,19 @@ comments are contracts we intend to keep.
 - Add, remove, or upgrade external dependencies (including Go toolchain version).
 - Change public APIs outside the scope of the requested task.
 - Modify `ABTaskFile`, `Dockerfile.goreleaser`, or CI configuration.
+- Edit or delete an existing file under `examples/`.
+
+### Why examples are behind an ask
+
+Every example drives the libraries through their exported surface alone, as a `func Example`
+with an `// Output:` comment that `go test` runs and compares. When one stops compiling, or its
+output changes, that is a report that a published API changed. Editing the example until it
+passes converts the report into silence, and the examples stop measuring anything.
+
+So when an example goes red, say which library change did it and ask. The answer decides
+whether the API change stands and the example follows it, or the API change is wrong and the
+example was right to complain.
+
+Two things this does not cover. Adding an example for a new surface is ordinary work. Changing
+an example's own comments or variable names is not an API report. Editing what it calls or what
+it prints is.

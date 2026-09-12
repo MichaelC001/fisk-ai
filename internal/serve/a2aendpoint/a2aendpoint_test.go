@@ -274,6 +274,25 @@ var _ = Describe("A2A endpoint", func() {
 				Expect(card.Protocols).To(ConsistOf(wire.ProtocolNamespace))
 			})
 
+			It("Should publish the sample prompts the operator wrote", func() {
+				built, err := NewFromConfig(promptsConfig("        workers: 1\nprompts:\n  - who can publish to ORDERS?\n  - what changed in the auth config today?\n"), ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(discover(built).Prompts).To(Equal([]string{"who can publish to ORDERS?", "what changed in the auth config today?"}))
+			})
+
+			// A card the discovery reply schema refuses is one every caller fails to
+			// discover, so the operator who wrote the value reads the error at startup.
+			It("Should refuse a configuration with more prompts than the card carries", func() {
+				var prompts string
+				for range wire.MaxPrompts + 1 {
+					prompts += "  - ask me\n"
+				}
+
+				_, err := NewFromConfig(promptsConfig("        workers: 1\nprompts:\n"+prompts), ConfigOptions{Conns: provider, Logger: quietLogger()})
+				Expect(err).To(MatchError(wire.ErrCardField))
+			})
+
 			// Registering the route twice would not fail: micro subscribes again on the
 			// same subject in the same queue group, and a peer gets whichever card NATS
 			// picked. So an agent with both endpoints answers from the one with tools.
