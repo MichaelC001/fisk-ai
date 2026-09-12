@@ -7,6 +7,7 @@ package wire
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -188,6 +189,55 @@ var _ = Describe("Wire", func() {
 				Expect(CheckIconURL(icon)).To(MatchError(ErrIconURL), icon)
 				Expect(validator.Validate(body)).ToNot(Succeed(), icon)
 			}
+		})
+	})
+
+	Describe("CheckPrompts", func() {
+		It("Should accept a list at both limits and an agent that wrote none", func() {
+			Expect(CheckPrompts(nil)).To(Succeed())
+			Expect(CheckPrompts([]string{})).To(Succeed())
+			Expect(CheckPrompts([]string{"who can publish to ORDERS?"})).To(Succeed())
+			Expect(CheckPrompts(slices.Repeat([]string{strings.Repeat("a", MaxPromptLength)}, MaxPrompts))).To(Succeed())
+		})
+
+		It("Should refuse more prompts than the limit", func() {
+			Expect(CheckPrompts(slices.Repeat([]string{"ask me"}, MaxPrompts+1))).To(MatchError(ErrCardField))
+		})
+
+		It("Should refuse a prompt over the length limit", func() {
+			Expect(CheckPrompts([]string{"who can publish?", strings.Repeat("a", MaxPromptLength+1)})).To(MatchError(ErrCardField))
+		})
+
+		// The Go rule and the schema's are two statements of one rule, and the schema is
+		// what refuses a card from a peer built against neither.
+		It("Should agree with the schema it states", func() {
+			validator, err := NewValidator()
+			Expect(err).ToNot(HaveOccurred())
+
+			for _, prompts := range [][]string{
+				slices.Repeat([]string{"ask me"}, MaxPrompts+1),
+				{strings.Repeat("a", MaxPromptLength+1)},
+			} {
+				card := NewDiscoveryReply("agent-a", "1.2.3")
+				fillHeader(&card.Header)
+				card.Prompts = prompts
+
+				body, err := json.Marshal(card)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(CheckPrompts(prompts)).To(MatchError(ErrCardField))
+				Expect(validator.Validate(body)).ToNot(Succeed())
+			}
+
+			card := NewDiscoveryReply("agent-a", "1.2.3")
+			fillHeader(&card.Header)
+			card.Prompts = []string{strings.Repeat("é", MaxPromptLength)}
+
+			body, err := json.Marshal(card)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(CheckPrompts(card.Prompts)).To(Succeed())
+			Expect(validator.Validate(body)).To(Succeed())
 		})
 	})
 

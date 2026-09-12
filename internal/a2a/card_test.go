@@ -7,6 +7,7 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -75,6 +76,20 @@ var _ = Describe("Agent card", func() {
 		Expect(err).To(MatchError(wire.ErrCardField))
 	})
 
+	It("Should refuse to serve a card carrying more sample prompts than the schema will, or one too long", func() {
+		_, err := NewServer(newFakeTransport(), nil, ServerOptions{
+			Identity: "svc",
+			Prompts:  slices.Repeat([]string{"ask me"}, wire.MaxPrompts+1),
+		})
+		Expect(err).To(MatchError(wire.ErrCardField))
+
+		_, err = NewServer(newFakeTransport(), nil, ServerOptions{
+			Identity: "svc",
+			Prompts:  []string{strings.Repeat("a", wire.MaxPromptLength+1)},
+		})
+		Expect(err).To(MatchError(wire.ErrCardField))
+	})
+
 	It("Should serve what the operator wrote about the agent", func() {
 		s, err := NewServer(newFakeTransport(), nil, ServerOptions{
 			Identity:    "nats-auth-prod-eu",
@@ -83,6 +98,7 @@ var _ = Describe("Agent card", func() {
 			DisplayName: "NATS Auth",
 			Icon:        "\U0001f510",
 			IconURL:     "https://example.net/agent.png",
+			Prompts:     []string{"who can publish to ORDERS?"},
 		})
 		Expect(err).ToNot(HaveOccurred())
 
@@ -90,6 +106,7 @@ var _ = Describe("Agent card", func() {
 		Expect(s.card.DisplayName).To(Equal("NATS Auth"))
 		Expect(s.card.Icon).To(Equal("\U0001f510"))
 		Expect(s.card.IconURL).To(Equal("https://example.net/agent.png"))
+		Expect(s.card.Prompts).To(ConsistOf("who can publish to ORDERS?"))
 	})
 
 	// The card is a peer's claim about itself and a caller may put it in front of a
@@ -121,12 +138,14 @@ var _ = Describe("Agent card", func() {
 			DisplayName: "NATS Auth",
 			Icon:        "\U0001f510",
 			IconURL:     "https://example.net/agent.png",
+			Prompts:     []string{"who can publish to ORDERS?"},
 			Notes:       []string{"the tools of one source could not be listed"},
 		})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(card.DisplayName).To(Equal("NATS Auth"))
 		Expect(card.Icon).To(Equal("\U0001f510"))
 		Expect(card.IconURL).To(Equal("https://example.net/agent.png"))
+		Expect(card.Prompts).To(ConsistOf("who can publish to ORDERS?"))
 		Expect(card.Notes).To(ConsistOf("the tools of one source could not be listed"))
 	})
 })

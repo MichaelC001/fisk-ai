@@ -88,6 +88,10 @@ type ServerOptions struct {
 	// the name. NewServer refuses a value wire.CheckIconURL refuses, since the card
 	// reaches a browser through whoever reads it.
 	IconURL string
+	// Prompts are things a person can ask this agent, in the operator's own words,
+	// reported in the agent card. NewServer refuses more than wire.MaxPrompts of them,
+	// and one longer than wire.MaxPromptLength.
+	Prompts []string
 	// ConfirmTags are the operator-configured tags that, with the always-on
 	// ai:confirm, gate a command behind approval. A served agent has no operator,
 	// so commands carrying any of these are never exposed (hard-deny).
@@ -604,6 +608,7 @@ func (o ServerOptions) cardOptions() CardOptions {
 		DisplayName: o.DisplayName,
 		Icon:        o.Icon,
 		IconURL:     o.IconURL,
+		Prompts:     o.Prompts,
 		Telemetry:   o.Telemetry,
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -85,6 +86,7 @@ var _ = Describe("The agent card", func() {
 			Description: "manages nats auth",
 			DisplayName: "NATS Auth",
 			IconURL:     "https://example.net/agent.png",
+			Prompts:     []string{"who can publish to ORDERS?", "add a user for the billing service"},
 		}
 		opts.CardTools = cardTools()
 
@@ -95,6 +97,7 @@ var _ = Describe("The agent card", func() {
 		Expect(card.Description).To(Equal("manages nats auth"))
 		Expect(card.DisplayName).To(Equal("NATS Auth"))
 		Expect(card.IconURL).To(Equal("https://example.net/agent.png"))
+		Expect(card.Prompts).To(Equal([]string{"who can publish to ORDERS?", "add a user for the billing service"}))
 	})
 
 	// The whole approval flow is driven on a gated command, so a card that omitted it
@@ -167,6 +170,16 @@ var _ = Describe("The agent card", func() {
 
 		opts = testOptions()
 		opts.Card.Icon = strings.Repeat("a", wire.MaxIconLength+1)
+		readCard(newTestChannel(opts), http.StatusInternalServerError)
+	})
+
+	It("Should refuse to serve a card carrying more sample prompts than the schema will, or one too long", func() {
+		opts := testOptions()
+		opts.Card.Prompts = slices.Repeat([]string{"ask me"}, wire.MaxPrompts+1)
+		readCard(newTestChannel(opts), http.StatusInternalServerError)
+
+		opts = testOptions()
+		opts.Card.Prompts = []string{strings.Repeat("a", wire.MaxPromptLength+1)}
 		readCard(newTestChannel(opts), http.StatusInternalServerError)
 	})
 

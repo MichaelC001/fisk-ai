@@ -22,9 +22,9 @@ import (
 const CardPath = "card"
 
 // cardRefusal is the body a request gets when the card cannot be built, which is a
-// configured icon url, display name or icon that a2a.BuildCard refuses. It names
-// neither the value nor the worker, and the log line beside it names the key.
-const cardRefusal = "this agent's card cannot be served; check its configured description, display name, icon and icon url"
+// configured icon url, display name, icon or sample prompt that a2a.BuildCard refuses.
+// It names neither the value nor the worker, and the log line beside it names the key.
+const cardRefusal = "this agent's card cannot be served; check its configured description, display name, icon, icon url and prompts"
 
 // AgentTools are the tools an agent card lists and what could not be listed.
 type AgentTools struct {

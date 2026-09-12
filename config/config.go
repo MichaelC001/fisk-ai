@@ -117,6 +117,10 @@ type Config struct {
 	// endpoint refuses to publish a card carrying any other scheme, since the card
 	// reaches a browser through whoever reads it.
 	IconURL string `json:"icon_url,omitempty" yaml:"icon_url,omitempty"`
+	// Prompts are things a person can ask this agent, written in the operator's own
+	// words. They are published on the agent card, for a page to offer somebody who has
+	// not used this agent before.
+	Prompts []string `json:"prompts,omitempty" yaml:"prompts,omitempty"`
 	// ApplicationPath is the app to run and introspect for tools. It is optional only
 	// when something else gives the agent a tool to call: a built-in enabled under
 	// harness, a remote agent's tools, an MCP server, or tools a Go caller injects

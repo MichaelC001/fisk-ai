@@ -257,7 +257,7 @@ var _ = Describe("The builder", func() {
 	})
 
 	It("Should put what the operator wrote about the agent on the card", func() {
-		built, err := Builder().Build(context.Background(), webConfig("description: manages nats auth\ndisplay_name: NATS Auth\nicon: \"\\U0001f510\"\nicon_url: https://example.net/agent.png\n"), serve.BuildOptions{
+		built, err := Builder().Build(context.Background(), webConfig("description: manages nats auth\ndisplay_name: NATS Auth\nicon: \"\\U0001f510\"\nicon_url: https://example.net/agent.png\nprompts:\n  - who can publish to ORDERS?\n"), serve.BuildOptions{
 			Sessions: agenttest.NewFakeSessionStore(GinkgoTB()),
 			Version:  "1.2.3",
 			Logger:   quietLogger(),
@@ -276,5 +276,6 @@ var _ = Describe("The builder", func() {
 		Expect(card.DisplayName).To(Equal("NATS Auth"))
 		Expect(card.Icon).To(Equal("\U0001f510"))
 		Expect(card.IconURL).To(Equal("https://example.net/agent.png"))
+		Expect(card.Prompts).To(ConsistOf("who can publish to ORDERS?"))
 	})
 })

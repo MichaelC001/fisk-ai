@@ -248,7 +248,25 @@ func infoAction(_ *fisk.ParseContext) error {
 		c.Print(wrapText(cfg.SystemPrompt, stdoutWidth()-promptIndent))
 	})
 
+	printSamplePromptsSection(c, cfg)
+
 	return nil
+}
+
+// printSamplePromptsSection lists the sample prompts published on the agent card,
+// which are the words a console offers somebody who has never used this agent. They
+// are what a person sends, where the Prompt section is what the agent is told. It is
+// skipped for a configuration that names none.
+func printSamplePromptsSection(c *columns.Document, cfg *config.Config) {
+	if len(cfg.Prompts) == 0 {
+		return
+	}
+
+	c.Section("Sample prompts", func(c *columns.Document) {
+		for _, prompt := range cfg.Prompts {
+			c.Print(wrapText(prompt, stdoutWidth()-promptIndent))
+		}
+	})
 }
 
 // printModelSection shows the resolved model, provider, thinking state and how tool

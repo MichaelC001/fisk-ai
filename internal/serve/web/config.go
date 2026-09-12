@@ -124,6 +124,7 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 			DisplayName: cfg.DisplayName,
 			Icon:        cfg.Icon,
 			IconURL:     cfg.IconURL,
+			Prompts:     cfg.Prompts,
 			Notes:       tools.Notes,
 			Telemetry:   opts.Telemetry,
 		},

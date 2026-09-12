@@ -48,6 +48,11 @@ type CardOptions struct {
 	// reaches a browser.
 	IconURL string
 
+	// Prompts are things a person can ask this agent, in the operator's own words, for
+	// a reader to offer somebody who has not used it before. BuildCard checks them with
+	// wire.CheckPrompts.
+	Prompts []string
+
 	// Notes are what could not be put on this card, one sentence each: an MCP server
 	// whose tools could not be listed names that server, so a tool missing from the
 	// card reads as a source being down rather than a tool that was removed.
@@ -67,10 +72,10 @@ type CardOptions struct {
 // served agent has no operator to approve a gated command; a channel with an operator
 // in front of it passes the agent's own set.
 //
-// It fails on an IconURL a browser must not be handed, and on a display name or icon
-// longer than the discovery reply schema carries: a card the schema refuses is one
-// every caller fails to discover, and failing here puts that in front of the operator
-// who wrote the value.
+// It fails on an IconURL a browser must not be handed, and on a display name, icon or
+// sample prompt the discovery reply schema will not carry: a card the schema refuses is
+// one every caller fails to discover, and failing here puts that in front of the
+// operator who wrote the value.
 func BuildCard(opts CardOptions, tools []toolkit.Tool) (wire.AgentCard, error) {
 	err := wire.CheckIconURL(opts.IconURL)
 	if err != nil {
@@ -87,6 +92,11 @@ func BuildCard(opts CardOptions, tools []toolkit.Tool) (wire.AgentCard, error) {
 		return wire.AgentCard{}, err
 	}
 
+	err = wire.CheckPrompts(opts.Prompts)
+	if err != nil {
+		return wire.AgentCard{}, err
+	}
+
 	card := wire.AgentCard{
 		Name:             opts.Identity,
 		Version:          versionOrDev(opts.Version),
@@ -95,6 +105,7 @@ func BuildCard(opts CardOptions, tools []toolkit.Tool) (wire.AgentCard, error) {
 		DisplayName:      opts.DisplayName,
 		Icon:             opts.Icon,
 		IconURL:          opts.IconURL,
+		Prompts:          slices.Clone(opts.Prompts),
 		Notes:            slices.Clone(opts.Notes),
 		Protocols:        []string{wire.ProtocolNamespace},
 		Telemetry:        opts.Telemetry.Enabled(),

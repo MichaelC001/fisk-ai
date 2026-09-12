@@ -94,6 +94,7 @@ func everyMessage() []any {
 	discoveryReply.DisplayName = "NATS Auth"
 	discoveryReply.Icon = "\U0001f510"
 	discoveryReply.IconURL = "https://example.net/agent.png"
+	discoveryReply.Prompts = []string{"who can publish to ORDERS?", "add a user for the billing service"}
 	discoveryReply.Notes = []string{`the tools of the mcp server "github" could not be listed`}
 	discoveryReply.Model = "claude-sonnet-5"
 	discoveryReply.Protocols = []string{ProtocolNamespace}
