@@ -383,154 +383,20 @@ var _ = Describe("ApplicationTools", func() {
 	})
 })
 
-var _ = Describe("FilterTools", func() {
-	// fixture returns a fresh tool list covering tagged, untagged and ai:deny tools.
-	fixture := func() []*CommandTool {
-		return []*CommandTool{
+var _ = Describe("stripDenied", func() {
+	It("Should remove the ai:deny tools and keep the rest in order", func() {
+		tools := stripDenied([]*CommandTool{
 			{Path: []string{"auth", "user", "add"}, Model: &fisk.CmdModel{Tags: []string{"admin"}}},
 			{Path: []string{"auth", "login"}, Model: &fisk.CmdModel{}},
 			{Path: []string{"server", "run"}, Model: &fisk.CmdModel{Tags: []string{denyTag}}},
 			{Path: []string{"server", "info"}, Model: &fisk.CmdModel{}},
-		}
-	}
-
-	It("Should always remove ai:deny tools regardless of mode", func() {
-		inc, err := FilterTools(fixture(), nil, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(inc)).NotTo(ContainElement("server_run"))
-
-		exc, err := FilterTools(fixture(), nil, ExcludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(exc)).NotTo(ContainElement("server_run"))
-	})
-
-	It("Should keep everything but ai:deny when the filter is nil", func() {
-		tools, err := FilterTools(fixture(), nil, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_user_add", "auth_login", "server_info"))
-	})
-
-	It("Should include only tools whose name matches a name pattern", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tools: []string{"^auth"}}, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_user_add", "auth_login"))
-	})
-
-	It("Should exclude tools whose name matches a name pattern", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tools: []string{"^auth"}}, ExcludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("server_info"))
-	})
-
-	It("Should match the underscore-joined tool name, not the space-joined command", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tools: []string{"auth_user"}}, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_user_add"))
-
-		// the space-joined command form must not match
-		none, err := FilterTools(fixture(), &config.ToolFilter{Tools: []string{"auth user"}}, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(none).To(BeEmpty())
-	})
-
-	It("Should include tools matching a tag", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tags: []string{"admin"}}, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_user_add"))
-	})
-
-	It("Should exclude tools matching a tag", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tags: []string{"admin"}}, ExcludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_login", "server_info"))
-	})
-
-	It("Should treat an empty tag as matching untagged tools", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tags: []string{""}}, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_login", "server_info"))
-	})
-
-	It("Should never include an ai:deny tool even when it matches an include pattern", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tools: []string{"^server"}}, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("server_info"))
-		Expect(names(tools)).NotTo(ContainElement("server_run"))
+		})
+		Expect(names(tools)).To(Equal([]string{"auth_user_add", "auth_login", "server_info"}))
 	})
 
 	It("Should let ai:deny win over ai:confirm so a doubly-tagged tool is never exposed", func() {
 		both := []*CommandTool{{Path: []string{"server", "wipe"}, Model: &fisk.CmdModel{Tags: []string{denyTag, confirmTag}}}}
-		tools, err := FilterTools(both, nil, IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(tools).To(BeEmpty())
-	})
-
-	It("Should return an error for an invalid name pattern", func() {
-		tools, err := FilterTools(fixture(), &config.ToolFilter{Tools: []string{"("}}, IncludeFilter)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("invalid tool filter pattern"))
-		Expect(tools).To(BeNil())
-	})
-})
-
-var _ = Describe("filterExposed", func() {
-	// fixture mirrors the FilterTools fixture; filterExposed runs after LoadTools,
-	// which has already stripped ai:deny, but the deny tool is kept here to assert
-	// the narrowing can never re-add one.
-	fixture := func() []*CommandTool {
-		return []*CommandTool{
-			{Path: []string{"auth", "user", "add"}, Model: &fisk.CmdModel{Tags: []string{"admin"}}},
-			{Path: []string{"auth", "login"}, Model: &fisk.CmdModel{}},
-			{Path: []string{"server", "run"}, Model: &fisk.CmdModel{Tags: []string{denyTag}}},
-			{Path: []string{"server", "info"}, Model: &fisk.CmdModel{}},
-		}
-	}
-
-	It("Should serve the set unchanged when the selection is nil", func() {
-		// A nil selection does no narrowing; stripping ai:deny is LoadTools' job, so
-		// filterExposed returns its input verbatim.
-		tools, err := filterExposed(fixture(), nil)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_user_add", "auth_login", "server_run", "server_info"))
-	})
-
-	It("Should ignore include and exclude that carry no patterns or tags", func() {
-		sel := &config.ExposedToolSelection{Include: &config.ToolFilter{}, Exclude: &config.ToolFilter{}}
-		tools, err := filterExposed(fixture(), sel)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_user_add", "auth_login", "server_run", "server_info"))
-	})
-
-	It("Should narrow to the include and drop ai:deny even when it matches", func() {
-		sel := &config.ExposedToolSelection{Include: &config.ToolFilter{Tools: []string{"^server"}}}
-		tools, err := filterExposed(fixture(), sel)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("server_info"))
-	})
-
-	It("Should drop tools matched by the exclude", func() {
-		sel := &config.ExposedToolSelection{Exclude: &config.ToolFilter{Tools: []string{"^auth"}}}
-		tools, err := filterExposed(fixture(), sel)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("server_info"))
-	})
-
-	It("Should apply the include then the exclude", func() {
-		sel := &config.ExposedToolSelection{
-			Include: &config.ToolFilter{Tools: []string{"^auth"}},
-			Exclude: &config.ToolFilter{Tags: []string{"admin"}},
-		}
-		tools, err := filterExposed(fixture(), sel)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(tools)).To(ConsistOf("auth_login"))
-	})
-
-	It("Should return an error for an invalid include pattern", func() {
-		sel := &config.ExposedToolSelection{Include: &config.ToolFilter{Tools: []string{"("}}}
-		tools, err := filterExposed(fixture(), sel)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("invalid tool filter pattern"))
-		Expect(tools).To(BeNil())
+		Expect(stripDenied(both)).To(BeEmpty())
 	})
 })
 

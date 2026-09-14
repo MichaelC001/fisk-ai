@@ -169,10 +169,13 @@ type Config struct {
 	// single-skill agent where this is the skill. Optional if MCP.
 	SystemPrompt string `json:"system_prompt" yaml:"system_prompt"`
 
-	// Exclude filters tools out. By default the entire command becomes tools
-	// (regex matching); this lets you take `nats` and only expose `nats auth`.
+	// Exclude filters tools of every kind out: commands, built-ins, remote and MCP
+	// imports and custom tools. By default the entire command becomes tools (regex
+	// matching); this lets you take `nats` and only expose `nats auth`.
 	Exclude *ToolFilter `json:"exclude,omitempty" yaml:"exclude,omitempty"`
-	// Include restricts tools to a specific set; it can never include `ai:deny`.
+	// Include restricts tools of every kind to a specific set; it can never include
+	// `ai:deny`. A tool of any kind that matches nothing in it is removed, so an
+	// include by tag alone removes every built-in and import, which carry no tags.
 	Include *ToolFilter `json:"include,omitempty" yaml:"include,omitempty"`
 	// GlobalFlags is an allowlist of the wrapped application's global (application-
 	// level) flag names to expose to the model as an argument on every leaf command
@@ -377,7 +380,8 @@ type HarnessConfig struct {
 	// Tools lists the built-in tools the harness implements itself, read_file and
 	// base64_encode, each off until an entry names it. An entry may gate the tool
 	// behind the operator's approval and may carry the tool's options. Both tools are
-	// served over MCP when also selected under expose.agent.mcp.builtins.
+	// served over MCP whenever they are enabled and include, exclude and
+	// expose.agent.tools leave them in.
 	Tools []HarnessToolConfig `json:"tools,omitempty" yaml:"tools,omitempty"`
 }
 
@@ -805,13 +809,14 @@ type PIIConfig struct {
 }
 
 // The built-in tools, by the names the model calls them by. An operator writes these
-// into harness.allow, harness.deny, harness.tools and expose.agent.mcp.builtins, a
-// run's transcript names them, and a program scripting a model provider in a test
-// sends them, so each name and its argument keys are a contract.
+// into harness.allow, harness.deny, harness.tools and the include, exclude and
+// expose.agent.tools filters, a run's transcript names them, and a program scripting
+// a model provider in a test sends them, so each name and its argument keys are a
+// contract.
 //
-// They are defined here, the lowest layer, so config validates an allowlist without
-// importing the package implementing the tools, which references these same constants
-// so the two never drift.
+// They are defined here, the lowest layer, so config validates a harness.tools entry
+// without importing the package implementing the tools, which references these same
+// constants so the two never drift.
 //
 // Each doc comment gives the argument keys the tool accepts. Every argument is a
 // top-level key of the tool_use input object, and the tools take no nested objects.
@@ -886,30 +891,6 @@ const (
 // size the harness has no say over. HarnessToolNames returns it so the builtin
 // package can check its constructor table against the same set.
 var harnessToolNames = []string{ReadFileToolName, Base64EncodeToolName}
-
-// mcpKnowledgeBuiltins are the knowledge tools an operator may name in
-// expose.agent.mcp.builtins. Selecting any of them opens the knowledge store, so
-// MCPExposesKnowledge asks about the group, and selecting one with knowledge off is
-// refused.
-//
-// knowledge_search and knowledge_enumerate are meant to be served together.
-// knowledge_search ranks and so cannot tell absence from a low score, which is the
-// question knowledge_enumerate answers; a client given only the first has the
-// defect the second exists to fix. knowledge_read answers a third question, what a
-// citation a client already holds says in full, and stands on its own. Each is
-// selectable on its own, because selection stays per tool and an operator who wants
-// one gets one.
-var mcpKnowledgeBuiltins = []string{KnowledgeSearchToolName, KnowledgeEnumerateToolName, KnowledgeReadToolName}
-
-// mcpExposableBuiltins are the built-in tools an operator may name in
-// expose.agent.mcp.builtins: the knowledge tools and the harness.tools built-ins.
-// Each needs neither an operator at a terminal nor state from an earlier run, which
-// is what the memory and ask_human_* built-ins cannot say. Membership here is only
-// the selection half: a tool must also declare MCP exposure on its own spec, so this
-// list can never widen what is servable. A knowledge name needs harness.knowledge
-// enabled and a harness.tools name needs its harness.tools entry, or there is
-// nothing to serve.
-var mcpExposableBuiltins = slices.Concat(mcpKnowledgeBuiltins, harnessToolNames)
 
 // HumanInTheLoopConfig configures the built-in human-in-the-loop tools, which let
 // the model ask the operator a question at the terminal during an agent run.
@@ -1120,17 +1101,20 @@ type AgentExpose struct {
 	// who narrows the served set is narrowing MCP and a2a only.
 	Jobs *ExposedJobsConfig `json:"jobs,omitempty" yaml:"jobs,omitempty"`
 	// Tools optionally narrows the served set, applied on top of the top-level
-	// include/exclude; it can only remove tools, never add them. When absent the
-	// whole top-level-selected set is served.
+	// include/exclude to every tool of every kind, the commands and the built-ins
+	// alike; it can only remove tools, never add them. When absent the whole
+	// top-level-selected set is served.
 	Tools *ExposedToolSelection `json:"tools,omitempty" yaml:"tools,omitempty"`
 }
 
 // ExposedToolSelection narrows the served tool set, on top of the top-level
-// include/exclude. Each filter is honored only when it carries patterns or tags.
+// include/exclude. Each filter is honored only when it carries patterns or tags, and
+// each matches every tool of every kind by its final name and, for a command, its
+// tags.
 type ExposedToolSelection struct {
 	// Exclude drops tools from the served set. By default the entire command
 	// becomes tools (regex matching); this lets you take `nats` and only serve
-	// `nats auth`.
+	// `nats auth`, or drop a built-in the surface would otherwise serve.
 	Exclude *ToolFilter `json:"exclude,omitempty" yaml:"exclude,omitempty"`
 	// Include restricts the served set to a specific subset; it can never re-add an
 	// `ai:deny` tool or one the top-level filters already removed.
@@ -1158,14 +1142,6 @@ type ExposedMCPConfig struct {
 	// be asked, and "never" never asks and runs it ungated, delegating approval to
 	// the client's own UI.
 	ConfirmOverMCP string `json:"confirm_over_mcp,omitempty" yaml:"confirm_over_mcp,omitempty"`
-	// Builtins additionally exposes the agent's built-in tools (currently only
-	// knowledge_search) over MCP. The agent's wrapped CLI tools are always exposed;
-	// the built-ins are off by default and must be listed here because they are
-	// otherwise agent-run-only. Only the read-only knowledge_search is exposable;
-	// the memory and human_in_the_loop built-ins are never exposable and listing one
-	// is a config error. Any client that can reach the port can then query the
-	// knowledge base, so this is an explicit, security-relevant opt-in.
-	Builtins []string `json:"builtins,omitempty" yaml:"builtins,omitempty"`
 	// MaxConcurrentTools bounds how many tool calls the MCP server runs at once, since
 	// an MCP client has no iteration budget. It is per-server on purpose: MCP bounds
 	// calls from anything that reaches the TCP port (address may be 0.0.0.0), a wider
@@ -1869,13 +1845,16 @@ func ParseMCPServerURL(value string) (*url.URL, error) {
 }
 
 // ToolFilter is a generic filter selecting tools by name or tag. It is used at
-// several levels: top-level include/exclude, per remote tool host, and when
-// exposing tools.
+// several levels: top-level include/exclude, per remote tool host, per MCP server,
+// and when exposing tools. A tool matches when any pattern matches its final name,
+// which for an import prefixed with its alias is "alias_tool", or any tag is among
+// its tags.
 type ToolFilter struct {
 	// Tools is an explicit list of tool names, regex matched.
 	Tools []string `json:"tools,omitempty" yaml:"tools,omitempty"`
 	// Tags matches tools by tag. `ai:deny` is always active and can never be
-	// included; "" matches untagged commands.
+	// included; "" matches a tool with no tags, which is every untagged command and
+	// every built-in, import and custom tool.
 	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 }
 
@@ -2532,7 +2511,7 @@ func (c *Config) RAGCitationRules() []RAGCitationRule {
 // limit of a name-based scrub rather than a claim that the mTLS case is closed.
 //
 // internal/telemetry lists the four headers names again for two startup checks. The
-// duplication is deliberate and matches mcpExposableBuiltins above: config is the
+// duplication is deliberate and matches harnessToolNames above: config is the
 // lowest layer and imports nothing from the tree. A spec asserts this list is a
 // superset of that one, so the two cannot drift apart unnoticed.
 var otlpCredentialEnvNames = []string{
@@ -3070,34 +3049,6 @@ func (c *Config) WebOrigins() []string {
 	return c.Expose.Agent.Web.Origins
 }
 
-// MCPBuiltins returns the built-in tools opted in to MCP exposure via
-// expose.agent.mcp.builtins, normalized and validated by Prepare. It is nil when
-// none are set.
-func (c *Config) MCPBuiltins() []string {
-	if c.Expose == nil || c.Expose.Agent == nil || c.Expose.Agent.MCP == nil {
-		return nil
-	}
-
-	return c.Expose.Agent.MCP.Builtins
-}
-
-// MCPExposesKnowledge reports whether any read-only knowledge built-in is
-// allowlisted for MCP exposure. It is the gate mcp_command uses to decide whether
-// to open the knowledge store, so it asks about the whole group rather than one
-// name: an operator who allowlisted only knowledge_enumerate still needs the store
-// opened, and gating on knowledge_search alone would serve them nothing. A
-// harness.tools built-in selected on its own leaves it false, since neither opens
-// the store.
-func (c *Config) MCPExposesKnowledge() bool {
-	for _, name := range mcpKnowledgeBuiltins {
-		if slices.Contains(c.MCPBuiltins(), name) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // Prepare fills in default budgets, derives Identity, normalizes the tag, flag and
 // built-in lists, parses every duration string into its Parsed field and compiles
 // every citation rule's Pattern into PatternCompiled.
@@ -3133,8 +3084,6 @@ func (c *Config) Prepare() error {
 	c.Harness.ConfirmTags = normalizeTags(c.Harness.ConfirmTags)
 	c.GlobalFlags = normalizeGlobalFlags(c.GlobalFlags)
 
-	// Before the MCP builtins, which check a selected harness.tools name against the
-	// trimmed entries.
 	tools, err := normalizeHarnessTools(c.Harness.Tools)
 	if err != nil {
 		return err
@@ -3161,12 +3110,6 @@ func (c *Config) Prepare() error {
 			return err
 		}
 		c.Expose.Agent.MCP.ConfirmOverMCP = mode
-
-		builtins, err := c.normalizeMCPBuiltins(c.Expose.Agent.MCP.Builtins)
-		if err != nil {
-			return err
-		}
-		c.Expose.Agent.MCP.Builtins = builtins
 
 		d, err := prepareServerToolLimits("expose.agent.mcp", c.Expose.Agent.MCP.MaxConcurrentTools, c.Expose.Agent.MCP.ToolTimeoutString)
 		if err != nil {
@@ -3478,61 +3421,6 @@ func normalizePIIMode(v string) (string, error) {
 	}
 }
 
-// normalizeMCPBuiltins trims and de-duplicates the expose.agent.mcp.builtins
-// allowlist and validates every entry against the names an operator may select.
-//
-// This is the SELECTION half of MCP exposure: which of the servable built-ins this
-// operator wants served. The CAPABILITY half, whether a tool may ever be served at
-// all, is declared on the tool itself and applied by the serving endpoint, which can
-// only narrow this list further and never widen it. Both gates apply, so a tool
-// added to a built-in set is not served on the strength of a neighbour's selection.
-// The duplication is deliberate: config is the lowest layer and cannot import the
-// tools it names, so this list is maintained here and every entry must also declare
-// MCP exposure on its Spec, or no operator can ever select it.
-//
-// A knowledge name selected with knowledge disabled is rejected, and so is a
-// harness.tools name selected without its harness.tools entry, since in either case
-// there would be nothing to serve.
-func (c *Config) normalizeMCPBuiltins(names []string) ([]string, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
-
-	seen := make(map[string]bool, len(names))
-	out := make([]string, 0, len(names))
-	var knowledge []string
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		if !slices.Contains(mcpExposableBuiltins, name) {
-			return nil, fmt.Errorf("expose.agent.mcp.builtins: %q is not an accepted built-in name; accepted: %s. The memory and ask_human_* built-ins are not offered over MCP because they need operator state or an operator at a terminal, and an MCP client is neither", name, strings.Join(mcpExposableBuiltins, ", "))
-		}
-		if slices.Contains(harnessToolNames, name) && !c.harnessToolListed(name) {
-			return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but harness.tools does not enable it; add a harness.tools entry with 'name: %s' or remove it from builtins", name, name)
-		}
-		if slices.Contains(mcpKnowledgeBuiltins, name) {
-			knowledge = append(knowledge, name)
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-
-	if len(knowledge) > 0 && !c.RAGEnabled() {
-		return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but knowledge is not enabled; add a harness.knowledge block with 'enabled: true' or remove them from builtins", strings.Join(knowledge, ", "))
-	}
-
-	// knowledge_read has a second gate of its own, so an allowlist entry for it with
-	// that key unset selects a tool nothing builds and the operator is served two
-	// tools where they asked for three.
-	if slices.Contains(out, KnowledgeReadToolName) && !c.RAGReadToolEnabled() {
-		return nil, fmt.Errorf("expose.agent.mcp.builtins lists %s but harness.knowledge.read_tool is not set; add 'read_tool: true' to harness.knowledge or remove it from builtins", KnowledgeReadToolName)
-	}
-
-	return out, nil
-}
-
 // normalizeHarnessTools trims each harness.tools name and refuses an empty one, a
 // name outside harnessToolNames and a name listed twice. Each entry's Options block
 // is left as the tool's constructor decodes it, since this package cannot import the
@@ -3560,33 +3448,6 @@ func normalizeHarnessTools(tools []HarnessToolConfig) ([]HarnessToolConfig, erro
 	}
 
 	return out, nil
-}
-
-// harnessToolListed reports whether an entry under harness.tools names the tool. It
-// reads the entries as Prepare trimmed them.
-func (c *Config) harnessToolListed(name string) bool {
-	for _, tool := range c.Harness.Tools {
-		if tool.Name == name {
-			return true
-		}
-	}
-
-	return false
-}
-
-// AppToolFiltersConfigured reports whether the top-level include or exclude tool
-// filters carry any patterns or tags. They only ever narrow the wrapped
-// application's tools, so with no application_path they match nothing; callers use
-// this to warn rather than silently ignore an operator's filter.
-func (c *Config) AppToolFiltersConfigured() bool {
-	if c.Include != nil && (len(c.Include.Tools) > 0 || len(c.Include.Tags) > 0) {
-		return true
-	}
-	if c.Exclude != nil && (len(c.Exclude.Tools) > 0 || len(c.Exclude.Tags) > 0) {
-		return true
-	}
-
-	return false
 }
 
 // GlobalFlagNames returns the configured allowlist of application global flag

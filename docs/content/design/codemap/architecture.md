@@ -60,9 +60,9 @@ Because `telemetry` cannot see the rest of the tree, its constructors take primi
 | Concern | Enforced by |
 |---|---|
 | Which tools exist | The flat namespace built at run start; collisions abort |
-| Which tools the model may see | Config include and exclude, after `ai:deny` is stripped unconditionally |
+| Which tools the model may see | Config include and exclude over every kind, after `ai:deny` is stripped unconditionally |
 | Which tools need a human | The confirm gate, on the union of the original and rewritten call |
-| Which tools reach a peer | The exposure methods on the interface, plus a per-surface allowlist |
+| Which tools reach a peer | The exposure methods on the interface, plus `expose.agent.tools` on top of include and exclude |
 | Whether a conversation may continue | The run fingerprint, split into hard, blocking, tools and budget classes |
 | What may leave the process on a span | Closed vocabularies and constructors that own their own attribute sets |
 

@@ -373,6 +373,53 @@ var _ = Describe("an MCP server that changes its tools mid-run", func() {
 		Expect(changed[0].Params[0]).To(ContainSubstring(`skipped status: the name "docs_status" is already taken`))
 	})
 
+	// The rebuild applies the run's filters to the server's new list, so a tool
+	// exclude.tools removed at startup stays out when the server re-lists it beside a
+	// tool it added, and the run reports only the addition.
+	It("Should keep an excluded tool out after a list change", func() {
+		fake := &mcpFakeServers{tools: []*mcp.Tool{
+			mcpDescriptor("search", "Searches the documentation"),
+			mcpDescriptor("delete", "Deletes a document"),
+		}}
+		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", WatchTools: true})
+
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
+		cfg.Exclude = &config.ToolFilter{Tools: []string{"^docs_delete$"}}
+
+		provider := newMCPStepProvider(GinkgoTB(),
+			mcpStep{
+				before: func() {
+					mcpAfterRebuild(GinkgoTB(), sessions, func() { mcpAddTool(GinkgoTB(), fake, "docs", "fetch") })
+				},
+				response: agenttest.ToolUseResponse("call-1", "docs_search", json.RawMessage(`{}`)),
+			},
+			mcpStep{response: agenttest.TextResponse("done")},
+		)
+		events := agenttest.NewRecordingEvents()
+
+		res, err := agent.Run(context.Background(), agent.Options{
+			Config:      cfg,
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"search the docs"},
+			Provider:    provider,
+			MCPSessions: sessions,
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+
+		requests := provider.Requests()
+		Expect(requests).To(HaveLen(2))
+		Expect(toolNames(requests[0])).To(ContainElement("docs_search"))
+		Expect(toolNames(requests[0])).NotTo(ContainElement("docs_delete"))
+		Expect(toolNames(requests[1])).To(ContainElement("docs_fetch"))
+		Expect(toolNames(requests[1])).NotTo(ContainElement("docs_delete"))
+
+		changed := mcpChangedWarnings(events)
+		Expect(changed).To(HaveLen(1))
+		Expect(changed[0].Params).To(ConsistOf("added docs_fetch"))
+	})
+
 	// This pins the ordinary run: a server that never says anything is listed once,
 	// offers the model the same tools on every call, and raises nothing.
 	It("Should run as before for a server that says nothing", func() {

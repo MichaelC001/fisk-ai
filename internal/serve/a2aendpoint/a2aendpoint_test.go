@@ -23,6 +23,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	natstransport "github.com/choria-io/fisk-ai/internal/a2a/nats"
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -194,13 +195,14 @@ var _ = Describe("A2A endpoint", func() {
 			Expect(svc.ExposedTools()).To(ConsistOf("backup", "restore"))
 			Expect(svc.Heading()).To(Equal("Serving tools over a2a"))
 			Expect(svc.Describe()).To(HaveLen(4))
-			Expect(svc.WithheldBuiltins()).To(BeEmpty(), "this configuration enables no built-in")
+			Expect(svc.Withheld()).To(BeEmpty(), "this configuration enables no built-in")
 		})
 
-		// No built-in declares a2a exposure, so every enabled family is withheld and the
-		// served set is the application's commands.
-		It("Should serve the commands and withhold every enabled built-in", func() {
-			cfg := toolsConfig("harness:\n  human_in_the_loop:\n    enabled: true\n  memory:\n    enabled: true\n  knowledge:\n    enabled: true\n  tools:\n    - name: read_file\n    - name: base64_encode\n")
+		// No built-in declares a2a exposure, so every enabled family is withheld with
+		// that reason, whatever the filters say, and the served set is the application's
+		// commands.
+		It("Should serve the commands and withhold every enabled built-in with its reason", func() {
+			cfg := toolsConfig("harness:\n  human_in_the_loop:\n    enabled: true\n  memory:\n    enabled: true\n  knowledge:\n    enabled: true\n  tools:\n    - name: read_file\n    - name: base64_encode\nexclude:\n  tools:\n    - ^memory_\n")
 
 			built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
 			Expect(err).ToNot(HaveOccurred())
@@ -208,12 +210,21 @@ var _ = Describe("A2A endpoint", func() {
 
 			svc := serviceOf(built)
 			Expect(svc.ExposedTools()).To(Equal([]string{"backup", "restore"}))
-			Expect(svc.WithheldBuiltins()).To(Equal([]string{
+
+			var names, reasons []string
+			for _, held := range svc.Withheld() {
+				names = append(names, held.Tool)
+				reasons = append(reasons, held.Reason)
+			}
+			Expect(names).To(Equal([]string{
 				"ask_human_confirm", "ask_human_select", "ask_human_input",
 				"memory_list", "memory_read", "memory_write", "memory_delete",
 				"knowledge_search", "knowledge_enumerate",
 				"read_file", "base64_encode",
 			}))
+			for _, reason := range reasons {
+				Expect(reason).To(Equal(agent.WithheldAgentOnly))
+			}
 		})
 
 		// A configuration that sets neither leaves the a2a server to its own defaults, so

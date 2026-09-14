@@ -47,17 +47,13 @@ var _ = Describe("knowledge_read tool", func() {
 		Expect(names).To(ConsistOf(knowledgeSearchName, knowledgeEnumerateName, knowledgeReadName))
 	})
 
-	It("declares MCP exposure, not a2a, and is nameable in config", func() {
+	It("declares MCP exposure, not a2a, and is named by a config constant", func() {
 		cfg := knowledge("", true)
 		tool := ragToolNamed(RAGTools(cfg, nil), knowledgeReadName)
 
 		Expect(tool.MCPExposable()).To(BeTrue())
 		Expect(tool.A2AExposable()).To(BeFalse())
-
-		exposed := knowledge("", true)
-		exposed.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Port: 8080, Builtins: []string{knowledgeReadName}}}}
-		Expect(exposed.Prepare()).To(Succeed())
-		Expect(exposed.MCPBuiltins()).To(ContainElement(knowledgeReadName))
+		Expect(tool.Name()).To(Equal(config.KnowledgeReadToolName))
 	})
 
 	It("returns an error when invoked with a nil store", func() {
@@ -75,9 +71,9 @@ var _ = Describe("knowledge_read tool", func() {
 	// an agent with no file reader nowhere to go for the rest of a document. The note
 	// names this tool only where the operator turned it on.
 	It("is offered in the system note only when it is enabled", func() {
-		Expect(RAGSystemNote(knowledge("", false))).ToNot(ContainSubstring(knowledgeReadName))
+		Expect(RAGSystemNote([]string{knowledgeSearchName, knowledgeEnumerateName})).ToNot(ContainSubstring(knowledgeReadName))
 
-		note := RAGSystemNote(knowledge("", true))
+		note := RAGSystemNote([]string{knowledgeSearchName, knowledgeEnumerateName, knowledgeReadName})
 		Expect(note).To(ContainSubstring("rather than fetching it"))
 		Expect(note).To(ContainSubstring("call knowledge_read with a result's index_ref"))
 		Expect(note).To(ContainSubstring("before and after arguments"))

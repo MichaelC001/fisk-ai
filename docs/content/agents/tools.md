@@ -79,6 +79,12 @@ exclude:
 
 This excludes any command that has the `scope:system` tag.
 
+The filters cover every tool the agent gets, not only the application's commands: a [built-in](#built-in-tools) is
+matched by its name, such as `memory_write`, and a tool imported from a [remote agent](../remote/) or an
+[MCP server](../mcp-client/) by its final name, which is `alias_tool` when the importer prefixed it. Only a command
+carries tags, so an `include` that lists tags alone removes every built-in and import; a pattern beside the tags names
+one back.
+
 ## Built-in tools
 
 Fisk has a set of built-in tools that are enabled under `harness.tools`:
@@ -122,8 +128,10 @@ options.
 
 ### Serving
 
-Both tools can be listed under `expose.agent.mcp.builtins`. [Confirmation over MCP](../../mcp/#confirmation-over-mcp)
-describes how `confirm: true` behaves with MCP clients. Neither tool is served over a2a.
+Both tools are served over [MCP](../../mcp/) whenever `harness.tools` lists them and the `include`, `exclude` and
+`expose.agent.tools` filters leave them in; `exclude: {tools: [^read_file$]}` under `expose.agent.tools` serves
+`base64_encode` alone. [Confirmation over MCP](../../mcp/#confirmation-over-mcp) describes how `confirm: true` behaves
+with MCP clients. Neither tool is served over a2a.
 
 ## Global flags
 

@@ -44,7 +44,7 @@ var _ = Describe("knowledge_search tool", func() {
 
 	It("returns no tools when RAG is disabled", func() {
 		Expect(RAGTools(disabled, nil)).To(BeNil())
-		Expect(RAGSystemNote(disabled)).To(Equal(""))
+		Expect(RAGSystemNote(nil)).To(Equal(""))
 	})
 
 	// The agent path has no allowlist: internal/agent takes everything RAGTools
@@ -73,7 +73,7 @@ var _ = Describe("knowledge_search tool", func() {
 	// fetch in front of it, which a relative path never was, so the note has to say
 	// what the URL is for.
 	It("tells the model a citation that reads as a URL is still a citation", func() {
-		note := RAGSystemNote(enabled(""))
+		note := RAGSystemNote([]string{knowledgeSearchName, knowledgeEnumerateName})
 		Expect(note).To(ContainSubstring("citation rules render a citation as a URL"))
 		Expect(note).To(ContainSubstring("rather than fetching it"))
 	})
@@ -83,7 +83,7 @@ var _ = Describe("knowledge_search tool", func() {
 	// the whole document is a web fetch. Fisk ships no file reader, so the note offers
 	// the path to a tool the model may have rather than naming one it does not.
 	It("tells the model to read a document at the path a result carries", func() {
-		note := RAGSystemNote(enabled(""))
+		note := RAGSystemNote([]string{knowledgeSearchName, knowledgeEnumerateName})
 		Expect(note).To(ContainSubstring("Each result carries a path"))
 		Expect(note).To(ContainSubstring("where you have a tool that reads files, give it that path"))
 		Expect(note).To(ContainSubstring("take the content from the document's path"))

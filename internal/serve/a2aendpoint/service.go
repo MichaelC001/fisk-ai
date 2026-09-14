@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/serve"
 )
 
@@ -29,7 +30,7 @@ type Service struct {
 	srv      *a2a.Server
 	held     *sharedTransport
 	exposed  []string
-	withheld []string
+	withheld []agent.Withheld
 	describe []serve.DescLine
 }
 
@@ -52,7 +53,7 @@ func newService(held *sharedTransport, opts Options) (*Service, error) {
 
 	svc := &Service{
 		held:     held,
-		withheld: opts.Tools.WithheldBuiltins,
+		withheld: opts.Tools.Withheld,
 		describe: describeService(transportLines(held.transport, opts.Identity), concurrency, callTimeout),
 	}
 
@@ -110,11 +111,12 @@ func (s *Service) Faults() <-chan error { return s.held.faults.Faults() }
 // so a caller that sorts or truncates the answer leaves the service's own set alone.
 func (s *Service) ExposedTools() []string { return slices.Clone(s.exposed) }
 
-// WithheldBuiltins names the built-in tools the program enabled that are not served,
-// which is all of them: no built-in declares a2a exposure. An operator who enabled some
-// would otherwise see a served set that silently excludes them. The list arrives on
-// ToolOptions.WithheldBuiltins, and this answers with a copy of it.
-func (s *Service) WithheldBuiltins() []string { return slices.Clone(s.withheld) }
+// Withheld names the built-in tools the program enabled that are not served, each with
+// the reason: no built-in declares a2a exposure today, and a filter can remove one
+// that did. An operator who enabled some would otherwise see a served set that
+// silently excludes them. The list arrives on ToolOptions.Withheld, and this answers
+// with a copy of it.
+func (s *Service) Withheld() []agent.Withheld { return slices.Clone(s.withheld) }
 
 // Heading names this endpoint on a startup banner. The prompt channel under the same
 // identity prints a section of its own.

@@ -45,11 +45,17 @@ var _ = Describe("mcp served tools", func() {
 		cfg = agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), infoApp()))
 	})
 
-	// exposeKnowledge enables knowledge on a fresh index directory and lists the
-	// given tools in expose.agent.mcp.builtins.
-	exposeKnowledge := func(builtins ...string) {
+	// enableKnowledge enables knowledge on a fresh index directory.
+	enableKnowledge := func() {
 		cfg.Harness.RAG = &config.RAGConfig{Enabled: true, Directory: GinkgoT().TempDir()}
-		cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: builtins}}}
+	}
+
+	// exposeExcluding sets expose.agent.tools to exclude the given names.
+	exposeExcluding := func(names ...string) {
+		cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{
+			MCP:   &config.ExposedMCPConfig{},
+			Tools: &config.ExposedToolSelection{Exclude: &config.ToolFilter{Tools: names}},
+		}}
 	}
 
 	// served assembles the set as the command does and closes the store after the spec.
@@ -74,15 +80,17 @@ var _ = Describe("mcp served tools", func() {
 
 	renderNotes := func(asm *agent.Assembly) string {
 		var buf bytes.Buffer
-		printMCPNotes(&buf, cfg, asm)
+		printMCPNotes(&buf, asm)
 
 		return buf.String()
 	}
 
-	It("Should serve the listed knowledge tools and no other built-in", func() {
+	// Knowledge enabled is the whole opt-in: the store is opened and both knowledge
+	// tools are served with no allowlist step.
+	It("Should serve the knowledge tools on harness.knowledge alone and no other built-in", func() {
 		cfg.Harness.HumanInTheLoop = &config.HumanInTheLoopConfig{Enabled: true}
 		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
-		exposeKnowledge(config.KnowledgeSearchToolName, config.KnowledgeEnumerateToolName)
+		enableKnowledge()
 
 		asm := served()
 		Expect(servedNames(asm)).To(Equal([]string{"backup", "status", "knowledge_search", "knowledge_enumerate"}))
@@ -95,39 +103,42 @@ var _ = Describe("mcp served tools", func() {
 		Expect(out).To(Equal("note: 7 built-in tool(s) this config enables are not served over MCP: ask_human_confirm, ask_human_select, ask_human_input, memory_list, memory_read, memory_write, memory_delete. They need operator state or an operator at a terminal, so they are reachable only in an agent run\n"))
 	})
 
-	It("Should open no store and note that knowledge is not exposed", func() {
-		cfg.Harness.RAG = &config.RAGConfig{Enabled: true, Directory: GinkgoT().TempDir()}
-
+	It("Should open no store with knowledge off", func() {
 		asm := served()
 		Expect(servedNames(asm)).To(Equal([]string{"backup", "status"}))
 		Expect(notes.String()).To(BeEmpty())
-
-		Expect(renderNotes(asm)).To(Equal("note: knowledge is enabled but not exposed over MCP; add knowledge_search and knowledge_enumerate to expose.agent.mcp.builtins to let MCP clients search your knowledge base\n"))
+		Expect(renderNotes(asm)).To(BeEmpty())
 	})
 
-	It("Should note the missing half of the knowledge set", func() {
-		exposeKnowledge(config.KnowledgeSearchToolName)
+	It("Should note the missing half of a knowledge set the filters split", func() {
+		enableKnowledge()
+		exposeExcluding("^knowledge_enumerate$")
 
 		asm := served()
 		Expect(servedNames(asm)).To(Equal([]string{"backup", "status", "knowledge_search"}))
+		Expect(asm.Withheld).To(Equal([]agent.Withheld{{Tool: "knowledge_enumerate", Reason: agent.WithheldFiltered}}))
 
-		out := renderNotes(asm)
-		Expect(out).ToNot(ContainSubstring("knowledge is enabled but not exposed"))
-		Expect(out).To(Equal("note: knowledge_search is exposed but knowledge_enumerate is not; clients can rank results but cannot tell an absent term from a low-scoring one. Add knowledge_enumerate to expose.agent.mcp.builtins to serve both\n"))
+		Expect(renderNotes(asm)).To(Equal("note: 1 built-in tool(s) this config enables are not served over MCP: knowledge_enumerate. They are excluded by include, exclude or expose.agent.tools\n" +
+			"note: knowledge_search is served but knowledge_enumerate is not; clients can rank results but cannot tell an absent term from a low-scoring one. Let knowledge_enumerate through include, exclude and expose.agent.tools to serve both\n"))
 	})
 
-	It("Should serve the listed harness tool and withhold the unlisted one", func() {
+	It("Should serve every enabled harness tool and withhold the one a filter excludes", func() {
 		cfg.Harness.Tools = []config.HarnessToolConfig{
 			{Name: config.ReadFileToolName, Confirm: true},
 			{Name: config.Base64EncodeToolName},
 		}
-		cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: []string{config.Base64EncodeToolName}}}}
 
 		asm := served()
+		Expect(servedNames(asm)).To(Equal([]string{"backup", "status", "read_file", "base64_encode"}))
+		Expect(asm.Withheld).To(BeEmpty())
+
+		exposeExcluding("^read_file$")
+
+		asm = served()
 		Expect(servedNames(asm)).To(Equal([]string{"backup", "status", "base64_encode"}))
-		Expect(asm.Withheld).To(Equal([]agent.Withheld{{Tool: "read_file", Reason: agent.WithheldNotListed}}))
+		Expect(asm.Withheld).To(Equal([]agent.Withheld{{Tool: "read_file", Reason: agent.WithheldFiltered}}))
 		Expect(notes.String()).To(BeEmpty())
-		Expect(renderNotes(asm)).To(BeEmpty())
+		Expect(renderNotes(asm)).To(Equal("note: 1 built-in tool(s) this config enables are not served over MCP: read_file. They are excluded by include, exclude or expose.agent.tools\n"))
 	})
 
 	It("Should serve a command named after a withheld memory built-in", func() {

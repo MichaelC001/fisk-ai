@@ -343,6 +343,133 @@ var _ = Describe("Assemble", func() {
 		Expect(err).To(MatchError(`custom tool at index 0 ("docs_search") collides with a tool of the same name imported from an mcp server; a custom tool may not shadow it`))
 	})
 
+	// The filters apply to every kind by its final name, so one exclude list reaches
+	// a command, a built-in, a remote import, an MCP import and a custom tool alike.
+	Describe("the filters", func() {
+		// taggedApp is an application with one tagged and one untagged command.
+		taggedApp := func() *fisk.Application {
+			app := fisk.New("app", "an app")
+			app.Command("do", "do a thing")
+			app.Command("status", "show the status").Tag("ai:read_only")
+
+			return app
+		}
+
+		It("Should remove a tool of every kind by exclude.tools", func() {
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation"), mcpDescriptor("lookup", "Looks a page up")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), taggedApp()), agenttest.WithMemory())
+			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
+			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
+			cfg.Exclude = &config.ToolFilter{Tools: []string{"^status$", "^memory_write$", "^memory_delete$", "^forecast$", "^docs_lookup$", "^zeta$"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{
+				Remote: remoteClient("forecast", "weather"),
+				MCP:    []*mcpclient.Sessions{sessions},
+				Custom: []toolkit.Tool{plainCustomTool("zeta"), plainCustomTool("alpha")},
+			}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(assembledNames(a)).To(Equal([]string{"do", "memory_list", "memory_read", "weather", "docs_search", "alpha"}))
+			Expect(a.Withheld).To(BeEmpty(), "a run records no withheld tool")
+
+			Expect(a.Remote).To(HaveLen(1))
+			Expect(partNames(toolkit.Tools(a.Remote[0].Tools))).To(Equal([]string{"weather"}))
+			Expect(a.MCP).To(HaveLen(1))
+			Expect(partNames(toolkit.Tools(a.MCP[0].Tools))).To(Equal([]string{"docs_search"}))
+		})
+
+		It("Should keep only what include.tools names across every kind", func() {
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation"), mcpDescriptor("lookup", "Looks a page up")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), taggedApp()), agenttest.WithHITL(), agenttest.WithMemory())
+			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
+			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
+			cfg.Include = &config.ToolFilter{Tools: []string{"^status$", "^memory_read$", "^forecast$", "^docs_lookup$", "^alpha$"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{
+				Remote: remoteClient("forecast", "weather"),
+				MCP:    []*mcpclient.Sessions{sessions},
+				Custom: []toolkit.Tool{plainCustomTool("zeta"), plainCustomTool("alpha")},
+			}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(assembledNames(a)).To(Equal([]string{"status", "memory_read", "forecast", "docs_lookup", "alpha"}))
+			Expect(a.Counts()).To(Equal(telemetry.ToolCounts{Application: 1, Builtin: 1, Remote: 1, MCP: 1, Custom: 1}))
+		})
+
+		// A built-in and an import carry no tags, so an include by tag alone removes
+		// them along with the untagged commands.
+		It("Should remove every tool without tags under an include by tag", func() {
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), taggedApp()), agenttest.WithMemory())
+			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
+			cfg.Include = &config.ToolFilter{Tags: []string{"ai:read_only"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{
+				Remote: remoteClient("forecast"),
+				Custom: []toolkit.Tool{plainCustomTool("alpha")},
+			}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(assembledNames(a)).To(Equal([]string{"status"}))
+		})
+
+		It("Should name a built-in back beside an include by tag with a pattern", func() {
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), taggedApp()), agenttest.WithMemory())
+			cfg.Include = &config.ToolFilter{Tools: []string{"^memory_list$"}, Tags: []string{"ai:read_only"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(assembledNames(a)).To(Equal([]string{"status", "memory_list"}))
+		})
+
+		// A command a tag filter removed claims no name, so a peer's tool of the same
+		// name, which carries no tag, is imported bare rather than prefixed.
+		It("Should leave a filtered command's name unclaimed", func() {
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), taggedApp()))
+			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
+			cfg.Exclude = &config.ToolFilter{Tags: []string{"ai:read_only"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{Remote: remoteClient("status")}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(assembledNames(a)).To(Equal([]string{"do", "status"}))
+			Expect(a.Tools[1].Kind).To(Equal(toolkit.KindRemote))
+		})
+
+		// The MCP importer reads the remote map for the names it may not take, so a
+		// filtered remote tool does not prefix an MCP tool; an MCP tool is always prefixed
+		// with its alias, so the check is on the custom side of the same map.
+		It("Should match an import by its prefixed name", func() {
+			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
+			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs", Alias: "d"})
+
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+			cfg.MCPClients = []config.MCPServer{{Name: "docs", Alias: "d"}}
+			cfg.Exclude = &config.ToolFilter{Tools: []string{"^search$"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{MCP: []*mcpclient.Sessions{sessions}}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(assembledNames(a)).To(Equal([]string{"do", "d_search"}), "the bare name matches nothing")
+
+			cfg.Exclude = &config.ToolFilter{Tools: []string{"^d_search$"}}
+			a, err = agent.Assemble(ctx, cfg, agent.Sources{MCP: []*mcpclient.Sessions{sessions}}, agent.SurfaceRun, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(assembledNames(a)).To(Equal([]string{"do"}))
+		})
+
+		It("Should refuse a pattern that does not compile, naming the filter", func() {
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+			cfg.Exclude = &config.ToolFilter{Tools: []string{"("}}
+
+			_, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceRun, agent.Strict)
+			Expect(err).To(MatchError(HavePrefix(`exclude: invalid tool filter pattern "("`)))
+		})
+	})
+
 	Describe("under Strict", func() {
 		It("Should return the source's error with the partial assembly beside it", func() {
 			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}, failList: true}
@@ -544,15 +671,32 @@ var _ = Describe("Assemble", func() {
 
 		It("Should fail a served tool whose store was not passed", func() {
 			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()), agenttest.WithRAG())
-			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: []string{"knowledge_search"}}}}
 
 			_, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceMCP, agent.Lenient)
 			Expect(err).To(MatchError(ContainSubstring(`the built-in tool "knowledge_search" is served on this surface but no store was passed in Sources.RAG`)))
 		})
+
+		// A filtered built-in is withheld before the store check, so a configuration
+		// that excludes the knowledge tools needs no store to serve.
+		It("Should not need a store for a served tool a filter removed", func() {
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()), agenttest.WithRAG())
+			cfg.Exclude = &config.ToolFilter{Tools: []string{"^knowledge_"}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceMCP, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(assembledNames(a)).To(Equal([]string{"do"}))
+			Expect(a.Withheld).To(Equal([]agent.Withheld{
+				{Tool: "knowledge_search", Reason: agent.WithheldFiltered},
+				{Tool: "knowledge_enumerate", Reason: agent.WithheldFiltered},
+			}))
+		})
 	})
 
 	Describe("the MCP surface", func() {
-		It("Should serve the exposed commands and the listed exposable built-ins and withhold the rest", func() {
+		// Every enabled built-in that declares MCP exposure is served with no
+		// selection step; expose.agent.tools removes one, and a memory tool is withheld
+		// as agent-only before any filter is consulted.
+		It("Should serve the exposed commands and every enabled exposable built-in and withhold the rest with a reason", func() {
 			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
 			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
@@ -561,8 +705,8 @@ var _ = Describe("Assemble", func() {
 			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
 			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{
-				Tools: &config.ExposedToolSelection{Exclude: &config.ToolFilter{Tools: []string{"^do$"}}},
-				MCP:   &config.ExposedMCPConfig{Builtins: []string{"knowledge_search", "base64_encode"}},
+				Tools: &config.ExposedToolSelection{Exclude: &config.ToolFilter{Tools: []string{"^do$", "^knowledge_enumerate$", "^read_file$", "^memory_read$"}}},
+				MCP:   &config.ExposedMCPConfig{},
 			}}
 
 			a, err := agent.Assemble(ctx, cfg, agent.Sources{
@@ -586,14 +730,36 @@ var _ = Describe("Assemble", func() {
 				"knowledge_enumerate",
 				"read_file",
 			}))
-			Expect(a.Withheld[0].Reason).To(Equal("it is reachable only in an agent run"))
-			Expect(a.Withheld[7].Reason).To(Equal("it is not listed in expose.agent.mcp.builtins"))
-			Expect(a.Withheld[8].Reason).To(Equal("it is not listed in expose.agent.mcp.builtins"))
+			for _, w := range a.Withheld[:7] {
+				Expect(w.Reason).To(Equal(agent.WithheldAgentOnly))
+			}
+			Expect(a.Withheld[7].Reason).To(Equal("it is excluded by include, exclude or expose.agent.tools"))
+			Expect(a.Withheld[8].Reason).To(Equal(agent.WithheldFiltered))
 
 			Expect(a.Remote).To(BeEmpty())
 			Expect(a.MCP).To(BeEmpty())
 			Expect(a.Problems).To(BeEmpty())
 			Expect(a.Counts()).To(Equal(telemetry.ToolCounts{Application: 1, Builtin: 2}))
+		})
+
+		// The top-level filters apply on a served surface too, and a served built-in a
+		// top-level include does not name is withheld like one expose.agent.tools drops.
+		It("Should apply the top-level include and exclude to the built-ins", func() {
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()), withOptInTools())
+			store := openRAG(cfg)
+			cfg.Include = &config.ToolFilter{Tools: []string{"^do$", "^knowledge_"}}
+			cfg.Exclude = &config.ToolFilter{Tools: []string{"^knowledge_enumerate$"}}
+			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{}}}
+
+			a, err := agent.Assemble(ctx, cfg, agent.Sources{RAG: store}, agent.SurfaceMCP, agent.Strict)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(assembledNames(a)).To(Equal([]string{"do", "knowledge_search"}))
+			Expect(a.Withheld).To(Equal([]agent.Withheld{
+				{Tool: "knowledge_enumerate", Reason: agent.WithheldFiltered},
+				{Tool: "read_file", Reason: agent.WithheldFiltered},
+				{Tool: "base64_encode", Reason: agent.WithheldFiltered},
+			}))
 		})
 
 		It("Should ignore Unbound", func() {

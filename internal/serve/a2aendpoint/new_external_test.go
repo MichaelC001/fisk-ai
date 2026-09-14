@@ -17,6 +17,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
@@ -203,8 +204,8 @@ var _ = Describe("A2A endpoints built in Go", func() {
 				Identity:  "agent1",
 				Version:   "1.2.3",
 				Tools: &a2aendpoint.ToolOptions{
-					Tools:            []toolkit.Tool{servedTool("backup", true)},
-					WithheldBuiltins: []string{"ask_human_confirm"},
+					Tools:    []toolkit.Tool{servedTool("backup", true)},
+					Withheld: []agent.Withheld{{Tool: "ask_human_confirm", Reason: agent.WithheldAgentOnly}},
 				},
 			})
 			Expect(err).ToNot(HaveOccurred())
@@ -213,7 +214,7 @@ var _ = Describe("A2A endpoints built in Go", func() {
 			Expect(eps.Channel).To(BeNil(), "no prompts were asked for")
 			Expect(eps.Service).ToNot(BeNil())
 			Expect(eps.Service.ExposedTools()).To(Equal([]string{"backup"}))
-			Expect(eps.Service.WithheldBuiltins()).To(Equal([]string{"ask_human_confirm"}))
+			Expect(eps.Service.Withheld()).To(Equal([]agent.Withheld{{Tool: "ask_human_confirm", Reason: agent.WithheldAgentOnly}}))
 		})
 
 		// A caller that set neither leaves the a2a server to its own defaults, so
@@ -372,19 +373,19 @@ var _ = Describe("A2A endpoints built in Go", func() {
 				Transport: toolTransport(),
 				Identity:  "agent1",
 				Tools: &a2aendpoint.ToolOptions{
-					Tools:            []toolkit.Tool{servedTool("backup", true), servedTool("restore", true)},
-					WithheldBuiltins: []string{"ask_human_confirm"},
+					Tools:    []toolkit.Tool{servedTool("backup", true), servedTool("restore", true)},
+					Withheld: []agent.Withheld{{Tool: "ask_human_confirm", Reason: agent.WithheldAgentOnly}},
 				},
 			})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(eps.Close)
 
 			eps.Service.ExposedTools()[0] = "clobbered"
-			eps.Service.WithheldBuiltins()[0] = "clobbered"
+			eps.Service.Withheld()[0] = agent.Withheld{Tool: "clobbered"}
 			eps.Service.Describe()[0] = serve.DescLine{Label: "clobbered"}
 
 			Expect(eps.Service.ExposedTools()).To(Equal([]string{"backup", "restore"}))
-			Expect(eps.Service.WithheldBuiltins()).To(Equal([]string{"ask_human_confirm"}))
+			Expect(eps.Service.Withheld()).To(Equal([]agent.Withheld{{Tool: "ask_human_confirm", Reason: agent.WithheldAgentOnly}}))
 			Expect(eps.Service.Describe()[0].Label).To(Equal("Concurrency"))
 		})
 	})

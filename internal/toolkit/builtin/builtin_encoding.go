@@ -19,7 +19,7 @@ import (
 
 // base64EncodeName is the opt-in built-in that encodes text as base64. It is
 // defined in the config package on the same terms as knowledgeSearchName, since an
-// operator names it under harness.tools and may name it in the MCP allowlist.
+// operator names it under harness.tools and in the tool filters.
 const base64EncodeName = config.Base64EncodeToolName
 
 // base64EncodeSpec builds the base64_encode spec from its harness.tools entry. Every
@@ -37,9 +37,8 @@ func base64EncodeSpec(_ *config.Config, options json.RawMessage) (functool.Spec,
 
 	return functool.Spec{
 		Name: base64EncodeName,
-		// A pure function over its argument, so it is safe to serve. Not a2a, for the
-		// reason knowledge_search is not: there is no a2a builtins allowlist, so
-		// declaring it there would serve it the moment a2a is enabled.
+		// A pure function over its argument, so it is safe to serve over MCP whenever
+		// its entry enables it and the filters leave it in. a2a serves no built-in.
 		Expose: &functool.ExposeSpec{MCP: true},
 		// It touches nothing: the same text encodes to the same string every time and
 		// no call reaches outside the process.

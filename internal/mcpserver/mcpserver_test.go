@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -426,11 +427,13 @@ var _ = Describe("BuildServer", func() {
 		app.Command("keep", "kept tool")
 		app.Command("secret", "denied tool").Tag("ai:deny")
 
-		cmdTools := cmdToolsFor(app)
-
-		// The deny strip is the same first FilterTools pass the agent uses.
-		filtered, err := fisktool.FilterTools(cmdTools, nil, fisktool.IncludeFilter)
-		Expect(err).NotTo(HaveOccurred())
+		// The deny strip is the one fisktool.LoadTools applies before any filter.
+		var filtered []*fisktool.CommandTool
+		for _, t := range cmdToolsFor(app) {
+			if !slices.Contains(t.Tags(), tools2.DenyTag) {
+				filtered = append(filtered, t)
+			}
+		}
 
 		srv, registered := BuildServer(tools2.Tools(filtered), Options{Name: "app", Version: "v1", LogOutput: io.Discard})
 		Expect(registered).To(ConsistOf("keep"))

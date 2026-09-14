@@ -44,9 +44,9 @@ func registerMcpAction(cmd *fisk.Application) {
 // mcpAction serves the configured tools over MCP instead of running the agent.
 // It is opt-in: the config must carry an expose.agent.mcp block or the command
 // refuses to start. It needs only the application and tool filters; the prompt
-// and model are not used. The served set is the agent's tools narrowed by
-// expose.agent.tools when set. All progress goes to stderr; the MCP protocol owns
-// the HTTP response bodies.
+// and model are not used. The served set is the agent's commands and MCP-exposable
+// built-ins narrowed by expose.agent.tools when set. All progress goes to stderr;
+// the MCP protocol owns the HTTP response bodies.
 func mcpAction(_ *fisk.ParseContext) error {
 	ctx, cancel := interruptContext()
 	defer cancel()
@@ -101,7 +101,7 @@ func mcpAction(_ *fisk.ParseContext) error {
 	// never concurrently with a live query.
 	defer release()
 
-	printMCPNotes(os.Stderr, cfg, asm)
+	printMCPNotes(os.Stderr, asm)
 
 	if asm.Len() == 0 {
 		return fmt.Errorf("no tools available after filtering; check include/exclude in %q", configFile)
@@ -141,17 +141,17 @@ func mcpAction(_ *fisk.ParseContext) error {
 	})
 }
 
-// mcpServedTools assembles the set fisk mcp serves: the application's commands
-// narrowed by expose.agent.tools, and the built-ins expose.agent.mcp.builtins lists.
-// The assembler consults no other source on the MCP surface, so no remote host is
-// dialed and no MCP server is started. When a knowledge tool is listed the store is
-// opened and the tier line and the not-built note go to notes. The returned function
-// closes the store.
+// mcpServedTools assembles the set fisk mcp serves: the application's commands and
+// the built-ins that declare MCP exposure, narrowed by include, exclude and
+// expose.agent.tools. The assembler consults no other source on the MCP surface, so
+// no remote host is dialed and no MCP server is started. When knowledge is enabled
+// the store is opened, as fisk serve opens it, and the tier line and the not-built
+// note go to notes. The returned function closes the store.
 func mcpServedTools(ctx context.Context, cfg *config.Config, notes io.Writer) (*agent.Assembly, func(), error) {
 	var src agent.Sources
 	release := func() {}
 
-	if cfg.MCPExposesKnowledge() {
+	if cfg.RAGEnabled() {
 		// Served over MCP there is no per-run store base; the index resolves against the
 		// process working directory, or an absolute configured knowledge directory.
 		store, err := rag.Open(cfg, "", rag.Options{})
@@ -186,25 +186,27 @@ func mcpServedTools(ctx context.Context, cfg *config.Config, notes io.Writer) (*
 // printMCPNotes tells the operator which built-ins this config enables and the
 // server does not serve. A config that enables memory for agent runs and is also
 // served over MCP is correct, so these are notes about where a tool is reachable, not
-// warnings. The withheld line lists the built-ins whose exposure declaration excludes
-// MCP; a knowledge tool the allowlist leaves out is covered by the two knowledge
-// notes instead.
-func printMCPNotes(w io.Writer, cfg *config.Config, asm *agent.Assembly) {
-	var agentOnly []string
+// warnings. The first line lists the built-ins whose exposure declaration excludes
+// MCP, the second the ones a filter removed, and the knowledge notes cover a
+// knowledge set the filters left half served.
+func printMCPNotes(w io.Writer, asm *agent.Assembly) {
+	var agentOnly, filtered []string
 	for _, held := range asm.Withheld {
-		if held.Reason == agent.WithheldAgentOnly {
+		switch held.Reason {
+		case agent.WithheldAgentOnly:
 			agentOnly = append(agentOnly, held.Tool)
+		case agent.WithheldFiltered:
+			filtered = append(filtered, held.Tool)
 		}
 	}
 	if len(agentOnly) > 0 {
 		fmt.Fprintf(w, "note: %d built-in tool(s) this config enables are not served over MCP: %s. They need operator state or an operator at a terminal, so they are reachable only in an agent run\n", len(agentOnly), strings.Join(agentOnly, ", "))
 	}
-
-	if cfg.RAGEnabled() && len(asm.Names(toolkit.KindBuiltin, agent.SourceKnowledge)) == 0 {
-		fmt.Fprintf(w, "note: knowledge is enabled but not exposed over MCP; add %s and %s to expose.agent.mcp.builtins to let MCP clients search your knowledge base\n", config.KnowledgeSearchToolName, config.KnowledgeEnumerateToolName)
+	if len(filtered) > 0 {
+		fmt.Fprintf(w, "note: %d built-in tool(s) this config enables are not served over MCP: %s. They are excluded by include, exclude or expose.agent.tools\n", len(filtered), strings.Join(filtered, ", "))
 	}
 
-	for _, note := range builtin.KnowledgeSetNotes(cfg) {
+	for _, note := range builtin.KnowledgeSetNotes(asm.Names(toolkit.KindBuiltin, agent.SourceKnowledge)) {
 		fmt.Fprintln(w, note)
 	}
 }

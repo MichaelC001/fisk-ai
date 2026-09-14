@@ -126,9 +126,9 @@ var ErrPromptAborted = errors.New("the operator did not answer the prompt")
 // returning both a denial value and an error. It backs the MCP builtin dispatch,
 // where there is no terminal and the concurrent path must never reach a real
 // prompter (see the Prompter doc). It is defense in depth only: the real gate is
-// the expose.agent.mcp.builtins allowlist, which serves only knowledge_search, a
-// tool that never prompts. Should a prompting built-in ever be wired here by
-// mistake, this makes it deny rather than hang or panic.
+// each built-in's exposure declaration, and the ones that declare MCP exposure never
+// prompt. Should a prompting built-in ever be wired here by mistake, this makes it
+// deny rather than hang or panic.
 type denyPrompter struct{}
 
 // DefaultDenyPrompter returns a Prompter whose every method fails closed. Use it

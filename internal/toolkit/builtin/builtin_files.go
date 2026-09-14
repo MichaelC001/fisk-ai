@@ -87,8 +87,8 @@ func readFileSpec(cfg *config.Config, options json.RawMessage) (functool.Spec, e
 	// configured directory would fail that check for the same tool.
 	return functool.Spec{
 		Name: readFileName,
-		// Not a2a, for the reason base64_encode is not: there is no a2a builtins
-		// allowlist, so declaring it there would serve it the moment a2a is enabled.
+		// Served over MCP whenever its entry enables it and the filters leave it in.
+		// a2a serves no built-in.
 		Expose: &functool.ExposeSpec{MCP: true},
 		// It reads and never writes; the same path returns the same content while the
 		// file is unchanged, and every read stays inside the root.

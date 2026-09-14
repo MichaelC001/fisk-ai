@@ -35,9 +35,7 @@ func knowledgeReadTool(store *rag.Store) *functool.Tool {
 	return mustNew(functool.Spec{
 		Name: knowledgeReadName,
 		// Read-only over the operator's own index and needing no operator prompt, on
-		// the same terms as knowledge_search. Not a2a, for the reason knowledge_search
-		// is not: there is no a2a builtins allowlist, so declaring it there would serve
-		// it the moment a2a is enabled.
+		// the same terms as knowledge_search. a2a serves no built-in.
 		Expose: &functool.ExposeSpec{MCP: true},
 		// It returns stored text by key, so the same reference returns the same
 		// sections until the index is rebuilt, and it reaches only the documents the
