@@ -77,8 +77,8 @@ agent-only harness settings are ignored.
 
 | Field                                   | Description                                                                                                                                        |
 |-----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `application_path`                      | path to the Fisk application binary to introspect and serve; optional, omit it to serve only allowlisted built-ins (today the two knowledge tools) |
-| `expose.agent.mcp.builtins`             | the built-ins this operator wants served; only `knowledge_search` and `knowledge_enumerate` are accepted. A tool must also declare MCP exposure itself, so this can narrow what is served but never widen it |
+| `application_path`                      | path to the Fisk application binary to introspect and serve; optional, omit it to serve only allowlisted built-ins                                 |
+| `expose.agent.mcp.builtins`             | the built-ins to serve: the knowledge tools and the [built-in tools](../agents/tools/#built-in-tools) enabled under `harness.tools`. A tool must also declare MCP exposure itself, so this can narrow what is served but never widen it |
 | `expose.agent.mcp`                      | the opt-in block that enables MCP serving; must be present                                                                                         |
 | `expose.agent.mcp.port`                 | default listen port when `--port` and `FISK_AI_MCP_PORT` are unset, default `8080`                                                                 |
 | `expose.agent.mcp.address`              | host or IP to bind when `--address` and `FISK_AI_MCP_ADDRESS` are unset, default `127.0.0.1` (loopback); use `0.0.0.0` to listen on all interfaces |
