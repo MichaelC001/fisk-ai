@@ -47,16 +47,17 @@ type readFileOptions struct {
 // options block, decoded strictly so a mistyped key such as roots fails at run start
 // rather than being ignored; an absent block, null and {} are the zero options.
 //
-// The root is opened here, once, so a root that is missing or not a directory fails
-// before the loop starts, and every call reuses the one directory descriptor rather
-// than opening its own, which a client looping over MCP would exhaust.
+// The root is opened here once and closed again, so a root that is missing or not a
+// directory fails before the loop starts; each call then opens and closes the root
+// itself, since a tool has no lifecycle hook and agent.Run assembles the tool set per
+// run.
 func readFileSpec(cfg *config.Config, options json.RawMessage) (functool.Spec, error) {
 	opts, err := decodeReadFileOptions(options)
 	if err != nil {
 		return functool.Spec{}, err
 	}
 	if opts.MaxBytes < 0 {
-		return functool.Spec{}, fmt.Errorf("harness.tools: %s max_bytes must be zero or positive, got %d", readFileName, opts.MaxBytes)
+		return functool.Spec{}, fmt.Errorf("max_bytes must be zero or positive, got %d", opts.MaxBytes)
 	}
 
 	dir, err := readFileRoot(cfg, opts.Root)
@@ -66,11 +67,15 @@ func readFileSpec(cfg *config.Config, options json.RawMessage) (functool.Spec, e
 
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return functool.Spec{}, fmt.Errorf("harness.tools: %s root: %w", readFileName, err)
+		return functool.Spec{}, fmt.Errorf("root: %w", err)
+	}
+	err = root.Close()
+	if err != nil {
+		return functool.Spec{}, fmt.Errorf("root: %w", err)
 	}
 
 	tool := &readFileTool{
-		root:     root,
+		dir:      dir,
 		maxBytes: opts.MaxBytes,
 	}
 	if tool.maxBytes == 0 {
@@ -126,7 +131,7 @@ func decodeReadFileOptions(options json.RawMessage) (readFileOptions, error) {
 	dec := json.NewDecoder(bytes.NewReader(options))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&opts); err != nil {
-		return opts, fmt.Errorf("harness.tools: invalid %s options: %w", readFileName, err)
+		return opts, fmt.Errorf("invalid options: %w", err)
 	}
 
 	return opts, nil
@@ -147,7 +152,7 @@ func readFileRoot(cfg *config.Config, root string) (string, error) {
 	case root == "" && base == "":
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("harness.tools: %s root: %w", readFileName, err)
+			return "", fmt.Errorf("root: %w", err)
 		}
 
 		return wd, nil
@@ -162,10 +167,10 @@ func readFileRoot(cfg *config.Config, root string) (string, error) {
 
 // readFileTool is the state one read_file tool holds across calls.
 type readFileTool struct {
-	// root is the directory descriptor every path opens through. It is opened once in
-	// readFileSpec and closed nowhere: a tool has no lifecycle hook, and the descriptor
-	// stays open as long as the process that built the tool set.
-	root *os.Root
+	// dir is the resolved directory every path opens under. Each call opens it as an
+	// os.Root and closes it before returning, so a tool set that is built and dropped
+	// per run leaves no descriptor behind.
+	dir string
 	// maxBytes is the most a file may hold and still be returned.
 	maxBytes int64
 }
@@ -224,7 +229,13 @@ func (t *readFileTool) handle(_ context.Context, input json.RawMessage, _ toolki
 		return "", fmt.Errorf("%s requires a non-empty path", readFileName)
 	}
 
-	f, err := t.root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	root, err := os.OpenRoot(t.dir)
+	if err != nil {
+		return "", fmt.Errorf("%s root: %w", readFileName, err)
+	}
+	defer root.Close()
+
+	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return outcomeJSON(readFileName, readFileOutcome{Path: args.Path})
 	}

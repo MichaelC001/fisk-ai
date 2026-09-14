@@ -56,7 +56,7 @@ var _ = Describe("base64_encode tool", func() {
 
 	It("Should refuse an options block with a key and accept null and an empty object", func() {
 		_, err := base64EncodeSpec(nil, json.RawMessage(`{"x": 1}`))
-		Expect(err).To(MatchError(ContainSubstring("base64_encode takes no options")))
+		Expect(err).To(MatchError(ContainSubstring("takes no options; remove the options block (it sets x)")))
 		Expect(err).To(MatchError(ContainSubstring("x")))
 
 		_, err = base64EncodeSpec(nil, json.RawMessage(`null`))

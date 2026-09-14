@@ -200,7 +200,7 @@ var _ = Describe("A2A endpoint", func() {
 		// No built-in declares a2a exposure, so every enabled family is withheld and the
 		// served set is the application's commands.
 		It("Should serve the commands and withhold every enabled built-in", func() {
-			cfg := toolsConfig("harness:\n  human_in_the_loop:\n    enabled: true\n  memory:\n    enabled: true\n  knowledge:\n    enabled: true\n")
+			cfg := toolsConfig("harness:\n  human_in_the_loop:\n    enabled: true\n  memory:\n    enabled: true\n  knowledge:\n    enabled: true\n  tools:\n    - name: read_file\n    - name: base64_encode\n")
 
 			built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
 			Expect(err).ToNot(HaveOccurred())
@@ -212,6 +212,7 @@ var _ = Describe("A2A endpoint", func() {
 				"ask_human_confirm", "ask_human_select", "ask_human_input",
 				"memory_list", "memory_read", "memory_write", "memory_delete",
 				"knowledge_search", "knowledge_enumerate",
+				"read_file", "base64_encode",
 			}))
 		})
 

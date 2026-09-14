@@ -173,7 +173,7 @@ var _ = Describe("read_file tool", func() {
 
 	It("Should refuse an unknown option key", func() {
 		_, err := readFileSpec(nil, json.RawMessage(`{"roots": "/tmp"}`))
-		Expect(err).To(MatchError(ContainSubstring("invalid read_file options")))
+		Expect(err).To(MatchError(ContainSubstring("invalid options")))
 		Expect(err).To(MatchError(ContainSubstring("roots")))
 	})
 
@@ -184,12 +184,12 @@ var _ = Describe("read_file tool", func() {
 
 	It("Should fail at construction when the root does not exist", func() {
 		_, err := readFileSpec(nil, json.RawMessage(`{"root": `+jsonString(filepath.Join(root, "absent"))+`}`))
-		Expect(err).To(MatchError(ContainSubstring("read_file root")))
+		Expect(err).To(MatchError(HavePrefix("root: ")))
 	})
 
 	It("Should fail at construction when the root is not a directory", func() {
 		_, err := readFileSpec(nil, json.RawMessage(`{"root": `+jsonString(filepath.Join(root, "a.txt"))+`}`))
-		Expect(err).To(MatchError(ContainSubstring("read_file root")))
+		Expect(err).To(MatchError(HavePrefix("root: ")))
 	})
 
 	It("Should read under cfg.RootDirectory when root is empty", func() {

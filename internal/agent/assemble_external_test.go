@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/choria-io/fisk"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -123,6 +124,29 @@ func memoryListApp() *fisk.Application {
 	return app
 }
 
+// readFileApp is an application whose "read file" command loads as the tool
+// read_file, the name of a harness.tools built-in.
+func readFileApp() *fisk.Application {
+	app := fisk.New("app", "an app")
+	app.Command("do", "do a thing")
+	app.Command("read", "read commands").Command("file", "read a file")
+
+	return app
+}
+
+// withOptInTools lists both harness.tools built-ins, read_file gated and rooted at a
+// fresh directory.
+func withOptInTools() agenttest.ConfigOption {
+	root := GinkgoT().TempDir()
+
+	return func(c *config.Config) {
+		c.Harness.Tools = []config.HarnessToolConfig{
+			{Name: config.ReadFileToolName, Confirm: true, Options: json.RawMessage(`{"root": ` + strconv.Quote(root) + `}`)},
+			{Name: config.Base64EncodeToolName},
+		}
+	}
+}
+
 var _ = Describe("Assemble", func() {
 	var ctx context.Context
 
@@ -135,7 +159,7 @@ var _ = Describe("Assemble", func() {
 		sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
 		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()),
-			agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG())
+			agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG(), withOptInTools())
 		cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather-svc"}}
 		cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 
@@ -151,6 +175,7 @@ var _ = Describe("Assemble", func() {
 			"ask_human_confirm", "ask_human_select", "ask_human_input",
 			"memory_list", "memory_read", "memory_write", "memory_delete",
 			"knowledge_search", "knowledge_enumerate",
+			"read_file", "base64_encode",
 			"forecast", "weather-svc_do",
 			"docs_search",
 			"alpha", "zeta",
@@ -167,6 +192,7 @@ var _ = Describe("Assemble", func() {
 			toolkit.KindBuiltin, toolkit.KindBuiltin, toolkit.KindBuiltin,
 			toolkit.KindBuiltin, toolkit.KindBuiltin, toolkit.KindBuiltin, toolkit.KindBuiltin,
 			toolkit.KindBuiltin, toolkit.KindBuiltin,
+			toolkit.KindBuiltin, toolkit.KindBuiltin,
 			toolkit.KindRemote, toolkit.KindRemote,
 			toolkit.KindMCP,
 			toolkit.KindCustom, toolkit.KindCustom,
@@ -176,6 +202,7 @@ var _ = Describe("Assemble", func() {
 			agent.SourceHumanInTheLoop, agent.SourceHumanInTheLoop, agent.SourceHumanInTheLoop,
 			agent.SourceMemory, agent.SourceMemory, agent.SourceMemory, agent.SourceMemory,
 			agent.SourceKnowledge, agent.SourceKnowledge,
+			agent.SourceTools, agent.SourceTools,
 			"weather-svc", "weather-svc",
 			"docs",
 			agent.SourceCustom, agent.SourceCustom,
@@ -185,16 +212,18 @@ var _ = Describe("Assemble", func() {
 			"ask_human_confirm", "ask_human_select", "ask_human_input",
 			"memory_list", "memory_read", "memory_write", "memory_delete",
 			"knowledge_search", "knowledge_enumerate",
+			"read_file", "base64_encode",
 		}))
 		Expect(partNames(a.BeforeMCP())).To(Equal([]string{"do", "forecast", "weather-svc_do"}))
 		Expect(partNames(a.MCPTools())).To(Equal([]string{"docs_search"}))
 		Expect(partNames(a.AfterMCP())).To(Equal([]string{"alpha", "zeta"}))
 
-		Expect(a.Len()).To(Equal(15))
-		Expect(a.Counts()).To(Equal(telemetry.ToolCounts{Application: 1, Builtin: 9, Remote: 2, MCP: 1, Custom: 2}))
-		Expect(a.Names(toolkit.KindBuiltin, "")).To(HaveLen(9))
+		Expect(a.Len()).To(Equal(17))
+		Expect(a.Counts()).To(Equal(telemetry.ToolCounts{Application: 1, Builtin: 11, Remote: 2, MCP: 1, Custom: 2}))
+		Expect(a.Names(toolkit.KindBuiltin, "")).To(HaveLen(11))
 		Expect(a.Names(toolkit.KindUnknown, agent.SourceMemory)).To(Equal([]string{"memory_list", "memory_read", "memory_write", "memory_delete"}))
 		Expect(a.Names(toolkit.KindUnknown, agent.SourceHumanInTheLoop)).To(Equal([]string{"ask_human_confirm", "ask_human_select", "ask_human_input"}))
+		Expect(a.Names(toolkit.KindUnknown, agent.SourceTools)).To(Equal([]string{"read_file", "base64_encode"}))
 
 		Expect(a.Problems).To(BeEmpty())
 		Expect(a.Withheld).To(BeEmpty())
@@ -236,6 +265,21 @@ var _ = Describe("Assemble", func() {
 		Entry("under Strict", agent.Strict),
 		Entry("under Lenient", agent.Lenient),
 	)
+
+	It("Should refuse a harness.tools entry whose name a command took", func() {
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), readFileApp()), withOptInTools())
+
+		_, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceRun, agent.Strict)
+		Expect(err).To(MatchError(`harness.tools adds a built-in tool "read_file" but the application already exposes a tool with that name; exclude or rename it`))
+	})
+
+	It("Should return a harness.tools entry's options error under the source name", func() {
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()))
+		cfg.Harness.Tools = []config.HarnessToolConfig{{Name: config.Base64EncodeToolName, Options: json.RawMessage(`{"x": 1}`)}}
+
+		_, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceRun, agent.Strict)
+		Expect(err).To(MatchError(HavePrefix("tools: harness.tools[0] (base64_encode): ")))
+	})
 
 	// Every way a custom tool is refused, with the message Run gives today.
 	DescribeTable("Should refuse a custom tool that",
@@ -512,13 +556,13 @@ var _ = Describe("Assemble", func() {
 			fake := &mcpFakeServers{tools: []*mcp.Tool{mcpDescriptor("search", "Searches the documentation")}}
 			sessions := connectMCP(GinkgoTB(), fake, config.MCPServer{Name: "docs"})
 
-			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), memoryListApp()), agenttest.WithHITL(), agenttest.WithMemory())
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), memoryListApp()), agenttest.WithHITL(), agenttest.WithMemory(), withOptInTools())
 			store := openRAG(cfg)
 			cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
 			cfg.MCPClients = []config.MCPServer{{Name: "docs"}}
 			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{
 				Tools: &config.ExposedToolSelection{Exclude: &config.ToolFilter{Tools: []string{"^do$"}}},
-				MCP:   &config.ExposedMCPConfig{Builtins: []string{"knowledge_search"}},
+				MCP:   &config.ExposedMCPConfig{Builtins: []string{"knowledge_search", "base64_encode"}},
 			}}
 
 			a, err := agent.Assemble(ctx, cfg, agent.Sources{
@@ -531,22 +575,25 @@ var _ = Describe("Assemble", func() {
 
 			// The command named memory_list is served, since the withheld memory built-in
 			// of that name never claimed it.
-			Expect(assembledNames(a)).To(Equal([]string{"memory_list", "knowledge_search"}))
+			Expect(assembledNames(a)).To(Equal([]string{"memory_list", "knowledge_search", "base64_encode"}))
 			Expect(a.Tools[0].Kind).To(Equal(toolkit.KindApplication))
 			Expect(a.Tools[1].Kind).To(Equal(toolkit.KindBuiltin))
+			Expect(a.Tools[2].Source).To(Equal(agent.SourceTools))
 
 			Expect(withheldNames(a)).To(Equal([]string{
 				"ask_human_confirm", "ask_human_select", "ask_human_input",
 				"memory_list", "memory_read", "memory_write", "memory_delete",
 				"knowledge_enumerate",
+				"read_file",
 			}))
 			Expect(a.Withheld[0].Reason).To(Equal("it is reachable only in an agent run"))
 			Expect(a.Withheld[7].Reason).To(Equal("it is not listed in expose.agent.mcp.builtins"))
+			Expect(a.Withheld[8].Reason).To(Equal("it is not listed in expose.agent.mcp.builtins"))
 
 			Expect(a.Remote).To(BeEmpty())
 			Expect(a.MCP).To(BeEmpty())
 			Expect(a.Problems).To(BeEmpty())
-			Expect(a.Counts()).To(Equal(telemetry.ToolCounts{Application: 1, Builtin: 1}))
+			Expect(a.Counts()).To(Equal(telemetry.ToolCounts{Application: 1, Builtin: 2}))
 		})
 
 		It("Should ignore Unbound", func() {
@@ -564,7 +611,7 @@ var _ = Describe("Assemble", func() {
 
 	Describe("the A2A surface", func() {
 		It("Should serve only the built-ins that declare a2a exposure", func() {
-			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()), agenttest.WithHITL(), agenttest.WithMemory())
+			cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), exampleApp()), agenttest.WithHITL(), agenttest.WithMemory(), withOptInTools())
 			openRAG(cfg)
 
 			a, err := agent.Assemble(ctx, cfg, agent.Sources{}, agent.SurfaceA2A, agent.Strict)
@@ -575,6 +622,7 @@ var _ = Describe("Assemble", func() {
 				"ask_human_confirm", "ask_human_select", "ask_human_input",
 				"memory_list", "memory_read", "memory_write", "memory_delete",
 				"knowledge_search", "knowledge_enumerate",
+				"read_file", "base64_encode",
 			}))
 			for _, w := range a.Withheld {
 				Expect(w.Reason).To(Equal("it is reachable only in an agent run"))

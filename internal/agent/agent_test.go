@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1888,6 +1889,24 @@ var _ = Describe("Run tool availability guard", func() {
 		_, err := Run(context.Background(), opts, nopEvents{}, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).ToNot(ContainSubstring("no tools available after filtering"))
+	})
+
+	It("starts on a harness.tools listing with no application_path", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "test-model"
+		cfg.LLM.Budget.MaxIterations = 1
+		cfg.Harness.Tools = []config.HarnessToolConfig{
+			{Name: config.ReadFileToolName, Options: json.RawMessage(`{"root": ` + strconv.Quote(GinkgoT().TempDir()) + `}`)},
+			{Name: config.Base64EncodeToolName},
+		}
+
+		provider := providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+			return mustResponse(`{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`), nil
+		})
+
+		res, err := Run(context.Background(), Options{Config: cfg, ConfigFile: "agent.yaml", Provider: provider}, nopEvents{}, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 	})
 })
 

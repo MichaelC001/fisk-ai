@@ -35,6 +35,8 @@ const (
 	SourceMemory = "memory"
 	// SourceKnowledge is the knowledge family of built-ins.
 	SourceKnowledge = "knowledge"
+	// SourceTools is the harness.tools family of built-ins, each listed by name.
+	SourceTools = "tools"
 	// SourceCustom is the caller's own tools.
 	SourceCustom = "custom"
 	// SourceRemoteTools is the remote_tools block.
@@ -159,9 +161,9 @@ type Assembly struct {
 // Assemble builds an agent's tool set from its configuration and the sources the
 // caller opened, for one surface under one policy.
 //
-// Assemble adds the application's commands, then the human-in-the-loop, memory and
-// knowledge built-ins, then the remote imports, then the MCP imports, then the custom
-// tools, and claims each name as it goes. A remote or MCP tool is prefixed with its
+// Assemble adds the application's commands, then the human-in-the-loop, memory,
+// knowledge and harness.tools built-ins, then the remote imports, then the MCP
+// imports, then the custom tools, and claims each name as it goes. A remote or MCP tool is prefixed with its
 // alias as the importers do it; a custom tool is refused on a clash with any earlier
 // kind.
 //
@@ -238,18 +240,28 @@ func (a *Assembly) add(t toolkit.Tool, kind toolkit.Kind, source string) {
 	}
 }
 
-// addBuiltins adds the three built-in families in order. On a served surface it
-// adds only the tools the surface serves and records the rest in Withheld.
+// addBuiltins adds the four built-in families in order. On a served surface it
+// adds only the tools the surface serves and records the rest in Withheld. The
+// harness.tools family is the one whose constructor can fail, on an entry whose
+// options its tool refuses; that error is returned under the source name.
 func (a *Assembly) addBuiltins(cfg *config.Config, src Sources, surface Surface) error {
+	optIn, err := builtin.OptInTools(cfg)
+	if err != nil {
+		return fmt.Errorf("%s: %w", SourceTools, err)
+	}
+
 	families := []struct {
 		source string
+		// block is the configuration key an operator reads a name clash against.
+		block  string
 		tools  []*functool.Tool
 		opened bool
 		field  string
 	}{
-		{SourceHumanInTheLoop, builtin.HITLTools(cfg), true, ""},
-		{SourceMemory, builtin.MemoryTools(cfg, src.Memory), src.Memory != nil, "Sources.Memory"},
-		{SourceKnowledge, builtin.RAGTools(cfg, src.RAG), src.RAG != nil, "Sources.RAG"},
+		{SourceHumanInTheLoop, SourceHumanInTheLoop, builtin.HITLTools(cfg), true, ""},
+		{SourceMemory, SourceMemory, builtin.MemoryTools(cfg, src.Memory), src.Memory != nil, "Sources.Memory"},
+		{SourceKnowledge, SourceKnowledge, builtin.RAGTools(cfg, src.RAG), src.RAG != nil, "Sources.RAG"},
+		{SourceTools, "harness.tools", optIn, true, ""},
 	}
 
 	for _, family := range families {
@@ -265,7 +277,7 @@ func (a *Assembly) addBuiltins(cfg *config.Config, src Sources, surface Surface)
 			}
 
 			if a.claimed[t.Name()] {
-				return fmt.Errorf("%s adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", family.source, t.Name())
+				return fmt.Errorf("%s adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", family.block, t.Name())
 			}
 
 			a.add(t, toolkit.KindBuiltin, family.source)
@@ -516,7 +528,7 @@ func (a *Assembly) Len() int {
 }
 
 // Builtins returns the never-deferred tools in family order: human-in-the-loop,
-// memory, knowledge.
+// memory, knowledge, harness.tools.
 func (a *Assembly) Builtins() []toolkit.Tool {
 	return a.ofKinds(toolkit.KindBuiltin)
 }

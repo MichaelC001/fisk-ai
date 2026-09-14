@@ -116,6 +116,20 @@ var _ = Describe("mcp served tools", func() {
 		Expect(out).To(Equal("note: knowledge_search is exposed but knowledge_enumerate is not; clients can rank results but cannot tell an absent term from a low-scoring one. Add knowledge_enumerate to expose.agent.mcp.builtins to serve both\n"))
 	})
 
+	It("Should serve the listed harness tool and withhold the unlisted one", func() {
+		cfg.Harness.Tools = []config.HarnessToolConfig{
+			{Name: config.ReadFileToolName, Confirm: true},
+			{Name: config.Base64EncodeToolName},
+		}
+		cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: []string{config.Base64EncodeToolName}}}}
+
+		asm := served()
+		Expect(servedNames(asm)).To(Equal([]string{"backup", "status", "base64_encode"}))
+		Expect(asm.Withheld).To(Equal([]agent.Withheld{{Tool: "read_file", Reason: agent.WithheldNotListed}}))
+		Expect(notes.String()).To(BeEmpty())
+		Expect(renderNotes(asm)).To(BeEmpty())
+	})
+
 	It("Should serve a command named after a withheld memory built-in", func() {
 		cfg = agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), memoryListApp()), agenttest.WithMemory())
 

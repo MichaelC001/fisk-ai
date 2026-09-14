@@ -31,7 +31,7 @@ const base64EncodeName = config.Base64EncodeToolName
 // rather than the tool so the wiring applies the confirm wrap and calls mustNew in
 // one place for every opt-in tool.
 func base64EncodeSpec(_ *config.Config, options json.RawMessage) (functool.Spec, error) {
-	if err := refuseOptions(base64EncodeName, options); err != nil {
+	if err := refuseOptions(options); err != nil {
 		return functool.Spec{}, err
 	}
 
@@ -69,15 +69,16 @@ func base64EncodeSpec(_ *config.Config, options json.RawMessage) (functool.Spec,
 
 // refuseOptions is the options check for an opt-in tool that takes none. An empty
 // block, null and {} pass; a block with any key fails and names the keys, and a
-// block that is not an object fails on the decode.
-func refuseOptions(name string, options json.RawMessage) error {
+// block that is not an object fails on the decode. OptInTools prefixes the error
+// with the entry's index and tool name.
+func refuseOptions(options json.RawMessage) error {
 	if len(options) == 0 || string(options) == "null" {
 		return nil
 	}
 
 	var block map[string]json.RawMessage
 	if err := json.Unmarshal(options, &block); err != nil {
-		return fmt.Errorf("harness.tools: %s takes no options, and its options block is not an object: %w", name, err)
+		return fmt.Errorf("takes no options, and its options block is not an object: %w", err)
 	}
 	if len(block) == 0 {
 		return nil
@@ -89,7 +90,7 @@ func refuseOptions(name string, options json.RawMessage) error {
 	}
 	slices.Sort(keys)
 
-	return fmt.Errorf("harness.tools: %s takes no options; remove the options block (it sets %s)", name, strings.Join(keys, ", "))
+	return fmt.Errorf("takes no options; remove the options block (it sets %s)", strings.Join(keys, ", "))
 }
 
 // base64EncodeTrace renders the one-line call trace as the tool name and the size

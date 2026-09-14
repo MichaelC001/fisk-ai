@@ -327,14 +327,24 @@ var _ = Describe("ResolveAgentTools", func() {
 		config.MemoryDeleteToolName,
 		config.KnowledgeSearchToolName,
 		config.KnowledgeEnumerateToolName,
+		config.ReadFileToolName,
+		config.Base64EncodeToolName,
 	}
 
-	// fullConfig is a configuration with commands, the three families, two remote hosts
+	// withOptInTools lists both harness.tools built-ins, read_file gated.
+	withOptInTools := func(c *config.Config) {
+		c.Harness.Tools = []config.HarnessToolConfig{
+			{Name: config.ReadFileToolName, Confirm: true},
+			{Name: config.Base64EncodeToolName},
+		}
+	}
+
+	// fullConfig is a configuration with commands, the four families, two remote hosts
 	// and one MCP server.
 	fullConfig := func() *config.Config {
 		GinkgoHelper()
 
-		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), cardApp()), agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG())
+		cfg := agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), cardApp()), agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG(), withOptInTools)
 		cfg.RemoteTools = []config.RemoteToolHost{{Name: "weather", Alias: "wx"}, {Name: "docs"}}
 		cfg.MCPClients = []config.MCPServer{{Name: "wiki"}}
 
@@ -342,13 +352,19 @@ var _ = Describe("ResolveAgentTools", func() {
 	}
 
 	// A run injects these alongside the application's commands, so a card built from the
-	// commands alone names fewer tools than the agent behind it calls.
+	// commands alone names fewer tools than the agent behind it calls. The gated
+	// read_file is listed like a confirm-gated command, since the channel has an
+	// operator to approve it.
 	It("Should list the built-ins the configuration enables", func() {
-		cfg := agenttest.Config(GinkgoTB(), nil, agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG())
+		cfg := agenttest.Config(GinkgoTB(), nil, agenttest.WithHITL(), agenttest.WithMemory(), agenttest.WithRAG(), withOptInTools)
 
 		tools, err := ResolveAgentTools(context.Background(), cfg, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(toolNames(tools)).To(Equal(builtinNames))
+
+		gated, ok := tools.Tools[len(tools.Tools)-2].(toolkit.Confirmable)
+		Expect(ok).To(BeTrue())
+		Expect(gated.NeedsConfirm(nil)).To(BeTrue())
 	})
 
 	It("Should list no built-in the configuration leaves off", func() {
