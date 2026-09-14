@@ -53,8 +53,9 @@ func knowledgeReadTool(store *rag.Store) *functool.Tool {
 			"stops short, a paragraph whose subject was named earlier. before and after count sections of the same " +
 			"document, so before 1 and after 2 return four sections in document order, and they cross heading " +
 			"boundaries: this reads the document, not one heading's part of it. " +
-			"It returns {\"status\": ..., \"index_ref\": ..., \"citation\": ..., \"path\": ..., \"section\": ..., " +
-			"\"span\": ..., \"document_sections\": ..., \"note\": ..., \"content\": ...}. " +
+			"It returns {\"status\": ..., \"note\": ..., \"ref\": ..., \"citation\": ..., \"index_ref\": ..., \"path\": ..., " +
+			"\"section\": ..., \"span\": ..., \"document_sections\": ..., \"content\": ...}. " +
+			"ref is a short stable id for the section, the same one a knowledge_search result for it carries. " +
 			"span is the range the content covers, <path>#<low>..#<high>; read on by calling again with index_ref set " +
 			"to either end of it. document_sections is how many sections the document holds, so its ordinals run from 0 " +
 			"to one less than that. One call returns a limited amount of text, and the note says when that limit or the " +
@@ -109,13 +110,17 @@ func knowledgeReadTrace(input json.RawMessage) string {
 
 // knowledgeReadOutcome is the JSON result the knowledge_read tool returns.
 //
-// Citation and IndexRef carry the pair knowledgeHitJSON describes, so the model
-// cites a read exactly as it cites a search result. Span names the range Content
-// covers and DocumentSections how far the document goes, which together say where
-// the next call starts and whether there is anything left to read.
+// Ref carries hitRef of the index reference, the same id a search hit for the
+// section carries, so a page keys a cited read and a cited search hit under one
+// source. Citation and IndexRef carry the pair knowledgeHitJSON describes, so the
+// model cites a read exactly as it cites a search result. Span names the range
+// Content covers and DocumentSections how far the document goes, which together
+// say where the next call starts and whether there is anything left to read. A
+// not_found or index_not_built outcome carries none of these.
 type knowledgeReadOutcome struct {
 	Status           string `json:"status"`
 	Note             string `json:"note,omitempty"`
+	Ref              string `json:"ref,omitempty"`
 	Citation         string `json:"citation,omitempty"`
 	IndexRef         string `json:"index_ref,omitempty"`
 	Path             string `json:"path,omitempty"`
@@ -163,6 +168,7 @@ func knowledgeReadHandler(store *rag.Store) builtinHandler {
 		return outcomeJSON(knowledgeReadName, knowledgeReadOutcome{
 			Status:           knowledgeReadOK,
 			Note:             knowledgeReadNote(res, opts),
+			Ref:              hitRef(res.Citation),
 			Citation:         res.MappedCitation,
 			IndexRef:         res.Citation,
 			Path:             res.DocPath,
