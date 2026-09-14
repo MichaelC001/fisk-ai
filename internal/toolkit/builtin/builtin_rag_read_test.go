@@ -67,6 +67,15 @@ var _ = Describe("knowledge_read tool", func() {
 		Expect(knowledgeReadTrace(json.RawMessage(`{"index_ref":"docs/a.md#3","before":1,"after":2}`))).To(Equal(`knowledge_read("docs/a.md#3", before=1, after=2)`))
 	})
 
+	// The description is the only place the model sees the result shape, so a field
+	// the struct returns and the description omits is one the model never cites.
+	It("describes every field a read carries", func() {
+		desc := ragToolNamed(RAGTools(knowledge("", true), nil), knowledgeReadName).Description()
+		for _, key := range jsonKeys(knowledgeReadOutcome{}) {
+			Expect(desc).To(ContainSubstring(`"`+key+`":`), key)
+		}
+	})
+
 	// The model is told a mapped citation is quoted rather than fetched, which leaves
 	// an agent with no file reader nowhere to go for the rest of a document. The note
 	// names this tool only where the operator turned it on.
@@ -81,10 +90,11 @@ var _ = Describe("knowledge_read tool", func() {
 
 	Describe("against a real lexical store", func() {
 		var (
-			tmp  string
-			cfg  *config.Config
-			tool *functool.Tool
-			path string
+			tmp   string
+			cfg   *config.Config
+			tools []*functool.Tool
+			tool  *functool.Tool
+			path  string
 		)
 
 		// Three sections of one document, so a read of the middle one with a neighbor
@@ -114,7 +124,8 @@ var _ = Describe("knowledge_read tool", func() {
 			store, err := rag.Open(cfg, "", rag.Options{})
 			Expect(err).ToNot(HaveOccurred())
 			DeferCleanup(store.Close)
-			tool = ragToolNamed(RAGTools(cfg, store), knowledgeReadName)
+			tools = RAGTools(cfg, store)
+			tool = ragToolNamed(tools, knowledgeReadName)
 		}
 
 		call := func(input string) knowledgeReadOutcome {
@@ -155,6 +166,30 @@ var _ = Describe("knowledge_read tool", func() {
 			Expect(res.Span).To(BeEmpty())
 			Expect(res.DocumentSections).To(Equal(3))
 			Expect(res.Note).To(BeEmpty())
+		})
+
+		// A page keys its sources by ref, so a claim the model cites from a read has to
+		// land under the same source as one it cites from the search that found it.
+		It("carries the ref the search hit for that section carried", func() {
+			buildIndex()
+			open()
+
+			out, err := callTool(ragToolNamed(tools, knowledgeSearchName), ctx, json.RawMessage(`{"query":"shards replicated"}`), nil)
+			Expect(err).ToNot(HaveOccurred())
+
+			var found knowledgeSearchOutcome
+			Expect(json.Unmarshal([]byte(out), &found)).To(Succeed())
+			Expect(found.Results).ToNot(BeEmpty())
+			hit := found.Results[0]
+			Expect(hit.Ref).To(MatchRegexp(`^[a-z2-7]{6}$`))
+
+			res := call(`{"index_ref":"` + hit.IndexRef + `"}`)
+			Expect(res.Status).To(Equal(knowledgeReadOK))
+			Expect(res.Ref).To(Equal(hit.Ref))
+
+			res = call(`{"index_ref":"` + path + `#9"}`)
+			Expect(res.Status).To(Equal(knowledgeReadNotFound))
+			Expect(res.Ref).To(BeEmpty())
 		})
 
 		It("crosses heading boundaries for the sections either side", func() {

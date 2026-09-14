@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,6 +34,25 @@ func ragToolNamed(tools []*functool.Tool, name string) *functool.Tool {
 
 	Fail("no tool named " + name + " in the set")
 	return nil
+}
+
+// jsonKeys returns the json tag names of a struct's fields, omitempty stripped, so
+// a spec can hold a tool's description to the shape the tool returns.
+func jsonKeys(v any) []string {
+	GinkgoHelper()
+
+	t := reflect.TypeOf(v)
+	Expect(t.Kind()).To(Equal(reflect.Struct))
+
+	var keys []string
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		Expect(tag).ToNot(BeEmpty())
+		name, _, _ := strings.Cut(tag, ",")
+		keys = append(keys, name)
+	}
+
+	return keys
 }
 
 var _ = Describe("knowledge_search tool", func() {
@@ -105,6 +126,33 @@ var _ = Describe("knowledge_search tool", func() {
 		Expect(knowledgeSearchTrace(json.RawMessage(`{"query":"q","top_k":3}`))).To(Equal(`knowledge_search("q", top_k=3)`))
 	})
 
+	// The description is the only place the model sees the result shape, so a field
+	// the struct returns and the description omits is one the model cannot use.
+	It("describes every field a result carries", func() {
+		desc := ragToolNamed(RAGTools(enabled(""), nil), knowledgeSearchName).Description()
+		for _, key := range jsonKeys(knowledgeHitJSON{}) {
+			Expect(desc).To(ContainSubstring(`"`+key+`":`), key)
+		}
+	})
+
+	Describe("hitRef", func() {
+		// The model copies the ref into a citation marker, so it has to be short and
+		// drawn from characters that read as one word.
+		It("is six lowercase base32 characters", func() {
+			Expect(hitRef("docs/note.md#3")).To(MatchRegexp(`^[a-z2-7]{6}$`))
+			Expect(hitRef("")).To(MatchRegexp(`^[a-z2-7]{6}$`))
+		})
+
+		// Nothing persists across nodes, resumptions or replays to hold a counter, so
+		// the same chunk has to get the same ref from every call and a different chunk
+		// a different one.
+		It("is a function of the index reference alone", func() {
+			Expect(hitRef("docs/note.md#3")).To(Equal(hitRef("docs/note.md#3")))
+			Expect(hitRef("docs/note.md#3")).ToNot(Equal(hitRef("docs/note.md#4")))
+			Expect(hitRef("docs/note.md#3")).ToNot(Equal(hitRef("docs/other.md#3")))
+		})
+	})
+
 	Describe("capHits", func() {
 		It("always includes the first hit and stops once the budget is exceeded", func() {
 			hits := []rag.Hit{
@@ -153,6 +201,23 @@ var _ = Describe("knowledge_search tool", func() {
 			out := capHits(hits, 1000)
 			Expect(out).To(HaveLen(1))
 			Expect(out[0].Path).To(Equal("docs/note.md"))
+		})
+
+		// The ref is computed from the raw index key, never from the mapped citation,
+		// so a citation rule that changes what a reader sees leaves the ref the same, and
+		// the same chunk returned twice carries one ref.
+		It("derives the ref from the index key", func() {
+			hits := []rag.Hit{
+				{Citation: "docs/note.md#3", MappedCitation: "https://docs.example.net/note#a", Mapped: true, Content: "x"},
+				{Citation: "docs/note.md#3", MappedCitation: "docs/note.md#3", Content: "x"},
+				{Citation: "docs/note.md#4", MappedCitation: "docs/note.md#4", Content: "y"},
+			}
+
+			out := capHits(hits, 1000)
+			Expect(out).To(HaveLen(3))
+			Expect(out[0].Ref).To(Equal(hitRef("docs/note.md#3")))
+			Expect(out[0].Ref).To(Equal(out[1].Ref))
+			Expect(out[2].Ref).ToNot(Equal(out[0].Ref))
 		})
 
 		// With expand_to_section off no hit carries a span, and the payload is what it

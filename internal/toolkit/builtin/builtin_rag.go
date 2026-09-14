@@ -6,6 +6,8 @@ package builtin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,7 +179,8 @@ func knowledgeSearchTool(store *rag.Store) *functool.Tool {
 			"convention, a design decision, an API, a runbook, a gotcha, or any fact that would live in the " +
 			"operator's own notes rather than general knowledge. Prefer searching over guessing, and search " +
 			"again with refined terms if the first results are thin. " +
-			"It returns {\"tier\": ..., \"status\": ..., \"results\": [{\"citation\": ..., \"index_ref\": ..., \"path\": ..., \"section\": ..., \"content\": ...}]}. " +
+			"It returns {\"tier\": ..., \"status\": ..., \"results\": [{\"ref\": ..., \"citation\": ..., \"index_ref\": ..., \"path\": ..., \"section\": ..., \"span\": ..., \"content\": ...}]}. " +
+			"ref is a short stable id for the section, the same from every search and read of it. " +
 			"Cite the citation value verbatim for each claim you draw from a result. It is how the operator's corpus " +
 			"is cited outside itself, which may be a link, a ticket key or a document id, and for a document the " +
 			"operator publishes nowhere it is the index reference itself. index_ref is the index's own key for the " +
@@ -241,9 +244,41 @@ type knowledgeSearchOutcome struct {
 	Results []knowledgeHitJSON `json:"results"`
 }
 
-// knowledgeHitJSON is one returned section: the citation to quote, the index's own
-// key for the section, the document's path on the operator's filesystem, the
-// human-readable section breadcrumb, and the verbatim content.
+// hitRefLen is how many base32 characters a hit's ref holds. Six characters carry
+// thirty bits, about a billion values, so a corpus of any practical size has no two
+// chunks sharing one.
+const hitRefLen = 6
+
+// hitRef returns the short id tool output gives a section. A channel that renders
+// citations can ask the model to name a section by it and key its sources by it;
+// the channel's prompt says how to write the marker, since that depends on how the
+// channel renders one.
+//
+// It is a pure function of the index reference, the raw <relpath>#<ordinal> token,
+// because nothing persists across nodes, session resumptions or replays to hold a
+// counter: any node, a resumed session and a replay compute the same ref for the
+// same chunk, the same chunk returned by two searches carries one ref, and a ref
+// cited in a later turn still names the chunk it named in the earlier one. A
+// re-index that assigns the token to a different chunk changes which chunk the ref
+// names, exactly as it changes which chunk the token names.
+//
+// The id is the SHA-256 of the token, base32 encoded, lowercased and cut to
+// hitRefLen characters, so it draws on [a-z2-7] and reads as one word.
+func hitRef(indexRef string) string {
+	sum := sha256.Sum256([]byte(indexRef))
+	enc := base32.StdEncoding.EncodeToString(sum[:])
+
+	return strings.ToLower(enc[:hitRefLen])
+}
+
+// knowledgeHitJSON is one returned section: a short stable id for the section,
+// the citation to quote, the index's own key for the section, the document's path
+// on the operator's filesystem, the human-readable section breadcrumb, and the
+// verbatim content.
+//
+// Ref carries hitRef of the index reference, a six-character id that a channel
+// rendering citations keys its sources by. It depends on the index reference
+// alone, so a search and a read of the same chunk carry the same ref.
 //
 // Citation carries rag.Hit.MappedCitation: the operator's rules applied to the
 // document path, and the raw <relpath>#<ordinal> token itself when no rule matched.
@@ -258,6 +293,7 @@ type knowledgeSearchOutcome struct {
 // operator turned on harness.knowledge.expand_to_section and the walk grew this
 // result past the section that ranked. It is absent otherwise.
 type knowledgeHitJSON struct {
+	Ref      string `json:"ref"`
 	Citation string `json:"citation"`
 	IndexRef string `json:"index_ref"`
 	Path     string `json:"path"`
@@ -320,7 +356,7 @@ func capHits(hits []rag.Hit, maxTokens int) []knowledgeHitJSON {
 		if i > 0 && used+len(h.Content) > budget {
 			break
 		}
-		out = append(out, knowledgeHitJSON{Citation: h.MappedCitation, IndexRef: h.Citation, Path: h.DocPath, Section: h.HeadingPath, Span: h.Span, Content: h.Content})
+		out = append(out, knowledgeHitJSON{Ref: hitRef(h.Citation), Citation: h.MappedCitation, IndexRef: h.Citation, Path: h.DocPath, Section: h.HeadingPath, Span: h.Span, Content: h.Content})
 		used += len(h.Content)
 	}
 
