@@ -80,8 +80,9 @@ var _ = Describe("knowledge_search tool", func() {
 
 	// The model is told not to show a citation's URL to a file reader and not to show
 	// index_ref to anyone, so without this the only move left for a model that wants
-	// the whole document is a web fetch. Fisk ships no file reader, so the note offers
-	// the path to a tool the model may have rather than naming one it does not.
+	// the whole document is a web fetch. read_file is opt-in and the note is not told
+	// whether it is enabled, so it offers the path to whatever file reader the model
+	// has, which the operator's system prompt names, rather than naming one it may not.
 	It("tells the model to read a document at the path a result carries", func() {
 		note := RAGSystemNote([]string{knowledgeSearchName, knowledgeEnumerateName})
 		Expect(note).To(ContainSubstring("Each result carries a path"))

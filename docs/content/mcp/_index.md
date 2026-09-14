@@ -164,6 +164,10 @@ gated command it asks the client to approve, showing the server name, the resolv
 it, and runs the command only on an explicit approval. A refusal, a dismissal, or any elicitation error denies the call
 and returns an authoritative result the model is told not to retry.
 
+A [built-in tool](../agents/tools/#built-in-tools) whose `harness.tools` entry sets `confirm: true` is gated the same
+way. Its prompt shows the tool's trace line in place of a command line, `read_file <path>` for example, and names
+`ai:confirm` as the gate.
+
 Not every client supports elicitation. `expose.agent.mcp.confirm_over_mcp` chooses what happens when the connected
 client cannot be asked:
 

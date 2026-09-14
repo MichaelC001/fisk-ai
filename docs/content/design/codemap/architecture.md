@@ -35,7 +35,7 @@ A package's imports place it in one of four layers. The root holds commands and 
 
 `config` imports the standard library, a duration parser and a YAML library. `internal/telemetry` imports the standard library and OpenTelemetry.
 
-Because `config` cannot see the rest of the tree, two lists are hand-maintained duplicates: the OTLP credential variable names, mirrored in `telemetry`, and the built-in tool names that may be exposed over MCP, mirrored on each tool's own spec. Both are pinned by a test assertion so they cannot drift.
+Because `config` cannot see the rest of the tree, two lists are hand-maintained duplicates: the OTLP credential variable names, mirrored in `telemetry`, and the built-in tool names a `harness.tools` entry can enable, mirrored in the `builtin` package's constructor table. Both are pinned by a test assertion so they cannot drift.
 
 Because `telemetry` cannot see the rest of the tree, its constructors take primitives rather than domain types, and its error classes are unforgeable values rather than a classifier over somebody else's sentinels. The HTTP middleware's type is written out longhand rather than named, and the `llm` package declares both halves as type aliases, so the value satisfies the interface without either package importing the other.
 

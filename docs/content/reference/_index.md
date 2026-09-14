@@ -82,8 +82,9 @@ identity: nats
 # Path to the Fisk application binary to introspect and run. OPTIONAL.
 # When set, the binary is introspected once at startup to obtain its
 # command tree and per-command JSON schemas. Leave it out to run an agent
-# on the built-in tools (knowledge, memory, human_in_the_loop) and the
-# tools remote_tools and mcp_clients import, with no wrapped application.
+# on the built-in tools (knowledge, memory, human_in_the_loop and those
+# listed under harness.tools) and the tools remote_tools and mcp_clients
+# import, with no wrapped application.
 # Required only when expose.agent.a2a.serve_tools exposes the wrapped
 # application's tools.
 application_path: /usr/local/bin/nats
@@ -258,6 +259,20 @@ harness:
   confirm_tags:
     - ai:destructive
     - impact:rw
+
+  # Opt-in built-in tools the harness implements itself. Only a listed
+  # tool is offered; today the names are read_file and base64_encode.
+  # confirm gates each call behind operator approval the way ai:confirm
+  # gates a command. options holds the tool's own settings, and an
+  # unknown key is an error. See the tools guide for each tool's
+  # arguments and options.
+  tools:
+    - name: base64_encode
+    - name: read_file
+      confirm: true
+      options:
+        root: /srv/corpus
+        max_bytes: 1048576
 
   # Limits a single tool call, at a terminal and on a worker alike.
   # Unset uses the default of 5m; set 0s for no limit at all, which is
