@@ -143,6 +143,16 @@ var _ = Describe("New", func() {
 		Expect(err).To(MatchError(ContainSubstring("cannot be exposed on a serving surface")))
 	})
 
+	It("Should build a confirm-gated tool exposed on a serving surface and report it gated", func() {
+		spec := base()
+		spec.Confirm = &ConfirmSpec{}
+		spec.Expose = &ExposeSpec{MCP: true, A2A: true}
+		tool := mustNew(spec)
+		Expect(tool.NeedsConfirm(nil)).To(BeTrue())
+		Expect(tool.MCPExposable()).To(BeTrue())
+		Expect(tool.A2AExposable()).To(BeTrue())
+	})
+
 	It("Should reject a tool that claims both a serving agent and an MCP server", func() {
 		spec := base()
 		spec.Remote = &RemoteSpec{Agent: "billing"}

@@ -481,7 +481,13 @@ func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeou
 		}
 
 		if c, ok := t.(toolkit.Confirmable); ok && policy.mode != ConfirmNever && c.NeedsConfirm(policy.tags) {
-			if denied := confirmRun(ctx, req, c, policy, cmdLine, logOut); denied != nil {
+			// A gated tool that renders no line of its own is named in the prompt by
+			// its tool name, so the user is never asked to approve an empty command.
+			prompt := cmdLine
+			if prompt == "" {
+				prompt = t.Name()
+			}
+			if denied := confirmRun(ctx, req, c, policy, prompt, logOut); denied != nil {
 				return denied, nil
 			}
 		}

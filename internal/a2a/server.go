@@ -301,7 +301,7 @@ func (s *Server) selectExposed(tools []toolkit.Tool) []toolkit.Tool {
 		case !canAnswerConfirm:
 			s.opts.Logger.Warn("Skipping tool: it cannot report whether it is confirmation-gated, so it cannot be served", "tool", t.Name())
 		case confirmable.NeedsConfirm(s.opts.ConfirmTags):
-			s.opts.Logger.Warn("Skipping tool: confirmation-gated commands are not served over a2a (no operator to approve); use ai:deny to suppress this", "tool", t.Name())
+			s.opts.Logger.Warn("Skipping tool: confirmation-gated tools are not served over a2a (no operator to approve); tag a command ai:deny or leave a2a exposure off a function tool to suppress this", "tool", t.Name())
 		case !toolNamePattern.MatchString(t.Name()):
 			s.opts.Logger.Warn("Skipping tool: not a valid a2a tool name", "tool", t.Name())
 		case t.ModelDescription() == "":

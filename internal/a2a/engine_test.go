@@ -5,6 +5,8 @@
 package a2a
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,6 +21,7 @@ import (
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
+	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
 // discardLogger is a slog logger that drops all output, for tests that build a
@@ -171,6 +174,29 @@ var _ = Describe("selectExposed", func() {
 		}
 		Expect(names).To(ConsistOf("keep"))
 		Expect(s.byName).NotTo(HaveKey("bare"))
+	})
+
+	// No built-in declares a2a exposure, so the gated function tool is built here.
+	It("Should drop a confirm-gated function tool with the same reason as a gated command", func() {
+		gated, err := functool.New(functool.Spec{
+			Name:        "wipe",
+			Description: "wipes things",
+			Schema:      map[string]any{"type": "object", "properties": map[string]any{}},
+			Handler: func(context.Context, json.RawMessage, *functool.CallContext) (string, error) {
+				return "wiped", nil
+			},
+			Confirm: &functool.ConfirmSpec{},
+			Expose:  &functool.ExposeSpec{A2A: true},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		logs := &bytes.Buffer{}
+		s := &Server{opts: ServerOptions{Logger: slog.New(slog.NewTextHandler(logs, nil))}, byName: map[string]toolkit.Tool{}}
+		exposed := s.selectExposed([]toolkit.Tool{gated})
+		Expect(exposed).To(BeEmpty())
+		Expect(s.byName).NotTo(HaveKey("wipe"))
+		Expect(logs.String()).To(ContainSubstring("confirmation-gated tools are not served over a2a"))
+		Expect(logs.String()).To(ContainSubstring("tool=wipe"))
 	})
 })
 

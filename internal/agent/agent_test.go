@@ -1856,7 +1856,7 @@ var _ = Describe("Run tool availability guard", func() {
 		cfg.LLM.Budget.MaxIterations = 1
 
 		_, err := Run(context.Background(), Options{Config: cfg, ConfigFile: "agent.yaml"}, nopEvents{}, nil)
-		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
+		Expect(err).To(MatchError(ContainSubstring("set application_path")))
 		Expect(err).To(MatchError(ContainSubstring(`in "agent.yaml"`)))
 	})
 
@@ -1868,8 +1868,8 @@ var _ = Describe("Run tool availability guard", func() {
 		cfg.LLM.Budget.MaxIterations = 1
 
 		_, err := Run(context.Background(), Options{Config: cfg}, nopEvents{}, nil)
-		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
-		Expect(err.Error()).To(HaveSuffix("mcp_clients"))
+		Expect(err).To(MatchError(ContainSubstring("set application_path")))
+		Expect(err.Error()).To(HaveSuffix("at least one tool"))
 	})
 
 	It("proceeds past the guard when only a native tool (knowledge_search) is enabled", func() {

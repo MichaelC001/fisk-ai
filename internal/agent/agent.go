@@ -1301,7 +1301,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			in = fmt.Sprintf(" in %q", opts.ConfigFile)
 		}
 		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients%s", in)
+			return res, fmt.Errorf("no tools available: set application_path or enable at least one tool%s", in)
 		}
 		return res, fmt.Errorf("no tools available after filtering; check include/exclude%s", in)
 	}

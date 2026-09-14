@@ -190,7 +190,7 @@ var _ = Describe("validateRunTarget", func() {
 
 			err := validateRunTarget(cfg, false)
 			Expect(err).To(MatchError(ContainSubstring("no tools available")))
-			Expect(err).To(MatchError(ContainSubstring("harness.memory")))
+			Expect(err).To(MatchError(ContainSubstring("set application_path")))
 
 			cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
 			Expect(validateRunTarget(cfg, false)).To(Succeed())

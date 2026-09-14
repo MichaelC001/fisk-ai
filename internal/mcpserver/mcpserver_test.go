@@ -24,6 +24,7 @@ import (
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	tools2 "github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
+	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -187,6 +188,26 @@ func taggedExecutable(name, tag, marker string) []tools2.Tool {
 	Expect(tools).To(HaveLen(1))
 
 	return tools2.Tools(tools)
+}
+
+// gatedFunctionTool builds one confirm-gated function tool declaring MCP exposure,
+// whose handler returns marker, ready to serve.
+func gatedFunctionTool(name, marker string) []tools2.Tool {
+	GinkgoHelper()
+
+	tool, err := functool.New(functool.Spec{
+		Name:        name,
+		Description: "a gated function tool",
+		Schema:      map[string]any{"type": "object", "properties": map[string]any{}},
+		Handler: func(context.Context, json.RawMessage, *functool.CallContext) (string, error) {
+			return marker, nil
+		},
+		Confirm: &functool.ConfirmSpec{Summary: func(json.RawMessage) string { return name }},
+		Expose:  &functool.ExposeSpec{MCP: true},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	return []tools2.Tool{tool}
 }
 
 // safeBuffer is an io.Writer safe for the concurrent writes a running server makes
@@ -884,6 +905,71 @@ var _ = Describe("Confirm gating over MCP", func() {
 		var result tools2.CommandResult
 		Expect(json.Unmarshal([]byte(text), &result)).To(Succeed())
 		Expect(result.Output).To(Equal("deployed\n"))
+	})
+
+	It("Should elicit before a confirm-gated function tool runs", func() {
+		tools := gatedFunctionTool("wipe", "wiped")
+		srv, registered := BuildServer(tools, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+		Expect(registered).To(ConsistOf("wipe"))
+
+		// A decline denies the call before the handler runs, so the marker never
+		// appears; an approval runs the handler and its output is returned verbatim.
+		cs := connectElicit(ctx, srv, func(_ context.Context, _ *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		})
+		defer cs.Close()
+
+		text, isError := callText(ctx, cs, "wipe", nil)
+		Expect(isError).To(BeTrue())
+		Expect(text).To(ContainSubstring("declined"))
+		Expect(text).NotTo(ContainSubstring("wiped"))
+
+		approved := connectElicit(ctx, srv, approve)
+		defer approved.Close()
+
+		text, isError = callText(ctx, approved, "wipe", nil)
+		Expect(isError).To(BeFalse())
+		Expect(text).To(Equal("wiped"))
+	})
+
+	It("Should refuse a confirm-gated function tool in always mode when the client cannot elicit", func() {
+		tools := gatedFunctionTool("wipe", "wiped")
+		srv, _ := BuildServer(tools, Options{Name: "app", Version: "v1", ConfirmMode: ConfirmAlways, LogOutput: io.Discard})
+
+		cs := connect(ctx, srv)
+		defer cs.Close()
+
+		text, isError := callText(ctx, cs, "wipe", nil)
+		Expect(isError).To(BeTrue())
+		Expect(text).To(ContainSubstring("requires approval"))
+		Expect(text).NotTo(ContainSubstring("wiped"))
+	})
+
+	It("Should name a gated function tool with no summary by its tool name in the prompt", func() {
+		tool, err := functool.New(functool.Spec{
+			Name:        "wipe",
+			Description: "a gated function tool with no summary",
+			Schema:      map[string]any{"type": "object", "properties": map[string]any{}},
+			Handler: func(context.Context, json.RawMessage, *functool.CallContext) (string, error) {
+				return "wiped", nil
+			},
+			Confirm: &functool.ConfirmSpec{},
+			Expose:  &functool.ExposeSpec{MCP: true},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		srv, _ := BuildServer([]tools2.Tool{tool}, Options{Name: "app", Version: "v1", LogOutput: io.Discard})
+
+		var message string
+		cs := connectElicit(ctx, srv, func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			message = req.Params.Message
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		})
+		defer cs.Close()
+
+		text, isError := callText(ctx, cs, "wipe", nil)
+		Expect(isError).To(BeTrue())
+		Expect(message).To(ContainSubstring("Command: wipe\n"))
+		Expect(text).To(ContainSubstring(`"wipe"`))
 	})
 })
 

@@ -80,6 +80,11 @@ type MCPSpec struct {
 // The zero value exposes nothing, and so does a nil ExposeSpec on a Spec. Every
 // field is therefore an opt-in a person had to type, which is what keeps a tool
 // added to an existing set from being served on its neighbour's selection.
+//
+// Exposure says nothing about confirmation. A confirm-gated tool may be exposed, and
+// each surface applies the gate its own way when it serves the tool: the MCP server
+// asks the client to approve each call under confirm_over_mcp, and the a2a tool
+// server drops the tool since it has no one to ask.
 type ExposeSpec struct {
 	// MCP allows the MCP server to carry the tool.
 	MCP bool
@@ -195,8 +200,14 @@ var (
 // required field is missing, when ValidateRequired is set but the schema declares no
 // required parameters (which would silently validate nothing), when a remote or MCP
 // tool is also marked confirm-gated (such a tool is gated by whoever serves it, never
-// locally), when a Spec claims both a serving agent and an MCP server, when Kind is
-// not one of the toolkit kinds, or when the declared Behavior contradicts itself.
+// locally), when a Spec claims both a serving agent and an MCP server, when a remote
+// or MCP tool declares exposure on a serving surface, when Kind is not one of the
+// toolkit kinds, or when the declared Behavior contradicts itself.
+//
+// A confirm-gated tool may declare exposure. The surface serving the tool reads its
+// NeedsConfirm answer and decides how a call is approved: the MCP server asks the
+// client to approve each call under confirm_over_mcp, and the a2a tool server drops the
+// tool with a logged reason.
 //
 // The zero Spec.Kind is valid and is what a caller's own tool leaves it at; Describe
 // accounts that tool as toolkit.KindCustom.
@@ -253,17 +264,15 @@ func New(spec Spec) (*Tool, error) {
 	}
 
 	// Re-serving another agent's or an MCP server's tool under this agent's identity
-	// is a proxying decision, and confirming a call needs an operator that a served
-	// surface does not have. Both are refused here rather than left to each surface to
-	// remember.
+	// is a proxying decision, refused here rather than left to each surface to
+	// remember. A confirm-gated tool may be exposed: each surface decides what to do
+	// with the gate when it serves the tool (see ExposeSpec).
 	if expose.MCP || expose.A2A {
 		switch {
 		case spec.Remote != nil:
 			return nil, fmt.Errorf("tool %q is remote and cannot be exposed on a serving surface; serving it would re-advertise another agent's tool as this agent's own", spec.Name)
 		case spec.MCP != nil:
 			return nil, fmt.Errorf("tool %q is served by an MCP server and cannot be exposed on a serving surface; serving it would re-advertise a third party's tool as this agent's own", spec.Name)
-		case spec.Confirm != nil:
-			return nil, fmt.Errorf("tool %q is confirm-gated and cannot be exposed on a serving surface; there is no operator to approve a served call", spec.Name)
 		}
 	}
 
