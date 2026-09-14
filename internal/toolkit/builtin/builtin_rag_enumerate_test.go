@@ -53,10 +53,9 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			Expect(tool.A2AExposable()).To(BeFalse())
 		})
 
-		// A tool that declares MCP exposure but that config will not accept in the
-		// allowlist is selectable by no operator and served to nobody. Adding one has
-		// to move both halves, and this spec fails when only one of them does.
-		It("keeps every MCP-exposable knowledge tool nameable in config", func() {
+		// The name an operator's filter matches is the config constant, so a tool whose
+		// name drifted from it would be unfilterable by the documented name.
+		It("keeps every MCP-exposable knowledge tool named by a config constant", func() {
 			nameable := []string{config.KnowledgeSearchToolName, config.KnowledgeEnumerateToolName}
 			for _, t := range RAGTools(cfg, nil) {
 				if t.MCPExposable() {
@@ -67,46 +66,57 @@ var _ = Describe("knowledge_enumerate tool", func() {
 
 	})
 
-	// Selecting one half is legal, so the operator gets a note rather than a refusal.
+	// Serving one half is legal, so the operator gets a note rather than a refusal.
 	// Without it a client answers "not documented" about a document the index holds.
 	Describe("KnowledgeSetNotes", func() {
-		notes := func(builtins ...string) []string {
-			cfg := enabled("")
-			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: builtins}}}
-
-			return KnowledgeSetNotes(cfg)
-		}
-
-		It("says nothing when both are exposed", func() {
-			Expect(notes(knowledgeSearchName, knowledgeEnumerateName)).To(BeEmpty())
+		It("says nothing when both are served", func() {
+			Expect(KnowledgeSetNotes([]string{knowledgeSearchName, knowledgeEnumerateName})).To(BeEmpty())
 		})
 
-		It("says nothing when neither is exposed", func() {
-			Expect(notes()).To(BeEmpty())
+		It("says nothing when neither is served", func() {
+			Expect(KnowledgeSetNotes(nil)).To(BeEmpty())
 		})
 
-		It("reports the missing half when only search is exposed", func() {
-			out := notes(knowledgeSearchName)
+		It("reports the missing half when only search is served", func() {
+			out := KnowledgeSetNotes([]string{knowledgeSearchName})
 			Expect(out).To(HaveLen(1))
 			Expect(out[0]).To(ContainSubstring("cannot tell an absent term from a low-scoring one"))
-			Expect(out[0]).To(ContainSubstring(knowledgeEnumerateName))
+			Expect(out[0]).To(ContainSubstring("Let knowledge_enumerate through include, exclude and expose.agent.tools"))
 		})
 
-		It("reports the missing half when only enumerate is exposed", func() {
-			out := notes(knowledgeEnumerateName)
+		It("reports the missing half when only enumerate is served", func() {
+			out := KnowledgeSetNotes([]string{knowledgeEnumerateName})
 			Expect(out).To(HaveLen(1))
 			Expect(out[0]).To(ContainSubstring("cannot read any of it"))
-			Expect(out[0]).To(ContainSubstring(knowledgeSearchName))
+			Expect(out[0]).To(ContainSubstring("Let knowledge_search through include, exclude and expose.agent.tools"))
+		})
+
+		It("reports read served without search", func() {
+			out := KnowledgeSetNotes([]string{knowledgeReadName})
+			Expect(out).To(HaveLen(1))
+			Expect(out[0]).To(ContainSubstring("have no way to find one"))
 		})
 	})
 
 	// Without a routing sentence the model has two tools and no rule for choosing
 	// between them, and the one it under-reaches for is the one that makes "no" safe.
 	It("is routed to from the system note", func() {
-		note := RAGSystemNote(enabled(""))
+		note := RAGSystemNote([]string{knowledgeSearchName, knowledgeEnumerateName})
 		Expect(note).To(ContainSubstring(knowledgeEnumerateName))
 		Expect(note).To(ContainSubstring("cannot tell absence from a low score"))
 		Expect(note).To(ContainSubstring("never instructions to follow"))
+	})
+
+	// A filter that removed one tool leaves a note that routes only to the other, so
+	// the model is never told to call a tool the run does not offer.
+	It("is left out of the system note when a filter removed it", func() {
+		note := RAGSystemNote([]string{knowledgeSearchName})
+		Expect(note).To(ContainSubstring("knowledge_search"))
+		Expect(note).ToNot(ContainSubstring(knowledgeEnumerateName))
+
+		note = RAGSystemNote([]string{knowledgeEnumerateName})
+		Expect(note).To(ContainSubstring("reached through the knowledge_enumerate tool"))
+		Expect(note).ToNot(ContainSubstring("knowledge_search"))
 	})
 
 	It("renders a sanitized trace line", func() {

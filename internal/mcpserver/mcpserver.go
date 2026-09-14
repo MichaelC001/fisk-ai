@@ -452,13 +452,15 @@ type confirmPolicy struct {
 // logOut naming the command line that is about to run, so an operator can see
 // what an MCP client is invoking.
 //
-// A confirm-tagged command (ai:confirm or a policy.tags match) is gated before it
-// runs, per policy.mode: a client that negotiated elicitation is asked to approve it
-// and the command runs only on approval, while a client that cannot elicit either
-// runs it ungated (ConfirmAuto) or is refused (ConfirmAlways); ConfirmNever skips the
-// gate entirely. The gate runs before the semaphore and outside the per-call timeout,
-// so waiting on a human neither holds a concurrency slot nor is cut short by the run
-// timeout.
+// A confirm-gated tool, which is a command tagged ai:confirm or a policy.tags match,
+// or an in-process tool built with a ConfirmSpec, is gated before it runs, per
+// policy.mode: a client that negotiated elicitation is asked to approve it and the
+// tool runs only on approval, while a client that cannot elicit either runs it
+// ungated (ConfirmAuto) or is refused (ConfirmAlways); ConfirmNever skips the gate
+// entirely. The prompt names the command line, or an in-process tool's trace line,
+// or the tool name when it renders neither. The gate runs before the semaphore and
+// outside the per-call timeout, so waiting on a human neither holds a concurrency
+// slot nor is cut short by the run timeout.
 //
 // The result mapping matches the agent's: an execution failure (a missing
 // binary, a canceled context, or arguments that cannot be turned into a command
@@ -481,7 +483,13 @@ func toolHandler(t toolkit.Tool, policy confirmPolicy, sem chan struct{}, timeou
 		}
 
 		if c, ok := t.(toolkit.Confirmable); ok && policy.mode != ConfirmNever && c.NeedsConfirm(policy.tags) {
-			if denied := confirmRun(ctx, req, c, policy, cmdLine, logOut); denied != nil {
+			// A gated tool that renders no line of its own is named in the prompt by
+			// its tool name, so the user is never asked to approve an empty command.
+			prompt := cmdLine
+			if prompt == "" {
+				prompt = t.Name()
+			}
+			if denied := confirmRun(ctx, req, c, policy, prompt, logOut); denied != nil {
 				return denied, nil
 			}
 		}

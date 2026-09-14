@@ -394,7 +394,7 @@ func validateRunTarget(cfg *config.Config, remote bool) error {
 		// files are opened. A Go program embedding the agent may inject its own, which
 		// is why config validation stays quiet about this and the caller asks.
 		if !cfg.SuppliesTools() {
-			return fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients in %q", configFile)
+			return fmt.Errorf("no tools available: set application_path or enable at least one tool in %q", configFile)
 		}
 
 		return nil

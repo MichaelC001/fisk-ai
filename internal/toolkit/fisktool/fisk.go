@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -66,8 +65,8 @@ const commandWaitDelay = 10 * time.Second
 const introspectTimeout = 30 * time.Second
 
 // CommandTool is one command of a fisk application presented to a model as a tool.
-// It is built from an application model, filtered with FilterTools, and finally
-// turned into a neutral tool definition with Definition. The captured
+// It is built from an application model, filtered with toolkit.FilterTools, and
+// finally turned into a neutral tool definition with Definition. The captured
 // command Model is the source of truth for the tool's schema and tags (so
 // tag-based filtering is possible, which a bare tool definition cannot express)
 // and, later, for mapping a call's arguments back to the command's
@@ -928,89 +927,18 @@ func commandTools(cmd *fisk.CmdModel, prefix []string) []*CommandTool {
 	}}
 }
 
-// FilterMode selects whether a ToolFilter keeps or removes the tools it matches.
-type FilterMode int
-
-const (
-	// IncludeFilter keeps only the tools that match the filter.
-	IncludeFilter FilterMode = iota
-	// ExcludeFilter removes the tools that match the filter.
-	ExcludeFilter
-)
-
-// FilterTools applies a ToolFilter to a list of tools as either an include or an
-// exclude list. A tool matches the filter when any of the filter's Tools regular
-// expressions matches its tool name (the underscore-joined command path, e.g.
-// "auth_user_info"), or any of the filter's Tags matches one of its tags (an
-// empty tag in the filter matches a tool with no tags).
-//
-// Tools tagged ai:deny are always removed, regardless of mode or filter, so this
-// is the enforcement point for that policy and should always be applied. A nil
-// filter imposes no include/exclude restriction and keeps everything else.
-func FilterTools(tools []*CommandTool, filter *config.ToolFilter, mode FilterMode) ([]*CommandTool, error) {
-	var patterns []*regexp.Regexp
-	if filter != nil {
-		for _, pattern := range filter.Tools {
-			re, err := regexp.Compile(pattern)
-			if err != nil {
-				return nil, fmt.Errorf("invalid tool filter pattern %q: %w", pattern, err)
-			}
-			patterns = append(patterns, re)
-		}
-	}
-
+// stripDenied returns the tools not tagged ai:deny, in the order given. It is the
+// enforcement point for that tag: no filter can name a denied tool back.
+func stripDenied(tools []*CommandTool) []*CommandTool {
 	var out []*CommandTool
 	for _, t := range tools {
 		if slices.Contains(t.Tags(), denyTag) {
 			continue
 		}
-
-		if filter == nil {
-			out = append(out, t)
-			continue
-		}
-
-		matched := matchesFilter(t, filter, patterns)
-		switch mode {
-		case IncludeFilter:
-			if matched {
-				out = append(out, t)
-			}
-		case ExcludeFilter:
-			if !matched {
-				out = append(out, t)
-			}
-		}
+		out = append(out, t)
 	}
 
-	return out, nil
-}
-
-// matchesFilter reports whether the CommandTool matches the filter's name patterns or
-// tags. patterns are the pre-compiled forms of filter.Tools, matched against the
-// tool name (the underscore-joined command path).
-func matchesFilter(t *CommandTool, filter *config.ToolFilter, patterns []*regexp.Regexp) bool {
-	name := t.Name()
-	for _, re := range patterns {
-		if re.MatchString(name) {
-			return true
-		}
-	}
-
-	tags := t.Tags()
-	for _, tag := range filter.Tags {
-		if tag == "" {
-			if len(tags) == 0 {
-				return true
-			}
-			continue
-		}
-		if slices.Contains(tags, tag) {
-			return true
-		}
-	}
-
-	return false
+	return out
 }
 
 // ToolsForApp introspects the application binary at appPath and returns its

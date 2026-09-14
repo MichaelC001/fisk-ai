@@ -830,6 +830,18 @@ func runErrorClass(err error, reachedRunner bool) telemetry.ErrorClass {
 	return telemetry.ClassOther
 }
 
+// filtersConfigured reports whether include or exclude carries a pattern or a tag,
+// the same test toolkit.NewFilter applies before it compiles one.
+func filtersConfigured(cfg *config.Config) bool {
+	for _, f := range []*config.ToolFilter{cfg.Include, cfg.Exclude} {
+		if f != nil && (len(f.Tools) > 0 || len(f.Tags) > 0) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Run loads the tools and prompt from opts.Config, sets up checkpointing and
 // resume as requested, and drives the agentic loop to a terminal state. It emits
 // the run's narration, tool traces and advisories through events and returns a
@@ -1300,8 +1312,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		if opts.ConfigFile != "" {
 			in = fmt.Sprintf(" in %q", opts.ConfigFile)
 		}
-		if cfg.ApplicationPath == "" {
-			return res, fmt.Errorf("no tools available: this agent wraps no application (application_path unset) and enables no built-in, remote or mcp tools; set application_path, or enable harness.knowledge, harness.memory, human_in_the_loop, remote_tools or mcp_clients%s", in)
+		// The filters remove tools of every kind, so a run with no application and a
+		// filter that matched nothing is told about the filter, not the application.
+		if cfg.ApplicationPath == "" && !filtersConfigured(cfg) {
+			return res, fmt.Errorf("no tools available: set application_path or enable at least one tool%s", in)
 		}
 		return res, fmt.Errorf("no tools available after filtering; check include/exclude%s", in)
 	}
@@ -1492,6 +1506,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			Caller:            mcpSessions,
 			Warnings:          mcpWarnings,
 			Imports:           asm.MCP,
+			Filters:           asm.filters,
 			Claimed:           asm.claimed,
 			Remote:            asm.remote,
 			Before:            beforeMCP,
@@ -1536,16 +1551,17 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// The system prompt is the user's prompt, plus a note about reaching the
 	// operator when the human-in-the-loop tools are enabled: the agent loop ends on
 	// a text-only turn, so without it the model tends to "ask the user" in prose and
-	// silently end the run instead of calling a tool. It is constant across
-	// iterations, so build it once.
+	// silently end the run instead of calling a tool. Each note is built from the
+	// assembled names, so a built-in a filter removed is never named to the model. It
+	// is constant across iterations, so build it once.
 	system := []string{cfg.SystemPrompt}
 	if note := builtin.HITLSystemNote(asm.Names(toolkit.KindBuiltin, SourceHumanInTheLoop)); note != "" {
 		system = append(system, note)
 	}
-	if note := builtin.MemorySystemNote(cfg); note != "" {
+	if note := builtin.MemorySystemNote(asm.Names(toolkit.KindBuiltin, SourceMemory)); note != "" {
 		system = append(system, note)
 	}
-	if note := builtin.RAGSystemNote(cfg); note != "" {
+	if note := builtin.RAGSystemNote(asm.Names(toolkit.KindBuiltin, SourceKnowledge)); note != "" {
 		system = append(system, note)
 	}
 

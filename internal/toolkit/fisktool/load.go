@@ -10,10 +10,11 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 )
 
-// LoadTools introspects the application, then always strips ai:deny tools before
-// applying the configured include and exclude filters. The unconditional first
-// pass is what enforces ai:deny even when neither filter is set. ctx bounds the
-// introspection subprocess (see FetchFiskAppModel).
+// LoadTools introspects the application and strips the commands tagged ai:deny. The
+// strip is unconditional, so the tag holds with no filter set. The configured include and
+// exclude filters are not applied here: agent.Assemble applies them to every tool of
+// every kind, the commands included. ctx bounds the introspection subprocess (see
+// FetchFiskAppModel).
 func LoadTools(ctx context.Context, cfg *config.Config) ([]*CommandTool, error) {
 	// With no wrapped application there is nothing to introspect; the agent runs on
 	// its built-in and remote tools alone.
@@ -26,70 +27,12 @@ func LoadTools(ctx context.Context, cfg *config.Config) ([]*CommandTool, error) 
 		return nil, err
 	}
 
-	tools, err = FilterTools(tools, nil, IncludeFilter)
-	if err != nil {
-		return nil, err
-	}
-
-	if cfg.Include != nil && (len(cfg.Include.Tools) > 0 || len(cfg.Include.Tags) > 0) {
-		tools, err = FilterTools(tools, cfg.Include, IncludeFilter)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if cfg.Exclude != nil && (len(cfg.Exclude.Tools) > 0 || len(cfg.Exclude.Tags) > 0) {
-		tools, err = FilterTools(tools, cfg.Exclude, ExcludeFilter)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return tools, nil
+	return stripDenied(tools), nil
 }
 
-// ServedTools returns the tools exposed to MCP and a2a callers: the agent's
-// loaded tool set (LoadTools, which applies the top-level include/exclude and
-// strips ai:deny) narrowed by the optional expose.agent.tools selection. The
-// selection can only remove tools the agent already has; when it is absent the
-// whole loaded set is served, so enabling a transport with no selection serves
-// the agent's focused toolset as-is.
+// ServedTools returns what LoadTools returns. A served surface's expose.agent.tools
+// selection is applied by agent.Assemble to every tool it serves, the commands
+// included.
 func ServedTools(ctx context.Context, cfg *config.Config) ([]*CommandTool, error) {
-	tools, err := LoadTools(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	if cfg.Expose == nil || cfg.Expose.Agent == nil {
-		return tools, nil
-	}
-
-	return filterExposed(tools, cfg.Expose.Agent.Tools)
-}
-
-// filterExposed narrows a loaded tool set by an exposure selection, applying its
-// include then its exclude, each honored only when it carries patterns or tags,
-// mirroring the top-level filtering in LoadTools. A nil selection serves the set
-// unchanged.
-func filterExposed(tools []*CommandTool, sel *config.ExposedToolSelection) ([]*CommandTool, error) {
-	if sel == nil {
-		return tools, nil
-	}
-
-	var err error
-	if sel.Include != nil && (len(sel.Include.Tools) > 0 || len(sel.Include.Tags) > 0) {
-		tools, err = FilterTools(tools, sel.Include, IncludeFilter)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if sel.Exclude != nil && (len(sel.Exclude.Tools) > 0 || len(sel.Exclude.Tags) > 0) {
-		tools, err = FilterTools(tools, sel.Exclude, ExcludeFilter)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return tools, nil
+	return LoadTools(ctx, cfg)
 }

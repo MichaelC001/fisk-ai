@@ -26,8 +26,7 @@ func knowledgeEnumerateTool(store *rag.Store) *functool.Tool {
 		// Read-only over the operator's own index and needing no operator prompt, on
 		// the same terms as knowledge_search, and served beside it: a client that can
 		// rank but cannot enumerate has exactly the defect this tool exists to fix.
-		// Not a2a, for the reason knowledge_search is not: there is no a2a builtins
-		// allowlist, so declaring it there would serve it the moment a2a is enabled.
+		// a2a serves no built-in.
 		Expose: &functool.ExposeSpec{MCP: true},
 		// Read-only over the same closed index knowledge_search reads.
 		Behavior: toolkit.Behavior{

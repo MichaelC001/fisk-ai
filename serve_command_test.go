@@ -13,6 +13,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
@@ -52,14 +53,14 @@ type describedService struct {
 	name     string
 	heading  string
 	exposed  []string
-	withheld []string
+	withheld []agent.Withheld
 }
 
 func (s *describedService) Name() string               { return s.name }
 func (s *describedService) Heading() string            { return s.heading }
 func (s *describedService) Close() error               { return nil }
 func (s *describedService) ExposedTools() []string     { return s.exposed }
-func (s *describedService) WithheldBuiltins() []string { return s.withheld }
+func (s *describedService) Withheld() []agent.Withheld { return s.withheld }
 
 func (s *describedService) Describe() []serve.DescLine {
 	return []serve.DescLine{{Label: "Discovery", Value: s.name + ".discover"}}
@@ -174,15 +175,20 @@ var _ = Describe("fiskServeCommand", func() {
 
 		// The two lists are values under one label rather than a label and a value, so
 		// they are asked for separately and printed inside the endpoint's own section.
+		// Each withheld tool prints with its own reason, since one a filter removed and
+		// one that declares no a2a exposure need different fixes.
 		It("Should print the served and withheld tools of an endpoint that serves tools", func() {
 			c := &fiskServeCommand{}
 			res := &serve.Resources{SessionStore: agenttest.NewFakeSessionStore(GinkgoTB())}
 
 			svc := &describedService{
-				name:     "a2a",
-				heading:  "Serving tools over a2a",
-				exposed:  []string{"backup", "restore"},
-				withheld: []string{"knowledge"},
+				name:    "a2a",
+				heading: "Serving tools over a2a",
+				exposed: []string{"backup", "restore"},
+				withheld: []agent.Withheld{
+					{Tool: "knowledge_search", Reason: agent.WithheldAgentOnly},
+					{Tool: "base64_encode", Reason: agent.WithheldFiltered},
+				},
 			}
 
 			out := c.banner(jobsConfig(), nil, []serve.Service{svc}, res, &telemetry.Provider{}).String()
@@ -190,8 +196,11 @@ var _ = Describe("fiskServeCommand", func() {
 			Expect(out).To(ContainSubstring("Serving tools over a2a"))
 			Expect(out).To(ContainSubstring("backup"))
 			Expect(out).To(ContainSubstring("restore"))
-			Expect(out).To(ContainSubstring("knowledge"))
-			Expect(out).To(ContainSubstring("declare no a2a exposure"))
+			// The renderer may escape an underscore for markdown, so each line is matched
+			// from the name's last word.
+			Expect(out).To(ContainSubstring("search: it is reachable only in an agent run"))
+			Expect(out).To(ContainSubstring("encode: it is excluded by include, exclude or expose.agent.tools"))
+			Expect(out).ToNot(ContainSubstring("declare no a2a exposure"))
 		})
 	})
 

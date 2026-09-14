@@ -20,7 +20,7 @@ import (
 // The built-in human-in-the-loop tool names share the ask_human_ prefix, which
 // groups them and keeps them clear of a typical fisk command path so they do not
 // collide with an introspected application tool. They are aliases of the config
-// constants, which is where an operator's allowlist and an embedder's provider script
+// constants, which is where an operator's filters and an embedder's provider script
 // read them from.
 const (
 	askHumanConfirmName = config.AskHumanConfirmToolName

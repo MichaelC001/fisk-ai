@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1856,7 +1857,7 @@ var _ = Describe("Run tool availability guard", func() {
 		cfg.LLM.Budget.MaxIterations = 1
 
 		_, err := Run(context.Background(), Options{Config: cfg, ConfigFile: "agent.yaml"}, nopEvents{}, nil)
-		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
+		Expect(err).To(MatchError(ContainSubstring("set application_path")))
 		Expect(err).To(MatchError(ContainSubstring(`in "agent.yaml"`)))
 	})
 
@@ -1868,8 +1869,21 @@ var _ = Describe("Run tool availability guard", func() {
 		cfg.LLM.Budget.MaxIterations = 1
 
 		_, err := Run(context.Background(), Options{Config: cfg}, nopEvents{}, nil)
-		Expect(err).To(MatchError(ContainSubstring("this agent wraps no application")))
-		Expect(err.Error()).To(HaveSuffix("mcp_clients"))
+		Expect(err).To(MatchError(ContainSubstring("set application_path")))
+		Expect(err.Error()).To(HaveSuffix("at least one tool"))
+	})
+
+	// The filters remove built-ins too, so an application-less run whose filter
+	// matched nothing is pointed at the filter rather than at application_path.
+	It("names the filters when they removed every built-in and there is no application", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "test-model"
+		cfg.LLM.Budget.MaxIterations = 1
+		cfg.Harness.Tools = []config.HarnessToolConfig{{Name: config.Base64EncodeToolName}}
+		cfg.Include = &config.ToolFilter{Tags: []string{"ai:read_only"}}
+
+		_, err := Run(context.Background(), Options{Config: cfg}, nopEvents{}, nil)
+		Expect(err).To(MatchError(ContainSubstring("no tools available after filtering")))
 	})
 
 	It("proceeds past the guard when only a native tool (knowledge_search) is enabled", func() {
@@ -1888,6 +1902,24 @@ var _ = Describe("Run tool availability guard", func() {
 		_, err := Run(context.Background(), opts, nopEvents{}, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).ToNot(ContainSubstring("no tools available after filtering"))
+	})
+
+	It("starts on a harness.tools listing with no application_path", func() {
+		cfg := &config.Config{}
+		cfg.LLM.Model = "test-model"
+		cfg.LLM.Budget.MaxIterations = 1
+		cfg.Harness.Tools = []config.HarnessToolConfig{
+			{Name: config.ReadFileToolName, Options: json.RawMessage(`{"root": ` + strconv.Quote(GinkgoT().TempDir()) + `}`)},
+			{Name: config.Base64EncodeToolName},
+		}
+
+		provider := providerFunc(func(context.Context, llm.Request) (*llm.Response, error) {
+			return mustResponse(`{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`), nil
+		})
+
+		res, err := Run(context.Background(), Options{Config: cfg, ConfigFile: "agent.yaml", Provider: provider}, nopEvents{}, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
 	})
 })
 

@@ -197,6 +197,10 @@ var _ = Describe("info tools", func() {
 		cfg.Harness.HumanInTheLoop = &config.HumanInTheLoopConfig{Enabled: true}
 		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
 		cfg.Harness.RAG = &config.RAGConfig{Enabled: true}
+		cfg.Harness.Tools = []config.HarnessToolConfig{
+			{Name: config.ReadFileToolName, Confirm: true},
+			{Name: config.Base64EncodeToolName},
+		}
 		cfg.NatsContext = "lab"
 		cfg.RemoteTools = []config.RemoteToolHost{{Name: "live", Alias: "lv"}, {Name: "dead"}}
 
@@ -208,6 +212,8 @@ var _ = Describe("info tools", func() {
 		Expect(out).To(ContainSubstring("| ask_human_confirm | local |  |"))
 		Expect(out).To(ContainSubstring("| memory_list | local |  |"))
 		Expect(out).To(ContainSubstring("| knowledge_search | local |  |"))
+		Expect(out).To(ContainSubstring("| read_file | local | Yes |"))
+		Expect(out).To(ContainSubstring("| base64_encode | local |  |"))
 		Expect(out).To(ContainSubstring("| forecast | lv |  | forecast on the peer | impact:ro |"))
 		Expect(out).To(ContainSubstring("| lv_status | lv |  | status on the peer | impact:ro |"))
 

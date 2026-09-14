@@ -186,10 +186,10 @@ type ToolOptions struct {
 	// config.Config.RootDirectory.
 	WorkDir string
 
-	// WithheldBuiltins names the built-in tools the program enabled and does not serve,
-	// which Service.WithheldBuiltins returns for a startup banner. Tools is the served
-	// set; nothing here filters it.
-	WithheldBuiltins []string
+	// Withheld are the built-in tools the program enabled and does not serve, each with
+	// the reason, which Service.Withheld returns for a startup banner. Tools is the
+	// served set; nothing here filters it.
+	Withheld []agent.Withheld
 }
 
 // PromptOptions describes the prompt channel: how much work it admits, how long a
@@ -456,18 +456,13 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 			tools = append(tools, t.Tool)
 		}
 
-		var withheld []string
-		for _, held := range asm.Withheld {
-			withheld = append(withheld, held.Tool)
-		}
-
 		built.Tools = &ToolOptions{
-			Tools:            tools,
-			ConfirmTags:      cfg.ConfirmTags(),
-			Concurrency:      cfg.A2AMaxConcurrentTools(),
-			CallTimeout:      cfg.A2AToolTimeout(),
-			WorkDir:          cfg.RootDirectory,
-			WithheldBuiltins: withheld,
+			Tools:       tools,
+			ConfirmTags: cfg.ConfirmTags(),
+			Concurrency: cfg.A2AMaxConcurrentTools(),
+			CallTimeout: cfg.A2AToolTimeout(),
+			WorkDir:     cfg.RootDirectory,
+			Withheld:    asm.Withheld,
 		}
 	}
 

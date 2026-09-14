@@ -61,10 +61,6 @@ func infoAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	if cfg.ApplicationPath == "" && cfg.AppToolFiltersConfigured() {
-		fmt.Fprintln(os.Stderr, "warning: include/exclude have no effect without application_path; they filter the wrapped application's tools")
-	}
-
 	// Assembly is lenient: info must stay usable offline and when a remote agent or an
 	// MCP server is down, so info warns about a source that failed and shows the tools
 	// of the sources that answered.

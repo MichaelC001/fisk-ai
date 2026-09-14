@@ -129,25 +129,34 @@ var _ = Describe("Memory tools", func() {
 
 	Describe("MemorySystemNote", func() {
 		It("Should name every tool a run was actually given", func() {
-			note := MemorySystemNote(enabled)
-			for _, name := range names(enabled) {
-				Expect(note).To(ContainSubstring(name))
-			}
+			note := MemorySystemNote(names(enabled))
+			Expect(note).To(ContainSubstring("reached through the tools memory_list, memory_read, memory_write and memory_delete."))
+			Expect(note).To(ContainSubstring("Write a memory when"))
 		})
 
 		// The note is the tool advertisement as much as the instruction, so naming a tool
 		// a read-only run does not have buys a wasted call and a confusing failure.
 		It("Should not name the withheld tools nor ask for a write when read only", func() {
-			note := MemorySystemNote(readOnly)
+			note := MemorySystemNote(names(readOnly))
 
-			Expect(note).To(ContainSubstring("memory_list"))
-			Expect(note).To(ContainSubstring("memory_read"))
+			Expect(note).To(ContainSubstring("reached through the tools memory_list and memory_read."))
 			Expect(note).ToNot(ContainSubstring("memory_write"))
 			Expect(note).ToNot(ContainSubstring("memory_delete"))
+			Expect(note).ToNot(ContainSubstring("Write a memory when"))
 		})
 
-		It("Should say nothing at all when memory is off", func() {
-			Expect(MemorySystemNote(&config.Config{})).To(BeEmpty())
+		// A filter that removed memory_write leaves a run that cannot save, whatever
+		// else it kept, so the note is the read-only one over the names it has.
+		It("Should name only the assembled tools and not ask for a write without memory_write", func() {
+			note := MemorySystemNote([]string{"memory_list", "memory_read", "memory_delete"})
+
+			Expect(note).To(ContainSubstring("reached through the tools memory_list, memory_read and memory_delete."))
+			Expect(note).ToNot(ContainSubstring("memory_write"))
+			Expect(note).ToNot(ContainSubstring("Write a memory when"))
+		})
+
+		It("Should say nothing at all with no memory tool", func() {
+			Expect(MemorySystemNote(nil)).To(BeEmpty())
 		})
 	})
 

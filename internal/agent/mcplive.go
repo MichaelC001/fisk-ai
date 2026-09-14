@@ -82,6 +82,10 @@ type liveMCPTools struct {
 	// toolSearchAllowed is the run's resolved gate, which is a property of the
 	// provider and the configuration and so cannot move with a server's tool list.
 	toolSearchAllowed bool
+	// filters are the run's include and exclude filters, applied to a server's new
+	// list as they were to the one the run started with, so a tool a filter removed at
+	// startup does not return on a list change.
+	filters []*toolkit.Filter
 
 	mu sync.Mutex
 	// order is the configured server order, which the tools are assembled in so a
@@ -110,8 +114,12 @@ type liveMCPSetup struct {
 	Caller mcpclient.Caller
 	// Warnings carries the advisory to the run goroutine.
 	Warnings *warnQueue
-	// Imports are the per-server outcomes the run started with, in configured order.
+	// Imports are the per-server outcomes the run started with, in configured order,
+	// each holding the tools the filters kept.
 	Imports []mcpclient.ServerImport
+	// Filters are the run's include and exclude filters, which a rebuild applies to
+	// a server's new list.
+	Filters []*toolkit.Filter
 	// Claimed is the run's whole name set, the names its MCP tools hold now included.
 	// It is copied, so what a rebuild does to it does not reach the run.
 	Claimed map[string]bool
@@ -137,6 +145,7 @@ func newLiveMCPTools(setup liveMCPSetup) *liveMCPTools {
 		after:             slices.Clone(setup.After),
 		builtins:          slices.Clone(setup.Builtins),
 		toolSearchAllowed: setup.ToolSearchAllowed,
+		filters:           setup.Filters,
 		tools:             make(map[string][]*functool.Tool, len(setup.Imports)),
 		skipped:           make(map[string][]mcpclient.SkippedTool, len(setup.Imports)),
 		claimed:           make(map[string]bool, len(setup.Claimed)),
@@ -183,7 +192,10 @@ func (l *liveMCPTools) changed(change mcpclient.ToolListChange) {
 		delete(l.claimed, t.Name())
 	}
 
+	// The filters run on the named tools, as they did at startup, so a removed tool
+	// claims no name here either.
 	imported := mcpclient.ImportChanged(change, mcpclient.NewClaimedNames(l.claimed, l.remote), l.caller)
+	imported.Tools = keptFunctools(l.filters, imported.Tools)
 	for _, t := range imported.Tools {
 		l.claimed[t.Name()] = true
 	}

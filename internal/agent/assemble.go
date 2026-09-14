@@ -35,6 +35,8 @@ const (
 	SourceMemory = "memory"
 	// SourceKnowledge is the knowledge family of built-ins.
 	SourceKnowledge = "knowledge"
+	// SourceTools is the harness.tools family of built-ins, each listed by name.
+	SourceTools = "tools"
 	// SourceCustom is the caller's own tools.
 	SourceCustom = "custom"
 	// SourceRemoteTools is the remote_tools block.
@@ -61,8 +63,8 @@ type Sources struct {
 	// Unbound reports it. A caller that wants one server's failure to leave the others
 	// importable connects one Sessions per server.
 	MCP []*mcpclient.Sessions
-	// Custom are the caller's own tools, validated after every other source has
-	// claimed its names.
+	// Custom are the caller's own tools, filtered by include and exclude like every
+	// other kind and validated after every other source has claimed its names.
 	Custom []toolkit.Tool
 	// Unbound are the sources the caller tried to connect and could not, each with the
 	// error it got: a NATS context that did not dial as {Source: SourceRemoteTools,
@@ -78,12 +80,13 @@ type Surface int
 const (
 	// SurfaceRun assembles the set an agent run offers the model, from every source.
 	SurfaceRun Surface = iota
-	// SurfaceMCP assembles the set fisk mcp serves: the application's commands
-	// narrowed by expose.agent.tools, and the built-ins that declare MCP exposure and
-	// that expose.agent.mcp.builtins lists. An imported tool is never re-served.
+	// SurfaceMCP assembles the set fisk mcp serves: the application's commands and
+	// the built-ins that declare MCP exposure, narrowed by include, exclude and
+	// expose.agent.tools. An imported tool is never re-served.
 	SurfaceMCP
 	// SurfaceA2A assembles the set the a2a endpoint serves: the application's commands
-	// narrowed by expose.agent.tools, and the built-ins that declare a2a exposure.
+	// and the built-ins that declare a2a exposure, narrowed by include, exclude and
+	// expose.agent.tools.
 	SurfaceA2A
 )
 
@@ -121,9 +124,8 @@ type Problem struct {
 const (
 	// WithheldAgentOnly is a built-in whose exposure declaration excludes the surface.
 	WithheldAgentOnly = "it is reachable only in an agent run"
-	// WithheldNotListed is an MCP-exposable built-in that expose.agent.mcp.builtins
-	// does not list.
-	WithheldNotListed = "it is not listed in expose.agent.mcp.builtins"
+	// WithheldFiltered is a built-in the surface could serve that a filter removed.
+	WithheldFiltered = "it is excluded by include, exclude or expose.agent.tools"
 )
 
 // Withheld is a built-in the configuration enables and the surface does not serve.
@@ -143,11 +145,18 @@ type Assembly struct {
 	// Withheld are the built-ins a served surface left out, with the reason for each.
 	Withheld []Withheld
 	// Remote is the outcome of importing each remote_tools host, in configured order.
+	// A row's Tools are the tools the filters kept.
 	Remote []remotetools.HostImport
 	// MCP is the outcome of importing each mcp_clients server, in configured order. A
 	// server the caller reported in Unbound, or passed no session for, has a row with
-	// that error.
+	// that error. A row's Tools are the tools the filters kept.
 	MCP []mcpclient.ServerImport
+
+	// filters are the compiled include, exclude and, on a served surface,
+	// expose.agent.tools filters, in the order they apply. A tool every filter keeps
+	// is assembled; one any filter removes claims no name. The live re-import applies
+	// the same filters to a server's new list.
+	filters []*toolkit.Filter
 
 	// claimed holds every name in use except the remote tools', and remote holds the
 	// remote tools by name. mcpclient.NewClaimedNames takes both, and the live
@@ -159,11 +168,18 @@ type Assembly struct {
 // Assemble builds an agent's tool set from its configuration and the sources the
 // caller opened, for one surface under one policy.
 //
-// Assemble adds the application's commands, then the human-in-the-loop, memory and
-// knowledge built-ins, then the remote imports, then the MCP imports, then the custom
-// tools, and claims each name as it goes. A remote or MCP tool is prefixed with its
-// alias as the importers do it; a custom tool is refused on a clash with any earlier
-// kind.
+// Assemble adds the application's commands, then the human-in-the-loop, memory,
+// knowledge and harness.tools built-ins, then the remote imports, then the MCP
+// imports, then the custom tools, and claims each name as it goes. A remote or MCP
+// tool is prefixed with its alias as the importers do it; a custom tool is refused
+// on a clash with any earlier kind.
+//
+// The configured include and exclude filters, and on a served surface the
+// expose.agent.tools filters too, apply to every tool of every kind by its final
+// name and, for a command, its tags. A tool a filter removes is left out before it
+// claims its name, so a command a tag filter removed does not prefix a remote tool
+// of the same name. On a served surface a removed built-in is recorded in Withheld
+// with WithheldFiltered.
 //
 // An application that cannot be introspected and a served built-in whose name a
 // command took are errors under both policies, since they are configuration
@@ -176,6 +192,12 @@ type Assembly struct {
 func Assemble(ctx context.Context, cfg *config.Config, src Sources, surface Surface, policy Policy) (*Assembly, error) {
 	a := &Assembly{claimed: map[string]bool{}, remote: map[string]*functool.Tool{}}
 
+	filters, err := compileFilters(cfg, surface)
+	if err != nil {
+		return a, err
+	}
+	a.filters = filters
+
 	if surface == SurfaceRun {
 		a.Problems = append(a.Problems, src.Unbound...)
 		if policy == Strict && len(src.Unbound) > 0 {
@@ -183,11 +205,14 @@ func Assemble(ctx context.Context, cfg *config.Config, src Sources, surface Surf
 		}
 	}
 
-	commands, err := loadCommands(ctx, cfg, surface)
+	commands, err := fisktool.LoadTools(ctx, cfg)
 	if err != nil {
 		return a, err
 	}
 	for _, t := range commands {
+		if !a.keeps(t) {
+			continue
+		}
 		a.add(t, toolkit.KindApplication, SourceApplication)
 	}
 
@@ -218,15 +243,53 @@ func Assemble(ctx context.Context, cfg *config.Config, src Sources, surface Surf
 	return a, nil
 }
 
-// loadCommands introspects the application for the surface: the configured
-// include and exclude for a run, and expose.agent.tools on top of them for a served
-// surface.
-func loadCommands(ctx context.Context, cfg *config.Config, surface Surface) ([]*fisktool.CommandTool, error) {
-	if surface == SurfaceRun {
-		return fisktool.LoadTools(ctx, cfg)
+// compileFilters compiles the top-level include and exclude and, on a served
+// surface, the expose.agent.tools include and exclude, in the order they apply. A
+// filter the configuration does not set compiles to nil, which keeps every tool.
+func compileFilters(cfg *config.Config, surface Surface) ([]*toolkit.Filter, error) {
+	type filter struct {
+		key  string
+		cfg  *config.ToolFilter
+		mode toolkit.FilterMode
 	}
 
-	return fisktool.ServedTools(ctx, cfg)
+	specs := []filter{
+		{"include", cfg.Include, toolkit.IncludeFilter},
+		{"exclude", cfg.Exclude, toolkit.ExcludeFilter},
+	}
+	if surface != SurfaceRun && cfg.Expose != nil && cfg.Expose.Agent != nil && cfg.Expose.Agent.Tools != nil {
+		specs = append(specs,
+			filter{"expose.agent.tools.include", cfg.Expose.Agent.Tools.Include, toolkit.IncludeFilter},
+			filter{"expose.agent.tools.exclude", cfg.Expose.Agent.Tools.Exclude, toolkit.ExcludeFilter},
+		)
+	}
+
+	filters := make([]*toolkit.Filter, 0, len(specs))
+	for _, spec := range specs {
+		f, err := toolkit.NewFilter(spec.cfg, spec.mode)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", spec.key, err)
+		}
+		filters = append(filters, f)
+	}
+
+	return filters, nil
+}
+
+// keeps reports whether every filter leaves t in.
+func (a *Assembly) keeps(t toolkit.Tool) bool {
+	return keptBy(a.filters, t)
+}
+
+// keptBy reports whether every filter leaves t in.
+func keptBy(filters []*toolkit.Filter, t toolkit.Tool) bool {
+	for _, f := range filters {
+		if !f.Keeps(t) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // add appends one tool and claims its name. A remote tool's name is not written to
@@ -238,25 +301,45 @@ func (a *Assembly) add(t toolkit.Tool, kind toolkit.Kind, source string) {
 	}
 }
 
-// addBuiltins adds the three built-in families in order. On a served surface it
-// adds only the tools the surface serves and records the rest in Withheld.
+// addBuiltins adds the four built-in families in order. On a served surface it
+// adds only the tools the surface serves and records the rest in Withheld: first
+// the tools whose exposure declaration excludes the surface, then the ones a filter
+// removed, so a memory tool on MCP is withheld as agent-only whatever the filters
+// say. A filtered built-in claims no name and needs no store. The harness.tools
+// family is the one whose constructor can fail, on an entry whose options its tool
+// refuses; that error is returned under the source name.
 func (a *Assembly) addBuiltins(cfg *config.Config, src Sources, surface Surface) error {
+	optIn, err := builtin.OptInTools(cfg)
+	if err != nil {
+		return fmt.Errorf("%s: %w", SourceTools, err)
+	}
+
 	families := []struct {
 		source string
+		// block is the configuration key an operator reads a name clash against.
+		block  string
 		tools  []*functool.Tool
 		opened bool
 		field  string
 	}{
-		{SourceHumanInTheLoop, builtin.HITLTools(cfg), true, ""},
-		{SourceMemory, builtin.MemoryTools(cfg, src.Memory), src.Memory != nil, "Sources.Memory"},
-		{SourceKnowledge, builtin.RAGTools(cfg, src.RAG), src.RAG != nil, "Sources.RAG"},
+		{SourceHumanInTheLoop, SourceHumanInTheLoop, builtin.HITLTools(cfg), true, ""},
+		{SourceMemory, SourceMemory, builtin.MemoryTools(cfg, src.Memory), src.Memory != nil, "Sources.Memory"},
+		{SourceKnowledge, SourceKnowledge, builtin.RAGTools(cfg, src.RAG), src.RAG != nil, "Sources.RAG"},
+		{SourceTools, "harness.tools", optIn, true, ""},
 	}
 
 	for _, family := range families {
 		for _, t := range family.tools {
-			reason := withheldReason(t, cfg, surface)
+			reason := withheldReason(t, surface)
 			if reason != "" {
 				a.Withheld = append(a.Withheld, Withheld{Tool: t.Name(), Reason: reason})
+				continue
+			}
+
+			if !a.keeps(t) {
+				if surface != SurfaceRun {
+					a.Withheld = append(a.Withheld, Withheld{Tool: t.Name(), Reason: WithheldFiltered})
+				}
 				continue
 			}
 
@@ -265,7 +348,7 @@ func (a *Assembly) addBuiltins(cfg *config.Config, src Sources, surface Surface)
 			}
 
 			if a.claimed[t.Name()] {
-				return fmt.Errorf("%s adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", family.source, t.Name())
+				return fmt.Errorf("%s adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", family.block, t.Name())
 			}
 
 			a.add(t, toolkit.KindBuiltin, family.source)
@@ -275,16 +358,14 @@ func (a *Assembly) addBuiltins(cfg *config.Config, src Sources, surface Surface)
 	return nil
 }
 
-// withheldReason returns why a served surface leaves a built-in out, and "" for a
-// tool the surface serves. A run serves every built-in.
-func withheldReason(t *functool.Tool, cfg *config.Config, surface Surface) string {
+// withheldReason returns why a served surface leaves a built-in out on its exposure
+// declaration alone, and "" for a tool the surface could serve. A run serves every
+// built-in.
+func withheldReason(t *functool.Tool, surface Surface) string {
 	switch surface {
 	case SurfaceMCP:
 		if !t.MCPExposable() {
 			return WithheldAgentOnly
-		}
-		if !slices.Contains(cfg.MCPBuiltins(), t.Name()) {
-			return WithheldNotListed
 		}
 	case SurfaceA2A:
 		if !t.A2AExposable() {
@@ -295,8 +376,10 @@ func withheldReason(t *functool.Tool, cfg *config.Config, surface Surface) strin
 	return ""
 }
 
-// importRemote imports the remote_tools hosts through the client. A nil client with
-// hosts configured is a failed source unless Unbound already reports it.
+// importRemote imports the remote_tools hosts through the client and keeps the tools
+// the filters leave in, in each host's row and in the remote map alike, so the MCP
+// importer and the custom-tool check read the filtered set. A nil client with hosts
+// configured is a failed source unless Unbound already reports it.
 func (a *Assembly) importRemote(ctx context.Context, cfg *config.Config, src Sources, policy Policy) error {
 	if len(cfg.RemoteTools) == 0 {
 		return nil
@@ -317,6 +400,14 @@ func (a *Assembly) importRemote(ctx context.Context, cfg *config.Config, src Sou
 	}
 
 	imports, byName, err := remotetools.ImportHosts(ctx, src.Remote, cfg, a.claimed)
+	for i := range imports {
+		imports[i].Tools = a.keptFunctools(imports[i].Tools)
+	}
+	for name, t := range byName {
+		if !a.keeps(t) {
+			delete(byName, name)
+		}
+	}
 	a.Remote = imports
 	a.remote = byName
 	if err != nil && policy == Strict {
@@ -337,9 +428,31 @@ func (a *Assembly) importRemote(ctx context.Context, cfg *config.Config, src Sou
 	return nil
 }
 
-// importMCP imports the servers each Sessions holds, then writes a.MCP in configured
-// order: the import outcome for a server a session held, the caller's error for one
-// reported in Unbound, and a failed source for one neither covers.
+// keptFunctools returns the tools the filters leave in, in the order given.
+func (a *Assembly) keptFunctools(tools []*functool.Tool) []*functool.Tool {
+	return keptFunctools(a.filters, tools)
+}
+
+// keptFunctools returns the tools every filter leaves in, in the order given. A list
+// nothing was removed from is returned as it is.
+func keptFunctools(filters []*toolkit.Filter, tools []*functool.Tool) []*functool.Tool {
+	kept := make([]*functool.Tool, 0, len(tools))
+	for _, t := range tools {
+		if keptBy(filters, t) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == len(tools) {
+		return tools
+	}
+
+	return kept
+}
+
+// importMCP imports the servers each Sessions holds, keeps the tools the filters
+// leave in, then writes a.MCP in configured order: the import outcome for a server a
+// session held, the caller's error for one reported in Unbound, and a failed source
+// for one neither covers.
 func (a *Assembly) importMCP(ctx context.Context, cfg *config.Config, src Sources, policy Policy) error {
 	if len(cfg.MCPClients) == 0 {
 		return nil
@@ -353,6 +466,7 @@ func (a *Assembly) importMCP(ctx context.Context, cfg *config.Config, src Source
 
 		outcome, err := mcpclient.Import(ctx, sessions, mcpclient.NewClaimedNames(a.claimed, a.remote))
 		for _, imp := range outcome.Servers {
+			imp.Tools = a.keptFunctools(imp.Tools)
 			imported[imp.Server.Name] = imp
 		}
 		if err != nil && policy == Strict {
@@ -367,7 +481,7 @@ func (a *Assembly) importMCP(ctx context.Context, cfg *config.Config, src Source
 				continue
 			}
 
-			for _, t := range imp.Tools {
+			for _, t := range imported[imp.Server.Name].Tools {
 				a.add(t, toolkit.KindMCP, imp.Server.EffectiveAlias())
 			}
 		}
@@ -418,9 +532,11 @@ func (a *Assembly) mcpRows(cfg *config.Config, src Sources, imported map[string]
 	return rows
 }
 
-// addCustom validates the caller's tools in the order given and adds them sorted by
-// name, so the set a run fingerprints is the same whether the caller built the slice
-// in a fixed order or by ranging a map.
+// addCustom validates the caller's tools in the order given and adds the ones the
+// filters keep sorted by name, so the set a run fingerprints is the same whether the
+// caller built the slice in a fixed order or by ranging a map. A tool a filter
+// removes is dropped once it has a name, before the clash checks, so it neither
+// claims a name nor is refused for one.
 func (a *Assembly) addCustom(custom []toolkit.Tool) error {
 	byName := make(map[string]toolkit.Tool, len(custom))
 	for i, t := range custom {
@@ -431,6 +547,10 @@ func (a *Assembly) addCustom(custom []toolkit.Tool) error {
 		name := t.Name()
 		if name == "" {
 			return fmt.Errorf("custom tool at index %d has an empty name", i)
+		}
+
+		if !a.keeps(t) {
+			continue
 		}
 
 		// The model addresses a tool by its Definition name but the runner dispatches on
@@ -516,7 +636,7 @@ func (a *Assembly) Len() int {
 }
 
 // Builtins returns the never-deferred tools in family order: human-in-the-loop,
-// memory, knowledge.
+// memory, knowledge, harness.tools.
 func (a *Assembly) Builtins() []toolkit.Tool {
 	return a.ofKinds(toolkit.KindBuiltin)
 }

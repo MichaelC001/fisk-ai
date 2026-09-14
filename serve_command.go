@@ -19,6 +19,7 @@ import (
 	"github.com/choria-io/ui/columns"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/sanitize"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/serve/a2aendpoint"
@@ -404,7 +405,7 @@ func (c *fiskServeCommand) banner(cfg *config.Config, channels []serve.Channel, 
 // banner asks for them separately and prints them inside the endpoint's own section.
 type toolServer interface {
 	ExposedTools() []string
-	WithheldBuiltins() []string
+	Withheld() []agent.Withheld
 }
 
 // describeEndpoints adds a section per endpoint that has something to say about itself.
@@ -433,10 +434,15 @@ func (c *fiskServeCommand) describeEndpoints(doc *columns.Document, channels []s
 
 			d.Values("Exposed", tools.ExposedTools())
 
-			withheld := tools.WithheldBuiltins()
+			// Each withheld built-in prints with its own reason, since a tool the
+			// filters removed and one that declares no a2a exposure need different fixes.
+			withheld := tools.Withheld()
 			if len(withheld) > 0 {
-				d.Values("Withheld", withheld)
-				d.Printf("Withheld built-in tools are enabled by this configuration but declare no a2a exposure.")
+				lines := make([]string, 0, len(withheld))
+				for _, held := range withheld {
+					lines = append(lines, fmt.Sprintf("%s: %s", held.Tool, held.Reason))
+				}
+				d.Values("Withheld", lines)
 			}
 		})
 	}
