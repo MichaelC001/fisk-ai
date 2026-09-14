@@ -41,6 +41,11 @@ var _ = Describe("Config.SuppliesTools", func() {
 		}}
 		Expect(withKnowledge.SuppliesTools()).To(BeTrue())
 
+		withHarnessTools := &config.Config{Harness: config.HarnessConfig{
+			Tools: []config.HarnessToolConfig{{Name: config.Base64EncodeToolName}},
+		}}
+		Expect(withHarnessTools.SuppliesTools()).To(BeTrue())
+
 		withRemote := &config.Config{RemoteTools: []config.RemoteToolHost{{Name: "peer"}}}
 		Expect(withRemote.SuppliesTools()).To(BeTrue())
 

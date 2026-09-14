@@ -62,9 +62,31 @@ var _ = Describe("MCP builtins allowlist", func() {
 		cfg := build([]string{"ask_human_confirm"}, true)
 		err := cfg.Prepare()
 		Expect(err).To(MatchError(ContainSubstring("is not an accepted built-in name")))
-		Expect(err).To(MatchError(ContainSubstring("knowledge_search")))
-		Expect(err).To(MatchError(ContainSubstring("knowledge_enumerate")))
+		Expect(err).To(MatchError(ContainSubstring("accepted: knowledge_search, knowledge_enumerate, knowledge_read, read_file, base64_encode")))
 		Expect(err).To(MatchError(ContainSubstring("an operator at a terminal")))
+	})
+
+	It("rejects a harness.tools built-in that harness.tools does not enable", func() {
+		cfg := build([]string{"read_file"}, true)
+		err := cfg.Prepare()
+		Expect(err).To(MatchError(ContainSubstring("lists read_file but harness.tools does not enable it")))
+		Expect(err).To(MatchError(ContainSubstring("add a harness.tools entry with 'name: read_file'")))
+	})
+
+	// Neither opens the knowledge store, so selecting them alone needs no knowledge
+	// block and must not make fisk mcp open one.
+	It("accepts both harness.tools built-ins with no knowledge block", func() {
+		cfg := build([]string{"read_file", "base64_encode"}, false)
+		cfg.Harness.Tools = []HarnessToolConfig{{Name: "read_file"}, {Name: "base64_encode"}}
+		Expect(cfg.Prepare()).To(Succeed())
+		Expect(cfg.MCPBuiltins()).To(Equal([]string{"read_file", "base64_encode"}))
+		Expect(cfg.MCPExposesKnowledge()).To(BeFalse())
+	})
+
+	It("rejects a knowledge name beside a harness.tools built-in when knowledge is not enabled", func() {
+		cfg := build([]string{"base64_encode", "knowledge_search"}, false)
+		cfg.Harness.Tools = []HarnessToolConfig{{Name: "base64_encode"}}
+		Expect(cfg.Prepare()).To(MatchError(ContainSubstring("lists knowledge_search but knowledge is not enabled")))
 	})
 
 	It("rejects an unknown built-in name", func() {
