@@ -7,7 +7,6 @@ package builtin
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -103,86 +102,6 @@ var _ = Describe("knowledge_search tool", func() {
 	It("renders a sanitized trace line", func() {
 		Expect(knowledgeSearchTrace(json.RawMessage(`{"query":"how does it work"}`))).To(Equal(`knowledge_search("how does it work")`))
 		Expect(knowledgeSearchTrace(json.RawMessage(`{"query":"q","top_k":3}`))).To(Equal(`knowledge_search("q", top_k=3)`))
-	})
-
-	Describe("mcpSelectedBuiltins", func() {
-		exposing := func(builtins ...string) *config.Config {
-			return &config.Config{
-				Harness: config.HarnessConfig{RAG: &config.RAGConfig{Enabled: true}},
-				Expose:  &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: builtins}}},
-			}
-		}
-
-		// A tool added to a built-in set alongside an allowlisted one must not reach
-		// MCP clients on the strength of its neighbour's selection. The two real
-		// knowledge tools cover the case where config knows both names; this covers a
-		// future tool it does not, which would otherwise be served with no config
-		// change and no error.
-		It("serves only the tools the operator named, not the whole set", func() {
-			cfg := exposing(knowledgeSearchName)
-			// Capability is satisfied, so this isolates the selection gate: a tool the
-			// operator did not name stays unserved even when it may be served.
-			second := mustNew(functool.Spec{
-				Name:        "knowledge_extra",
-				Description: "a tool sharing the knowledge set that config does not name",
-				Schema:      map[string]any{"type": "object"},
-				Expose:      &functool.ExposeSpec{MCP: true},
-				Handler:     func(context.Context, json.RawMessage, *functool.CallContext) (string, error) { return "{}", nil },
-			})
-
-			out := mcpSelectedBuiltins(cfg, append(RAGTools(cfg, nil), second))
-			Expect(out).To(HaveLen(1))
-			Expect(out[0].Name()).To(Equal(knowledgeSearchName))
-		})
-
-		It("serves nothing when the operator named nothing", func() {
-			cfg := exposing()
-			Expect(mcpSelectedBuiltins(cfg, RAGTools(cfg, nil))).To(BeEmpty())
-		})
-
-		// The subset property is what MCPKnowledgeBuiltins must hold for any future
-		// RAGTools, so this fails the moment a second tool is added and the filter has
-		// been bypassed, which the isolated filter test above cannot catch.
-		It("returns nothing beyond the allowlist from MCPKnowledgeBuiltins", func() {
-			cfg := exposing(knowledgeSearchName)
-			cfg.Harness.RAG.Directory = filepath.Join(GinkgoT().TempDir(), "knowledge")
-
-			tools, store, err := MCPKnowledgeBuiltins(ctx, cfg, io.Discard)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(store).ToNot(BeNil())
-			DeferCleanup(store.Close)
-
-			Expect(tools).ToNot(BeEmpty())
-			for _, t := range tools {
-				Expect(cfg.MCPBuiltins()).To(ContainElement(t.Name()))
-			}
-		})
-
-		// The store gate asks about the knowledge group, not one name. Gating it on
-		// knowledge_search would open no store for this operator and serve them
-		// nothing, with the allowlist they wrote having been accepted at load.
-		It("opens the store for an enumerate-only allowlist", func() {
-			cfg := exposing(knowledgeEnumerateName)
-			cfg.Harness.RAG.Directory = filepath.Join(GinkgoT().TempDir(), "knowledge")
-
-			tools, store, err := MCPKnowledgeBuiltins(ctx, cfg, io.Discard)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(store).ToNot(BeNil())
-			DeferCleanup(store.Close)
-
-			Expect(tools).To(HaveLen(1))
-			Expect(tools[0].Name()).To(Equal(knowledgeEnumerateName))
-		})
-
-		It("opens no store and serves nothing when neither is allowlisted", func() {
-			cfg := exposing()
-			cfg.Harness.RAG.Directory = filepath.Join(GinkgoT().TempDir(), "knowledge")
-
-			tools, store, err := MCPKnowledgeBuiltins(ctx, cfg, io.Discard)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(store).To(BeNil())
-			Expect(tools).To(BeEmpty())
-		})
 	})
 
 	Describe("capHits", func() {

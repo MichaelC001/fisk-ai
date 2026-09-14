@@ -53,8 +53,6 @@ var _ = Describe("knowledge_read tool", func() {
 
 		Expect(tool.MCPExposable()).To(BeTrue())
 		Expect(tool.A2AExposable()).To(BeFalse())
-		Expect(WithheldFromMCP(cfg)).ToNot(ContainElement(knowledgeReadName))
-		Expect(WithheldFromA2A(cfg)).To(ContainElement(knowledgeReadName))
 
 		exposed := knowledge("", true)
 		exposed.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Port: 8080, Builtins: []string{knowledgeReadName}}}}

@@ -5,7 +5,6 @@
 package builtin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -48,32 +47,10 @@ var _ = Describe("knowledge_enumerate tool", func() {
 	Describe("exposure", func() {
 		cfg := enabled("")
 
-		exposing := func(builtins ...string) *config.Config {
-			out := enabled("")
-			out.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: builtins}}}
-			return out
-		}
-
-		names := func(tools []*functool.Tool) []string {
-			var out []string
-			for _, t := range tools {
-				out = append(out, t.Name())
-			}
-			return out
-		}
-
 		It("declares MCP exposure and not a2a", func() {
 			tool := ragToolNamed(RAGTools(cfg, nil), knowledgeEnumerateName)
 			Expect(tool.MCPExposable()).To(BeTrue())
 			Expect(tool.A2AExposable()).To(BeFalse())
-		})
-
-		// The withheld lists are what the operator is shown, so a tool that may be
-		// served has to be absent from them and one that may not has to be named.
-		It("is reported as withheld from a2a only", func() {
-			Expect(WithheldFromA2A(cfg)).To(ContainElement(knowledgeEnumerateName))
-			Expect(WithheldFromMCP(cfg)).ToNot(ContainElement(knowledgeEnumerateName))
-			Expect(WithheldFromMCP(cfg)).ToNot(ContainElement(knowledgeSearchName))
 		})
 
 		// A tool that declares MCP exposure but that config will not accept in the
@@ -88,60 +65,38 @@ var _ = Describe("knowledge_enumerate tool", func() {
 			}
 		})
 
-		It("is served when the operator names it", func() {
-			out := mcpSelectedBuiltins(exposing(knowledgeSearchName, knowledgeEnumerateName), RAGTools(cfg, nil))
-			Expect(names(out)).To(ConsistOf(knowledgeSearchName, knowledgeEnumerateName))
-		})
-
-		// The per-tool filter now has two genuinely servable tools to separate, which
-		// is a stronger test of it than a tool that could not be served either way:
-		// naming one must not carry the other, in either direction.
-		It("is not served on the strength of its neighbour's entry", func() {
-			out := mcpSelectedBuiltins(exposing(knowledgeSearchName), RAGTools(cfg, nil))
-			Expect(names(out)).To(ConsistOf(knowledgeSearchName))
-		})
-
-		It("can be served without the search tool", func() {
-			out := mcpSelectedBuiltins(exposing(knowledgeEnumerateName), RAGTools(cfg, nil))
-			Expect(names(out)).To(ConsistOf(knowledgeEnumerateName))
-		})
-
-		It("serves nothing when the operator named nothing", func() {
-			Expect(mcpSelectedBuiltins(exposing(), RAGTools(cfg, nil))).To(BeEmpty())
-		})
 	})
 
-	// Selecting one half is legal, so the operator is told what it costs rather than
-	// stopped. Silence would leave a client answering "not documented" about a
-	// document the index holds, with nothing having warned anyone.
-	Describe("notePartialKnowledgeSet", func() {
-		note := func(builtins ...string) string {
+	// Selecting one half is legal, so the operator gets a note rather than a refusal.
+	// Without it a client answers "not documented" about a document the index holds.
+	Describe("KnowledgeSetNotes", func() {
+		notes := func(builtins ...string) []string {
 			cfg := enabled("")
 			cfg.Expose = &config.ExposeConfig{Agent: &config.AgentExpose{MCP: &config.ExposedMCPConfig{Builtins: builtins}}}
 
-			var buf bytes.Buffer
-			notePartialKnowledgeSet(cfg, &buf)
-			return buf.String()
+			return KnowledgeSetNotes(cfg)
 		}
 
 		It("says nothing when both are exposed", func() {
-			Expect(note(knowledgeSearchName, knowledgeEnumerateName)).To(BeEmpty())
+			Expect(notes(knowledgeSearchName, knowledgeEnumerateName)).To(BeEmpty())
 		})
 
 		It("says nothing when neither is exposed", func() {
-			Expect(note()).To(BeEmpty())
+			Expect(notes()).To(BeEmpty())
 		})
 
-		It("names the missing half when only search is exposed", func() {
-			out := note(knowledgeSearchName)
-			Expect(out).To(ContainSubstring("cannot tell an absent term from a low-scoring one"))
-			Expect(out).To(ContainSubstring(knowledgeEnumerateName))
+		It("reports the missing half when only search is exposed", func() {
+			out := notes(knowledgeSearchName)
+			Expect(out).To(HaveLen(1))
+			Expect(out[0]).To(ContainSubstring("cannot tell an absent term from a low-scoring one"))
+			Expect(out[0]).To(ContainSubstring(knowledgeEnumerateName))
 		})
 
-		It("names the missing half when only enumerate is exposed", func() {
-			out := note(knowledgeEnumerateName)
-			Expect(out).To(ContainSubstring("cannot read any of it"))
-			Expect(out).To(ContainSubstring(knowledgeSearchName))
+		It("reports the missing half when only enumerate is exposed", func() {
+			out := notes(knowledgeEnumerateName)
+			Expect(out).To(HaveLen(1))
+			Expect(out[0]).To(ContainSubstring("cannot read any of it"))
+			Expect(out[0]).To(ContainSubstring(knowledgeSearchName))
 		})
 	})
 

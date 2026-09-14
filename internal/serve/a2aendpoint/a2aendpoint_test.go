@@ -197,6 +197,24 @@ var _ = Describe("A2A endpoint", func() {
 			Expect(svc.WithheldBuiltins()).To(BeEmpty(), "this configuration enables no built-in")
 		})
 
+		// No built-in declares a2a exposure, so every enabled family is withheld and the
+		// served set is the application's commands.
+		It("Should serve the commands and withhold every enabled built-in", func() {
+			cfg := toolsConfig("harness:\n  human_in_the_loop:\n    enabled: true\n  memory:\n    enabled: true\n  knowledge:\n    enabled: true\n")
+
+			built, err := NewFromConfig(cfg, ConfigOptions{Conns: provider, Logger: quietLogger()})
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(closeAll, built)
+
+			svc := serviceOf(built)
+			Expect(svc.ExposedTools()).To(Equal([]string{"backup", "restore"}))
+			Expect(svc.WithheldBuiltins()).To(Equal([]string{
+				"ask_human_confirm", "ask_human_select", "ask_human_input",
+				"memory_list", "memory_read", "memory_write", "memory_delete",
+				"knowledge_search", "knowledge_enumerate",
+			}))
+		})
+
 		// A configuration that sets neither leaves the a2a server to its own defaults, so
 		// reporting the configured values would print a concurrency and a timeout of zero
 		// for a worker that in fact paces and stops every served call.

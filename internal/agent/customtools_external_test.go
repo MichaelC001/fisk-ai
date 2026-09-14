@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/choria-io/fisk"
 	. "github.com/onsi/ginkgo/v2"
@@ -286,6 +287,33 @@ var _ = Describe("Options.CustomTools", func() {
 				Expect(td.DeferLoading).To(BeTrue())
 			}
 		}
+	})
+
+	// The example application has no gated command, so the count is the custom tool
+	// alone.
+	It("Should count a gated custom tool toward the no-terminal advisory", func() {
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		var ran atomic.Int64
+		tool := gatedTool(GinkgoTB(), "stream_rm", &ran)
+
+		events := agenttest.NewRecordingEvents()
+		_, err := agent.Run(context.Background(), agent.Options{
+			Config:      agenttest.Config(GinkgoTB(), app),
+			ConfigFile:  "agent.yaml",
+			Prompt:      []string{"go"},
+			Provider:    agenttest.NewScriptedProvider(GinkgoTB(), agenttest.TextResponse("done")),
+			CustomTools: []toolkit.Tool{tool},
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()).NoOperator())
+		Expect(err).NotTo(HaveOccurred())
+
+		var advisories []agent.Warning
+		for _, w := range events.Warnings() {
+			if w.Kind == agent.WarnConfirmNoTerminal {
+				advisories = append(advisories, w)
+			}
+		}
+		Expect(advisories).To(HaveLen(1))
+		Expect(advisories[0].Count).To(Equal(1))
 	})
 
 	// A custom tool is part of the run fingerprint: a checkpointed run started with one

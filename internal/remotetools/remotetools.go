@@ -20,9 +20,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
-	_ "github.com/choria-io/fisk-ai/internal/a2a/nats"
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
-	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 )
 
@@ -78,39 +76,30 @@ func ImportForRun(ctx context.Context, client *a2a.Client, cfg *config.Config, t
 	return remoteTools, remoteByName, imports, nil
 }
 
-// DiscoverForInfo discovers and resolves the configured remote tool hosts for the
-// info command, using the same naming as a run (taken holds the local tool and
-// built-in names) so info shows the names a run would actually use. Unlike the
-// run path it is best-effort: it returns nil when there are no hosts, and returns
-// the connection error (with nil imports) on a connection failure so the caller
-// can warn and still show the local tools. A collision is not fatal here; the
-// colliding tools are recorded as skipped for the caller to render. The tools are
-// built with no invoker, since info never calls them.
-func DiscoverForInfo(ctx context.Context, cfg *config.Config, taken map[string]bool) ([]HostImport, error) {
-	if len(cfg.RemoteTools) == 0 {
-		return nil, nil
+// ImportHosts discovers every configured host, builds the tools of the hosts that
+// answered, and returns the per-host outcomes, the built tools by name, and the first
+// failure: the first host in configured order that could not be discovered or
+// filtered, or else a name collision. ImportForRun returns before resolving anything
+// once one host has failed; ImportHosts resolves the hosts that answered either way,
+// so a caller that fails on the error and one that reports each host's Err and
+// imports the rest read the same outcomes. The caller owns the client.
+func ImportHosts(ctx context.Context, client *a2a.Client, cfg *config.Config, taken map[string]bool) ([]HostImport, map[string]*functool.Tool, error) {
+	imports := importRemoteToolHosts(ctx, client, cfg.RemoteTools)
+
+	var first error
+	for _, imp := range imports {
+		if imp.Err != nil {
+			first = fmt.Errorf("importing tools from remote agent %q on context %q: %w", imp.Host.Name, cfg.NatsContext, imp.Err)
+			break
+		}
 	}
 
-	provider, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
-	if err != nil {
-		return nil, err
-	}
-	defer provider.Close()
-
-	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{Resources: provider, Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
-	if err != nil {
-		return nil, err
+	byName, err := resolveRemoteTools(taken, imports, client)
+	if first == nil {
+		first = err
 	}
 
-	client, err := a2a.NewClient(transport, cfg.Identity, a2a.WithIdleTimeout(cfg.A2ARequestTimeout()))
-	if err != nil {
-		return nil, err
-	}
-
-	imports := importRemoteToolHosts(context.Background(), client, cfg.RemoteTools)
-	_, _ = resolveRemoteTools(taken, imports, nil)
-
-	return imports, nil
+	return imports, byName, first
 }
 
 // importRemoteToolHosts discovers and filters each configured host. Discovery

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"slices"
 
 	"github.com/choria-io/fisk-ai/config"
@@ -77,93 +76,33 @@ func RAGTools(cfg *config.Config, store *rag.Store) []*functool.Tool {
 	return tools
 }
 
-// MCPKnowledgeBuiltins opens the knowledge store read-only and returns the
-// knowledge built-ins the operator allowlisted in expose.agent.mcp.builtins (and
-// the open store, for the caller to close after it is done serving). The store is
-// opened only when at least one is allowlisted, so an agent-only knowledge config
-// never opens the index over MCP; because the operator explicitly opted in, an
-// index that cannot be opened cleanly (a stale rag_meta, a bad embeddings block)
-// returns an error rather than silently dropping the tool. It returns a nil store
-// when no knowledge tool is exposed. The returned set is filtered per tool against
-// the allowlist, so it carries only what the operator named and never the whole of
-// RAGTools. Operator-facing progress and discoverability notes are written to
-// notes (typically os.Stderr); it is never the MCP protocol stream.
-func MCPKnowledgeBuiltins(ctx context.Context, cfg *config.Config, notes io.Writer) ([]*functool.Tool, *rag.Store, error) {
-	if !cfg.MCPExposesKnowledge() {
-		if cfg.RAGEnabled() {
-			fmt.Fprintf(notes, "note: knowledge is enabled but not exposed over MCP; add %s and %s to expose.agent.mcp.builtins to let MCP clients search your knowledge base\n", knowledgeSearchName, knowledgeEnumerateName)
-		}
-		return nil, nil, nil
-	}
-
-	// Served over MCP there is no per-run store base; the index resolves against the
-	// process working directory, or an absolute configured knowledge directory.
-	store, err := rag.Open(cfg, "", rag.Options{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot expose knowledge over MCP: %w", err)
-	}
-
-	line, err := store.TierLine(ctx)
-	if err != nil {
-		store.Close()
-		return nil, nil, err
-	}
-	fmt.Fprintf(notes, "knowledge %s\n", line)
-	if !store.Built() {
-		fmt.Fprintf(notes, "note: the knowledge index is not built yet; %s will return index_not_built until it is\n", knowledgeSearchName)
-	}
-
-	selected := mcpSelectedBuiltins(cfg, RAGTools(cfg, store))
-	notePartialKnowledgeSet(cfg, notes)
-
-	return selected, store, nil
-}
-
-// notePartialKnowledgeSet tells an operator who exposed one knowledge tool what
-// serving only that one costs their clients. Search ranks and so cannot separate
-// absence from a low score, and enumerate answers exactly that; read returns the
-// text under a reference a client already holds, which only a search hands out.
-// Selecting one is legitimate and stays legal, so this is a note and not an error,
-// but an operator who did it by omission rather than by choice should find that out
-// here rather than from a client that answers "not documented" about a document it
-// holds.
-func notePartialKnowledgeSet(cfg *config.Config, notes io.Writer) {
+// KnowledgeSetNotes returns the notes for an operator who listed one knowledge tool
+// in expose.agent.mcp.builtins without its partner, one line each and none when the
+// set is whole. Search ranks and so cannot separate absence from a low score, and
+// enumerate answers exactly that; read returns the text under a reference a client
+// already holds, which only a search hands out. Selecting one is legal, so these are
+// notes and not an error, but an operator who did it by omission rather than by
+// choice should find that out here rather than from a client that answers "not
+// documented" about a document it holds.
+func KnowledgeSetNotes(cfg *config.Config) []string {
 	selected := cfg.MCPBuiltins()
 	hasSearch := slices.Contains(selected, knowledgeSearchName)
 	hasEnumerate := slices.Contains(selected, knowledgeEnumerateName)
 	hasRead := slices.Contains(selected, knowledgeReadName)
 
+	var notes []string
 	switch {
 	case hasSearch && !hasEnumerate:
-		fmt.Fprintf(notes, "note: %s is exposed but %s is not; clients can rank results but cannot tell an absent term from a low-scoring one. Add %s to expose.agent.mcp.builtins to serve both\n", knowledgeSearchName, knowledgeEnumerateName, knowledgeEnumerateName)
+		notes = append(notes, fmt.Sprintf("note: %s is exposed but %s is not; clients can rank results but cannot tell an absent term from a low-scoring one. Add %s to expose.agent.mcp.builtins to serve both", knowledgeSearchName, knowledgeEnumerateName, knowledgeEnumerateName))
 	case hasEnumerate && !hasSearch:
-		fmt.Fprintf(notes, "note: %s is exposed but %s is not; clients can find which documents mention a term but cannot read any of it. Add %s to expose.agent.mcp.builtins to serve both\n", knowledgeEnumerateName, knowledgeSearchName, knowledgeSearchName)
+		notes = append(notes, fmt.Sprintf("note: %s is exposed but %s is not; clients can find which documents mention a term but cannot read any of it. Add %s to expose.agent.mcp.builtins to serve both", knowledgeEnumerateName, knowledgeSearchName, knowledgeSearchName))
 	}
 
 	if hasRead && !hasSearch {
-		fmt.Fprintf(notes, "note: %s is exposed but %s is not; clients can read a section whose reference they already hold and have no way to find one. Add %s to expose.agent.mcp.builtins\n", knowledgeReadName, knowledgeSearchName, knowledgeSearchName)
-	}
-}
-
-// mcpSelectedBuiltins narrows a built-in set to the tools the operator listed in
-// expose.agent.mcp.builtins. The allowlist is applied per tool rather than
-// consulted once as a boolean, so a tool added to a set alongside an allowlisted
-// one is never served on the strength of its neighbour's selection: adding to
-// RAGTools cannot widen what MCP clients can reach without an explicit config
-// change, which config in turn refuses for any name it does not accept. The two
-// knowledge tools are meant to be served together, but that is a recommendation
-// carried by a note, never by one name selecting the other.
-func mcpSelectedBuiltins(cfg *config.Config, tools []*functool.Tool) []*functool.Tool {
-	selected := cfg.MCPBuiltins()
-
-	out := make([]*functool.Tool, 0, len(tools))
-	for _, t := range tools {
-		if slices.Contains(selected, t.Name()) {
-			out = append(out, t)
-		}
+		notes = append(notes, fmt.Sprintf("note: %s is exposed but %s is not; clients can read a section whose reference they already hold and have no way to find one. Add %s to expose.agent.mcp.builtins", knowledgeReadName, knowledgeSearchName, knowledgeSearchName))
 	}
 
-	return out
+	return notes
 }
 
 // RAGSystemNote returns the system-prompt note telling the model the knowledge

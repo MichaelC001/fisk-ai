@@ -26,8 +26,6 @@ import (
 
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
-	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
@@ -53,7 +51,6 @@ import (
 	// pre-existing NATS KV bucket over the shared connection.
 	_ "github.com/choria-io/fisk-ai/internal/memory/jetstream"
 	"github.com/choria-io/fisk-ai/internal/rag"
-	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 
 	// Link the file session backend in so it registers itself; runstate.New resolves
@@ -647,20 +644,20 @@ func memoryInfo(s memory.Store) telemetry.MemoryInfo {
 // memoryToolNames is the set of tool names the memory built-ins registered, so a tool
 // span can be told whether the call it covers was served by the memory store.
 //
-// It is derived from the tools that were actually built rather than restated as a name
+// It is derived from the tools the assembly holds rather than restated as a name
 // prefix or a list of its own: this is the copy that is not authoritative, so it reads
 // the real one. A memory tool added later is attributed without touching this.
-func memoryToolNames(tools []*functool.Tool) map[string]bool {
-	if len(tools) == 0 {
+func memoryToolNames(names []string) map[string]bool {
+	if len(names) == 0 {
 		return nil
 	}
 
-	names := make(map[string]bool, len(tools))
-	for _, t := range tools {
-		names[t.Name()] = true
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
 	}
 
-	return names
+	return set
 }
 
 // startupErrorClass names the telemetry error class for a failure before the run
@@ -1089,40 +1086,14 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		opts.StoreDir = cfg.RootDirectory
 	}
 
-	tools, err := fisktool.LoadTools(ctx, cfg)
-	if err != nil {
-		return res, err
-	}
+	// Run opens the stores and connections the tool set is assembled from and hands
+	// them to Assemble as Sources; it owns their lifecycle, and the assembler only reads
+	// them.
+	var src Sources
 
-	byName := make(map[string]*fisktool.CommandTool, len(tools))
-	for _, t := range tools {
-		byName[t.Name()] = t
-	}
-
-	// taken tracks every tool name already claimed (local tools, then built-ins, then
-	// the tools imported from remote agents and from MCP servers), so a clash across
-	// those namespaces is caught rather than silently shadowing one with another, since
-	// the model addresses every tool by a single flat name.
-	taken := make(map[string]bool, len(tools))
-	for name := range byName {
-		taken[name] = true
-	}
-
-	// Built-in human-in-the-loop tools are injected only here, in the agent run
-	// path, so they are never reachable over MCP where there is no operator. They
-	// are never deferred, so enabling them neither hides them behind tool search
-	// nor changes how the application tools are presented.
-	builtins := builtin.HITLTools(cfg)
-	builtinByName := make(map[string]*functool.Tool, len(builtins))
-	for _, b := range builtins {
-		if taken[b.Name()] {
-			return res, fmt.Errorf("human_in_the_loop adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", b.Name())
-		}
-		builtinByName[b.Name()] = b
-		taken[b.Name()] = true
-	}
-
-	if len(builtins) > 0 && !prompter.CanPrompt() {
+	// The human-in-the-loop tools ask the operator through the prompter, so with no
+	// terminal every call to them fails; warn before anything is dialed.
+	if cfg.HumanInTheLoopEnabled() && !prompter.CanPrompt() {
 		events.Warn(Warning{Kind: WarnHITLNoTerminal})
 	}
 
@@ -1158,15 +1129,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		natsConns = p
 	}
 
-	// Built-in memory tools are added here in the agent run path too, but tracked
-	// in their own slice so they never perturb the human-in-the-loop system note or
-	// its no-terminal warning. They are pure (no operator), and like the HITL tools
-	// they are not reachable over MCP. The store is built now so a misconfiguration
-	// (unknown backend, bad options, an unwritable directory or an unusable KV
-	// bucket) fails before the loop. natsConns.Nats() is nil-safe and yields nil for
-	// a backend that needs no connection (the file backend ignores it).
+	// The memory store is built now so a misconfiguration (unknown backend, bad
+	// options, an unwritable directory or an unusable KV bucket) fails before the loop.
+	// natsConns.Nats() is nil-safe and yields nil for a backend that needs no
+	// connection (the file backend ignores it).
 	var memStore memory.Store
-	var memBuiltins []*functool.Tool
 	if cfg.MemoryEnabled() {
 		// A caller-injected store is borrowed: a fleet shares one store across runs of one
 		// identity rather than each building its own. It is used verbatim (no configured
@@ -1197,24 +1164,10 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		// backend and disagree for an injected one, where the config still says "file"
 		// while something else entirely is serving the tools.
 		startupSpan.SetMemory(memoryInfo(memStore))
-
-		memBuiltins = builtin.MemoryTools(cfg, memStore)
-		for _, b := range memBuiltins {
-			if taken[b.Name()] {
-				return res, fmt.Errorf("memory adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", b.Name())
-			}
-			builtinByName[b.Name()] = b
-			taken[b.Name()] = true
-		}
+		src.Memory = memStore
 	}
 
-	// The built-in knowledge tools are added here in the agent run path too,
-	// tracked in their own slice like the memory tools. rag.Open validates the config
-	// (a bad embeddings block fails before the loop) but treats a missing index file
-	// as a soft empty state, so a first run never fails to start. The store is opened
-	// read-only; knowledge index is the writer.
 	var ragStore *rag.Store
-	var ragBuiltins []*functool.Tool
 	if cfg.RAGEnabled() {
 		// A caller-injected store is borrowed: a fleet shares one read-only store (one
 		// sqlite handle and its database/sql pool) across every run rather than each
@@ -1241,22 +1194,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 		}
 
-		ragBuiltins = builtin.RAGTools(cfg, ragStore)
-		for _, b := range ragBuiltins {
-			if taken[b.Name()] {
-				return res, fmt.Errorf("knowledge adds a built-in tool %q but the application already exposes a tool with that name; exclude or rename it", b.Name())
-			}
-			builtinByName[b.Name()] = b
-			taken[b.Name()] = true
-		}
+		src.RAG = ragStore
 	}
 
-	// Import remote tools, if any, before building the request tool set. A run is
-	// strict: a named remote agent that cannot be reached or imported aborts the
-	// run rather than silently dropping tools the prompt may depend on. The
-	// connection is held open for the whole run since each remote tool call uses it.
-	var remoteTools []*functool.Tool
-	remoteByName := map[string]*functool.Tool{}
+	// The a2a client the remote tools are imported through. The connection is held
+	// open for the whole run since each remote tool call uses it.
 	if len(cfg.RemoteTools) > 0 {
 		// A caller-injected transport is borrowed: a fleet shares one client transport
 		// across runs rather than each constructing its own. It is used verbatim and never
@@ -1272,32 +1214,15 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			}
 		}
 
-		client, err := a2a.NewClient(transport, cfg.Identity, a2a.WithIdleTimeout(cfg.A2ARequestTimeout()))
+		src.Remote, err = a2a.NewClient(transport, cfg.Identity, a2a.WithIdleTimeout(cfg.A2ARequestTimeout()))
 		if err != nil {
 			return res, err
-		}
-
-		var imports []remotetools.HostImport
-		remoteTools, remoteByName, imports, err = remotetools.ImportForRun(ctx, client, cfg, taken)
-		if err != nil {
-			return res, err
-		}
-		reporter, ok := events.(RemoteHostReporter)
-		if ok {
-			reporter.RemoteHostNotes(imports)
 		}
 	}
 
-	// Import the tools of the configured MCP servers, after the remote agents so a
-	// name is checked against everything claimed so far. A run is as strict about a
-	// server as it is about a remote agent: one that cannot be started, reached or
-	// listed aborts the run rather than dropping tools the prompt may depend on. A tool
-	// the server described badly does not abort it, since the server answered: that one
-	// is skipped and reported.
-	var mcpTools []*functool.Tool
+	// The sessions with the configured MCP servers. Assemble imports through them; Run
+	// holds them for the live re-import and closes the ones it opened.
 	var mcpSessions *mcpclient.Sessions
-	var mcpImports []mcpclient.ServerImport
-	mcpByName := map[string]*functool.Tool{}
 	if len(cfg.MCPClients) > 0 {
 		// Caller-injected sessions are borrowed: a server process connects once and hands
 		// the same sessions to every run it hosts rather than starting a stdio child around
@@ -1337,97 +1262,40 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		}
 
 		mcpSessions = sessions
+		src.MCP = []*mcpclient.Sessions{sessions}
+	}
 
-		// The names the remote import settled on are never written into taken, so the
-		// naming pass is given both lookups. The names this import settles on are added to
-		// taken below, which keeps it the whole set of claimed names.
-		var imported mcpclient.Imported
-		imported, err = mcpclient.Import(setupCtx, sessions, mcpclient.NewClaimedNames(taken, remoteByName))
-		mcpImports = imported.Servers
+	src.Custom = opts.CustomTools
 
-		// Import returns the per-server outcomes with its error as well as without one,
-		// so the notes are reported before the error is: an operator deciding whether to
-		// set an alias or drop a filter needs the skipped tools and round trips that came
-		// back with the failure, not the failure alone.
+	// A run is strict: a remote agent or an MCP server that cannot be reached or
+	// imported aborts the run rather than dropping tools the prompt may depend on, and
+	// the error is the source's own. The call runs under setupCtx so the per-server
+	// import spans nest under startup, as the connect does.
+	//
+	// The per-server outcomes come back with the error as well as without one, and
+	// are reported before it: an operator deciding whether to set an alias or drop a
+	// filter needs the skipped tools and round trips that came back with the failure.
+	// The per-host outcomes are reported on success only.
+	asm, err := Assemble(setupCtx, cfg, src, SurfaceRun, Strict)
+	if len(asm.MCP) > 0 {
 		reporter, ok := events.(MCPServerReporter)
 		if ok {
-			reporter.MCPServerNotes(mcpImports)
-		}
-
-		if err != nil {
-			return res, err
-		}
-
-		mcpTools = imported.Tools
-		mcpByName = imported.ByName
-
-		for name := range mcpByName {
-			taken[name] = true
+			reporter.MCPServerNotes(asm.MCP)
 		}
 	}
-
-	// Caller-injected custom tools are registered last, after every other source has
-	// claimed its names, so a collision is caught against all of them and the clashing
-	// kind can be named. A custom tool may never shadow an existing one: shadowing a
-	// confirm-gated command would strip its gate, so this aborts the run like every
-	// other name clash rather than silently replacing a tool.
-	customByName := make(map[string]toolkit.Tool, len(opts.CustomTools))
-	for i, t := range opts.CustomTools {
-		if t == nil {
-			return res, fmt.Errorf("custom tool at index %d is nil", i)
-		}
-
-		name := t.Name()
-		if name == "" {
-			return res, fmt.Errorf("custom tool at index %d has an empty name", i)
-		}
-
-		// The model addresses a tool by its Definition name but the runner dispatches on
-		// Name(); a mismatch would advertise a tool the model could call but the runner
-		// could not find. Reject it here rather than leave it silently unreachable.
-		if defName := t.Definition(false).Name; defName != name {
-			return res, fmt.Errorf("custom tool %q reports Definition name %q; Name() and Definition().Name must match", name, defName)
-		}
-
-		switch {
-		case byName[name] != nil:
-			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing application tool of the same name; a custom tool may not shadow it", i, name)
-		case builtinByName[name] != nil:
-			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing built-in tool of the same name; a custom tool may not shadow it", i, name)
-		case remoteByName[name] != nil:
-			return res, fmt.Errorf("custom tool at index %d (%q) collides with an existing remote tool of the same name; a custom tool may not shadow it", i, name)
-		case mcpByName[name] != nil:
-			return res, fmt.Errorf("custom tool at index %d (%q) collides with a tool of the same name imported from an mcp server; a custom tool may not shadow it", i, name)
-		case customByName[name] != nil:
-			return res, fmt.Errorf("custom tool at index %d (%q) duplicates an earlier custom tool of the same name", i, name)
-		}
-
-		// A custom tool runs in-process, so it may not claim a provider whose work
-		// happens elsewhere. KindRemote is journaled remote and recomputed into the
-		// remote-call counters on resume, and KindMCP owns its own bucket in the per-kind
-		// accounting; either one declared by an injected tool reports work this process
-		// did as work a peer did. The check is on the kind because the accounting reads
-		// the kind.
-		d, ok := t.(toolkit.Describer)
+	if err != nil {
+		return res, err
+	}
+	if len(asm.Remote) > 0 {
+		reporter, ok := events.(RemoteHostReporter)
 		if ok {
-			switch d.Describe(json.RawMessage("{}")).Kind {
-			case toolkit.KindRemote:
-				return res, fmt.Errorf("custom tool %q declares the remote kind; injected tools run in-process and may not be accounted as another agent's", name)
-			case toolkit.KindMCP:
-				return res, fmt.Errorf("custom tool %q declares the mcp kind; injected tools run in-process and may not be accounted as an MCP server's", name)
-			}
+			reporter.RemoteHostNotes(asm.Remote)
 		}
-
-		customByName[name] = t
-		taken[name] = true
 	}
 
-	// The run needs at least one callable tool, counting every source the model can
-	// address: filtered application tools, the built-in HITL/memory/knowledge tools,
-	// tools imported from remote agents and from MCP servers, and caller-injected custom
-	// tools. Checking only the application tools would abort a run whose sole tools are
-	// native (e.g. knowledge_search), imported, or injected by the caller.
-	if len(tools)+len(builtins)+len(memBuiltins)+len(ragBuiltins)+len(remoteTools)+len(mcpTools)+len(opts.CustomTools) == 0 {
+	// The run needs at least one callable tool from any source: a run whose sole tools
+	// are native (e.g. knowledge_search), imported, or injected by the caller starts.
+	if asm.Len() == 0 {
 		in := ""
 		if opts.ConfigFile != "" {
 			in = fmt.Sprintf(" in %q", opts.ConfigFile)
@@ -1452,17 +1320,11 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	approvals := newJournalApprovals()
 	gate := NewConfirmGate(prompter, approvals)
 	confirmTags := cfg.ConfirmTags()
+	// Every tool is counted through toolkit.Confirmable, the interface the gate
+	// consults, so the advisory's count is every gated tool of every kind.
 	confirmTools := 0
-	for _, t := range tools {
-		if t.NeedsConfirm(confirmTags) {
-			confirmTools++
-		}
-	}
-	// A custom tool is gated exactly as the runner gates it: it opts into confirmation
-	// through toolkit.Confirmable, so count the same interface the gate consults, else a
-	// gated injected tool would go uncounted and the no-operator advisory would undercount.
-	for _, t := range opts.CustomTools {
-		if c, ok := t.(toolkit.Confirmable); ok && c.NeedsConfirm(confirmTags) {
+	for _, t := range asm.Tools {
+		if confirmGated(t.Tool, confirmTags) {
 			confirmTools++
 		}
 	}
@@ -1470,13 +1332,16 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		events.Warn(Warning{Kind: WarnConfirmNoTerminal, Count: confirmTools})
 	}
 
+	// Tags are a command's, so the two tag scans walk the application tools alone.
+	commands := asm.ofKinds(toolkit.KindApplication)
+
 	// A configured confirm tag that matches no loaded tool is almost always a typo;
 	// left unreported it gives a false sense of safety, since the operator believes a
 	// command is gated when nothing actually carries the tag. Warn per unmatched tag.
 	for _, tag := range confirmTags {
 		matched := false
-		for _, t := range tools {
-			if slices.Contains(t.Tags(), tag) {
+		for _, t := range commands {
+			if slices.Contains(toolkit.TagsOf(t), tag) {
 				matched = true
 				break
 			}
@@ -1491,7 +1356,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// tagged command until someone says so. Contradictory behavior tags are reported
 	// for the same reason: the tool still runs, resolved the more dangerous way, but
 	// its author asked for two things and got one.
-	for _, t := range tools {
+	for _, t := range commands {
 		unknown, conflicting := toolkit.TagIssues(t)
 		if len(unknown) > 0 {
 			events.Warn(Warning{Kind: WarnUnknownReservedTag, Name: t.Name(), Params: unknown})
@@ -1595,49 +1460,15 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 
 	// The deferrable tools are assembled in three parts rather than one list, because a
 	// server changing its tool list replaces the middle part and leaves the two either
-	// side of it alone.
-	beforeMCP := make([]toolkit.Tool, 0, len(tools)+len(remoteTools))
-	for _, t := range tools {
-		beforeMCP = append(beforeMCP, t)
-	}
-	for _, rt := range remoteTools {
-		beforeMCP = append(beforeMCP, rt)
-	}
-	// Custom tools are appended in name order rather than the caller's slice order, so the
-	// tool set the run fingerprints is identical whether the caller built the slice in a
-	// fixed order or by ranging a map. Each honors deferral through its own Definition (a
+	// side of it alone. Each custom tool honors deferral through its own Definition (a
 	// tool built to never defer stays direct even inside a deferred set), like the
 	// application tools, so they need no special handling here.
-	customNames := make([]string, 0, len(customByName))
-	for name := range customByName {
-		customNames = append(customNames, name)
-	}
-	slices.Sort(customNames)
-	afterMCP := make([]toolkit.Tool, 0, len(customNames))
-	for _, name := range customNames {
-		afterMCP = append(afterMCP, customByName[name])
-	}
-
-	deferrable := make([]toolkit.Tool, 0, len(beforeMCP)+len(mcpTools)+len(afterMCP))
-	deferrable = append(deferrable, beforeMCP...)
-	for _, mt := range mcpTools {
-		deferrable = append(deferrable, mt)
-	}
-	deferrable = append(deferrable, afterMCP...)
-	// The built-in tools in the order their definitions follow the deferrable ones:
-	// human-in-the-loop, then memory, then knowledge. They are kept in their own slices
-	// above so that neither the HITL system note nor its no-terminal warning sees the
-	// others.
-	builtinTools := make([]toolkit.Tool, 0, len(builtins)+len(memBuiltins)+len(ragBuiltins))
-	for _, b := range builtins {
-		builtinTools = append(builtinTools, b)
-	}
-	for _, b := range memBuiltins {
-		builtinTools = append(builtinTools, b)
-	}
-	for _, b := range ragBuiltins {
-		builtinTools = append(builtinTools, b)
-	}
+	beforeMCP := asm.BeforeMCP()
+	afterMCP := asm.AfterMCP()
+	deferrable := slices.Concat(beforeMCP, asm.MCPTools(), afterMCP)
+	// The built-in tools follow the deferrable ones, in family order: human-in-the-loop,
+	// then memory, then knowledge.
+	builtinTools := asm.Builtins()
 
 	// The definitions the model is offered and the registry the runner dispatches on
 	// are built together from one list, so neither can name a tool the other does not.
@@ -1660,9 +1491,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 			Source:            toolSrc,
 			Caller:            mcpSessions,
 			Warnings:          mcpWarnings,
-			Imports:           mcpImports,
-			Claimed:           taken,
-			Remote:            remoteByName,
+			Imports:           asm.MCP,
+			Claimed:           asm.claimed,
+			Remote:            asm.remote,
 			Before:            beforeMCP,
 			After:             afterMCP,
 			Builtins:          builtinTools,
@@ -1691,14 +1522,9 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// These are the counts the run started with. A set that moves later does not
 	// rewrite them: this is the startup span, and what it reports is what startup
 	// resolved.
-	startupSpan.SetTools(telemetry.ToolCounts{
-		Application: len(tools),
-		Builtin:     len(builtins) + len(memBuiltins) + len(ragBuiltins),
-		Remote:      len(remoteTools),
-		MCP:         len(mcpTools),
-		Custom:      len(customByName),
-		Deferred:    set.search,
-	})
+	counts := asm.Counts()
+	counts.Deferred = set.search
+	startupSpan.SetTools(counts)
 
 	messages := []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: strings.Join(prompt, " ")}}}},
@@ -1713,7 +1539,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// silently end the run instead of calling a tool. It is constant across
 	// iterations, so build it once.
 	system := []string{cfg.SystemPrompt}
-	if note := builtin.HITLSystemNote(builtins); note != "" {
+	if note := builtin.HITLSystemNote(asm.Names(toolkit.KindBuiltin, SourceHumanInTheLoop)); note != "" {
 		system = append(system, note)
 	}
 	if note := builtin.MemorySystemNote(cfg); note != "" {
@@ -1873,10 +1699,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 	// distinguishes them), before any session is created or opened and before the first
 	// model call, so an aborting hook leaves nothing behind. ToolNames lists every tool the
 	// model can address, including those deferred behind tool search.
-	toolNames := make([]string, 0, len(taken))
-	for name := range taken {
-		toolNames = append(toolNames, name)
-	}
+	toolNames := asm.Names(toolkit.KindUnknown, "")
 	slices.Sort(toolNames)
 
 	err = opts.Hooks.fireRunStart(ctx, RunStartInfo{
@@ -2255,7 +2078,7 @@ func Run(ctx context.Context, opts Options, events Events, prompter toolkit.Prom
 		providerName:     caps.SemconvProviderName(),
 		sessionBackend:   cfg.SessionBackend(),
 		identity:         cfg.Identity,
-		memoryTools:      memoryToolNames(memBuiltins),
+		memoryTools:      memoryToolNames(asm.Names(toolkit.KindBuiltin, SourceMemory)),
 		memory:           memoryInfo(memStore),
 		memScope:         memScope,
 

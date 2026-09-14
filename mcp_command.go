@@ -5,19 +5,23 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/choria-io/fisk"
+
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/mcpserver"
+	"github.com/choria-io/fisk-ai/internal/rag"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
 	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // defaultMCPPort is the TCP port the MCP server listens on when neither the
@@ -65,9 +69,9 @@ func mcpAction(_ *fisk.ParseContext) error {
 	// the SDK's diagnostics go straight to stderr, which is where this command's notes
 	// already go and is never its protocol channel.
 	//
-	// The provider rides the context rather than being handed to Serve: the knowledge
-	// tools this command serves read it off the context, which is what internal/rag
-	// needs to open a retrieval span for a search that arrived over MCP.
+	// The provider is put on the context rather than handed to Serve: the knowledge
+	// tools this command serves read it off the context, and internal/rag opens a
+	// retrieval span from it for a search that arrived over MCP.
 	tel, reportTelemetry, err := setupTelemetry(cfg, telemetrySetup{ConfigFile: configFile})
 	if err != nil {
 		return err
@@ -75,14 +79,6 @@ func mcpAction(_ *fisk.ParseContext) error {
 	defer reportTelemetry()
 
 	ctx = telemetry.ContextWithProvider(ctx, tel)
-
-	// Derived from each tool's own exposure declaration rather than written out per
-	// feature, so this cannot claim a tool is withheld after it stops being. A config
-	// that enables memory for agent runs and is also served over MCP is correct, so
-	// this is a note about where those tools are reachable, not a warning.
-	if withheld := builtin.WithheldFromMCP(cfg); len(withheld) > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d built-in tool(s) this config enables are not served over MCP: %s. They need operator state or an operator at a terminal, so they are reachable only in an agent run\n", len(withheld), strings.Join(withheld, ", "))
-	}
 
 	// The refusal is structural rather than a policy this command applies, so this is a
 	// note about where those tools are reachable. A client here cannot tell which of
@@ -96,30 +92,18 @@ func mcpAction(_ *fisk.ParseContext) error {
 		fmt.Fprintf(os.Stderr, "note: the %d server(s) in mcp_clients are not served over MCP: %s. Their tools are imported into an agent run, so they are reachable only there\n", len(servers), strings.Join(servers, ", "))
 	}
 
-	tools, err := fisktool.ServedTools(ctx, cfg)
-	if err != nil {
-		return err
-	}
-
-	ragBuiltins, ragStore, err := builtin.MCPKnowledgeBuiltins(ctx, cfg, os.Stderr)
+	asm, release, err := mcpServedTools(ctx, cfg, os.Stderr)
 	if err != nil {
 		return knowledgeAdvice(err)
 	}
 	// Close after Serve returns (Serve below is the final call, so this deferred
 	// close runs only once graceful shutdown has drained in-flight tool calls),
 	// never concurrently with a live query.
-	if ragStore != nil {
-		defer ragStore.Close()
+	defer release()
 
-		// MCPKnowledgeBuiltins has just told the operator on this same stream that the
-		// index is not built. It names no command, since an embedder ships its own, so
-		// this one adds the command that builds it.
-		if !ragStore.Built() {
-			fmt.Fprintln(os.Stderr, "run: fisk knowledge index")
-		}
-	}
+	printMCPNotes(os.Stderr, cfg, asm)
 
-	if len(tools)+len(ragBuiltins) == 0 {
+	if asm.Len() == 0 {
 		return fmt.Errorf("no tools available after filtering; check include/exclude in %q", configFile)
 	}
 
@@ -139,9 +123,10 @@ func mcpAction(_ *fisk.ParseContext) error {
 		address = defaultMCPAddress
 	}
 
-	// The wrapped application's commands are listed first so one of them keeps a
-	// name a built-in would also claim, rather than being shadowed by it.
-	served := append(toolkit.Tools(tools), toolkit.Tools(ragBuiltins)...)
+	served := make([]toolkit.Tool, 0, asm.Len())
+	for _, t := range asm.Tools {
+		served = append(served, t.Tool)
+	}
 
 	return mcpserver.Serve(ctx, served, mcpserver.Options{
 		Name:         cfg.Identity,
@@ -154,4 +139,72 @@ func mcpAction(_ *fisk.ParseContext) error {
 		CallTimeout:  cfg.MCPToolTimeout(),
 		WorkDir:      cfg.RootDirectory,
 	})
+}
+
+// mcpServedTools assembles the set fisk mcp serves: the application's commands
+// narrowed by expose.agent.tools, and the built-ins expose.agent.mcp.builtins lists.
+// The assembler consults no other source on the MCP surface, so no remote host is
+// dialed and no MCP server is started. When a knowledge tool is listed the store is
+// opened and the tier line and the not-built note go to notes. The returned function
+// closes the store.
+func mcpServedTools(ctx context.Context, cfg *config.Config, notes io.Writer) (*agent.Assembly, func(), error) {
+	var src agent.Sources
+	release := func() {}
+
+	if cfg.MCPExposesKnowledge() {
+		// Served over MCP there is no per-run store base; the index resolves against the
+		// process working directory, or an absolute configured knowledge directory.
+		store, err := rag.Open(cfg, "", rag.Options{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot expose knowledge over MCP: %w", err)
+		}
+
+		line, err := store.TierLine(ctx)
+		if err != nil {
+			store.Close()
+			return nil, nil, err
+		}
+		fmt.Fprintf(notes, "knowledge %s\n", line)
+		if !store.Built() {
+			fmt.Fprintf(notes, "note: the knowledge index is not built yet; %s will return index_not_built until it is\n", config.KnowledgeSearchToolName)
+			fmt.Fprintln(notes, "run: fisk knowledge index")
+		}
+
+		src.RAG = store
+		release = func() { store.Close() }
+	}
+
+	asm, err := agent.Assemble(ctx, cfg, src, agent.SurfaceMCP, agent.Strict)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+
+	return asm, release, nil
+}
+
+// printMCPNotes tells the operator which built-ins this config enables and the
+// server does not serve. A config that enables memory for agent runs and is also
+// served over MCP is correct, so these are notes about where a tool is reachable, not
+// warnings. The withheld line lists the built-ins whose exposure declaration excludes
+// MCP; a knowledge tool the allowlist leaves out is covered by the two knowledge
+// notes instead.
+func printMCPNotes(w io.Writer, cfg *config.Config, asm *agent.Assembly) {
+	var agentOnly []string
+	for _, held := range asm.Withheld {
+		if held.Reason == agent.WithheldAgentOnly {
+			agentOnly = append(agentOnly, held.Tool)
+		}
+	}
+	if len(agentOnly) > 0 {
+		fmt.Fprintf(w, "note: %d built-in tool(s) this config enables are not served over MCP: %s. They need operator state or an operator at a terminal, so they are reachable only in an agent run\n", len(agentOnly), strings.Join(agentOnly, ", "))
+	}
+
+	if cfg.RAGEnabled() && len(asm.Names(toolkit.KindBuiltin, agent.SourceKnowledge)) == 0 {
+		fmt.Fprintf(w, "note: knowledge is enabled but not exposed over MCP; add %s and %s to expose.agent.mcp.builtins to let MCP clients search your knowledge base\n", config.KnowledgeSearchToolName, config.KnowledgeEnumerateToolName)
+	}
+
+	for _, note := range builtin.KnowledgeSetNotes(cfg) {
+		fmt.Fprintln(w, note)
+	}
 }
