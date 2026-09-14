@@ -140,8 +140,8 @@ type Options struct {
 	// the card as given: this channel has an operator in front of it, so a confirm-gated
 	// command belongs there where a2a's own exposure policy drops it. They also render a
 	// stored conversation's outstanding question, since a gated command's line comes from
-	// the tool that runs it. ResolveAgentTools produces them
-	// from a configuration and the process's MCP sessions.
+	// the tool that runs it. ResolveAgentTools produces them from a configuration, the
+	// process's a2a client and its MCP sessions.
 	CardTools []toolkit.Tool
 
 	// ConfirmTags are the operator's extra confirm tags, config.Config.ConfirmTags. They

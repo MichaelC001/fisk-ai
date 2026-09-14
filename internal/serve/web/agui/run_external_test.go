@@ -49,7 +49,7 @@ func gatedApp() *fisk.Application {
 func servedChannel(cfg *config.Config, store runstate.Store) *web.Channel {
 	GinkgoHelper()
 
-	tools, err := web.ResolveAgentTools(context.Background(), cfg, nil)
+	tools, err := web.ResolveAgentTools(context.Background(), cfg, nil, nil)
 	Expect(err).ToNot(HaveOccurred())
 
 	ch, err := web.New(web.Options{

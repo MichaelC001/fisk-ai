@@ -29,13 +29,12 @@ import (
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
 	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // Builder describes these endpoints to serve.Endpoints, so a program that wants to
@@ -434,16 +433,16 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 	if cfg.A2AServeToolsEnabled() {
 		// Loaded on a background context: the process installs its signal handling after
 		// the endpoints are built, so a context passed in here is one nothing would
-		// cancel. Introspecting the application carries a limit of its own.
+		// cancel. Introspecting the application has a timeout of its own.
 		//
 		// The tool set is loaded before anything is registered, so a configuration whose
 		// filters leave nothing is refused rather than served as an agent with no tools.
-		tools, err := fisktool.ServedTools(context.Background(), cfg)
+		asm, err := agent.Assemble(context.Background(), cfg, agent.Sources{}, agent.SurfaceA2A, agent.Strict)
 		if err != nil {
 			releaseTransport(transport, opts.Logger)
 			return nil, err
 		}
-		if len(tools) == 0 {
+		if asm.Len() == 0 {
 			releaseTransport(transport, opts.Logger)
 			in := ""
 			if opts.ConfigFile != "" {
@@ -452,13 +451,23 @@ func NewFromConfig(cfg *config.Config, opts ConfigOptions) ([]serve.Endpoint, er
 			return nil, fmt.Errorf("no tools available after filtering; check include/exclude%s", in)
 		}
 
+		tools := make([]toolkit.Tool, 0, asm.Len())
+		for _, t := range asm.Tools {
+			tools = append(tools, t.Tool)
+		}
+
+		var withheld []string
+		for _, held := range asm.Withheld {
+			withheld = append(withheld, held.Tool)
+		}
+
 		built.Tools = &ToolOptions{
-			Tools:            toolkit.Tools(tools),
+			Tools:            tools,
 			ConfirmTags:      cfg.ConfirmTags(),
 			Concurrency:      cfg.A2AMaxConcurrentTools(),
 			CallTimeout:      cfg.A2AToolTimeout(),
 			WorkDir:          cfg.RootDirectory,
-			WithheldBuiltins: builtin.WithheldFromA2A(cfg),
+			WithheldBuiltins: withheld,
 		}
 	}
 

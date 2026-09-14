@@ -2309,6 +2309,9 @@ func (c *Config) MemoryEnabled() bool {
 // call: a wrapped application, any of the built-in human-in-the-loop, memory or
 // knowledge tools, remote tools imported from a peer, or an MCP server.
 //
+// agent.Assemble holds the sources and this package cannot import it, so whoever adds
+// a source there adds it to this expression by hand.
+//
 // A run needs one callable tool and refuses to start without any. It counts tools the
 // caller injected through agent.Options.CustomTools as well, which no configuration
 // describes, so a program building its own tools in Go runs on a config this reports

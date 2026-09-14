@@ -11,6 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -594,6 +596,48 @@ var _ = Describe("durable confirm-gate approvals", func() {
 		rs, err := store.Load(context.Background(), res.SessionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rs.Approvals).To(Equal([]string{"stream_rm"}))
+	})
+
+	// The journal in testdata was written by Run before it called agent.Assemble,
+	// against this configuration: the example application, the memory and
+	// human-in-the-loop built-ins and one gated custom tool, with the operator's
+	// standing approval of it. A resume against the same configuration must compute
+	// the same tools hash, or every session journaled before the change would drop its
+	// grants on its first resume.
+	It("Should resume a session journaled before the assembler with its grants", func() {
+		ctx := context.Background()
+
+		dir := GinkgoT().TempDir()
+		journal, err := os.ReadFile(filepath.Join("testdata", "pre_assembler_session.json"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(dir, "pre-assembler.json"), journal, 0o600)).To(Succeed())
+
+		store, err := runstatefile.NewFileStore(dir)
+		Expect(err).NotTo(HaveOccurred())
+
+		app := agenttest.NewFakeApp(GinkgoTB(), exampleApp())
+		var ran atomic.Int64
+		tool := gatedTool(GinkgoTB(), "stream_rm", &ran)
+
+		// The resume's prompter has no ApproveFn, so a question fails the spec: the grant
+		// has to come from the journal.
+		events := agenttest.NewRecordingEvents()
+		res, err := agent.Run(ctx, agent.Options{
+			Config:       agenttest.Config(GinkgoTB(), app, agenttest.WithMemory(), agenttest.WithHITL()),
+			ConfigFile:   "agent.yaml",
+			Provider:     agenttest.NewScriptedProvider(GinkgoTB(), agenttest.ToolUseResponse("c2", "stream_rm", json.RawMessage(`{}`)), agenttest.TextResponse("the stream is gone")),
+			StoreDir:     GinkgoT().TempDir(),
+			SessionStore: store,
+			Checkpoint:   agent.Checkpoint{ResumeID: "pre-assembler"},
+			CustomTools:  []toolkit.Tool{tool},
+		}, events, agenttest.NewScriptedPrompter(GinkgoTB()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Reason).To(Equal(runstate.ReasonCompleted))
+		Expect(ran.Load()).To(Equal(int64(1)))
+
+		Expect(events.HasWarning(agent.WarnToolSetDrift)).To(BeFalse())
+		Expect(events.HasWarning(agent.WarnApprovalsDropped)).To(BeFalse())
+		Expect(events.Starts()[0].StandingApprovals).To(Equal([]string{"stream_rm"}))
 	})
 
 	// This is the deferral counterpart of the ordering: the call produces no result and is

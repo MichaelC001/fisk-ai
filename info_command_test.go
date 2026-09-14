@@ -5,12 +5,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"sync"
 	"time"
 
+	"github.com/choria-io/fisk"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,9 +20,12 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/a2a"
+	wire "github.com/choria-io/fisk-ai/internal/a2a/wire/v1"
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/agenttest"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
-	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
+	"github.com/choria-io/fisk-ai/internal/toolkit"
 )
 
 // mcpInfoServers stands a real mcp.Server up in this process for every server info
@@ -89,29 +94,44 @@ func mcpInfoHandler(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "handled by " + req.Params.Name}}}, nil
 }
 
-// mcpInfoRemoteTool is a function tool standing in for one the a2a import already named,
-// whose names never reach the taken set.
-func mcpInfoRemoteTool(name string) *functool.Tool {
-	GinkgoHelper()
+// infoApp is an application with a confirm-gated command and a plain one.
+func infoApp() *fisk.Application {
+	app := fisk.New("app", "an app")
+	app.Command("backup", "back a thing up").Tag(toolkit.ConfirmTag)
+	app.Command("status", "show the status")
 
-	tool, err := functool.New(functool.Spec{
-		Name:        name,
-		Description: "A tool an a2a peer already holds this name for",
-		Schema:      map[string]any{"type": "object"},
-		Handler: func(context.Context, json.RawMessage, *functool.CallContext) (string, error) {
-			return "", nil
-		},
-	})
-	Expect(err).ToNot(HaveOccurred())
-
-	return tool
+	return app
 }
 
-var _ = Describe("MCP servers", func() {
+// fakeRemoteClient is an a2a client over a fake transport that answers discovery for
+// every host with the given tools, and fails it for the host named dead.
+func fakeRemoteClient(dead string, tools ...string) *a2a.Client {
+	GinkgoHelper()
+
+	card := wire.AgentCard{Name: "peer", Version: "1.0.0"}
+	for _, name := range tools {
+		card.Tools = append(card.Tools, wire.ToolDescriptor{
+			Name:        name,
+			Description: name + " on the peer\n\nTags: impact:ro",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		})
+	}
+
+	transport := agenttest.NewFakeTransport(GinkgoTB(), card)
+	transport.SetFaults(agenttest.TransportFault{Agent: dead, Err: a2a.ErrNoResponders})
+
+	client, err := a2a.NewClient(transport, "agent")
+	Expect(err).ToNot(HaveOccurred())
+
+	return client
+}
+
+var _ = Describe("info tools", func() {
 	var (
 		ctx     context.Context
 		cancel  context.CancelFunc
 		servers *mcpInfoServers
+		cfg     *config.Config
 	)
 
 	BeforeEach(func() {
@@ -119,88 +139,136 @@ var _ = Describe("MCP servers", func() {
 		DeferCleanup(cancel)
 
 		servers = newMCPInfoServers()
+		cfg = agenttest.Config(GinkgoTB(), agenttest.NewFakeApp(GinkgoTB(), infoApp()))
 	})
 
-	discover := func(claimed mcpclient.ClaimedNames, entries ...config.MCPServer) []mcpclient.ServerImport {
+	// assemble assembles src as info does, leniently.
+	assemble := func(src agent.Sources) *agent.Assembly {
 		GinkgoHelper()
 
-		return mcpclient.Inspect(ctx, mcpclient.Options{
-			Servers:  entries,
-			Identity: "fisk-info",
-			Version:  "0.0.1",
-			Dialer:   servers.dialer(),
-		}, claimed)
+		asm, err := agent.Assemble(ctx, cfg, src, agent.SurfaceRun, agent.Lenient)
+		Expect(err).ToNot(HaveOccurred())
+
+		return asm
 	}
 
-	render := func(imports []mcpclient.ServerImport) string {
+	// sources opens what info opens, with the fake MCP servers behind the dialer.
+	sources := func() agent.Sources {
+		GinkgoHelper()
+
+		src, release := infoSources(ctx, cfg, servers.dialer())
+		DeferCleanup(release)
+
+		return src
+	}
+
+	// The table is rendered as Markdown on purpose: String picks Markdown or a
+	// box-drawn text table from the environment, and the rows are pinned as
+	// pipe-separated cells.
+	renderTable := func(asm *agent.Assembly) string {
+		GinkgoHelper()
+
+		tbl := table.NewTableWriter("")
+		tbl.AddHeaders("Tool", "Source", "Confirm", "Description", "Tags")
+		addToolRows(tbl, cfg, asm)
+
+		out, err := tbl.Markdown()
+		Expect(err).ToNot(HaveOccurred())
+
+		return string(out)
+	}
+
+	renderStatus := func(asm *agent.Assembly) string {
 		c := columns.New()
-		printMCPServerStatus(c, imports)
+		printRemoteToolStatus(c, cfg, asm.Remote)
+		printMCPServerStatus(c, asm.MCP)
 
 		return c.String()
 	}
 
-	It("Should list a server's tools under the names a run would use", func() {
-		servers.tools["docs"] = []*mcp.Tool{
-			mcpInfoTool("search", "Searches the pages"),
-			mcpInfoTool("read", "Reads a page"),
-		}
+	renderProblems := func(asm *agent.Assembly) string {
+		var buf bytes.Buffer
+		printSourceProblems(&buf, cfg, asm.Problems)
 
-		imports := discover(mcpclient.NewClaimedNames(nil, nil), config.MCPServer{
-			Name:    "docs",
-			Alias:   "dx",
-			Command: "npx",
-			Args:    []string{"-y", "docs-server"},
-			Exclude: &config.ToolFilter{Tools: []string{"^read$"}},
-		})
-		Expect(imports).To(HaveLen(1))
-		Expect(imports[0].Err).ToNot(HaveOccurred())
+		return buf.String()
+	}
 
-		out := render(imports)
-		Expect(out).To(ContainSubstring("MCP clients"))
-		Expect(out).To(ContainSubstring("docs (stdio npx -y docs-server): reachable in"))
-		Expect(out).To(ContainSubstring(`advertised 2 tool(s), kept 1 after filtering, imported 1 as "dx"`))
-		Expect(out).To(ContainSubstring("tools: dx_search"))
+	It("Should list the commands, the built-ins and a live host's tools, with the dead host unavailable", func() {
+		cfg.Harness.HumanInTheLoop = &config.HumanInTheLoopConfig{Enabled: true}
+		cfg.Harness.Memory = &config.MemoryConfig{Enabled: true}
+		cfg.Harness.RAG = &config.RAGConfig{Enabled: true}
+		cfg.NatsContext = "lab"
+		cfg.RemoteTools = []config.RemoteToolHost{{Name: "live", Alias: "lv"}, {Name: "dead"}}
 
-		tbl := table.NewTableWriter("")
-		tbl.AddHeaders("Tool", "Source", "Confirm", "Description", "Tags")
-		addMCPToolRows(tbl, imports)
+		asm := assemble(agent.Sources{Remote: fakeRemoteClient("dead", "forecast", "status")})
 
-		Expect(tbl.String()).To(MatchRegexp(`dx_search.*\bdx\b.*Searches the pages`))
+		out := renderTable(asm)
+		Expect(out).To(ContainSubstring("| backup | local | Yes | back a thing up | ai:confirm |"))
+		Expect(out).To(ContainSubstring("| status | local |  | show the status |  |"))
+		Expect(out).To(ContainSubstring("| ask_human_confirm | local |  |"))
+		Expect(out).To(ContainSubstring("| memory_list | local |  |"))
+		Expect(out).To(ContainSubstring("| knowledge_search | local |  |"))
+		Expect(out).To(ContainSubstring("| forecast | lv |  | forecast on the peer | impact:ro |"))
+		Expect(out).To(ContainSubstring("| lv_status | lv |  | status on the peer | impact:ro |"))
+
+		status := renderStatus(asm)
+		Expect(status).To(ContainSubstring("Remote tool hosts"))
+		Expect(status).To(ContainSubstring(`live (1.0.0): reachable in`))
+		Expect(status).To(ContainSubstring(`advertised 2 tool(s), imported 2 as "lv"`))
+		Expect(status).To(ContainSubstring(`dead: UNAVAILABLE via context "lab" after`))
+		Expect(status).To(ContainSubstring(a2a.ErrNoResponders.Error()))
+
+		Expect(asm.Problems).To(HaveLen(1))
+		Expect(asm.Problems[0].Alias).To(Equal("dead"))
+		Expect(renderProblems(asm)).To(BeEmpty())
 	})
 
-	It("Should skip a tool whose name an imported a2a tool already answers to", func() {
-		servers.tools["docs"] = []*mcp.Tool{
-			mcpInfoTool("search", "Searches the pages"),
-			mcpInfoTool("read", "Reads a page"),
-		}
+	It("Should warn with the dial error when the NATS context cannot be dialed and still list the local tools", func() {
+		GinkgoT().Setenv("XDG_CONFIG_HOME", GinkgoT().TempDir())
+		cfg.NatsContext = "nowhere"
+		cfg.RemoteTools = []config.RemoteToolHost{{Name: "peer"}}
 
-		// The names the a2a import settled on are never written into the taken set, so
-		// info passes the name map beside it. Given taken alone this tool would be named
-		// over one the model already has.
-		remote := map[string]*functool.Tool{"docs_search": mcpInfoRemoteTool("docs_search")}
+		src := sources()
+		Expect(src.Remote).To(BeNil())
+		Expect(src.Unbound).To(HaveLen(1))
+		Expect(src.Unbound[0].Source).To(Equal(agent.SourceRemoteTools))
 
-		imports := discover(mcpclient.NewClaimedNames(map[string]bool{"docs_read": true}, remote), config.MCPServer{Name: "docs", Command: "unused"})
-		Expect(imports[0].Tools).To(BeEmpty())
-
-		out := render(imports)
-		Expect(out).To(ContainSubstring(`tool "search" was not imported: the name "docs_search" is already taken`))
-		Expect(out).To(ContainSubstring(`tool "read" was not imported: the name "docs_read" is already taken`))
+		asm := assemble(src)
+		Expect(renderProblems(asm)).To(Equal(`warning: cannot connect to NATS context "nowhere" to discover remote tools: connecting to NATS context "nowhere": unknown context "nowhere"` + "\n"))
+		Expect(renderTable(asm)).To(ContainSubstring("| backup | local | Yes |"))
+		Expect(renderStatus(asm)).ToNot(ContainSubstring("Remote tool hosts"))
 	})
 
-	It("Should render a server that cannot be reached with its error and still render the rest", func() {
+	It("Should list a live server's tools beside a server that refused the connection", func() {
 		servers.fail["down"] = errors.New("the server did not start")
-		servers.tools["docs"] = []*mcp.Tool{mcpInfoTool("search", "Searches the pages")}
+		servers.tools["docs"] = []*mcp.Tool{
+			mcpInfoTool("search", "Searches the pages"),
+			mcpInfoTool("read", "Reads a page"),
+		}
+		cfg.MCPClients = []config.MCPServer{
+			{Name: "down", Command: "unused"},
+			{Name: "docs", Alias: "dx", Command: "npx", Args: []string{"-y", "docs-server"}, Exclude: &config.ToolFilter{Tools: []string{"^read$"}}},
+		}
 
-		imports := discover(mcpclient.NewClaimedNames(nil, nil),
-			config.MCPServer{Name: "down", Command: "unused"},
-			config.MCPServer{Name: "docs", Command: "unused"},
-		)
-		Expect(imports).To(HaveLen(2))
-		Expect(imports[0].Err).To(HaveOccurred())
+		src := sources()
+		Expect(src.MCP).To(HaveLen(1))
+		Expect(src.Unbound).To(HaveLen(1))
+		Expect(src.Unbound[0].Alias).To(Equal("down"))
 
-		out := render(imports)
-		Expect(out).To(ContainSubstring("down (stdio unused): UNAVAILABLE: the server did not start"))
-		Expect(out).To(ContainSubstring("tools: docs_search"))
+		asm := assemble(src)
+		Expect(asm.MCP).To(HaveLen(2))
+
+		Expect(renderTable(asm)).To(ContainSubstring("| dx_search | dx |  | Searches the pages |  |"))
+
+		status := renderStatus(asm)
+		Expect(status).To(ContainSubstring("MCP clients"))
+		Expect(status).To(ContainSubstring("down (stdio unused): UNAVAILABLE: "))
+		Expect(status).To(ContainSubstring("the server did not start"))
+		Expect(status).To(ContainSubstring("docs (stdio npx -y docs-server): reachable in"))
+		Expect(status).To(ContainSubstring(`advertised 2 tool(s), kept 1 after filtering, imported 1 as "dx"`))
+		Expect(status).To(ContainSubstring("tools: dx_search"))
+
+		Expect(renderProblems(asm)).To(BeEmpty())
 	})
 
 	It("Should show a skipped tool with the reason it was left out", func() {
@@ -208,46 +276,43 @@ var _ = Describe("MCP servers", func() {
 			mcpInfoTool("search", "Searches the pages"),
 			mcpInfoTool("read", ""),
 		}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs", Command: "unused"}}
 
-		imports := discover(mcpclient.NewClaimedNames(nil, nil), config.MCPServer{Name: "docs", Command: "unused"})
-
-		out := render(imports)
+		out := renderStatus(assemble(sources()))
 		Expect(out).To(ContainSubstring("tools: docs_search"))
 		Expect(out).To(ContainSubstring(`tool "read" was not imported: tool "read" from mcp server "docs" advertises no description`))
 	})
 
 	It("Should print the configured endpoint with its credentials redacted", func() {
 		servers.tools["docs"] = []*mcp.Tool{mcpInfoTool("search", "Searches the pages")}
+		cfg.MCPClients = []config.MCPServer{{Name: "docs", URL: "https://mcp.example.net/mcp/?apiKey=a-very-secret-token"}}
 
-		imports := discover(mcpclient.NewClaimedNames(nil, nil), config.MCPServer{
-			Name: "docs",
-			URL:  "https://mcp.example.net/mcp/?apiKey=a-very-secret-token",
-		})
-
-		out := render(imports)
+		out := renderStatus(assemble(sources()))
 		Expect(out).To(ContainSubstring("docs (http https://mcp.example.net/mcp/?apiKey=REDACTED)"))
 		Expect(out).ToNot(ContainSubstring("a-very-secret-token"))
 	})
 
 	It("Should redact an endpoint a stdio bridge carries in an argument", func() {
 		servers.tools["docs"] = []*mcp.Tool{mcpInfoTool("search", "Searches the pages")}
-
-		imports := discover(mcpclient.NewClaimedNames(nil, nil), config.MCPServer{
+		cfg.MCPClients = []config.MCPServer{{
 			Name:    "docs",
 			Command: "npx",
 			Args:    []string{"-y", "mcp-remote", "https://mcp.example.net/sse?key=a-very-secret-token"},
-		})
+		}}
 
-		out := render(imports)
+		out := renderStatus(assemble(sources()))
 		Expect(out).To(ContainSubstring("docs (stdio npx -y mcp-remote https://mcp.example.net/sse?key=REDACTED)"))
 		Expect(out).ToNot(ContainSubstring("a-very-secret-token"))
 	})
 
 	It("Should connect to nothing when no servers are configured", func() {
-		imports := discover(mcpclient.NewClaimedNames(nil, nil))
-		Expect(imports).To(BeNil())
+		src := sources()
+		Expect(src.MCP).To(BeEmpty())
 		Expect(servers.dialed()).To(Equal(0))
-		Expect(render(imports)).ToNot(ContainSubstring("MCP clients"))
+
+		asm := assemble(src)
+		Expect(asm.MCP).To(BeEmpty())
+		Expect(renderStatus(asm)).ToNot(ContainSubstring("MCP clients"))
 	})
 })
 
@@ -299,32 +364,21 @@ var _ = Describe("toolSearchStatus", func() {
 	It("Should report tool search enabled for the default provider", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "claude-sonnet-5"
-		Expect(toolSearchStatus(cfg, 3)).To(ContainSubstring("enabled"))
+		Expect(toolSearchStatus(cfg)).To(Equal("enabled"))
 	})
 
-	It("Should report the operator-disabled cause when no_tool_search is set", func() {
+	It("Should report disabled when no_tool_search is set", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "claude-sonnet-5"
 		cfg.LLM.NoToolSearch = true
-		Expect(toolSearchStatus(cfg, agent.ToolSearchThreshold-1)).To(Equal("disabled (no_tool_search)"))
+		Expect(toolSearchStatus(cfg)).To(Equal("disabled"))
 	})
 
-	It("Should name what the operator-disabled tool search costs once the set crosses the threshold", func() {
-		cfg := &config.Config{}
-		cfg.LLM.Model = "claude-sonnet-5"
-		cfg.LLM.NoToolSearch = true
-
-		status := toolSearchStatus(cfg, 12)
-		Expect(status).To(ContainSubstring("disabled (no_tool_search)"))
-		Expect(status).To(ContainSubstring("12 tools are sent to the model directly"))
-		Expect(status).To(ContainSubstring("Anthropic models only"))
-	})
-
-	It("Should report an unavailable provider that is not linked into the build", func() {
+	It("Should report unknown for a provider that is not linked into the build", func() {
 		cfg := &config.Config{}
 		cfg.LLM.Model = "gpt-5"
 		cfg.LLM.Provider = "openai"
-		Expect(toolSearchStatus(cfg, 3)).To(ContainSubstring(`provider "openai" is not available`))
+		Expect(toolSearchStatus(cfg)).To(Equal("unknown"))
 	})
 })
 

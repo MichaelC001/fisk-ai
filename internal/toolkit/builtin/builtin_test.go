@@ -72,7 +72,11 @@ var _ = Describe("Built-in tools", func() {
 
 		It("Should explain the tools are the only way to reach the operator and name them", func() {
 			on := &config.Config{Harness: config.HarnessConfig{HumanInTheLoop: &config.HumanInTheLoopConfig{Enabled: true}}}
-			note := HITLSystemNote(HITLTools(on))
+			var names []string
+			for _, t := range HITLTools(on) {
+				names = append(names, t.Name())
+			}
+			note := HITLSystemNote(names)
 
 			Expect(note).To(ContainSubstring("non-interactive"))
 			Expect(note).To(ContainSubstring("only way"))

@@ -12,10 +12,9 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/agent"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
-	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
 )
 
 // CardPath is the segment the agent card answers on under the base path, so a channel
@@ -29,11 +28,11 @@ const cardRefusal = "this agent's card cannot be served; check its configured de
 
 // AgentTools are the tools an agent card lists and what could not be listed.
 type AgentTools struct {
-	// Tools are the agent's own tools, in the order a run resolves them: the
+	// Tools are the agent's own tools, in the order a run assembles them: the
 	// application's commands first, then the built-ins the configuration enables, then
-	// the tools of each configured MCP server. They are listed whatever their tags say,
-	// confirm-gated commands included, since the channel has an operator in front of it
-	// to approve one.
+	// the tools of each remote_tools host, then the tools of each configured MCP server.
+	// They are listed whatever their tags say, confirm-gated commands included, since
+	// the channel has an operator in front of it to approve one.
 	Tools []toolkit.Tool
 
 	// Notes name each source whose tools are missing, one sentence each, and go on the
@@ -43,67 +42,62 @@ type AgentTools struct {
 	Notes []string
 }
 
-// ResolveAgentTools names the agent's tools outside a run: the application's commands
-// as the configuration filters them, the human-in-the-loop, memory and knowledge
-// built-ins the configuration enables, and the tools of every connected MCP server.
+// ResolveAgentTools assembles the agent's tools outside a run, through agent.Assemble
+// under the Lenient policy: the application's commands as the configuration filters
+// them, the human-in-the-loop, memory and knowledge built-ins the configuration
+// enables, the tools of every remote_tools host the client reaches, and the tools of
+// every MCP server the sessions hold.
 //
-// The built-ins are enumerated with a nil store, since a card carries no handler, and
-// they claim their names before the MCP import so a clashing MCP tool is prefixed on
-// the card exactly as a run would name it.
+// The built-ins are enumerated with nil stores, since a card has no handler. Assemble
+// claims names in a run's order, so a clashing remote or MCP tool gets the prefix a
+// run gives it.
 //
 // It is called once, when the channel is built, and the card is assembled from what it
-// returns on each request. The tools are never called through: a card carries their
+// returns on each request. The tools are never called through: a card has their
 // names, descriptions, schemas and declared behavior.
 //
-// An MCP server whose tools cannot be listed leaves its tools off the card and gets a
-// note naming it, where a run refuses to start on the same failure. The two answers are
-// right for different things: a prompt may depend on a tool that is not there, and a
-// console showing a short tool list with the reason beside it is better than a console
-// that will not load. Sessions are borrowed and stay open for the runs.
+// A host or an MCP server whose tools cannot be listed leaves its tools off the card
+// and gets a note with its configured name, where a run refuses to start on the same
+// failure. The two
+// answers are right for different things: a prompt may depend on a tool that is not
+// there, and a console showing a short tool list with the reason beside it is better
+// than a console that will not load. A nil client with hosts configured, or nil
+// sessions with servers configured, is such a failure and gets its note. The client
+// and the sessions are borrowed and stay open for the runs.
 //
-// An error is the application's own commands failing to load, which leaves no card
-// worth serving.
-func ResolveAgentTools(ctx context.Context, cfg *config.Config, sessions *mcpclient.Sessions) (AgentTools, error) {
-	commands, err := fisktool.LoadTools(ctx, cfg)
+// An error is an application that cannot be introspected or a built-in whose name a
+// command took, which leaves no card worth serving.
+func ResolveAgentTools(ctx context.Context, cfg *config.Config, remote *a2a.Client, sessions *mcpclient.Sessions) (AgentTools, error) {
+	asm, err := agent.Assemble(ctx, cfg, agent.Sources{Remote: remote, MCP: []*mcpclient.Sessions{sessions}}, agent.SurfaceRun, agent.Lenient)
 	if err != nil {
-		return AgentTools{}, fmt.Errorf("loading the application's tools: %w", err)
+		return AgentTools{}, fmt.Errorf("resolving the agent's tools: %w", err)
 	}
 
-	out := AgentTools{Tools: toolkit.Tools(commands)}
-
-	builtins := builtin.HITLTools(cfg)
-	builtins = append(builtins, builtin.MemoryTools(cfg, nil)...)
-	builtins = append(builtins, builtin.RAGTools(cfg, nil)...)
-
-	out.Tools = append(out.Tools, toolkit.Tools(builtins)...)
-
-	if sessions == nil {
-		return out, nil
+	out := AgentTools{Tools: make([]toolkit.Tool, 0, asm.Len())}
+	for _, t := range asm.Tools {
+		out.Tools = append(out.Tools, t.Tool)
 	}
 
-	taken := make(map[string]bool, len(commands)+len(builtins))
-	for _, t := range commands {
-		taken[t.Name()] = true
-	}
-	for _, b := range builtins {
-		taken[b.Name()] = true
-	}
-
-	// The error is read off each server's own outcome rather than from the return: the
-	// return reports the first server that failed, and this card carries the tools of
-	// the ones that answered along with a note for each that did not.
-	imported, _ := mcpclient.Import(ctx, sessions, mcpclient.NewClaimedNames(taken, nil))
-	for _, server := range imported.Servers {
-		if server.Err != nil {
-			out.Notes = append(out.Notes, fmt.Sprintf("the tools of the mcp server %q could not be listed, so any tool it supplies is missing here", server.Server.Name))
-
-			continue
-		}
-
-		out.Tools = append(out.Tools, toolkit.Tools(server.Tools)...)
+	for _, p := range asm.Problems {
+		out.Notes = append(out.Notes, problemNote(p))
 	}
 
 	return out, nil
+}
+
+// problemNote is the card's line for a source that failed: the MCP server or the
+// remote agent by its configured name, or every host of a block no client reached.
+func problemNote(p agent.Problem) string {
+	kind := "remote agent"
+	if p.Source == agent.SourceMCPClients {
+		kind = "mcp server"
+	}
+
+	if p.Alias == "" {
+		return fmt.Sprintf("the tools of every %s could not be listed, so any tool one supplies is missing here", kind)
+	}
+
+	return fmt.Sprintf("the tools of the %s %q could not be listed, so any tool it supplies is missing here", kind, p.Alias)
 }
 
 // serveCard answers the agent card.

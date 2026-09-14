@@ -11,6 +11,7 @@ import (
 
 	"github.com/choria-io/fisk-ai/config"
 	"github.com/choria-io/fisk-ai/internal/a2a"
+	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/serve"
@@ -28,13 +29,15 @@ func Builder(formats ...Mount) serve.EndpointBuilder {
 		Name:    channelName,
 		Enabled: func(cfg *config.Config) bool { return cfg.WebEnabled() },
 		// The listener binds here, so a busy port fails before the banner rather than
-		// after it. The context governs the introspection of the application and the
-		// listing of the MCP servers the card names, so an operator who gives up while a
-		// server is answering nothing gets the error back.
+		// after it. The context governs the introspection of the application, the
+		// discovery of the remote hosts and the listing of the MCP servers on the card,
+		// so an operator who gives up while a server is answering nothing gets the
+		// error back.
 		Build: func(ctx context.Context, cfg *config.Config, opts serve.BuildOptions) ([]serve.Endpoint, error) {
 			ch, err := NewFromConfig(ctx, cfg, ConfigOptions{
 				Formats:          formats,
 				Sessions:         opts.Sessions,
+				Conns:            opts.Conns,
 				MCPSessions:      opts.MCPSessions,
 				Telemetry:        opts.Telemetry,
 				SuspendRequested: opts.SuspendRequested,
@@ -63,10 +66,16 @@ type ConfigOptions struct {
 	// thread it holds from one it is opening.
 	Sessions runstate.Store
 
+	// Conns is the process's NATS connection, borrowed and never closed here. The a2a
+	// client the remote_tools hosts are discovered through is built on it. With hosts
+	// configured and no connection, the assembler records the remote_tools block as a
+	// problem and the card notes that no remote agent's tools could be listed.
+	Conns *conns.Provider
+
 	// MCPSessions are the process's live sessions with the configured MCP servers,
 	// borrowed and never closed here. Nil lists no MCP tool on the card, which is right
-	// for a configuration that declares no server and leaves the card short for one that
-	// does.
+	// for a configuration that declares no server; with servers configured the card
+	// has a note per server.
 	MCPSessions *mcpclient.Sessions
 
 	// Telemetry is the process's resolved provider, or nil when telemetry is off. The
@@ -93,10 +102,10 @@ type ConfigOptions struct {
 // card alone, and its listener still binds, so a busy port and a bad address fail at
 // startup.
 //
-// It resolves the agent's tools once, here, so the card names what a run would offer
+// It resolves the agent's tools once, here, so the card lists what a run would offer
 // the model rather than what this channel could work out on its own. The context
-// governs that: introspecting the application starts a subprocess, and listing an MCP
-// server's tools is a round trip to it.
+// governs that: introspecting the application starts a subprocess, and discovering a
+// remote host or listing an MCP server's tools is a round trip to it.
 func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) (*Channel, error) {
 	if !cfg.WebEnabled() {
 		return nil, fmt.Errorf("expose.agent.web is not configured")
@@ -106,7 +115,12 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 		return nil, fmt.Errorf("expose.agent.web needs a session store: a thread is a conversation, so a worker with nowhere to journal one would answer a first request and nothing after it")
 	}
 
-	tools, err := ResolveAgentTools(ctx, cfg, opts.MCPSessions)
+	remote, err := remoteClient(cfg, opts.Conns)
+	if err != nil {
+		return nil, err
+	}
+
+	tools, err := ResolveAgentTools(ctx, cfg, remote, opts.MCPSessions)
 	if err != nil {
 		return nil, err
 	}
@@ -134,4 +148,20 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, opts ConfigOptions) 
 		SuspendRequested: opts.SuspendRequested,
 		Logger:           opts.Logger,
 	})
+}
+
+// remoteClient builds the a2a client the remote_tools hosts are discovered through on
+// the process's connection, as a run builds its own. It is nil when no host is
+// configured or no connection was passed.
+func remoteClient(cfg *config.Config, provider *conns.Provider) (*a2a.Client, error) {
+	if len(cfg.RemoteTools) == 0 || provider == nil {
+		return nil, nil
+	}
+
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{Resources: provider, Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
+	if err != nil {
+		return nil, err
+	}
+
+	return a2a.NewClient(transport, cfg.Identity, a2a.WithIdleTimeout(cfg.A2ARequestTimeout()))
 }

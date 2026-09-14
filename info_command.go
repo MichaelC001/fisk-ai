@@ -5,26 +5,27 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/choria-io/fisk"
 	"github.com/choria-io/fisk-ai/config"
+	"github.com/choria-io/fisk-ai/internal/a2a"
 	"github.com/choria-io/fisk-ai/internal/agent"
+	"github.com/choria-io/fisk-ai/internal/conns"
 	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/mcpclient"
 	"github.com/choria-io/fisk-ai/internal/memory"
-	"github.com/choria-io/fisk-ai/internal/remotetools"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 	"github.com/choria-io/fisk-ai/internal/telemetry"
 	"github.com/choria-io/fisk-ai/internal/telemetry/bootstrap"
 	"github.com/choria-io/fisk-ai/internal/toolkit"
-	"github.com/choria-io/fisk-ai/internal/toolkit/builtin"
 	"github.com/choria-io/fisk-ai/internal/toolkit/fisktool"
-	"github.com/choria-io/fisk-ai/internal/toolkit/functool"
 	"github.com/choria-io/ui/columns"
 	"github.com/choria-io/ui/table"
 )
@@ -64,75 +65,23 @@ func infoAction(_ *fisk.ParseContext) error {
 		fmt.Fprintln(os.Stderr, "warning: include/exclude have no effect without application_path; they filter the wrapped application's tools")
 	}
 
-	tools, err := fisktool.LoadTools(ctx, cfg)
+	// Assembly is lenient: info must stay usable offline and when a remote agent or an
+	// MCP server is down, so info warns about a source that failed and shows the tools
+	// of the sources that answered.
+	src, release := infoSources(ctx, cfg, nil)
+	defer release()
+
+	asm, err := agent.Assemble(ctx, cfg, src, agent.SurfaceRun, agent.Lenient)
 	if err != nil {
 		return err
 	}
 
-	// The memory and knowledge tools are enumerated with a nil store: info only needs
-	// their names and descriptions, and never invokes a handler.
-	hitlTools := builtin.HITLTools(cfg)
-	memTools := builtin.MemoryTools(cfg, nil)
-	ragTools := builtin.RAGTools(cfg, nil)
-
-	// Names already claimed by local tools and the built-ins, so remote tools are
-	// named (and prefixed on clash) exactly as a run would name them.
-	taken := make(map[string]bool, len(tools))
-	for _, t := range tools {
-		taken[t.Name()] = true
-	}
-	for _, b := range hitlTools {
-		taken[b.Name()] = true
-	}
-	for _, b := range memTools {
-		taken[b.Name()] = true
-	}
-	for _, b := range ragTools {
-		taken[b.Name()] = true
-	}
-
-	// Discover remote tools best-effort: info must stay usable offline and when a
-	// remote agent is down, so a connection or discovery failure is reported as a
-	// warning and the local tools are still shown.
-	imports, err := remotetools.DiscoverForInfo(ctx, cfg, taken)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot connect to NATS context %q to discover remote tools: %v\n", cfg.NatsContext, err)
-	}
-
-	// The names the a2a import settled on are never written into taken, so the MCP
-	// naming pass is given both lookups, as a run gives it both. Passing taken alone
-	// would let an MCP tool take a name an imported remote tool already answers to,
-	// and info would then show a name no run would use.
-	remoteByName := make(map[string]*functool.Tool)
-	for _, imp := range imports {
-		for _, rt := range imp.Tools {
-			remoteByName[rt.Name()] = rt
-		}
-	}
-
-	// Discover the configured MCP servers best-effort, for the same reason the remote
-	// hosts are: a server that will not answer is reported with its error and the rest
-	// of the configuration is still shown. Nothing is connected when none are declared.
-	mcpImports := mcpclient.Inspect(ctx, mcpclient.Options{
-		Servers:            cfg.MCPClients,
-		Identity:           cfg.Identity,
-		Version:            version,
-		CredentialEnvNames: cfg.CredentialEnvNames(),
-		WorkDir:            cfg.RootDirectory,
-	}, mcpclient.NewClaimedNames(taken, remoteByName))
-
-	totalTools := len(tools) + len(hitlTools) + len(memTools) + len(ragTools)
-	for _, imp := range imports {
-		totalTools += len(imp.Tools)
-	}
-	for _, imp := range mcpImports {
-		totalTools += len(imp.Tools)
-	}
+	printSourceProblems(os.Stderr, cfg, asm.Problems)
 
 	c := columns.New()
 	defer c.WriteTo(os.Stdout)
 
-	printModelSection(c, cfg, totalTools)
+	printModelSection(c, cfg)
 	printMemorySection(c, cfg)
 	printSessionsSection(c, cfg)
 	printHarnessSection(c, cfg)
@@ -140,61 +89,7 @@ func infoAction(_ *fisk.ParseContext) error {
 
 	tbl := table.NewTableWriter("")
 	tbl.AddHeaders("Tool", "Source", "Confirm", "Description", "Tags")
-	// The Confirm column marks the commands a run would gate behind operator
-	// confirmation, so an author can see confirm_tags resolves to the commands they
-	// expect rather than discovering a typo (an unmatched tag) only mid-run. Only the
-	// introspected local tools carry tags; the built-ins and remote tools are not gated
-	// here, so their cell stays blank.
-	// A tag that does nothing renders in the Tags column exactly like one that works,
-	// so the tags that are misspelled or contradictory are called out under the table
-	// rather than left for the operator to spot.
-	var tagIssues []string
-	for _, t := range tools {
-		confirm := ""
-		if t.NeedsConfirm(cfg.ConfirmTags()) {
-			confirm = "Yes"
-		}
-		tbl.AddRow(t.Name(), "local", confirm, truncateString(t.Description(), maxInfoDescriptionLen), strings.Join(t.Tags(), ", "))
-
-		unknown, conflicting := toolkit.TagIssues(t)
-		if len(unknown) > 0 {
-			tagIssues = append(tagIssues, fmt.Sprintf("%s carries unknown reserved tag(s) %s, which do nothing; the recognized tags are %s", t.Name(), strings.Join(unknown, ", "), strings.Join(toolkit.ReservedTags(), ", ")))
-		}
-		if len(conflicting) > 0 {
-			tagIssues = append(tagIssues, fmt.Sprintf("%s carries contradictory behavior tags %s; the more dangerous reading is used", t.Name(), strings.Join(conflicting, ", ")))
-		}
-	}
-	// Built-in human-in-the-loop tools are not introspected from the application,
-	// so list them too when enabled, to show the full tool set a run would expose.
-	// They carry no tags.
-	for _, b := range hitlTools {
-		tbl.AddRow(b.Name(), "local", "", truncateString(b.Description(), maxInfoDescriptionLen), "")
-	}
-	// Built-in memory tools are likewise not introspected from the application, so
-	// list them when enabled to show the full tool set a run would expose.
-	for _, b := range memTools {
-		tbl.AddRow(b.Name(), "local", "", truncateString(b.Description(), maxInfoDescriptionLen), "")
-	}
-	// The built-in knowledge tools, likewise, when RAG is enabled.
-	for _, b := range ragTools {
-		tbl.AddRow(b.Name(), "local", "", truncateString(b.Description(), maxInfoDescriptionLen), "")
-	}
-	// Imported remote tools are listed with the host alias as their source, so the
-	// provenance of a tool the prompt may reference is clear.
-	for _, imp := range imports {
-		alias := imp.Host.EffectiveAlias()
-		for _, rt := range imp.Tools {
-			// A remote tool's description is the serving agent's model-facing
-			// description, which has the command's tags appended as a trailing
-			// "Tags:" block. Split that back out so the table shows a clean,
-			// single-line description and the tags in their own column, matching the
-			// local rows.
-			desc, tags := splitRemoteDescription(rt.Description())
-			desc = strings.ReplaceAll(desc, "\n", " ")
-			tbl.AddRow(rt.Name(), alias, "", truncateString(desc, maxInfoDescriptionLen), tags)
-		}
-	}
-	addMCPToolRows(tbl, mcpImports)
+	tagIssues := addToolRows(tbl, cfg, asm)
 
 	c.Section("Tools", func(c *columns.Document) {
 		c.Embed(tbl)
@@ -204,8 +99,8 @@ func infoAction(_ *fisk.ParseContext) error {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", issue)
 	}
 
-	printRemoteToolStatus(c, cfg, imports)
-	printMCPServerStatus(c, mcpImports)
+	printRemoteToolStatus(c, cfg, asm.Remote)
+	printMCPServerStatus(c, asm.MCP)
 
 	// List the application's exposable global flags so an operator can see which
 	// exist and which they have allowlisted under global_flags, closing the loop
@@ -273,10 +168,7 @@ func printSamplePromptsSection(c *columns.Document, cfg *config.Config) {
 // search will behave, so an operator can confirm the backend and the feature gates
 // without starting a run. It is skipped for a config with no model (an MCP-only config
 // parsed in ModeMCP), which has no LLM run to describe.
-//
-// totalTools is how many tools a run would put in front of the model, which decides
-// whether the tool search state costs anything worth reporting.
-func printModelSection(c *columns.Document, cfg *config.Config, totalTools int) {
+func printModelSection(c *columns.Document, cfg *config.Config) {
 	if cfg.LLM.Model == "" {
 		return
 	}
@@ -297,7 +189,7 @@ func printModelSection(c *columns.Document, cfg *config.Config, totalTools int) 
 		}
 		c.Item("Thinking", thinking)
 
-		c.Item("Tool search", toolSearchStatus(cfg, totalTools))
+		c.Item("Tool search", toolSearchStatus(cfg))
 	})
 }
 
@@ -390,7 +282,7 @@ func printSessionsSection(c *columns.Document, cfg *config.Config) {
 			// The subject prefix is derived by binding the stream at connect time (its
 			// single wildcard subject), so it is not knowable offline; naming that here
 			// mirrors Memory's Prefix so the omission reads as by-design, not a bug.
-			c.Item("Prefix", "(derived from the stream at connect time)")
+			c.Item("Prefix", "derived from the stream")
 		case runstate.BackendFile:
 			var opts struct {
 				Directory string `json:"directory"`
@@ -441,9 +333,9 @@ func printHarnessSection(c *columns.Document, cfg *config.Config) {
 		tui := "full-screen"
 		switch {
 		case cfg.TUIDisabled():
-			tui = "line UI (no_tui)"
+			tui = "line"
 		case !cfg.BellEnabled():
-			tui = "full-screen, bell silenced (no_bell)"
+			tui = "full-screen, no bell"
 		}
 		c.Item("Terminal UI", tui)
 
@@ -498,43 +390,173 @@ func printTelemetrySection(c *columns.Document, cfg *config.Config) {
 	})
 }
 
-// printTelemetryCaptureItems shows what content capture would export.
-//
-// Off is one line rather than four, because the settings underneath it mean nothing
-// then and four lines of inert configuration is how an operator comes to believe a
-// feature is on. On is four, and the fourth is the point: the export batch size is
-// derived from the content cap rather than configured, so it is invisible everywhere
-// else and it moves underneath an operator the moment they change the cap. This command
-// exists to show exactly that class of value.
+// printTelemetryCaptureItems shows the content capture settings. Off is one line,
+// since the settings under it apply only when it is on. On is four, and the export
+// batch size is derived from the content cap rather than configured, so this is the
+// one place an operator sees it.
 func printTelemetryCaptureItems(c *columns.Document, resolved telemetry.Resolved) {
 	if !resolved.Capture.Value {
-		c.Item("Content capture", "off (default): spans carry structure and timing only")
+		c.Item("Content capture", "off")
 		return
 	}
 
-	c.Item("Content capture", withOrigin("on", resolved.Capture.Origin)+
-		": prompts, model output, tool arguments and tool results are exported to this endpoint")
+	c.Item("Content capture", withOrigin("on", resolved.Capture.Origin))
 	c.Item("Content messages", withOrigin(resolved.Messages.Value.String(), resolved.Messages.Origin))
 	c.Item("Content limit", withOrigin(fmt.Sprintf("%d bytes per attribute", resolved.MaxBytes.Value), resolved.MaxBytes.Origin))
 	c.Item("Export batch", withOrigin(fmt.Sprintf("%d spans", resolved.ExportBatch.Value), resolved.ExportBatch.Origin))
 }
 
-// addMCPToolRows lists every imported MCP tool in the tool table, so one table answers
-// what the model can call whether a tool came from the application, a built-in, an a2a
-// peer or an MCP server. The source is the server's alias, the way a remote tool's is
-// its host's alias, and it is the prefix the tool's own name carries.
+// infoSources opens what info lists tools through: an a2a client on the configured
+// NATS context when remote_tools has hosts, and one Sessions per configured MCP
+// server, so a server that will not connect fails its own status row and the servers
+// after it are still connected. The stores are left nil, since info never calls a
+// tool. A NATS context that will not dial and a server that will not connect are
+// recorded in Unbound with the error rather than failing, since a configuration is
+// inspected when it may not be runnable.
 //
-// An MCP tool carries no tags and is never confirm gated locally, so both of those
-// cells stay blank. Its description is the server's own text, which is not split the
-// way a remote agent's is: no tag block is appended to it.
-func addMCPToolRows(tbl *table.Table, imports []mcpclient.ServerImport) {
-	for _, imp := range imports {
-		alias := imp.Server.EffectiveAlias()
-		for _, mt := range imp.Tools {
-			desc := strings.ReplaceAll(mt.Description(), "\n", " ")
-			tbl.AddRow(mt.Name(), alias, "", truncateString(desc, maxInfoDescriptionLen), "")
+// dialer overrides how each MCP server's transport is built; nil builds the stdio
+// and HTTP transports from the entry. The returned function closes what was opened.
+func infoSources(ctx context.Context, cfg *config.Config, dialer mcpclient.Dialer) (agent.Sources, func()) {
+	var src agent.Sources
+	var closers []func()
+
+	if len(cfg.RemoteTools) > 0 {
+		client, closeClient, err := infoRemoteClient(ctx, cfg)
+		if err != nil {
+			src.Unbound = append(src.Unbound, agent.Problem{Source: agent.SourceRemoteTools, Err: err})
+		} else {
+			src.Remote = client
+			closers = append(closers, closeClient)
 		}
 	}
+
+	// One Sessions per server, so a server that does not come up fails its own row
+	// and the others are still imported. Connect closes what it opened when it fails.
+	for _, server := range cfg.MCPClients {
+		sessions, err := mcpclient.Connect(ctx, mcpclient.Options{
+			Servers:            []config.MCPServer{server},
+			Identity:           cfg.Identity,
+			Version:            version,
+			CredentialEnvNames: cfg.CredentialEnvNames(),
+			WorkDir:            cfg.RootDirectory,
+			Dialer:             dialer,
+		})
+		if err != nil {
+			src.Unbound = append(src.Unbound, agent.Problem{Source: agent.SourceMCPClients, Alias: server.Name, Err: err})
+			continue
+		}
+
+		src.MCP = append(src.MCP, sessions)
+		// The close error describes tearing down a session whose tools have already been
+		// read, which has nothing to say to someone reading a configuration. The close
+		// runs outside ctx so a canceled info still reaps the stdio child.
+		closers = append(closers, func() { _ = sessions.Close(context.WithoutCancel(ctx)) })
+	}
+
+	return src, func() {
+		for _, closer := range closers {
+			closer()
+		}
+	}
+}
+
+// infoRemoteClient dials the configured NATS context and builds the a2a client the
+// remote_tools hosts are discovered through. The returned function closes the
+// connection.
+func infoRemoteClient(ctx context.Context, cfg *config.Config) (*a2a.Client, func(), error) {
+	provider, err := conns.ConnectNatsContext(ctx, cfg.NatsContext, conns.Config{Product: cfg.ProductName(), Name: cfg.Identity})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	transport, err := a2a.NewTransport(cfg.A2ATransport(), a2a.TransportConfig{Resources: provider, Identity: cfg.Identity, Timeout: cfg.A2ARequestTimeout()})
+	if err != nil {
+		provider.Close()
+		return nil, nil, err
+	}
+
+	client, err := a2a.NewClient(transport, cfg.Identity, a2a.WithIdleTimeout(cfg.A2ARequestTimeout()))
+	if err != nil {
+		provider.Close()
+		return nil, nil, err
+	}
+
+	return client, provider.Close, nil
+}
+
+// printSourceProblems warns about each source that failed as a whole. A host or a
+// server that failed has a row in its status block, printed UNAVAILABLE with its
+// error, so a problem with an alias is left to that block.
+func printSourceProblems(w io.Writer, cfg *config.Config, problems []agent.Problem) {
+	for _, p := range problems {
+		if p.Alias != "" {
+			continue
+		}
+
+		switch p.Source {
+		case agent.SourceRemoteTools:
+			fmt.Fprintf(w, "warning: cannot connect to NATS context %q to discover remote tools: %v\n", cfg.NatsContext, p.Err)
+		default:
+			fmt.Fprintf(w, "warning: %s could not be imported: %v\n", p.Source, p.Err)
+		}
+	}
+}
+
+// addToolRows lists every assembled tool, so one table answers what the model can
+// call whether a tool came from the application, a built-in, an a2a peer or an MCP
+// server. The Source column is "local" for a command and a built-in, and the host or
+// server alias for an import, which is the prefix on the tool's name.
+//
+// The Confirm column marks every tool a run would gate behind operator confirmation,
+// asked of each through toolkit.Confirmable, so an author can see confirm_tags
+// resolves to the commands they expect rather than discovering a typo (an unmatched
+// tag) only mid-run. Only a command has tags of its own. A remote tool's
+// description is the serving agent's model-facing one, which has the command's tags
+// appended as a trailing "Tags:" block, so it is split back into the two columns; an
+// MCP server's description is its own text, with no block to split.
+//
+// It returns the tag issues found on the commands, one line each, for the caller to
+// print under the table: a tag that does nothing renders in the Tags column exactly
+// like one that works, so the tags that are misspelled or contradictory are called
+// out rather than left for the operator to spot.
+func addToolRows(tbl *table.Table, cfg *config.Config, asm *agent.Assembly) []string {
+	confirmTags := cfg.ConfirmTags()
+
+	var tagIssues []string
+	for _, t := range asm.Tools {
+		confirm := ""
+		gated, ok := t.Tool.(toolkit.Confirmable)
+		if ok && gated.NeedsConfirm(confirmTags) {
+			confirm = "Yes"
+		}
+
+		source := t.Source
+		if t.Kind == toolkit.KindApplication || t.Kind == toolkit.KindBuiltin {
+			source = "local"
+		}
+
+		desc := t.Tool.Description()
+		tags := strings.Join(toolkit.TagsOf(t.Tool), ", ")
+		switch t.Kind {
+		case toolkit.KindRemote:
+			desc, tags = splitRemoteDescription(desc)
+			desc = strings.ReplaceAll(desc, "\n", " ")
+		case toolkit.KindMCP:
+			desc = strings.ReplaceAll(desc, "\n", " ")
+		}
+
+		tbl.AddRow(t.Tool.Name(), source, confirm, truncateString(desc, maxInfoDescriptionLen), tags)
+
+		unknown, conflicting := toolkit.TagIssues(t.Tool)
+		if len(unknown) > 0 {
+			tagIssues = append(tagIssues, fmt.Sprintf("%s carries unknown reserved tag(s) %s, which do nothing; the recognized tags are %s", t.Tool.Name(), strings.Join(unknown, ", "), strings.Join(toolkit.ReservedTags(), ", ")))
+		}
+		if len(conflicting) > 0 {
+			tagIssues = append(tagIssues, fmt.Sprintf("%s carries contradictory behavior tags %s; the more dangerous reading is used", t.Tool.Name(), strings.Join(conflicting, ", ")))
+		}
+	}
+
+	return tagIssues
 }
 
 // printMCPServerStatus prints a per-server block after the tool table, the parallel of
@@ -652,41 +674,31 @@ func telemetryScrubStatus(cfg *config.Config) string {
 	}
 
 	if len(set) == 0 {
-		return "no credential variables are set in this environment"
+		return "none set"
 	}
 
-	return fmt.Sprintf("%s (stripped from tool subprocesses)", strings.Join(set, ", "))
+	return strings.Join(set, ", ")
 }
 
-// toolSearchStatus describes how server-side tool search will behave for a run of
-// cfg: disabled by the operator, unsupported by (or unknown to) the provider, or
-// enabled and used once the tool count crosses the threshold. It resolves the
+// toolSearchStatus reports whether a run of cfg uses server-side tool search:
+// disabled by the operator, unknown when the provider is not linked into the build,
+// unavailable when the provider does not support it, or enabled. It resolves the
 // provider only to read its capabilities, never to make a call, so it works offline
 // and with no credentials.
-//
-// A run does not warn about no_tool_search, since the operator chose it, so the cost
-// of that choice is reported here instead: with totalTools at or above the threshold
-// every one of them is sent on every request. totalTools comes from the caller's
-// resolved tool set, which counts the tools a2a and MCP discovery reached; an a2a
-// peer that could not be discovered and an MCP server that would not answer both
-// leave it short of what a run would send.
-func toolSearchStatus(cfg *config.Config, totalTools int) string {
+func toolSearchStatus(cfg *config.Config) string {
 	if !cfg.ToolSearchEnabled() {
-		if totalTools >= agent.ToolSearchThreshold {
-			return fmt.Sprintf("disabled (no_tool_search), %d tools are sent to the model directly and use more context on each request; unset it to defer them behind the search tool, supported on Anthropic models only", totalTools)
-		}
-		return "disabled (no_tool_search)"
+		return "disabled"
 	}
 
 	provider, err := llm.NewProvider(cfg.LLMProvider(), llm.Config{})
 	if err != nil {
-		return fmt.Sprintf("unknown (provider %q is not available)", cfg.LLMProvider())
+		return "unknown"
 	}
 	if !provider.Capabilities().SupportsToolSearch {
-		return fmt.Sprintf("unavailable (provider %q does not support it)", cfg.LLMProvider())
+		return "unavailable"
 	}
 
-	return fmt.Sprintf("enabled (used when %d or more tools are available)", agent.ToolSearchThreshold)
+	return "enabled"
 }
 
 // splitRemoteDescription separates a remote tool's advertised description into its

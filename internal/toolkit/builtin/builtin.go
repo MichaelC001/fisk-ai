@@ -71,47 +71,6 @@ func mustNew(spec functool.Spec) *functool.Tool {
 	return t
 }
 
-// enabledBuiltins enumerates every built-in cfg turns on, with no store bound. It
-// answers naming and exposure questions only; a handler reached through it would
-// error rather than run, which is the same contract info uses to list tools.
-func enabledBuiltins(cfg *config.Config) []*functool.Tool {
-	var out []*functool.Tool
-
-	out = append(out, HITLTools(cfg)...)
-	out = append(out, MemoryTools(cfg, nil)...)
-	out = append(out, RAGTools(cfg, nil)...)
-
-	return out
-}
-
-// WithheldFromMCP names the built-ins cfg enables that the MCP server will not
-// carry. It is derived from each tool's own exposure declaration rather than
-// written out, so an operator note cannot drift from what is actually served the
-// way a hand-maintained list does.
-func WithheldFromMCP(cfg *config.Config) []string {
-	var out []string
-	for _, t := range enabledBuiltins(cfg) {
-		if !t.MCPExposable() {
-			out = append(out, t.Name())
-		}
-	}
-
-	return out
-}
-
-// WithheldFromA2A names the built-ins cfg enables that the a2a server will not
-// carry, on the same terms as WithheldFromMCP.
-func WithheldFromA2A(cfg *config.Config) []string {
-	var out []string
-	for _, t := range enabledBuiltins(cfg) {
-		if !t.A2AExposable() {
-			out = append(out, t.Name())
-		}
-	}
-
-	return out
-}
-
 // withPrompter adapts a built-in handler, which takes the operator prompter
 // directly, to a functool.Handler, which receives its per-run dependencies through
 // a CallContext. A built-in needs only the prompter, never the working directory.
@@ -136,19 +95,15 @@ func HITLTools(cfg *config.Config) []*functool.Tool {
 }
 
 // HITLSystemNote returns a system-prompt note to add when the human-in-the-loop
-// tools are present, or "" when there are none. The agent loop ends on a turn that
-// produces only text, so a model that "asks the user" in prose silently ends the
-// run instead of reaching anyone; without this the model has no way to know that
-// the operator is unreachable except through these tools. The note names the tools
-// actually enabled so it stays accurate as the set changes.
-func HITLSystemNote(builtins []*functool.Tool) string {
-	if len(builtins) == 0 {
+// tools are present, or "" when there are none. names are the tool names the run
+// offers. The agent loop ends on a turn that produces only text, so a model that
+// "asks the user" in prose silently ends the run instead of reaching anyone; without
+// this the model has no way to know that the operator is unreachable except through
+// these tools. The note lists the tools actually enabled so it stays accurate as the
+// set changes.
+func HITLSystemNote(names []string) string {
+	if len(names) == 0 {
 		return ""
-	}
-
-	names := make([]string, len(builtins))
-	for i, b := range builtins {
-		names[i] = b.Name()
 	}
 
 	return fmt.Sprintf("You are running as a non-interactive agent: the operator cannot see your "+
