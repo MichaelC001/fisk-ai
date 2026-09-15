@@ -172,6 +172,11 @@ func (s *Store) Index(ctx context.Context, roots []string, opts IndexOptions) (*
 		if opts.Reindex {
 			stats.FirstBuild = true
 		}
+		// The dimension probe in prepareIndex is the first request, so a server that
+		// names a different model has done so by now.
+		if served := s.servedModel(); served != "" {
+			opts.note(fmt.Sprintf("embeddings server served model %q for configured model %q; the index is pinned to the configured name", served, s.emb.Model()))
+		}
 	}
 
 	// One copy for the whole run rather than one per root, so every root walks the set

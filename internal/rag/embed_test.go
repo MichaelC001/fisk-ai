@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -132,19 +133,24 @@ var _ = Describe("Embedding client", func() {
 			})
 		}
 
-		It("refuses vectors from a model other than the configured one", func() {
-			// A local server handed a model name it does not have may answer 200 with
-			// whichever model happens to be loaded, at a dimension that agrees with the
-			// index. The reported model is the only evidence of the substitution.
+		It("accepts vectors from a model named differently and records the served name", func() {
+			// A gateway routing to an upstream provider reports the provider's name
+			// for the model it was asked for, so the response is accepted; the name is
+			// kept for the index run and the doctor to report. The manifest still pins
+			// the configured name.
 			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
 				writeVectorsAs(w, "some-other-model")
 			})
 			defer srv.Close()
 
-			_, err := newEmbedder(srv.URL).embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a"})
-			Expect(err).To(MatchError(ErrModelMismatch))
-			Expect(err).To(MatchError(ContainSubstring("test-model")))
-			Expect(err).To(MatchError(ContainSubstring("some-other-model")))
+			e := newEmbedder(srv.URL)
+			Expect(e.ServedModel()).To(BeEmpty())
+
+			vecs, err := e.embedBatch(ctx, telemetry.EmbeddingsPurposeQuery, []string{"a"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(vecs).To(HaveLen(1))
+			Expect(e.ServedModel()).To(Equal("some-other-model"))
+			Expect(e.Model()).To(Equal("test-model"))
 		})
 
 		It("names the model and the status, without the server's body, when the probe is rejected", func() {
@@ -161,14 +167,51 @@ var _ = Describe("Embedding client", func() {
 			Expect(err.Error()).ToNot(ContainSubstring("Invalid model identifier"))
 		})
 
-		It("fails the dimension probe, so a substitution is caught before any index is written", func() {
+		It("probes the dimension through a differently named model and records the served name", func() {
 			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
 				writeVectorsAs(w, "some-other-model")
 			})
 			defer srv.Close()
 
-			_, err := newEmbedder(srv.URL).Dim(ctx)
-			Expect(err).To(MatchError(ErrModelMismatch))
+			e := newEmbedder(srv.URL)
+			dim, err := e.Dim(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(dim).To(Equal(2))
+			Expect(e.ServedModel()).To(Equal("some-other-model"))
+		})
+
+		It("reports the served name through Progress on an index run and pins the configured one", func() {
+			// The fake answers every input with one vector, whatever the batch size,
+			// under a name a gateway would report for the configured model.
+			srv := fakeServer(func(w http.ResponseWriter, req embedRequest) {
+				type item struct {
+					Embedding []float32 `json:"embedding"`
+					Index     int       `json:"index"`
+				}
+				data := make([]item, len(req.Input))
+				for i := range req.Input {
+					data[i] = item{Embedding: []float32{1, 0.5}, Index: i}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"model": "private/gateway/test-model", "data": data})
+			})
+			defer srv.Close()
+
+			tmp := GinkgoT().TempDir()
+			docsD := filepath.Join(tmp, "docs")
+			writeDoc(docsD, "a.md", "# A\n\nsome text\n")
+
+			w, err := OpenWriter(lexicalConfig(filepath.Join(tmp, "knowledge")), "", Options{Embedder: newEmbedder(srv.URL)})
+			Expect(err).ToNot(HaveOccurred())
+			defer w.Close()
+
+			var notes []string
+			_, err = w.Index(ctx, []string{docsD}, IndexOptions{Progress: func(msg string) { notes = append(notes, msg) }})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(notes).To(ContainElement(`embeddings server served model "private/gateway/test-model" for configured model "test-model"; the index is pinned to the configured name`))
+
+			meta, err := w.readMeta(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(meta.Model).To(Equal("test-model"))
 		})
 
 		It("accepts vectors when the server reports the configured model", func() {

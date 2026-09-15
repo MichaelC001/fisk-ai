@@ -162,11 +162,40 @@ type openAIEmbedder struct {
 	// more than one in-flight call), so the cache must not be raced.
 	dimMu sync.Mutex
 	dim   int
+
+	// servedMu guards served, the model name the server reported when it differed
+	// from the configured one. It is a separate lock because Dim holds dimMu while it
+	// calls embedBatch, which is where the name is recorded.
+	servedMu sync.Mutex
+	served   string
 }
 
 func (e *openAIEmbedder) Model() string          { return e.model }
 func (e *openAIEmbedder) QueryPrefix() string    { return e.queryPrefix }
 func (e *openAIEmbedder) DocumentPrefix() string { return e.docPrefix }
+
+// ServedModel returns the model name the server reported when it differed from the
+// configured one, and "" when every response so far named the configured model or
+// omitted the field. A gateway that routes to an upstream provider often reports the
+// provider's name for the model it was asked for, and a single-model local server
+// embeds with whatever is loaded, so the difference is reported rather than refused.
+func (e *openAIEmbedder) ServedModel() string {
+	e.servedMu.Lock()
+	defer e.servedMu.Unlock()
+
+	return e.served
+}
+
+// servedModel returns the served model name the store's embedder recorded, and ""
+// for a caller-supplied Embedder, which has no such record.
+func (s *Store) servedModel() string {
+	e, ok := s.emb.(*openAIEmbedder)
+	if !ok {
+		return ""
+	}
+
+	return e.ServedModel()
+}
 
 // Dim probes the model's dimension once (embedding a short neutral input) and
 // caches it. An empty or error-shaped response is a failure, never a pin, so a
@@ -369,12 +398,14 @@ func (e *openAIEmbedder) embedBatch(ctx context.Context, purpose string, inputs 
 	if parsed.Error != nil && parsed.Error.Message != "" {
 		return nil, fmt.Errorf("embeddings server at %s reported: %s", e.baseURL, parsed.Error.Message)
 	}
-	// A server that serves a different model than the one asked for produces vectors
-	// from the wrong space, and every downstream check passes: the dimensions can
-	// agree, so an index is written and pinned to a model that never embedded it.
-	// Servers that omit the field are taken at their word.
+	// A server that names a different model than the one asked for is usually a
+	// gateway reporting its upstream provider's name for the same model, so the
+	// response is accepted and the name recorded for the index run and the doctor to
+	// report. Servers that omit the field are taken at their word.
 	if parsed.Model != "" && parsed.Model != e.model {
-		return nil, fmt.Errorf("%w: asked %s for model %q but it served %q", ErrModelMismatch, e.baseURL, e.model, parsed.Model)
+		e.servedMu.Lock()
+		e.served = parsed.Model
+		e.servedMu.Unlock()
 	}
 	if len(parsed.Data) != len(inputs) {
 		return nil, fmt.Errorf("embeddings server returned %d vectors for %d inputs", len(parsed.Data), len(inputs))
