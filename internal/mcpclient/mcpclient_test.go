@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -134,6 +136,47 @@ var _ = Describe("Sessions", func() {
 				}},
 			})
 			Expect(err).To(MatchError(ContainSubstring(`mcp server "docs": url: environment variable "FISK_MCPCLIENT_ABSENT" is not set`)))
+		})
+
+		It("should fail the connect on a file it cannot read, naming the path and not the content", func() {
+			dir := GinkgoT().TempDir()
+			readable := filepath.Join(dir, "present")
+			Expect(os.WriteFile(readable, []byte(referencedToken), 0600)).To(Succeed())
+			absent := filepath.Join(dir, "absent")
+
+			_, err := Connect(ctx, Options{
+				Servers: []config.MCPServer{{
+					Name:    "docs",
+					URL:     "https://mcp.example.net/mcp/?apiKey=${file:" + readable + "}",
+					Headers: map[string]string{"Authorization": "Bearer ${file:" + absent + "}"},
+				}},
+			})
+			Expect(err).To(MatchError(os.ErrNotExist))
+			Expect(err).To(MatchError(ContainSubstring(`mcp server "docs": headers "Authorization": reading credential file "` + absent + `"`)))
+			Expect(err.Error()).ToNot(ContainSubstring(referencedToken))
+		})
+
+		// A token a file supplied is searched for the way one a variable supplied is, so
+		// a service that takes it in the path does not print it on a refused connection.
+		It("should redact a credential a file put in the url path from a failed connect", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "path_token")
+			Expect(os.WriteFile(path, []byte(referencedToken+"\n"), 0600)).To(Succeed())
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			Expect(err).ToNot(HaveOccurred())
+
+			endpoint := fmt.Sprintf("http://%s/api/mcp/s/${file:%s}/mcp", listener.Addr().String(), path)
+			Expect(listener.Close()).To(Succeed())
+
+			_, err = Connect(ctx, Options{
+				Servers:  []config.MCPServer{{Name: "docs", URL: endpoint, TimeoutParsed: 10 * time.Second}},
+				Identity: "fisk-test",
+				Version:  "0.0.1",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).ToNot(ContainSubstring(referencedToken))
+			Expect(err).To(MatchError(ContainSubstring(`connecting to mcp server "docs"`)))
+			Expect(err).To(MatchError(ContainSubstring("/api/mcp/s/REDACTED/mcp")))
 		})
 
 		// The endpoint of a server that authenticates by query parameter carries the

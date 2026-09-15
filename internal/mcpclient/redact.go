@@ -35,34 +35,57 @@ const redactedValue = "REDACTED"
 // left printed and nothing they need to read is destroyed.
 const minSecretLength = 8
 
-// serverSecrets are the values the "${VAR}" references in a server's url resolve to,
-// which is the credential an operator kept in a variable rather than in the file. They
-// are what the redaction searches for, so a credential a service takes in the path,
-// as Zapier's "/api/mcp/s/<token>/mcp" does, is caught where the structure of a url
-// says nothing.
+// serverSecrets are the values the "${VAR}" and "${file:PATH}" references in a
+// server's url resolve to, which is the credential an operator kept in a variable or
+// a file rather than in the configuration. They are what the redaction searches for,
+// so a credential a service takes in the path, as Zapier's "/api/mcp/s/<token>/mcp"
+// does, is caught where the structure of a url says nothing.
 //
-// A value shorter than minSecretLength and one the lookup does not have are left out,
-// and the longest is searched for first, so a value that contains another is replaced
-// whole rather than leaving a fragment of itself behind. A server with no url, and one
-// whose url references nothing, has no secrets.
-func serverSecrets(server config.MCPServer, lookup func(string) (string, bool)) []string {
-	if server.URL == "" || lookup == nil {
-		return nil
-	}
-
-	names, err := config.EnvReferences(server.URL)
-	if err != nil {
+// A value shorter than minSecretLength, one the lookup does not have and one the
+// reader cannot read are left out, and the longest is searched for first, so a value
+// that contains another is replaced whole rather than leaving a fragment of itself
+// behind. A server with no url, and one whose url references nothing, has no secrets;
+// a file the reader cannot read fails the connect on the read error instead.
+func serverSecrets(server config.MCPServer, lookup func(string) (string, bool), readFile func(string) (string, error)) []string {
+	if server.URL == "" {
 		return nil
 	}
 
 	var out []string
-	for _, name := range names {
-		value, ok := lookup(name)
-		if !ok || len(value) < minSecretLength || slices.Contains(out, value) {
-			continue
+	add := func(value string) {
+		if len(value) < minSecretLength || slices.Contains(out, value) {
+			return
 		}
 
 		out = append(out, value)
+	}
+
+	if lookup != nil {
+		names, err := config.EnvReferences(server.URL)
+		if err != nil {
+			return nil
+		}
+
+		for _, name := range names {
+			value, ok := lookup(name)
+			if ok {
+				add(value)
+			}
+		}
+	}
+
+	if readFile != nil {
+		paths, err := config.FileReferences(server.URL)
+		if err != nil {
+			return nil
+		}
+
+		for _, path := range paths {
+			value, err := readFile(path)
+			if err == nil {
+				add(value)
+			}
+		}
 	}
 
 	slices.SortStableFunc(out, func(a string, b string) int { return len(b) - len(a) })

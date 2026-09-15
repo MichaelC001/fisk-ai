@@ -5,7 +5,8 @@
 // Package mcpclient imports the tools of a third-party MCP server into an agent
 // run. It is the policy and transport layer over the client half of the Model
 // Context Protocol SDK: it builds a transport from an mcp_clients entry,
-// resolves that entry's "${VAR}" references against the process environment,
+// resolves that entry's "${VAR}" references against the process environment and
+// its "${file:PATH}" references against the filesystem,
 // connects one session per server and holds those sessions for the caller to
 // reach by name and close when the run ends. Over those sessions it lists each
 // server's tools, applies the entry's include and exclude filters, names each
@@ -68,11 +69,17 @@ type Options struct {
 	// LookupEnv resolves the "${VAR}" references in an entry's env, headers and url.
 	// Nil reads the process environment through os.LookupEnv.
 	LookupEnv func(name string) (string, bool)
+	// ReadFile resolves the "${file:PATH}" references in an entry's env, headers and
+	// url. Nil reads the file through config.ReadCredentialFile, with a relative path
+	// resolved under WorkDir, so a Docker Compose secret at /run/secrets/<name> is
+	// read as written and trailing whitespace is dropped.
+	ReadFile func(path string) (string, error)
 	// WorkDir is the directory a stdio child is started in, and is what makes a
 	// command written with a separator ("./bin/server") resolve against it rather than
 	// against the process working directory. Empty starts the child in the process
-	// working directory. Pass config.Config.RootDirectory. It applies to a stdio child
-	// alone: an HTTP server runs wherever its operator started it.
+	// working directory. Pass config.Config.RootDirectory. A relative "${file:PATH}"
+	// in any entry, stdio or HTTP, resolves under it too; an HTTP server itself runs
+	// wherever its operator started it.
 	WorkDir string
 	// Dialer overrides how a transport is built for a server. Nil builds the stdio
 	// and streamable HTTP transports this package builds from the entry.
@@ -133,9 +140,10 @@ type entry struct {
 // Connect opens a session with every configured server, in the order they were
 // configured, and returns them keyed by name. Each server gets its own
 // StartupTimeout to be started or reached and to finish the initialize
-// handshake, and its "${VAR}" references are resolved here rather than when the
-// config was parsed, so a variable that is not set fails this call naming the
-// variable and the server.
+// handshake, and its "${VAR}" and "${file:PATH}" references are resolved here
+// rather than when the config was parsed, so a variable that is not set or a file
+// that cannot be read fails this call naming the variable or the path and the
+// server.
 //
 // What the references in a url resolve to is kept for the life of the sessions and
 // replaced with "REDACTED" in every error they return, so a credential a service
@@ -152,6 +160,9 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 	if opts.LookupEnv == nil {
 		opts.LookupEnv = os.LookupEnv
 	}
+	if opts.ReadFile == nil {
+		opts.ReadFile = credentialFileReader(opts.WorkDir)
+	}
 
 	s := &Sessions{
 		opts:    opts,
@@ -166,7 +177,7 @@ func Connect(ctx context.Context, opts Options) (*Sessions, error) {
 			return nil, fmt.Errorf("mcp server %q is configured more than once", server.Name)
 		}
 
-		e := &entry{server: server, secrets: serverSecrets(server, opts.LookupEnv)}
+		e := &entry{server: server, secrets: serverSecrets(server, opts.LookupEnv, opts.ReadFile)}
 		err := s.open(ctx, e)
 		if err != nil {
 			_ = s.closeOpened(ctx)

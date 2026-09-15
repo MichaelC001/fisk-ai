@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -73,6 +74,43 @@ var _ = Describe("Embedding client", func() {
 			emb, err := buildEmbedder(cfg)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(emb).ToNot(BeNil())
+		})
+
+		// A Compose secret is a file ending in a newline; the token is sent without it.
+		It("sends a token read from api_key_file as the bearer, resolved under the root", func() {
+			root := GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(root, "secrets"), 0700)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(root, "secrets", "embed_token"), []byte("from-the-file\n"), 0600)).To(Succeed())
+
+			received := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received <- r.Header.Get("Authorization")
+				writeVectors(w, []int{0})
+			}))
+			defer srv.Close()
+
+			cfg := &config.Config{Identity: "t", RootDirectory: root, Harness: config.HarnessConfig{RAG: &config.RAGConfig{
+				Enabled:    true,
+				Embeddings: &config.RAGEmbeddingsConfig{BaseURL: srv.URL, Model: "test-model", APIKeyFile: "secrets/embed_token", TimeoutParsed: time.Second},
+			}}}
+			emb, err := buildEmbedder(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = emb.EmbedQuery(ctx, "a")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(received).To(Receive(Equal("Bearer from-the-file")))
+		})
+
+		It("fails at build when api_key_file cannot be read, naming the field and the path", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "absent")
+			cfg := &config.Config{Identity: "t", Harness: config.HarnessConfig{RAG: &config.RAGConfig{
+				Enabled:    true,
+				Embeddings: &config.RAGEmbeddingsConfig{BaseURL: "http://example.com/v1", Model: "m", APIKeyFile: path, TimeoutParsed: time.Second},
+			}}}
+			_, err := buildEmbedder(cfg)
+			Expect(err).To(MatchError(ContainSubstring("knowledge.embeddings.api_key_file")))
+			Expect(err).To(MatchError(ContainSubstring(path)))
+			Expect(err).To(MatchError(os.ErrNotExist))
 		})
 	})
 

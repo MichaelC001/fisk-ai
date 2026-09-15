@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -40,11 +41,25 @@ func (s *Sessions) transport(ctx context.Context, server config.MCPServer) (mcp.
 
 	switch {
 	case server.URL != "":
-		return httpTransport(server, s.opts.LookupEnv)
+		return httpTransport(server, s.opts.LookupEnv, s.opts.ReadFile)
 	case server.Command != "":
-		return commandTransport(server, s.opts.WorkDir, s.opts.CredentialEnvNames, s.opts.LookupEnv)
+		return commandTransport(server, s.opts.WorkDir, s.opts.CredentialEnvNames, s.opts.LookupEnv, s.opts.ReadFile)
 	default:
 		return nil, fmt.Errorf("mcp server %q sets neither command nor url", server.Name)
+	}
+}
+
+// credentialFileReader is the reader Connect uses when Options.ReadFile is nil: it
+// reads through config.ReadCredentialFile, with a relative path joined under workDir
+// when there is one, so a path in a configuration resolves under the root the way
+// every other relative path in it does.
+func credentialFileReader(workDir string) func(string) (string, error) {
+	return func(path string) (string, error) {
+		if workDir != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(workDir, path)
+		}
+
+		return config.ReadCredentialFile(path)
 	}
 }
 
@@ -55,8 +70,8 @@ func (s *Sessions) transport(ctx context.Context, server config.MCPServer) (mcp.
 // one with a separator against Dir in the child, which chdirs before it execs, so
 // "npx" stays a PATH lookup and "./bin/server" runs from workDir. An empty workDir
 // starts the child in the process working directory.
-func commandTransport(server config.MCPServer, workDir string, credentials []string, lookup func(string) (string, bool)) (mcp.Transport, error) {
-	env, err := childEnv(server, credentials, lookup)
+func commandTransport(server config.MCPServer, workDir string, credentials []string, lookup func(string) (string, bool), readFile func(string) (string, error)) (mcp.Transport, error) {
+	env, err := childEnv(server, credentials, lookup, readFile)
 	if err != nil {
 		return nil, err
 	}
@@ -88,9 +103,11 @@ func commandTransport(server config.MCPServer, workDir string, credentials []str
 // what a command tool gets, and a child with no PATH or HOME cannot run the
 // npx-shaped and uvx-shaped servers that are most of what an operator wires up.
 // The entry's values are appended last, and os/exec keeps the last value of a
-// repeated name, so an entry setting a variable the parent also has wins.
-func childEnv(server config.MCPServer, credentials []string, lookup func(string) (string, bool)) ([]string, error) {
-	resolved, err := resolveValues(server.Name, "env", server.Env, lookup)
+// repeated name, so an entry setting a variable the parent also has wins. A
+// "${file:PATH}" in the entry's env puts the file's content into the child's
+// environment on purpose, as "${VAR}" puts the variable's value there.
+func childEnv(server config.MCPServer, credentials []string, lookup func(string) (string, bool), readFile func(string) (string, error)) ([]string, error) {
+	resolved, err := resolveValues(server.Name, "env", server.Env, lookup, readFile)
 	if err != nil {
 		return nil, err
 	}
@@ -121,18 +138,18 @@ func childEnv(server config.MCPServer, credentials []string, lookup func(string)
 // httpTransport builds the streamable HTTP transport for a server reached at a
 // url, with an http.Client that carries the entry's resolved headers.
 //
-// The url's own "${VAR}" references are resolved here, as the headers are, because a
-// service that authenticates by query parameter puts the credential in the endpoint.
-// The expanded endpoint is what the transport dials and is never put in an error: what
-// the errors quote is the configured text, redacted, which names the variable an
-// operator has to set.
+// The url's own "${VAR}" and "${file:PATH}" references are resolved here, as the
+// headers are, because a service that authenticates by query parameter puts the
+// credential in the endpoint. The transport dials the expanded endpoint and never
+// puts it in an error; the errors quote the configured text, redacted, so an operator
+// sees the variable to set or the file to supply.
 //
 // Whether the endpoint is one this transport can reach is decided on the expanded form
 // too, since a reference may supply the scheme or the host, so a config that parsed is
 // still told here that "${DOCS_ENDPOINT}" expanded to something that is not an http
 // url.
-func httpTransport(server config.MCPServer, lookup func(string) (string, bool)) (mcp.Transport, error) {
-	endpoint, err := config.ExpandEnvReferences(server.URL, lookup)
+func httpTransport(server config.MCPServer, lookup func(string) (string, bool), readFile func(string) (string, error)) (mcp.Transport, error) {
+	endpoint, err := config.ExpandReferences(server.URL, lookup, readFile)
 	if err != nil {
 		return nil, fmt.Errorf("mcp server %q: url: %w", server.Name, err)
 	}
@@ -142,7 +159,7 @@ func httpTransport(server config.MCPServer, lookup func(string) (string, bool)) 
 		return nil, fmt.Errorf("mcp server %q has an unusable url %q: %w", server.Name, server.SafeURL(), err)
 	}
 
-	headers, err := resolveValues(server.Name, "headers", server.Headers, lookup)
+	headers, err := resolveValues(server.Name, "headers", server.Headers, lookup, readFile)
 	if err != nil {
 		return nil, err
 	}
@@ -210,22 +227,22 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return base.RoundTrip(out)
 }
 
-// resolveValues resolves the "${VAR}" references in one entry's env or headers
-// against lookup, and returns an error naming the server, the key and the
-// variable when a value references one lookup does not have. key names the map in
-// that error, so an operator is told which of the two to fix.
+// resolveValues resolves the "${VAR}" and "${file:PATH}" references in one entry's
+// env or headers against lookup and readFile, and returns an error naming the
+// server, the key and the variable or path when a value references one that cannot
+// be resolved. key names the map in that error.
 //
 // This is where a reference is resolved: parsing a config checks the syntax and
-// reads no variable, so a command that inspects a configuration it cannot run is
-// not refused a file over a credential it never uses.
-func resolveValues(server string, key string, values map[string]string, lookup func(string) (string, bool)) (map[string]string, error) {
+// reads no variable and no file, so fisk info loads a configuration it cannot run
+// without reading a credential it never uses.
+func resolveValues(server string, key string, values map[string]string, lookup func(string) (string, bool), readFile func(string) (string, error)) (map[string]string, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
 
 	out := make(map[string]string, len(values))
 	for _, name := range slices.Sorted(maps.Keys(values)) {
-		resolved, err := config.ExpandEnvReferences(values[name], lookup)
+		resolved, err := config.ExpandReferences(values[name], lookup, readFile)
 		if err != nil {
 			return nil, fmt.Errorf("mcp server %q: %s %q: %w", server, key, name, err)
 		}

@@ -39,6 +39,7 @@ var (
 	setConfigFile bool
 
 	setAPIKey      bool
+	setAPIKeyFile  bool
 	setBaseURL     bool
 	setTraceFile   bool
 	setHTTPDebug   bool
@@ -54,6 +55,7 @@ func registerRunCommand(cmd *fisk.Application) {
 	run.Arg("q", "Interactive prompt").StringsVar(&q)
 	run.Flag("config", "Path to the agent configuration file").IsSetByUser(&setConfigFile).Default("agent.yaml").StringVar(&configFile)
 	run.Flag("api-key", "Anthropic API key to use (not needed with --nats-context, where the worker holds it)").IsSetByUser(&setAPIKey).Envar("ANTHROPIC_API_KEY").StringVar(&apiKey)
+	run.Flag("api-key-file", "File holding the Anthropic API key, such as a Docker Compose secret; an alternative to --api-key").IsSetByUser(&setAPIKeyFile).Envar("ANTHROPIC_API_KEY_FILE").PlaceHolder("FILE").StringVar(&apiKeyFile)
 	run.Flag("base-url", "Anthropic API base URL to use").IsSetByUser(&setBaseURL).Envar("ANTHROPIC_BASE_URL").StringVar(&baseURL)
 	run.Flag("http-debug", "Dump Anthropic API request and response bodies to "+httpDebugFilename).IsSetByUser(&setHTTPDebug).Envar("HTTP_DEBUG").UnNegatableBoolVar(&httpDebug)
 	run.Flag("a2a-debug", "Dump every a2a message between this terminal and the agent to "+a2aDebugFilename).UnNegatableBoolVar(&a2aDebug)
@@ -99,6 +101,17 @@ func runAction(_ *fisk.ParseContext) error {
 	cfg, err := loadRunConfig(remote)
 	if err != nil {
 		return err
+	}
+
+	// The key is resolved only for an agent hosted here. A remote run refuses --api-key
+	// and --api-key-file when they were typed and ignores them when they came from the
+	// environment, and reading a file named by ANTHROPIC_API_KEY_FILE would fail a run
+	// that never needed it.
+	if !remote {
+		apiKey, err = resolveAPIKey(apiKey, apiKeyFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = validateRunTarget(cfg, remote)
@@ -384,9 +397,10 @@ func runAgainstWorker(ctx context.Context, stop context.CancelFunc, cfg *config.
 // exported in a shell profile would refuse a command nobody wrote.
 func validateRunTarget(cfg *config.Config, remote bool) error {
 	if !remote {
-		// The agent runs here, so its model credentials have to be here.
+		// The agent runs here, so its model credentials have to be here. The caller has
+		// already folded --api-key-file into apiKey.
 		if apiKey == "" {
-			return fmt.Errorf("--api-key is required to run an agent in this process; set it, export ANTHROPIC_API_KEY, or pass --nats-context to talk to an agent that already has one")
+			return fmt.Errorf("--api-key or --api-key-file is required to run an agent in this process; set one, export ANTHROPIC_API_KEY or ANTHROPIC_API_KEY_FILE, or pass --nats-context to talk to an agent that already has one")
 		}
 
 		// This command injects no tools of its own, so the configuration is the whole
@@ -413,6 +427,7 @@ func validateRunTarget(cfg *config.Config, remote bool) error {
 		why   string
 	}{
 		{setAPIKey, "--api-key", "the agent's own model credentials, which the worker holds"},
+		{setAPIKeyFile, "--api-key-file", "the agent's own model credentials, which the worker holds"},
 		{setBaseURL, "--base-url", "the agent's own model endpoint, which the worker chooses"},
 		{setTraceFile, "--trace", "a file written on the machine running the agent, which is not this one"},
 		{setHTTPDebug, "--http-debug", "a file written on the machine running the agent, which is not this one"},

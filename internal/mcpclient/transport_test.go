@@ -47,7 +47,7 @@ var _ = Describe("Transports", func() {
 		It("should inherit the parent environment", func() {
 			setenv("FISK_MCPCLIENT_INHERITED", "yes")
 
-			env, err := childEnv(config.MCPServer{Name: "docs"}, nil, lookup)
+			env, err := childEnv(config.MCPServer{Name: "docs"}, nil, lookup, nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(env).To(ContainElement("FISK_MCPCLIENT_INHERITED=yes"))
 			Expect(env).To(ContainElement(HavePrefix("PATH=")))
@@ -57,7 +57,7 @@ var _ = Describe("Transports", func() {
 			setenv(fakeCredEnvVar, "provider-secret")
 			setenv("FISK_MCPCLIENT_OPERATOR_SECRET", "operator-secret")
 
-			env, err := childEnv(config.MCPServer{Name: "docs"}, []string{"FISK_MCPCLIENT_OPERATOR_SECRET"}, lookup)
+			env, err := childEnv(config.MCPServer{Name: "docs"}, []string{"FISK_MCPCLIENT_OPERATOR_SECRET"}, lookup, nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(env).ToNot(ContainElement(HavePrefix(fakeCredEnvVar + "=")))
 			Expect(env).ToNot(ContainElement(HavePrefix("FISK_MCPCLIENT_OPERATOR_SECRET=")))
@@ -72,7 +72,7 @@ var _ = Describe("Transports", func() {
 					"DOCS_TOKEN":               "Bearer ${FISK_MCPCLIENT_TOKEN}",
 					"FISK_MCPCLIENT_INHERITED": "from-the-entry",
 				},
-			}, nil, lookup)
+			}, nil, lookup, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			// os/exec keeps the last value of a repeated name, so the entry's value is
@@ -85,8 +85,43 @@ var _ = Describe("Transports", func() {
 			_, err := childEnv(config.MCPServer{
 				Name: "docs",
 				Env:  map[string]string{"DOCS_TOKEN": "${FISK_MCPCLIENT_ABSENT}"},
-			}, nil, lookup)
+			}, nil, lookup, nil)
 			Expect(err).To(MatchError(`mcp server "docs": env "DOCS_TOKEN": environment variable "FISK_MCPCLIENT_ABSENT" is not set`))
+		})
+
+		// The content goes into the child's environment on purpose, as a variable's
+		// value does.
+		It("should put the content of a referenced file into the child's environment", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "api_token")
+			Expect(os.WriteFile(path, []byte("from-the-file\n"), 0600)).To(Succeed())
+
+			env, err := childEnv(config.MCPServer{
+				Name: "docs",
+				Env:  map[string]string{"API_TOKEN": "${file:" + path + "}"},
+			}, nil, lookup, credentialFileReader(""))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(env).To(ContainElement("API_TOKEN=from-the-file"))
+		})
+	})
+
+	Describe("credentialFileReader", func() {
+		It("should resolve a relative path under the working directory", func() {
+			dir := GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(dir, "secrets"), 0700)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(dir, "secrets", "token"), []byte("from-the-file\n"), 0600)).To(Succeed())
+
+			value, err := credentialFileReader(dir)("secrets/token")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(value).To(Equal("from-the-file"))
+		})
+
+		It("should read an absolute path as written", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "token")
+			Expect(os.WriteFile(path, []byte("from-the-file"), 0600)).To(Succeed())
+
+			value, err := credentialFileReader("/nowhere")(path)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(value).To(Equal("from-the-file"))
 		})
 	})
 
@@ -103,7 +138,7 @@ var _ = Describe("Transports", func() {
 				Name:    "docs",
 				URL:     srv.URL + "/mcp",
 				Headers: map[string]string{"Authorization": "Bearer ${FISK_MCPCLIENT_TOKEN}"},
-			}, func(string) (string, bool) { return "secret-token", true })
+			}, func(string) (string, bool) { return "secret-token", true }, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			streamable, ok := transport.(*mcp.StreamableClientTransport)
@@ -116,6 +151,50 @@ var _ = Describe("Transports", func() {
 			var headers http.Header
 			Eventually(received).Should(Receive(&headers))
 			Expect(headers.Get("Authorization")).To(Equal("Bearer secret-token"))
+		})
+
+		// A Compose secret ends in a newline, and a token sent with one is refused with
+		// an error that does not say why.
+		It("should send a header read from a file, trailing newline removed", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "docs_token")
+			Expect(os.WriteFile(path, []byte("secret-from-file\n"), 0600)).To(Succeed())
+
+			received := make(chan http.Header, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received <- r.Header.Clone()
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			DeferCleanup(srv.Close)
+
+			transport, err := httpTransport(config.MCPServer{
+				Name:    "docs",
+				URL:     srv.URL + "/mcp",
+				Headers: map[string]string{"Authorization": "Bearer ${file:" + path + "}"},
+			}, func(string) (string, bool) { return "", false }, credentialFileReader(""))
+			Expect(err).ToNot(HaveOccurred())
+
+			streamable, ok := transport.(*mcp.StreamableClientTransport)
+			Expect(ok).To(BeTrue())
+
+			res, err := streamable.HTTPClient.Get(srv.URL + "/mcp")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.Body.Close()).To(Succeed())
+
+			var headers http.Header
+			Eventually(received).Should(Receive(&headers))
+			Expect(headers.Get("Authorization")).To(Equal("Bearer secret-from-file"))
+		})
+
+		It("should name the server, the key and the path of a file it cannot read", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "absent")
+
+			_, err := httpTransport(config.MCPServer{
+				Name:    "docs",
+				URL:     "https://example.net/mcp",
+				Headers: map[string]string{"Authorization": "Bearer ${file:" + path + "}"},
+			}, func(string) (string, bool) { return "", false }, credentialFileReader(""))
+			Expect(err).To(MatchError(os.ErrNotExist))
+			Expect(err).To(MatchError(HavePrefix(`mcp server "docs": headers "Authorization": reading credential file "` + path + `"`)))
 		})
 
 		It("should drop the headers when a redirect leaves the configured host", func() {
@@ -135,7 +214,7 @@ var _ = Describe("Transports", func() {
 				Name:    "docs",
 				URL:     srv.URL + "/mcp",
 				Headers: map[string]string{"Authorization": "Bearer ${FISK_MCPCLIENT_TOKEN}"},
-			}, func(string) (string, bool) { return "secret-token", true })
+			}, func(string) (string, bool) { return "secret-token", true }, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			streamable, ok := transport.(*mcp.StreamableClientTransport)
@@ -154,7 +233,7 @@ var _ = Describe("Transports", func() {
 			transport, err := httpTransport(config.MCPServer{
 				Name: "docs",
 				URL:  "https://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_TOKEN}",
-			}, func(string) (string, bool) { return "secret-token", true })
+			}, func(string) (string, bool) { return "secret-token", true }, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			streamable, ok := transport.(*mcp.StreamableClientTransport)
@@ -166,7 +245,7 @@ var _ = Describe("Transports", func() {
 			transport, err := httpTransport(config.MCPServer{
 				Name: "docs",
 				URL:  "https://${FISK_MCPCLIENT_TOKEN}.example.net/mcp/?apiKey=prefix-${FISK_MCPCLIENT_TOKEN}",
-			}, func(string) (string, bool) { return "docs", true })
+			}, func(string) (string, bool) { return "docs", true }, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			streamable, ok := transport.(*mcp.StreamableClientTransport)
@@ -174,11 +253,26 @@ var _ = Describe("Transports", func() {
 			Expect(streamable.Endpoint).To(Equal("https://docs.example.net/mcp/?apiKey=prefix-docs"))
 		})
 
+		It("should resolve a file reference in the url beside a variable", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "key")
+			Expect(os.WriteFile(path, []byte("secret-from-file\n"), 0600)).To(Succeed())
+
+			transport, err := httpTransport(config.MCPServer{
+				Name: "docs",
+				URL:  "https://${FISK_MCPCLIENT_HOST}/mcp/?apiKey=${file:" + path + "}",
+			}, func(string) (string, bool) { return "mcp.example.net", true }, credentialFileReader(""))
+			Expect(err).ToNot(HaveOccurred())
+
+			streamable, ok := transport.(*mcp.StreamableClientTransport)
+			Expect(ok).To(BeTrue())
+			Expect(streamable.Endpoint).To(Equal("https://mcp.example.net/mcp/?apiKey=secret-from-file"))
+		})
+
 		It("should name the variable and the server a url references but is not set", func() {
 			_, err := httpTransport(config.MCPServer{
 				Name: "docs",
 				URL:  "https://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_ABSENT}",
-			}, func(string) (string, bool) { return "", false })
+			}, func(string) (string, bool) { return "", false }, nil)
 			Expect(err).To(MatchError(`mcp server "docs": url: environment variable "FISK_MCPCLIENT_ABSENT" is not set`))
 		})
 
@@ -188,7 +282,7 @@ var _ = Describe("Transports", func() {
 			_, err := httpTransport(config.MCPServer{
 				Name: "docs",
 				URL:  "${FISK_MCPCLIENT_ENDPOINT}",
-			}, func(string) (string, bool) { return "localhost:9000", true })
+			}, func(string) (string, bool) { return "localhost:9000", true }, nil)
 			Expect(err).To(MatchError(ContainSubstring(`mcp server "docs" has an unusable url "${FISK_MCPCLIENT_ENDPOINT}"`)))
 			Expect(err).To(MatchError(ContainSubstring("http:// or https:// endpoint")))
 		})
@@ -197,7 +291,7 @@ var _ = Describe("Transports", func() {
 			_, err := httpTransport(config.MCPServer{
 				Name: "docs",
 				URL:  "ftp://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_TOKEN}",
-			}, func(string) (string, bool) { return "secret-token", true })
+			}, func(string) (string, bool) { return "secret-token", true }, nil)
 			Expect(err).To(MatchError(ContainSubstring(`has an unusable url "ftp://mcp.example.net/mcp/?apiKey=${FISK_MCPCLIENT_TOKEN}"`)))
 			Expect(err.Error()).ToNot(ContainSubstring("secret-token"))
 		})
@@ -207,7 +301,7 @@ var _ = Describe("Transports", func() {
 				Name:    "docs",
 				URL:     "https://example.net/mcp",
 				Headers: map[string]string{"Authorization": "Bearer ${FISK_MCPCLIENT_ABSENT}"},
-			}, func(string) (string, bool) { return "", false })
+			}, func(string) (string, bool) { return "", false }, nil)
 			Expect(err).To(MatchError(`mcp server "docs": headers "Authorization": environment variable "FISK_MCPCLIENT_ABSENT" is not set`))
 		})
 	})
@@ -219,7 +313,7 @@ var _ = Describe("Transports", func() {
 		server := config.MCPServer{Name: "docs", Command: "docs-server"}
 
 		It("starts the child in the directory it was given", func() {
-			tr, err := commandTransport(server, "/srv/agent", nil, os.LookupEnv)
+			tr, err := commandTransport(server, "/srv/agent", nil, os.LookupEnv, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			cmd, ok := tr.(*mcp.CommandTransport)
@@ -228,7 +322,7 @@ var _ = Describe("Transports", func() {
 		})
 
 		It("leaves the child in the process working directory when it is given none", func() {
-			tr, err := commandTransport(server, "", nil, os.LookupEnv)
+			tr, err := commandTransport(server, "", nil, os.LookupEnv, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			cmd, ok := tr.(*mcp.CommandTransport)
