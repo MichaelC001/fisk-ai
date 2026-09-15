@@ -5,7 +5,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -270,6 +272,22 @@ var _ = Describe("MCP clients", func() {
 			cfg := prepared(MCPServer{Name: "filesystem", Command: "npx", Env: map[string]string{"FS_HOME": "$HOME/cache"}})
 			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
 		})
+
+		// Parsing reads no credential file, so a host holding none of the secrets still loads the configuration.
+		It("Should accept a file reference in a url, a header and an env value without reading it", func() {
+			cfg := prepared(
+				MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp/?apiKey=${file:/run/secrets/absent}", Headers: map[string]string{"Authorization": "Bearer ${file:/run/secrets/absent}"}},
+				MCPServer{Name: "filesystem", Command: "npx", Env: map[string]string{"FS_TOKEN": "${file:secrets/absent}"}},
+			)
+			Expect(ValidateForMode(cfg, ModeAgent)).To(Succeed())
+		})
+
+		It("Should reject a file reference naming no file", func() {
+			cfg := prepared(MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp", Headers: map[string]string{"Authorization": "Bearer ${file:}"}})
+			err := ValidateForMode(cfg, ModeAgent)
+			Expect(err).To(MatchError(ContainSubstring("has an invalid headers value for \"Authorization\"")))
+			Expect(err).To(MatchError(ContainSubstring("names no file")))
+		})
 	})
 
 	Describe("RedactURL", func() {
@@ -380,6 +398,36 @@ var _ = Describe("MCP clients", func() {
 				_, err := EnvReferences("${1TOKEN}")
 				Expect(err).To(MatchError(ContainSubstring("\"1TOKEN\" is not a variable name")))
 			})
+
+			It("Should leave a file reference to FileReferences", func() {
+				Expect(EnvReferences("Bearer ${file:/run/secrets/docs_token}")).To(BeEmpty())
+				Expect(EnvReferences("${SCHEME}://${HOST}/mcp?apiKey=${file:/run/secrets/key}")).To(Equal([]string{"SCHEME", "HOST"}))
+			})
+		})
+
+		Describe("FileReferences", func() {
+			It("Should name the files a value references, in order", func() {
+				Expect(FileReferences("${file:/x}")).To(Equal([]string{"/x"}))
+				Expect(FileReferences("Bearer ${file:/run/secrets/docs_token}")).To(Equal([]string{"/run/secrets/docs_token"}))
+				Expect(FileReferences("${file:secrets/a}:${HOST}:${file:/run/secrets/b}")).To(Equal([]string{"secrets/a", "/run/secrets/b"}))
+			})
+
+			It("Should return no paths for a value with no file reference", func() {
+				Expect(FileReferences("Bearer ${DOCS_TOKEN}")).To(BeEmpty())
+				Expect(FileReferences("literal")).To(BeEmpty())
+			})
+
+			It("Should reject a reference naming no file", func() {
+				_, err := FileReferences("Bearer ${file:}")
+				Expect(err).To(MatchError(ContainSubstring(`"${file:}" names no file`)))
+			})
+
+			// The path runs to the first "}", so one holding a brace cannot be written.
+			It("Should cut the path at the first closing brace", func() {
+				paths, err := FileReferences("${file:/run/{secrets}/key}")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(paths).To(Equal([]string{"/run/{secrets"}))
+			})
 		})
 
 		Describe("ExpandEnvReferences", func() {
@@ -423,6 +471,83 @@ var _ = Describe("MCP clients", func() {
 				expanded, err := ExpandEnvReferences("Bearer ${FISK_AI_MCP_TEST_TOKEN}", os.LookupEnv)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(expanded).To(Equal("Bearer secret"))
+			})
+
+			It("Should refuse a file reference, naming it", func() {
+				_, err := ExpandEnvReferences("Bearer ${file:/run/secrets/docs_token}", lookup(nil))
+				Expect(err).To(MatchError(`"${file:/run/secrets/docs_token}" reads a file, which this expansion does not`))
+			})
+		})
+
+		Describe("ExpandReferences", func() {
+			lookup := func(values map[string]string) func(string) (string, bool) {
+				return func(name string) (string, bool) {
+					value, ok := values[name]
+
+					return value, ok
+				}
+			}
+
+			readFile := func(files map[string]string) func(string) (string, error) {
+				return func(path string) (string, error) {
+					value, ok := files[path]
+					if !ok {
+						return "", fmt.Errorf("no file at %q", path)
+					}
+
+					return value, nil
+				}
+			}
+
+			It("Should expand both forms in one value", func() {
+				expanded, err := ExpandReferences("${SCHEME}://${HOST}/mcp?apiKey=${file:/run/secrets/key}&tenant=${TENANT}",
+					lookup(map[string]string{"SCHEME": "https", "HOST": "mcp.example.net", "TENANT": "acme"}),
+					readFile(map[string]string{"/run/secrets/key": "from-the-file"}))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(expanded).To(Equal("https://mcp.example.net/mcp?apiKey=from-the-file&tenant=acme"))
+			})
+
+			It("Should return the reader's own error for a file it cannot read", func() {
+				_, err := ExpandReferences("Bearer ${file:/run/secrets/absent}", lookup(nil), readFile(nil))
+				Expect(err).To(MatchError(`no file at "/run/secrets/absent"`))
+			})
+
+			It("Should still name a variable that is not set", func() {
+				_, err := ExpandReferences("${file:/x} ${DOCS_TOKEN}", lookup(nil), readFile(map[string]string{"/x": "value"}))
+				Expect(err).To(MatchError(ContainSubstring(`environment variable "DOCS_TOKEN" is not set`)))
+			})
+		})
+
+		Describe("ReadCredentialFile", func() {
+			var dir string
+
+			BeforeEach(func() {
+				dir = GinkgoT().TempDir()
+			})
+
+			It("Should trim the trailing whitespace an editor or Compose leaves", func() {
+				path := filepath.Join(dir, "token")
+				Expect(os.WriteFile(path, []byte("  abc123secret \n\n"), 0600)).To(Succeed())
+
+				value, err := ReadCredentialFile(path)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(value).To(Equal("  abc123secret"))
+			})
+
+			It("Should refuse an empty file, naming the path", func() {
+				path := filepath.Join(dir, "token")
+				Expect(os.WriteFile(path, []byte("\n"), 0600)).To(Succeed())
+
+				_, err := ReadCredentialFile(path)
+				Expect(err).To(MatchError(fmt.Sprintf("credential file %q is empty", path)))
+			})
+
+			It("Should name the path and the reason for a file it cannot read", func() {
+				path := filepath.Join(dir, "absent")
+
+				_, err := ReadCredentialFile(path)
+				Expect(err).To(MatchError(os.ErrNotExist))
+				Expect(err).To(MatchError(ContainSubstring(path)))
 			})
 		})
 

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -60,6 +61,33 @@ var _ = Describe("validateRunFlags", func() {
 		runIdentity = "billing"
 		runNatsContext = "ngs_user"
 		Expect(validateRunFlags()).To(Succeed())
+	})
+})
+
+var _ = Describe("resolveAPIKey", func() {
+	It("Should pass a key given directly through", func() {
+		Expect(resolveAPIKey("sk-test", "")).To(Equal("sk-test"))
+		Expect(resolveAPIKey("", "")).To(BeEmpty())
+	})
+
+	It("Should read the key from the file, trailing newline removed", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "key")
+		Expect(os.WriteFile(path, []byte("sk-from-file\n"), 0600)).To(Succeed())
+
+		Expect(resolveAPIKey("", path)).To(Equal("sk-from-file"))
+	})
+
+	It("Should refuse both sources at once", func() {
+		_, err := resolveAPIKey("sk-test", "/run/secrets/key")
+		Expect(err).To(MatchError(ContainSubstring("--api-key and --api-key-file cannot both be set")))
+	})
+
+	It("Should name the flag and the path of a file it cannot read", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "absent")
+
+		_, err := resolveAPIKey("", path)
+		Expect(err).To(MatchError(os.ErrNotExist))
+		Expect(err).To(MatchError(HavePrefix("--api-key-file: reading credential file " + fmt.Sprintf("%q", path))))
 	})
 })
 
@@ -159,6 +187,7 @@ var _ = Describe("validateRunTarget", func() {
 		cfg = &config.Config{Identity: "worker1", ApplicationPath: "/usr/bin/abt"}
 		apiKey = ""
 		setAPIKey = false
+		setAPIKeyFile = false
 		setBaseURL = false
 		setTraceFile = false
 		setHTTPDebug = false
@@ -176,7 +205,8 @@ var _ = Describe("validateRunTarget", func() {
 	Describe("Hosting the agent here", func() {
 		It("Should require a key, since the model is called from this process", func() {
 			err := validateRunTarget(cfg, false)
-			Expect(err).To(MatchError(ContainSubstring("--api-key is required to run an agent in this process")))
+			Expect(err).To(MatchError(ContainSubstring("--api-key or --api-key-file is required to run an agent in this process")))
+			Expect(err).To(MatchError(ContainSubstring("ANTHROPIC_API_KEY_FILE")))
 
 			apiKey = "sk-test"
 			Expect(validateRunTarget(cfg, false)).To(Succeed())
@@ -226,6 +256,7 @@ var _ = Describe("validateRunTarget", func() {
 				flag string
 			}{
 				{&setAPIKey, "--api-key"},
+				{&setAPIKeyFile, "--api-key-file"},
 				{&setBaseURL, "--base-url"},
 				{&setTraceFile, "--trace"},
 				{&setHTTPDebug, "--http-debug"},

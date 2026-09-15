@@ -704,6 +704,11 @@ type RAGEmbeddingsConfig struct {
 	// APIKeyEnv is the NAME of an environment variable holding a bearer token, never
 	// the secret itself. When set the token is sent as Authorization: Bearer.
 	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	// APIKeyFile is the path of a file holding the bearer token, which is how a
+	// Docker Compose secret arrives. A relative path resolves under RootDirectory.
+	// rag.Open reads it through ReadCredentialFile, so trailing whitespace is dropped
+	// and an empty file is an error. Setting it beside APIKeyEnv fails config load.
+	APIKeyFile string `json:"api_key_file,omitempty" yaml:"api_key_file,omitempty"`
 	// TimeoutString is the per-request timeout as a duration string, e.g. 30s. It
 	// defaults to 30s.
 	TimeoutString string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
@@ -1602,24 +1607,33 @@ func (s MCPServer) SafeURL() string {
 // digits and underscores.
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// envReferenceSyntax is the tail every reference syntax error ends with, so an
-// operator reading any of them is told the same rule.
-const envReferenceSyntax = `a reference is written ${VAR}, where VAR is a letter or '_' followed by letters, digits and '_'`
+// referenceSyntax is the tail every reference syntax error ends with, so an operator
+// reading any of them is told the same rule.
+const referenceSyntax = `a reference is written ${VAR}, where VAR is a letter or '_' followed by letters, digits and '_', or ${file:PATH}, where PATH is a file holding the value`
 
-// envReference is one "${VAR}" found in a value, with the name it carries and the
-// half-open range of the whole reference in the value it came from.
-type envReference struct {
+// filePrefix opens the body of a "${file:PATH}" reference.
+const filePrefix = "file:"
+
+// reference is one "${VAR}" or "${file:PATH}" found in a value: the variable name or
+// the file path it carries, and the half-open range of the whole reference in the
+// value it came from. Exactly one of name and path is set.
+type reference struct {
 	name  string
+	path  string
 	start int
 	end   int
 }
 
-// scanEnvReferences finds every "${VAR}" in value, in the order they appear. A "${"
-// that is never closed, a "${}" that names nothing, and a name the shell would not
-// accept are errors, so a typo becomes an error rather than a dollar sign handed to a
-// server. A "$VAR" without braces is literal text and is not a reference.
-func scanEnvReferences(value string) ([]envReference, error) {
-	var refs []envReference
+// scanReferences finds every "${VAR}" and "${file:PATH}" in value, in the order they
+// appear. A "${" that is never closed, a "${}" that names nothing, a "${file:}" that
+// names no file, and a name the shell would not accept are errors, so a typo becomes
+// an error rather than a dollar sign handed to a server. A "$VAR" without braces is
+// literal text and is not a reference.
+//
+// A file path runs from "file:" to the first "}", so a path holding a "}" cannot be
+// written.
+func scanReferences(value string) ([]reference, error) {
+	var refs []reference
 
 	for i := 0; i < len(value); {
 		opened := strings.Index(value[i:], "${")
@@ -1630,19 +1644,31 @@ func scanEnvReferences(value string) ([]envReference, error) {
 
 		closed := strings.Index(value[opened:], "}")
 		if closed < 0 {
-			return nil, fmt.Errorf(`a "${" is never closed: %s`, envReferenceSyntax)
+			return nil, fmt.Errorf(`a "${" is never closed: %s`, referenceSyntax)
 		}
 		closed += opened
 
-		name := value[opened+2 : closed]
-		if name == "" {
-			return nil, fmt.Errorf(`"${}" names no variable: %s`, envReferenceSyntax)
-		}
-		if !envNamePattern.MatchString(name) {
-			return nil, fmt.Errorf("%q is not a variable name: %s", name, envReferenceSyntax)
+		body := value[opened+2 : closed]
+		if body == "" {
+			return nil, fmt.Errorf(`"${}" names no variable: %s`, referenceSyntax)
 		}
 
-		refs = append(refs, envReference{name: name, start: opened, end: closed + 1})
+		path, isFile := strings.CutPrefix(body, filePrefix)
+		if isFile {
+			if path == "" {
+				return nil, fmt.Errorf(`"${file:}" names no file: %s`, referenceSyntax)
+			}
+
+			refs = append(refs, reference{path: path, start: opened, end: closed + 1})
+			i = closed + 1
+			continue
+		}
+
+		if !envNamePattern.MatchString(body) {
+			return nil, fmt.Errorf("%q is not a variable name: %s", body, referenceSyntax)
+		}
+
+		refs = append(refs, reference{name: body, start: opened, end: closed + 1})
 		i = closed + 1
 	}
 
@@ -1653,7 +1679,9 @@ func scanEnvReferences(value string) ([]envReference, error) {
 // they appear, and an error when the value's reference syntax is wrong. A value in an
 // MCP server's env or headers map mixes literal text with any number of "${VAR}"
 // references, so "Bearer ${DOCS_TOKEN}" references DOCS_TOKEN and a value with no
-// braces references nothing. A "$VAR" without braces is literal text.
+// braces references nothing. A "$VAR" without braces is literal text, and a
+// "${file:PATH}" reference names a file rather than a variable, so FileReferences
+// returns it and this does not.
 //
 // Parsing a config checks that syntax and stops there, and nothing in this package
 // reads the environment. Resolving belongs to whoever builds the session, because the
@@ -1663,17 +1691,40 @@ func scanEnvReferences(value string) ([]envReference, error) {
 // over a credential it never uses. An unresolvable reference fails the connect, naming
 // the variable and the server.
 func EnvReferences(value string) ([]string, error) {
-	refs, err := scanEnvReferences(value)
+	refs, err := scanReferences(value)
 	if err != nil {
 		return nil, err
 	}
 
 	names := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		names = append(names, ref.name)
+		if ref.name != "" {
+			names = append(names, ref.name)
+		}
 	}
 
 	return names, nil
+}
+
+// FileReferences returns the paths a value's "${file:PATH}" references name, in the
+// order they appear, and an error when the value's reference syntax is wrong. A
+// relative path is returned as written: whoever reads the file resolves it, under
+// RootDirectory for a value from a configuration. Parsing a config reads none of the
+// files, for the reason EnvReferences gives.
+func FileReferences(value string) ([]string, error) {
+	refs, err := scanReferences(value)
+	if err != nil {
+		return nil, err
+	}
+
+	paths := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.path != "" {
+			paths = append(paths, ref.path)
+		}
+	}
+
+	return paths, nil
 }
 
 // ExpandEnvReferences replaces every "${VAR}" in value with what lookup returns for
@@ -1681,8 +1732,23 @@ func EnvReferences(value string) ([]string, error) {
 // first variable lookup does not have. Pass os.LookupEnv to read the process
 // environment: this package never reads it itself, so the command that connects to a
 // server decides where a value comes from.
+//
+// A value holding a "${file:PATH}" reference is an error naming that reference, since
+// this reads no file; ExpandReferences expands both forms.
 func ExpandEnvReferences(value string, lookup func(string) (string, bool)) (string, error) {
-	refs, err := scanEnvReferences(value)
+	return ExpandReferences(value, lookup, nil)
+}
+
+// ExpandReferences replaces every "${VAR}" in value with what lookup returns for VAR
+// and every "${file:PATH}" with what readFile returns for PATH, leaving the literal
+// text around them as it is. It returns an error naming the first variable lookup
+// does not have, and readFile's own error for the first file it cannot read, so the
+// reader decides what an error says about a file. Pass os.LookupEnv and
+// ReadCredentialFile to read the process environment and the files as written; a
+// caller resolving a relative path under a directory wraps ReadCredentialFile with
+// the join. A nil readFile refuses a file reference, naming it.
+func ExpandReferences(value string, lookup func(string) (string, bool), readFile func(string) (string, error)) (string, error) {
+	refs, err := scanReferences(value)
 	if err != nil {
 		return "", err
 	}
@@ -1694,9 +1760,25 @@ func ExpandEnvReferences(value string, lookup func(string) (string, bool)) (stri
 	at := 0
 
 	for _, ref := range refs {
-		resolved, ok := lookup(ref.name)
-		if !ok {
-			return "", fmt.Errorf("environment variable %q is not set", ref.name)
+		var resolved string
+
+		switch {
+		case ref.path != "":
+			if readFile == nil {
+				return "", fmt.Errorf("%q reads a file, which this expansion does not", value[ref.start:ref.end])
+			}
+
+			resolved, err = readFile(ref.path)
+			if err != nil {
+				return "", err
+			}
+
+		default:
+			var ok bool
+			resolved, ok = lookup(ref.name)
+			if !ok {
+				return "", fmt.Errorf("environment variable %q is not set", ref.name)
+			}
 		}
 
 		out.WriteString(value[at:ref.start])
@@ -1706,6 +1788,28 @@ func ExpandEnvReferences(value string, lookup func(string) (string, bool)) (stri
 	out.WriteString(value[at:])
 
 	return out.String(), nil
+}
+
+// ReadCredentialFile reads the credential held in the file at path: the file's
+// content with trailing whitespace removed, which drops the newline an editor or a
+// Docker Compose secret leaves at the end. A token sent with that newline fails
+// authentication with an error that does not say why. An empty result is an error.
+//
+// Every credential read from a file goes through here: the --api-key-file flag, the
+// knowledge.embeddings.api_key_file field, and each "${file:PATH}" reference in an
+// mcp_clients entry. The error names the path and never the content.
+func ReadCredentialFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading credential file %q: %w", path, err)
+	}
+
+	value := strings.TrimRightFunc(string(raw), unicode.IsSpace)
+	if value == "" {
+		return "", fmt.Errorf("credential file %q is empty", path)
+	}
+
+	return value, nil
 }
 
 // redactedValue replaces the parts of a url that can carry a credential.
@@ -1799,13 +1903,14 @@ func redactQuery(query string) string {
 }
 
 // redactValue replaces one value, keeping an empty one empty, since there is nothing
-// to hide, and a bare "${VAR}" reference as written, since it names a variable.
+// to hide, and a bare "${VAR}" or "${file:PATH}" reference as written, since it names
+// a variable or a file rather than holding the value.
 func redactValue(value string) string {
 	if value == "" {
 		return value
 	}
 
-	refs, err := scanEnvReferences(value)
+	refs, err := scanReferences(value)
 	if err == nil && len(refs) == 1 && refs[0].start == 0 && refs[0].end == len(value) {
 		return value
 	}
@@ -2199,9 +2304,9 @@ func validateRemoteToolHosts(hosts []RemoteToolHost) error {
 // tools and only discovery cannot carry it, while MCP has no tag vocabulary at all, so
 // neither filter could ever be honored.
 //
-// A value in env, headers or url is checked for the syntax of its "${VAR}" references
-// and nothing more; see EnvReferences for why the variables themselves are read
-// elsewhere.
+// A value in env, headers or url is checked for the syntax of its "${VAR}" and
+// "${file:PATH}" references and nothing more; see EnvReferences for why the variables
+// and files themselves are read elsewhere.
 func validateMCPClients(servers []MCPServer) error {
 	names := make(map[string]struct{}, len(servers))
 	aliases := make(map[string]string, len(servers))
@@ -2294,8 +2399,8 @@ func validateMCPServerValues(server string, key string, values map[string]string
 
 // validateMCPServerURL checks a server's url as far as parsing a file can.
 //
-// The syntax of its "${VAR}" references is always checked, so a typo in one is an error
-// on the file rather than a dollar sign handed to a server.
+// The syntax of its "${VAR}" and "${file:PATH}" references is always checked, so a
+// typo in one is an error on the file rather than a dollar sign handed to a server.
 //
 // Whether it is a url the HTTP transport can reach is checked only when it holds no
 // reference. A reference can stand anywhere in the url, including in the scheme and the
@@ -2309,7 +2414,7 @@ func validateMCPServerValues(server string, key string, values map[string]string
 // literal credential in its query string is exactly the case that cannot be helped by
 // naming a variable.
 func validateMCPServerURL(server string, value string) error {
-	refs, err := EnvReferences(value)
+	refs, err := scanReferences(value)
 	if err != nil {
 		return fmt.Errorf("mcp_clients server %q has an invalid url: %w", server, err)
 	}
@@ -3370,7 +3475,13 @@ const defaultRAGEmbedTimeout = 30 * time.Second
 // prepare parses the embeddings request timeout, defaulting it when unset. A
 // malformed duration fails loudly at parse time rather than on the first embed.
 // The base_url and model are validated later at rag.Open, before the agent loop.
+//
+// It also refuses api_key_env beside api_key_file rather than rank them.
 func (e *RAGEmbeddingsConfig) prepare() error {
+	if strings.TrimSpace(e.APIKeyEnv) != "" && strings.TrimSpace(e.APIKeyFile) != "" {
+		return fmt.Errorf("knowledge.embeddings sets both api_key_env and api_key_file: set one of them")
+	}
+
 	if e.TimeoutString == "" {
 		e.TimeoutParsed = defaultRAGEmbedTimeout
 		return nil

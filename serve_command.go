@@ -39,6 +39,7 @@ type fiskServeCommand struct {
 	stateDir    string
 	workDir     string
 	apiKey      string
+	apiKeyFile  string
 	baseURL     string
 	workers     int
 	workersSet  bool
@@ -58,6 +59,7 @@ func registerServeCommand(app *fisk.Application) {
 	srv.Flag("state-dir", "Directory holding checkpointed sessions (default: <root-dir>/runs when a root is set, else the XDG state dir)").StringVar(&c.stateDir)
 	srv.Flag("work-dir", "Directory command tools run in (default: --root-dir, else the worker's own working directory)").StringVar(&c.workDir)
 	srv.Flag("api-key", "Anthropic API key to use").Envar("ANTHROPIC_API_KEY").StringVar(&c.apiKey)
+	srv.Flag("api-key-file", "File holding the Anthropic API key, such as a Docker Compose secret; an alternative to --api-key").Envar("ANTHROPIC_API_KEY_FILE").PlaceHolder("FILE").StringVar(&c.apiKeyFile)
 	srv.Flag("base-url", "Anthropic API base URL to use").Envar("ANTHROPIC_BASE_URL").StringVar(&c.baseURL)
 	srv.Flag("no-telemetry", "Suppress OpenTelemetry export for this worker, whatever the configuration says").Envar("NO_TELEMETRY").UnNegatableBoolVar(&c.noTelemetry)
 	srv.Flag("verbose", "Log what the endpoints are doing in detail").UnNegatableBoolVar(&c.verbose)
@@ -95,6 +97,14 @@ func (c *fiskServeCommand) serveAction(_ *fisk.ParseContext) error {
 			return err
 		}
 	}
+
+	// The key is read before the configuration is parsed, so a file that is missing or
+	// empty fails naming the flag.
+	apiKey, err := resolveAPIKey(c.apiKey, c.apiKeyFile)
+	if err != nil {
+		return err
+	}
+	c.apiKey = apiKey
 
 	cfg, err := versionedConfig(config.ParseConfigFileForMode(c.configFile, config.ModeServe))
 	if err != nil {

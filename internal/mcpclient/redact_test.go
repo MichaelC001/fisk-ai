@@ -23,12 +23,23 @@ var _ = Describe("Redaction", func() {
 		}
 	}
 
+	readFile := func(files map[string]string) func(string) (string, error) {
+		return func(path string) (string, error) {
+			value, ok := files[path]
+			if !ok {
+				return "", fmt.Errorf("no file at %q", path)
+			}
+
+			return value, nil
+		}
+	}
+
 	Describe("serverSecrets", func() {
 		It("should resolve the references in the url", func() {
 			secrets := serverSecrets(config.MCPServer{
 				Name: "zapier",
 				URL:  "https://mcp.zapier.com/api/mcp/s/${ZAPIER_KEY}/mcp",
-			}, lookup(map[string]string{"ZAPIER_KEY": "abc123secretkey"}))
+			}, lookup(map[string]string{"ZAPIER_KEY": "abc123secretkey"}), nil)
 
 			Expect(secrets).To(Equal([]string{"abc123secretkey"}))
 		})
@@ -37,7 +48,7 @@ var _ = Describe("Redaction", func() {
 			secrets := serverSecrets(config.MCPServer{
 				Name: "docs",
 				URL:  "https://mcp.example.net/${SHORT}/mcp?apiKey=${LONG}",
-			}, lookup(map[string]string{"SHORT": "abc123secret", "LONG": "abc123secret-and-more"}))
+			}, lookup(map[string]string{"SHORT": "abc123secret", "LONG": "abc123secret-and-more"}), nil)
 
 			Expect(secrets).To(Equal([]string{"abc123secret-and-more", "abc123secret"}))
 		})
@@ -55,15 +66,34 @@ var _ = Describe("Redaction", func() {
 				"MODE":  "1",
 				"TOKEN": "abc123secret",
 				"OFF":   "",
-			}))
+			}), nil)
 
 			Expect(secrets).To(Equal([]string{"abc123secret", "127.0.0.1"}))
 		})
 
 		It("should have nothing for a server with no url and none for a variable that is not set", func() {
-			Expect(serverSecrets(config.MCPServer{Name: "docs", Command: "npx"}, lookup(nil))).To(BeEmpty())
-			Expect(serverSecrets(config.MCPServer{Name: "docs", URL: "https://mcp.example.net/${ABSENT}/mcp"}, lookup(nil))).To(BeEmpty())
-			Expect(serverSecrets(config.MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp"}, lookup(nil))).To(BeEmpty())
+			Expect(serverSecrets(config.MCPServer{Name: "docs", Command: "npx"}, lookup(nil), nil)).To(BeEmpty())
+			Expect(serverSecrets(config.MCPServer{Name: "docs", URL: "https://mcp.example.net/${ABSENT}/mcp"}, lookup(nil), nil)).To(BeEmpty())
+			Expect(serverSecrets(config.MCPServer{Name: "docs", URL: "https://mcp.example.net/mcp"}, lookup(nil), nil)).To(BeEmpty())
+		})
+
+		It("should read the value a file reference in the url names, beside the variables", func() {
+			secrets := serverSecrets(config.MCPServer{
+				Name: "docs",
+				URL:  "https://mcp.example.net/${file:/run/secrets/path_token}/mcp?apiKey=${TOKEN}",
+			}, lookup(map[string]string{"TOKEN": "abc123secret"}), readFile(map[string]string{"/run/secrets/path_token": "file-secret-value"}))
+
+			Expect(secrets).To(Equal([]string{"file-secret-value", "abc123secret"}))
+		})
+
+		// The connect fails on the read error for that file.
+		It("should leave out a file it cannot read", func() {
+			secrets := serverSecrets(config.MCPServer{
+				Name: "docs",
+				URL:  "https://mcp.example.net/mcp?apiKey=${file:/run/secrets/absent}",
+			}, lookup(nil), readFile(nil))
+
+			Expect(secrets).To(BeEmpty())
 		})
 	})
 

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -54,6 +55,7 @@ func versionedConfig(cfg *config.Config, err error) (*config.Config, error) {
 var (
 	configFile  string
 	apiKey      string
+	apiKeyFile  string
 	baseURL     string
 	q           []string
 	httpDebug   bool
@@ -78,6 +80,26 @@ var (
 	sessionArgID      string
 	sessionTranscript bool
 )
+
+// resolveAPIKey returns the model key: the --api-key value, or the content of the
+// --api-key-file file read through config.ReadCredentialFile, which drops a trailing
+// newline and refuses an empty file. It refuses both flags set rather than rank them.
+// Neither set returns an empty key, which the caller refuses.
+func resolveAPIKey(key string, file string) (string, error) {
+	if key != "" && file != "" {
+		return "", fmt.Errorf("--api-key and --api-key-file cannot both be set: pass one of them")
+	}
+	if file == "" {
+		return key, nil
+	}
+
+	key, err := config.ReadCredentialFile(file)
+	if err != nil {
+		return "", fmt.Errorf("--api-key-file: %w", err)
+	}
+
+	return key, nil
+}
 
 // interruptContext returns a context canceled on the first Ctrl-C (SIGINT) or
 // SIGTERM, the shared interrupt contract for the one-shot commands. SIGTERM is

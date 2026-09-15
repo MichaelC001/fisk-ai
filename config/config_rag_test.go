@@ -97,6 +97,29 @@ harness:
 		Expect(cfg.Harness.RAG.Embeddings.TimeoutParsed).To(Equal(30 * time.Second))
 	})
 
+	It("parses api_key_file and refuses it beside api_key_env", func() {
+		data := `
+application_path: /bin/ls
+identity: kb
+system_prompt: hello
+llm:
+  model: claude-opus-4-8
+harness:
+  knowledge:
+    enabled: true
+    embeddings:
+      base_url: http://127.0.0.1:1234/v1
+      model: m
+      api_key_file: secrets/embed_token
+`
+		cfg, err := ParseConfig([]byte(data))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cfg.Harness.RAG.Embeddings.APIKeyFile).To(Equal("secrets/embed_token"))
+
+		_, err = ParseConfig([]byte(data + "      api_key_env: RAG_EMBED_KEY\n"))
+		Expect(err).To(MatchError(ContainSubstring("knowledge.embeddings sets both api_key_env and api_key_file")))
+	})
+
 	It("rejects a malformed embeddings timeout", func() {
 		data := []byte(`
 application_path: /bin/ls

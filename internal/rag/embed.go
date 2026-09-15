@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,10 @@ type Document struct {
 // misconfiguration fails at Open, before the agent loop, without contacting the
 // server: base_url and model must be set, and base_url must be a well-formed http
 // or https URL naming a host.
+//
+// The bearer token is read here too, from the variable api_key_env names or the file
+// api_key_file names, so a file that is missing or empty fails at Open rather than on
+// the first embed. A relative file path resolves under RootDirectory.
 func buildEmbedder(cfg *config.Config) (Embedder, error) {
 	if !cfg.RAGVectorEnabled() {
 		return nil, nil
@@ -107,6 +112,18 @@ func buildEmbedder(cfg *config.Config) (Embedder, error) {
 	var apiKey string
 	if ec.APIKeyEnv != "" {
 		apiKey = os.Getenv(ec.APIKeyEnv)
+	}
+	if ec.APIKeyFile != "" {
+		path := ec.APIKeyFile
+		if cfg.RootDirectory != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(cfg.RootDirectory, path)
+		}
+
+		var err error
+		apiKey, err = config.ReadCredentialFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("knowledge.embeddings.api_key_file: %w", err)
+		}
 	}
 
 	host, port := parseServerAddress(ec.BaseURL)
