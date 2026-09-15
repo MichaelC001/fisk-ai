@@ -370,7 +370,11 @@ func (s *Store) doctorEmbeddingChecks(ctx context.Context, add func(string, bool
 		add("Embeddings reachable", false, false, err.Error())
 		return
 	}
-	add("Embeddings reachable", true, false, fmt.Sprintf("model=%s dim=%d", s.emb.Model(), dim))
+	if served := s.servedModel(); served != "" {
+		add("Embeddings reachable", true, false, fmt.Sprintf("model=%s served=%s dim=%d", s.emb.Model(), served, dim))
+	} else {
+		add("Embeddings reachable", true, false, fmt.Sprintf("model=%s dim=%d", s.emb.Model(), dim))
+	}
 
 	if s.db == nil {
 		return
