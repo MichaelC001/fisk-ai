@@ -419,8 +419,8 @@ var _ = Describe("runstate", func() {
 			Expect(err).To(MatchError(ErrCorrupt))
 		})
 
-		// The record is written as a run ends, which is after its terminal record, so it
-		// folds behind one and must leave the turn it sits inside alone.
+		// The record is written as a run ends, just before its terminal record, so on a run
+		// that ended mid-batch it sits inside the open batch and must leave that turn alone.
 		It("folds memory revisions and leaves the turn alone", func() {
 			recs := []Record{
 				meta(),

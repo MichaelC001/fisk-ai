@@ -94,10 +94,11 @@ var _ = Describe("memory revisions across turns", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res1.Reason).To(Equal(runstate.ReasonCompleted))
 
-		// The record is written as the run ends, which is after the terminal record: a
-		// memory read on the last tool call of a run counts as much as one on the first.
+		// The record is written as the run ends, so a memory read on the last tool call of
+		// a run counts as much as one on the first, and before the terminal record, so a
+		// finished run ends on its terminal for a listing that reads only the last record.
 		records := journalRecords(GinkgoTB(), store, res1.SessionID)
-		Expect(recordIndex(records, runstate.MemoryRevisionsProtocol)).To(BeNumerically(">", recordIndex(records, runstate.TerminalProtocol)))
+		Expect(recordIndex(records, runstate.MemoryRevisionsProtocol)).To(BeNumerically("<", recordIndex(records, runstate.TerminalProtocol)))
 
 		rs, err := store.Load(context.Background(), res1.SessionID)
 		Expect(err).NotTo(HaveOccurred())

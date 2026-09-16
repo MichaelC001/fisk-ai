@@ -340,12 +340,14 @@ func (r *runner) journalGrants(ctx context.Context) error {
 
 // journalMemoryRevisions records the memory revisions this run read, so the next turn
 // of the conversation can overwrite a value it read on an earlier one. It is written
-// as the run ends, after the terminal record, since a memory read on the last tool
-// call of the run counts as much as the first.
+// as the run ends, since a memory read on the last tool call of the run counts as much
+// as the first, and before the terminal record: the JetStream listing reads a run's
+// ending off its last record, so a finished run has to end on its terminal.
 //
-// A run that read no memory writes nothing, and a failed append warns rather than
-// ending anything: the run is over, and the next turn reads the value again as every
-// turn does today.
+// A run that read no memory writes nothing. A failed append warns, and since emit has
+// already advanced the sequence, the terminal append that follows fails on the gap, as
+// it does after any failed append in a run; the next turn reads the value again as
+// every turn does today.
 func (r *runner) journalMemoryRevisions(ctx context.Context) {
 	revs := r.memScope.Snapshot()
 	if len(revs) == 0 {
@@ -800,6 +802,8 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 	}
 
 	if r.journal != nil {
+		r.journalMemoryRevisions(ctx)
+
 		tr := &runstate.TerminalRecord{Reason: reason, Summary: r.conversationSummary()}
 		if err != nil {
 			tr.Message = err.Error()
@@ -808,8 +812,6 @@ func (r *runner) run(ctx context.Context) (runstate.TerminalReason, error) {
 		if jerr != nil {
 			r.events.Warn(Warning{Kind: WarnJournalTerminal, Err: jerr})
 		}
-
-		r.journalMemoryRevisions(ctx)
 	}
 
 	return reason, err

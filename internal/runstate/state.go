@@ -448,8 +448,9 @@ func Fold(records []Record) (*RunState, error) {
 				return nil, fmt.Errorf("%w: memory revisions record with no payload at seq %d", ErrCorrupt, r.Seq)
 			}
 			// Inert against the turn, as a decision is. The record is written as the run
-			// ends, which is after a terminal record on a run that ended mid-batch, so
-			// touching cur here would commit a turn the resume exists to finish.
+			// ends, just before the terminal record, so on a run that ended mid-batch it
+			// lands inside the open batch and touching cur here would commit a turn the
+			// resume exists to finish.
 			//
 			// The newest wins outright rather than merging: a run that dropped a revision
 			// after a refused write records what it holds now, and merging would restore
