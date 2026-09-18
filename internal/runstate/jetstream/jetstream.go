@@ -10,6 +10,12 @@
 // two writers of the same run cannot interleave. The record body is byte-identical to
 // a file-backend journal line, so a run migrates between backends unchanged.
 //
+// There is no lock. Open refuses a run whose last turn has not ended on a terminal
+// record for the hold window after its tail was written, since a turn is in flight or
+// its holder crashed inside the window. Outside the window the fence at the append is
+// the only exclusion, so a second process can take over a run whose holder crashed or
+// stalled, and the holder fails at its next append.
+//
 // Importing this package registers the backend under runstate.BackendJetStream, so a
 // program links it in by importing it (usually for its side effect). It holds no
 // exported API beyond that registration. The operator owns the stream: this backend
@@ -80,6 +86,14 @@ const (
 	// unlimited one), which is the operator's call, so the floor only rejects a stream
 	// that cannot hold a session at all.
 	recordFloorBytes = 4096
+
+	// defaultHold is how long Open refuses a run with a turn in flight after its last
+	// append. It has to exceed the longest gap a live turn goes without appending, which
+	// is one model call or one tool call for a served run, since a server channel
+	// suspends on a gate rather than waiting in-process. An interactive chat waits at
+	// its prompt in-process with no terminal record written, so a chat idle longer than
+	// this is openable by a resume elsewhere and fails at its next append.
+	defaultHold = 10 * time.Minute
 )
 
 // options is the typed shape of the jetstream backend's session options.
@@ -89,6 +103,13 @@ type options struct {
 	// operator owns the stream's durability and retention policy. The run subject
 	// prefix is derived from the stream's own wildcard subject, not configured here.
 	Stream string `json:"stream"`
+
+	// Hold is how long a run with a turn in flight stays refused to a second opener
+	// after its last append, as a Go duration string. Empty is the default of ten
+	// minutes. "0s" turns the check off: Open then always succeeds and the fence at the
+	// append is the only exclusion, so a second opener takes the run over and the
+	// holder fails at its next append.
+	Hold string `json:"hold"`
 }
 
 // decodeOptions strictly decodes the backend options. A stdlib decoder with
@@ -121,6 +142,17 @@ func newStore(env runstate.RuntimeEnv, raw json.RawMessage) (runstate.Store, err
 	}
 	if opts.Stream == "" {
 		return nil, fmt.Errorf("jetstream session: options.stream is required (the JetStream stream name); the stream must already exist")
+	}
+
+	hold := defaultHold
+	if opts.Hold != "" {
+		hold, err = time.ParseDuration(opts.Hold)
+		if err != nil {
+			return nil, fmt.Errorf("jetstream session: options.hold %q is not a duration (for example 10m or 0s): %w", opts.Hold, err)
+		}
+		if hold < 0 {
+			return nil, fmt.Errorf("jetstream session: options.hold %q is negative; set 0s to turn the hold off", opts.Hold)
+		}
 	}
 
 	nc := env.Nats
@@ -158,7 +190,7 @@ func newStore(env runstate.RuntimeEnv, raw json.RawMessage) (runstate.Store, err
 		return nil, err
 	}
 
-	return &store{js: js, stream: stream, streamName: opts.Stream, prefix: prefix}, nil
+	return &store{js: js, stream: stream, streamName: opts.Stream, prefix: prefix, hold: hold}, nil
 }
 
 // derivePrefix resolves the run subject prefix from the stream's bound subjects.
@@ -271,6 +303,9 @@ type store struct {
 	stream     jetstream.Stream
 	streamName string
 	prefix     string
+	// hold is how long Open refuses a run whose tail is not a terminal record, measured
+	// from the tail's stream store time. Zero turns the check off.
+	hold time.Duration
 }
 
 // Info implements runstate.Store, reporting the backend and the stream it is bound to.
@@ -373,6 +408,17 @@ func (s *store) Create(ctx context.Context, id string, meta runstate.MetaRecord)
 }
 
 // Open implements runstate.Store.
+//
+// Every turn ends on a terminal record, so a run at rest ends on one, or on the
+// tool_result records SupplyToolResult appends after it to answer deferred calls. A run
+// whose tail is anything else has a turn in flight or a holder that crashed, and Open
+// refuses it with ErrLocked while the tail is younger than the store's hold. Once the
+// tail is older than the hold, Open hands the run over and the fence at the append is
+// the only exclusion: a holder that was merely slow fails at its next append, after
+// this opener has written.
+//
+// The age is the tail's stream store time against this process's clock. The server
+// stamps the time, so an opener's own clock cannot favor it.
 func (s *store) Open(ctx context.Context, id string) (runstate.Journal, error) {
 	err := runstate.ValidateID(id)
 	if err != nil {
@@ -399,12 +445,55 @@ func (s *store) Open(ctx context.Context, id string) (runstate.Journal, error) {
 		return nil, fmt.Errorf("jetstream session: run %q has an unparsable record subject %q: %w", id, last.Subject, err)
 	}
 
+	if s.hold > 0 && time.Since(last.Time) < s.hold {
+		rest, err := s.atRest(opCtx, id, seq, last.Data)
+		if err != nil {
+			return nil, fmt.Errorf("jetstream session: opening run %q: %w", id, err)
+		}
+		if !rest {
+			return nil, fmt.Errorf("%w: run %q on stream %q has a turn in flight, last written at %s; if its holder is gone it opens again at %s",
+				runstate.ErrLocked, id, s.streamName, last.Time.UTC().Format(time.RFC3339), last.Time.Add(s.hold).UTC().Format(time.RFC3339))
+		}
+	}
+
 	nonce, err := newNonce()
 	if err != nil {
 		return nil, err
 	}
 
 	return &journal{store: s, id: id, nonce: nonce, lastSeq: seq, tailStreamSeq: last.Sequence}, nil
+}
+
+// atRest reports whether a run whose tail is the record at seq has no turn in flight.
+//
+// A terminal tail is at rest. For a tool_result tail, atRest reads the record before it
+// until it reaches a record of another kind, and that record decides: the runner writes
+// a tool_result after each tool call inside a turn, where the record before the run of
+// them is the assistant record that made the calls, and SupplyToolResult writes one
+// after the terminal record of a suspend to answer a deferred call. Any other record,
+// and a body that does not decode, is a turn in flight. atRest reads one message per
+// supplied answer, so a read back is as long as the deferred calls of one turn.
+func (s *store) atRest(ctx context.Context, id string, seq uint64, data []byte) (bool, error) {
+	for {
+		var rec runstate.Record
+		err := json.Unmarshal(data, &rec)
+		if err != nil {
+			return false, nil
+		}
+		if rec.Terminal != nil {
+			return true, nil
+		}
+		if rec.ToolResult == nil || seq <= 1 {
+			return false, nil
+		}
+
+		seq--
+		msg, err := s.stream.GetLastMsgForSubject(ctx, s.subjectForSeq(id, seq))
+		if err != nil {
+			return false, fmt.Errorf("reading record %d: %w", seq, err)
+		}
+		data = msg.Data
+	}
 }
 
 // Load implements runstate.Store.
