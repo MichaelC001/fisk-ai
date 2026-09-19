@@ -166,6 +166,18 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 		return newStore(runstate.RuntimeEnv{Nats: nc}, []byte(fmt.Sprintf(`{"stream":%q}`, stream)))
 	}
 
+	// newStoreWithHold binds a second store to the same stream with the hold the spec
+	// names, so a spec that needs Open to hand a live run over sets it to "0s" and one
+	// that needs a run to go quiet sets it to a millisecond.
+	newStoreWithHold := func(stream, hold string) runstate.Store {
+		GinkgoHelper()
+
+		s, err := newStore(runstate.RuntimeEnv{Nats: nc}, []byte(fmt.Sprintf(`{"stream":%q,"hold":%q}`, stream, hold)))
+		Expect(err).ToNot(HaveOccurred())
+
+		return s
+	}
+
 	createStream := func(cfg jetstream.StreamConfig) {
 		GinkgoHelper()
 		_, err := js.CreateStream(ctx, cfg)
@@ -242,6 +254,17 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			s, err := newStoreFor("SESSIONS")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(s.(*store).prefix).To(Equal("runs"))
+		})
+
+		It("Should default the hold to ten minutes and read a configured one", func() {
+			createStream(goodStream("SESSIONS", "runs.>"))
+			s, err := newStoreFor("SESSIONS")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(s.(*store).hold).To(Equal(defaultHold))
+			Expect(defaultHold).To(Equal(10 * time.Minute))
+
+			Expect(newStoreWithHold("SESSIONS", "0s").(*store).hold).To(BeZero())
+			Expect(newStoreWithHold("SESSIONS", "90s").(*store).hold).To(Equal(90 * time.Second))
 		})
 
 		It("Should report the backend and the bound stream, and not the subject prefix", func() {
@@ -351,21 +374,123 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).To(MatchError(runstate.ErrNotFound))
 		})
 
+		// The hold is off: a meta record is not a terminal record, so under the default
+		// hold Open would refuse the run for ten minutes after its creation. This pins
+		// the takeover path, where Open seeds the fence from the tail and hands over.
 		It("Should open a meta-only run and continue its sequence", func() {
+			takeover := newStoreWithHold("SESSIONS", "0s")
+
 			id := newID()
-			j, err := store.Create(ctx, id, newMeta(id))
+			j, err := takeover.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(j.Close()).To(Succeed())
 
-			j2, err := store.Open(ctx, id)
+			j2, err := takeover.Open(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(j2.LastSeq()).To(Equal(uint64(1)))
 			Expect(j2.Append(ctx, 2, assistantRec(0))).To(Succeed())
 			Expect(j2.Close()).To(Succeed())
 
-			rs, err := store.Load(ctx, id)
+			rs, err := takeover.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rs.Counters.LlmCalls).To(Equal(int64(1)))
+		})
+
+		It("Should refuse a second opener while a turn is in flight", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			_, err = store.Open(ctx, id)
+			Expect(err).To(MatchError(runstate.ErrLocked))
+			Expect(err).To(MatchError(ContainSubstring(id)))
+		})
+
+		It("Should open a run whose last turn ended", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+			Expect(j.Append(ctx, 3, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			j2, err := store.Open(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j2.LastSeq()).To(Equal(uint64(3)))
+			Expect(j2.Close()).To(Succeed())
+		})
+
+		// A suspend on a deferred call ends on a terminal record, and every answer
+		// SupplyToolResult writes after it is a tool_result, so Open reads back over
+		// them to the terminal and the resume that follows a supply opens.
+		It("Should open a suspended run whose deferred calls were answered", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0, "tu_1", "tu_2"))).To(Succeed())
+			Expect(j.Append(ctx, 3, terminalRec(runstate.ReasonSuspended))).To(Succeed())
+			Expect(j.Append(ctx, 4, toolResultRec("tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 5, toolResultRec("tu_2"))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			j2, err := store.Open(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j2.LastSeq()).To(Equal(uint64(5)))
+			Expect(j2.Close()).To(Succeed())
+		})
+
+		// The runner writes the same tool_result record after a tool call inside a
+		// turn, where the record before it is the assistant record that made the call,
+		// so the read back holds the run.
+		It("Should refuse a second opener while a turn waits on the model after a tool call", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 3, toolResultRec("tu_1"))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			_, err = store.Open(ctx, id)
+			Expect(err).To(MatchError(runstate.ErrLocked))
+		})
+
+		// The tail's age is the stream's store time against this clock, so a hold of a
+		// millisecond passes in the sleep and the run opens as a crashed holder's would.
+		It("Should open a run whose turn went quiet longer than the hold", func() {
+			quiet := newStoreWithHold("SESSIONS", "1ms")
+
+			id := newID()
+			j, err := quiet.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			time.Sleep(5 * time.Millisecond)
+
+			j2, err := quiet.Open(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j2.LastSeq()).To(Equal(uint64(2)))
+			Expect(j2.Close()).To(Succeed())
+		})
+
+		// A run holding only its meta record has a turn in flight: Create is the first
+		// write of a turn that has not ended. Under the default hold that refuses it, and
+		// under a hold of zero the takeover path opens it.
+		It("Should open a meta-only run under a hold of zero and refuse it under the default", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Close()).To(Succeed())
+
+			_, err = store.Open(ctx, id)
+			Expect(err).To(MatchError(runstate.ErrLocked))
+
+			j2, err := newStoreWithHold("SESSIONS", "0s").Open(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j2.LastSeq()).To(Equal(uint64(1)))
+			Expect(j2.Close()).To(Succeed())
 		})
 
 		It("Should treat a duplicate seq as an idempotent no-op and reject gaps", func() {
@@ -414,13 +539,18 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(recs).To(HaveLen(3))
 		})
 
+		// The hold is off: A's tail is a fresh assistant record, which the default hold
+		// would refuse B at Open. This pins the fence, which decides after Open has
+		// handed the run to both.
 		It("Should fence a second writer out with ErrLocked", func() {
+			takeover := newStoreWithHold("SESSIONS", "0s")
+
 			id := newID()
-			jA, err := store.Create(ctx, id, newMeta(id))
+			jA, err := takeover.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jA.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
 
-			jB, err := store.Open(ctx, id)
+			jB, err := takeover.Open(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jB.LastSeq()).To(Equal(uint64(2)))
 
@@ -432,15 +562,20 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).To(MatchError(runstate.ErrLocked))
 		})
 
+		// The hold is off: B has to get past Open while A's turn is in flight for
+		// CheckHeld to have a takeover to report, and the default hold refuses that
+		// Open. This pins the takeover past the hold, which the fence still decides.
 		It("Should report a run as held until another writer takes it, then refuse it", func() {
+			takeover := newStoreWithHold("SESSIONS", "0s")
+
 			id := newID()
-			jA, err := store.Create(ctx, id, newMeta(id))
+			jA, err := takeover.Create(ctx, id, newMeta(id))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jA.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
 			Expect(jA.CheckHeld(ctx)).To(Succeed(), "nobody else has written, so A still holds it")
 
 			// B takes the run the way a resume does, by writing before it does anything.
-			jB, err := store.Open(ctx, id)
+			jB, err := takeover.Open(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jB.Append(ctx, 3, claimRec("worker-b"))).To(Succeed())
 

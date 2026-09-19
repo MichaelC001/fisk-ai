@@ -32,6 +32,18 @@ var _ = Describe("newStore construction", func() {
 		Expect(err).To(MatchError(ContainSubstring("invalid jetstream session options")))
 	})
 
+	// The hold is parsed before the connection is looked at, so a bad value is refused
+	// here without a server.
+	It("Should reject a hold option it cannot parse", func() {
+		_, err := newStore(runstate.RuntimeEnv{}, []byte(`{"stream":"sessions","hold":"soon"}`))
+		Expect(err).To(MatchError(ContainSubstring(`options.hold "soon" is not a duration`)))
+	})
+
+	It("Should reject a negative hold", func() {
+		_, err := newStore(runstate.RuntimeEnv{}, []byte(`{"stream":"sessions","hold":"-1m"}`))
+		Expect(err).To(MatchError(ContainSubstring(`options.hold "-1m" is negative`)))
+	})
+
 	It("Should be registered under the jetstream backend name", func() {
 		Expect(runstate.Backends()).To(ContainElement(runstate.BackendJetStream))
 	})
