@@ -114,6 +114,8 @@ func registerSessionCommand(cmd *fisk.Application) {
 
 	rm := session.Command("rm", "Removes a checkpointed session").Alias("delete").Action(sessionRmAction)
 	rm.Arg("id", "Session id").Required().StringVar(&sessionArgID)
+
+	registerSessionInspectCommands(session)
 }
 
 // sessionTokens is what this conversation has processed, against the bound it was
