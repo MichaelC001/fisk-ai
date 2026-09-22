@@ -632,10 +632,11 @@ func (s *FileStore) summarize(id string) (*runstate.RunInfo, error) {
 			info.Updated = fi.ModTime()
 		}
 	}
-	if rs.Terminal != nil {
-		info.Terminal = rs.Terminal.Reason
+	ending := rs.Ending()
+	if ending != nil {
+		info.Terminal = ending.Reason
 		info.Ended = rs.Ended
-		info.Summary = rs.Terminal.Summary
+		info.Summary = ending.Summary
 	}
 
 	return &info, nil

@@ -377,9 +377,10 @@ func sessionRmAction(_ *fisk.ParseContext) error {
 }
 
 func terminalReason(rs *runstate.RunState) runstate.TerminalReason {
-	if rs.Terminal == nil {
+	ending := rs.Ending()
+	if ending == nil {
 		return ""
 	}
 
-	return rs.Terminal.Reason
+	return ending.Reason
 }

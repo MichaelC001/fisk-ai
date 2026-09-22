@@ -876,9 +876,8 @@ func decodeMetaRow(id string, data []byte, stored time.Time, filter runstate.Lis
 // time, which is what this store has always reported.
 //
 // A run with a turn in flight ends on whatever that turn last wrote, which carries no
-// terminal payload, so it is reported as open. That is the one thing a listing reads
-// differently from a fold, which keeps the previous turn's ending until a new one
-// replaces it and so calls a running conversation completed.
+// terminal payload, so it is reported as open. This is the answer RunState.Ending gives
+// for the same run, since a last record that is terminal means nothing followed it.
 func (s *store) readEnding(ctx context.Context, id string, ri *runstate.RunInfo) {
 	last, err := s.stream.GetLastMsgForSubject(ctx, s.runWildcard(id))
 	if err != nil {

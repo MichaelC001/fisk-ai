@@ -1301,10 +1301,9 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			})
 		})
 
-		// The one thing a listing reads differently from a fold. A fold keeps the last
-		// terminal record it saw until another replaces it, so a conversation whose next
-		// turn is under way still reads as completed; the last record says what is
-		// actually true of it now.
+		// A fold keeps the last terminal record it saw until another replaces it, because
+		// resume reads it. The listing reads the last record, which says the conversation
+		// has a turn under way.
 		It("Should report a conversation with a turn in flight as open", func() {
 			id := newID()
 			j, err := store.Create(ctx, id, newMeta(id))
@@ -1321,11 +1320,12 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(BeEmpty())
 
-			// The fold still carries the earlier ending, so the two differ on purpose
-			// rather than by one of them losing the record.
+			// The fold still carries the earlier terminal record for resume, and reports
+			// no ending, as the listing does.
 			rs, err := store.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rs.Terminal.Reason).To(Equal(runstate.ReasonCompleted))
+			Expect(rs.Ending()).To(BeNil())
 		})
 
 		// The listing must not grow a dependency on the middle of a journal again: every

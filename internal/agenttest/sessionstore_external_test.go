@@ -6,6 +6,7 @@ package agenttest_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/choria-io/fisk-ai/internal/agenttest"
+	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
@@ -403,6 +405,53 @@ var _ = Describe("FakeSessionStore", func() {
 			Expect(infos[0].Caller).To(BeEmpty())
 			Expect(infos[0].Ended).To(BeZero())
 		})
+	})
+
+	// A conversation that journaled anything after its last terminal record lists as open
+	// with no summary in both real stores, so an embedder's rail sees the same here.
+	Describe("a run past its last ending", func() {
+		at := time.Unix(1700000000, 0).UTC()
+		summary := &runstate.ConversationSummary{Turns: 1, Counters: runstate.Counters{LlmCalls: 1}}
+		completed := runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted, Summary: summary}}
+		suspended := runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended, Summary: summary}}
+		user := runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{Message: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "again"}}}}}}
+		answer := func(text string) runstate.Record {
+			return runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: text}}}}}}
+		}
+		deferring := runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{ToolUse: &llm.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{}`)}}}}}}
+
+		DescribeTable("Should list it as open with no summary",
+			func(recs ...runstate.Record) {
+				j := create("run1", "do the thing")
+				for i, rec := range recs {
+					Expect(j.Append(ctx, uint64(i+2), rec)).To(Succeed())
+				}
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+				Expect(err).ToNot(HaveOccurred())
+				described, err := store.Describe(ctx, runstate.ListFilter{}, []string{"run1"})
+				Expect(err).ToNot(HaveOccurred())
+
+				for name, rows := range map[string][]runstate.RunInfo{"List": infos, "ListPage": page.Runs, "Describe": described} {
+					Expect(rows).To(HaveLen(1), name)
+					Expect(rows[0].Terminal).To(BeEmpty(), name)
+					Expect(rows[0].Summary).To(BeNil(), name)
+					Expect(rows[0].Ended).To(BeZero(), name)
+				}
+			},
+			Entry("a user turn after a terminal record", answer("one"), completed, user),
+			Entry("a claim after a terminal record", answer("one"), completed,
+				runstate.Record{Protocol: runstate.ClaimProtocol, Claim: &runstate.ClaimRecord{By: "worker-2"}}),
+			Entry("the memory revisions a turn writes before its terminal record", answer("one"), completed, user, answer("two"),
+				runstate.Record{Protocol: runstate.MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &runstate.MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7}}}),
+			Entry("a suspended run whose deferred call was answered", deferring,
+				runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{ToolUseID: "tu_1", ToolName: "shell"}},
+				suspended,
+				runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "tu_1", Result: llm.ToolResultBlock{ToolUseID: "tu_1", Content: "ok"}}}),
+		)
 	})
 
 	// An embedder pages this fake the way it pages a real store, so the fake enumerates
