@@ -180,9 +180,11 @@ func sessionLsAction(_ *fisk.ParseContext) error {
 	tbl := table.NewTableWriter("")
 	defer tbl.WriteTo(os.Stdout)
 
+	// The model and the prompt are read back from a journal, and the prompt is whatever
+	// a caller sent, so both are sanitized to one line before they reach the table.
 	tbl.AddHeaders("ID", "Model", "Status", "Updated", "Prompt")
 	for _, info := range infos {
-		tbl.AddRow(info.RunID, info.Model, sessionStatus(info.Terminal), info.Updated, truncateString(info.Prompt, 50))
+		tbl.AddRow(info.RunID, sanitize.ForTerminal(info.Model, 100), sessionStatus(info.Terminal), info.Updated, sanitize.ForTerminal(info.Prompt, 50))
 	}
 
 	return nil
@@ -255,7 +257,7 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	}
 
 	c.Item("Status", sessionStatus(terminalReason(rs)))
-	c.Item("Model", rs.Fingerprint.Model)
+	c.Item("Model", sanitize.ForTerminal(rs.Fingerprint.Model, 100))
 	c.Item("Next iter", rs.NextIteration)
 	c.Item("LLM calls", rs.Counters.LlmCalls)
 	c.Item("Tool calls", fmt.Sprintf("%d (remote %d, mcp %d)", rs.Counters.ToolCalls, rs.Counters.RemoteToolCalls, rs.Counters.MCPToolCalls))
@@ -293,8 +295,10 @@ func printSessionMeta(c *columns.Document, rs *runstate.RunState) {
 	}
 
 	c.Blank()
+	// The prompt is whatever a caller sent, read back from a journal. It is sanitized
+	// with its newlines kept, so a multi-line prompt still prints on several lines.
 	c.Section("Prompt", func(c *columns.Document) {
-		c.Print(truncateString(rs.Prompt, 200))
+		c.Print(truncateString(sanitize.ForDisplay(rs.Prompt), 200))
 	})
 }
 
@@ -309,10 +313,10 @@ func deferredCalls(rs *runstate.RunState) []runstate.DeferredRecord {
 }
 
 // deferralSummary renders one deferred call for an operator: the tool that deferred,
-// what it said it is waiting on, and the handle it named. Both tool-supplied strings
-// are sanitized, since they were written by a tool and are read back from a journal.
+// what it said it is waiting on, and the handle it named. All three are sanitized,
+// since they are read back from a journal.
 func deferralSummary(d runstate.DeferredRecord) string {
-	out := d.ToolName
+	out := sanitize.ForTerminal(d.ToolName, 100)
 
 	note := sanitize.ForTerminal(d.Note, 200)
 	if note != "" {

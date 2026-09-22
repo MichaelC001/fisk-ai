@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -48,7 +49,107 @@ var _ = Describe("printSessionMeta", func() {
 		Expect(out).ToNot(ContainSubstring("Caller"))
 		Expect(out).ToNot(ContainSubstring("Conversation token"))
 	})
+
+	It("Should strip terminal control sequences from the model and the prompt", func() {
+		c := columns.New()
+		printSessionMeta(c, &runstate.RunState{
+			RunID:       "2ZqL",
+			Fingerprint: runstate.Fingerprint{Model: hostileModel},
+			Prompt:      "first \x1b[31mline\x1b[0m\nsecond\x1b]0;pwned\x07 line\x08",
+		})
+
+		out := c.String()
+		Expect(out).To(ContainSubstring("claude-sonnet -4-6"))
+		Expect(out).To(ContainSubstring("first line\n"))
+		Expect(out).To(ContainSubstring("second line"))
+		Expect(out).ToNot(ContainSubstring("[31m"))
+		Expect(out).ToNot(ContainSubstring("]0;"))
+		Expect(out).ToNot(ContainSubstring("pwned"))
+		Expect(out).ToNot(ContainSubstring("\x07"))
+		Expect(out).ToNot(ContainSubstring("\x08"))
+	})
 })
+
+// hostileModel carries a color sequence, an OSC title sequence and a bare BEL.
+const hostileModel = "claude-\x1b[31msonnet\x1b[0m\x1b]0;pwned\x07\x07-4-6"
+
+var _ = Describe("deferralSummary", func() {
+	It("Should strip terminal control sequences from the tool name", func() {
+		out := deferralSummary(runstate.DeferredRecord{
+			ToolUseID: "tu_1",
+			ToolName:  "\x1b[31mraise\x1b[0m_\x1b]0;pwned\x07change\x08",
+			Note:      "waiting on approval",
+		})
+
+		Expect(out).To(Equal("raise_change: waiting on approval"))
+	})
+})
+
+var _ = Describe("sessionLsAction", func() {
+	var origConfig, origStateDir string
+
+	BeforeEach(func() {
+		origConfig = sessionConfigFile
+		origStateDir = stateDirFlag
+	})
+
+	AfterEach(func() {
+		sessionConfigFile = origConfig
+		stateDirFlag = origStateDir
+	})
+
+	It("Should strip terminal control sequences from the model and the prompt", func() {
+		sessionConfigFile = ""
+		stateDirFlag = GinkgoT().TempDir()
+
+		ctx := context.Background()
+		store, cleanup, err := openSessionStore(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		defer cleanup()
+
+		j, err := store.Create(ctx, "lsHostile", runstate.MetaRecord{
+			RunID:       "lsHostile",
+			Fingerprint: runstate.Fingerprint{Model: hostileModel},
+			Prompt:      "list \x1b[31mthe\x1b[0m\nstreams\x1b]0;pwned\x07 now\x08",
+		})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+
+		out := captureStdout(func() {
+			Expect(sessionLsAction(nil)).To(Succeed())
+		})
+
+		Expect(out).To(ContainSubstring("claude-sonnet -4-6"))
+		Expect(out).To(ContainSubstring("list the streams now"))
+		Expect(out).ToNot(ContainSubstring("\x1b"))
+		Expect(out).ToNot(ContainSubstring("pwned"))
+		Expect(out).ToNot(ContainSubstring("\x07"))
+		Expect(out).ToNot(ContainSubstring("\x08"))
+	})
+})
+
+// captureStdout runs f with os.Stdout redirected to a pipe and returns what it wrote.
+func captureStdout(f func()) string {
+	GinkgoHelper()
+
+	r, w, err := os.Pipe()
+	Expect(err).ToNot(HaveOccurred())
+
+	stdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = stdout }()
+
+	captured := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		captured <- data
+	}()
+
+	f()
+	Expect(w.Close()).To(Succeed())
+
+	return string(<-captured)
+}
 
 var _ = Describe("openSessionStore", func() {
 	// The session flags are package globals; snapshot and restore the ones these cases
