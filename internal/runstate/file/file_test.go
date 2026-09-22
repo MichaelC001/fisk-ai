@@ -206,6 +206,87 @@ var _ = Describe("FileStore", func() {
 		Expect(err).To(MatchError(runstate.ErrNotFound))
 	})
 
+	Describe("reading a run's records", func() {
+		It("returns what was appended in seq order while another journal holds the run", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			defer j.Close()
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+			Expect(j.Append(ctx, 3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")})).To(Succeed())
+
+			if LocksRuns {
+				_, err = store.Open(ctx, id)
+				Expect(err).To(MatchError(runstate.ErrLocked), "the run is held, so a reader going through Open is refused")
+			}
+
+			recs, err := store.Records(ctx, id)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(3))
+			Expect([]uint64{recs[0].Seq, recs[1].Seq, recs[2].Seq}).To(Equal([]uint64{1, 2, 3}))
+			Expect(recs[0].Meta).NotTo(BeNil())
+			Expect(recs[0].Meta.RunID).To(Equal(id))
+			Expect(recs[1].Assistant).NotTo(BeNil())
+			Expect(recs[2].ToolResult).NotTo(BeNil())
+
+			held, err := j.Records(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(Equal(held), "the same stream the holder's journal reads")
+
+			Expect(j.Append(ctx, 4, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.CheckHeld(ctx)).To(Succeed())
+
+			recs, err = store.Records(ctx, id)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(4))
+			Expect(recs[3].Terminal).NotTo(BeNil())
+		})
+
+		It("returns ErrNotFound for an unknown run", func() {
+			_, err := store.Records(ctx, newID())
+			Expect(err).To(MatchError(runstate.ErrNotFound))
+		})
+	})
+
+	Describe("the caller and the ending on a listing row", func() {
+		It("carries the caller off the meta record and the ending time off the terminal record", func() {
+			at := time.Unix(1700000000, 0).UTC()
+
+			id := newID()
+			meta := newMeta(id)
+			meta.Caller = "peer1"
+			j, err := store.Create(ctx, id, meta)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Caller).To(Equal("peer1"))
+			Expect(infos[0].Ended).To(BeTemporally("==", at))
+
+			described, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(described).To(Equal(infos))
+		})
+
+		It("leaves both zero for a run with no caller and no terminal record", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0)})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Terminal).To(BeEmpty())
+			Expect(infos[0].Caller).To(BeEmpty())
+			Expect(infos[0].Ended).To(BeZero())
+		})
+	})
+
 	Describe("listing by agent", func() {
 		// One run each for two agents sharing this store, plus one written before
 		// Store.Create stamped an agent, which is what an empty agent means.

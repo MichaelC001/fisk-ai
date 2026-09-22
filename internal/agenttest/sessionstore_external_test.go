@@ -106,6 +106,42 @@ var _ = Describe("FakeSessionStore", func() {
 		Expect(reopened.LastSeq()).To(Equal(uint64(1)))
 	})
 
+	// Both real backends read a run's records without its lock, so an embedder inspecting
+	// a run another journal holds reads it here too, and the holder carries on appending.
+	It("Should read a run's records while another journal holds it", func() {
+		j := create("run1", "do the thing")
+		claim := runstate.Record{Protocol: runstate.ClaimProtocol, Claim: &runstate.ClaimRecord{By: "worker"}}
+		Expect(j.Append(ctx, 2, claim)).To(Succeed())
+
+		_, err := store.Open(ctx, "run1")
+		Expect(err).To(MatchError(runstate.ErrLocked))
+
+		records, err := store.Records(ctx, "run1")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(records).To(HaveLen(2))
+		Expect([]uint64{records[0].Seq, records[1].Seq}).To(Equal([]uint64{1, 2}))
+		Expect(records[0].Meta.Prompt).To(Equal("do the thing"))
+		Expect(records[1].Claim).ToNot(BeNil())
+
+		held, err := j.Records(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(records).To(Equal(held), "the same stream the holder's journal reads")
+
+		Expect(j.CheckHeld(ctx)).To(Succeed())
+		Expect(j.Append(ctx, 3, runstate.Record{Protocol: runstate.TerminalProtocol,
+			Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+
+		records, err = store.Records(ctx, "run1")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(records).To(HaveLen(3))
+		Expect(records[2].Terminal).ToNot(BeNil())
+	})
+
+	It("Should report the records of a run nobody created as not found", func() {
+		_, err := store.Records(ctx, "missing")
+		Expect(err).To(MatchError(runstate.ErrNotFound))
+	})
+
 	// A journal on a shared store discovers it lost the run when it writes, so Evict is
 	// how a spec reaches the take-over path with one writer.
 	It("Should refuse a journal whose run was taken over", func() {
@@ -333,6 +369,39 @@ var _ = Describe("FakeSessionStore", func() {
 			for _, info := range infos {
 				Expect(info.Summary).To(BeNil(), "run %q", info.RunID)
 			}
+		})
+	})
+
+	Describe("the caller and the ending on a listing row", func() {
+		It("Should carry the caller off the meta record and the ending time off the terminal record", func() {
+			at := time.Unix(1700000000, 0).UTC()
+
+			j, err := store.Create(ctx, "run1", runstate.MetaRecord{RunID: "run1", Prompt: "do the thing", Caller: "peer1"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Time: at,
+				Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Caller).To(Equal("peer1"))
+			Expect(infos[0].Ended).To(BeTemporally("==", at))
+
+			described, err := store.Describe(ctx, runstate.ListFilter{}, []string{"run1"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(described).To(Equal(infos))
+		})
+
+		It("Should leave both zero for a run with no caller and no terminal record", func() {
+			create("run1", "still running")
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Terminal).To(BeEmpty())
+			Expect(infos[0].Caller).To(BeEmpty())
+			Expect(infos[0].Ended).To(BeZero())
 		})
 	})
 

@@ -63,9 +63,16 @@ type RunInfo struct {
 	// Agent is MetaRecord.Agent, so a listing says which agent a conversation belongs
 	// to without loading the run. Empty for a run journaled before that field existed.
 	Agent string
+	// Caller is MetaRecord.Caller, so a listing says who asked for a run without loading
+	// it. Empty where no channel was involved or the channel knew nothing about who
+	// asked.
+	Caller string
 	// Terminal is the reason the run ended, or empty if it is still open (was
 	// suspended or crashed).
 	Terminal TerminalReason
+	// Ended is the time on the terminal record Terminal was read from. It is zero when
+	// Terminal is empty, and for a terminal record that predates Record.Time.
+	Ended time.Time
 	// Summary is the conversation's cost when its last turn ended, read off the
 	// terminal record that turn wrote.
 	//
@@ -278,6 +285,15 @@ type Store interface {
 	Open(ctx context.Context, id string) (Journal, error)
 	// Load reads and folds a run without locking it, for inspection and listing.
 	Load(ctx context.Context, id string) (*RunState, error)
+	// Records returns every record of a run in seq order, as Journal.Records does, for
+	// a caller that reads the journal rather than resuming it. It takes no lock and does
+	// not fold, so it succeeds against a run another handle holds open, including one
+	// with a turn in flight, and leaves that handle able to append.
+	//
+	// It fails with ErrNotFound if the id is unknown and with ErrCorrupt for a record it
+	// cannot decode. The file backend drops an unparsable final line, the torn tail of a
+	// crash mid-write, rather than reporting it.
+	Records(ctx context.Context, id string) ([]Record, error)
 	// List summarizes the stored runs filter selects, applying it inside the store
 	// rather than leaving the caller to drop rows it already paid to read. A zero
 	// ListFilter summarizes every run.

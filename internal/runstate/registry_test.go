@@ -22,6 +22,7 @@ func (stubStore) Create(context.Context, string, MetaRecord) (Journal, error) {
 }
 func (stubStore) Open(context.Context, string) (Journal, error)       { return nil, nil }
 func (stubStore) Load(context.Context, string) (*RunState, error)     { return nil, nil }
+func (stubStore) Records(context.Context, string) ([]Record, error)   { return nil, nil }
 func (stubStore) List(context.Context, ListFilter) ([]RunInfo, error) { return nil, nil }
 func (stubStore) ListPage(context.Context, ListFilter, int, string) (RunPage, error) {
 	return RunPage{}, nil
