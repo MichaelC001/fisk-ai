@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/choria-io/ui/columns"
 
+	"github.com/choria-io/fisk-ai/internal/llm"
 	"github.com/choria-io/fisk-ai/internal/runstate"
 )
 
@@ -48,7 +51,163 @@ var _ = Describe("printSessionMeta", func() {
 		Expect(out).ToNot(ContainSubstring("Caller"))
 		Expect(out).ToNot(ContainSubstring("Conversation token"))
 	})
+
+	It("Should strip terminal control sequences from the model and the prompt", func() {
+		c := columns.New()
+		printSessionMeta(c, &runstate.RunState{
+			RunID:       "2ZqL",
+			Fingerprint: runstate.Fingerprint{Model: hostileModel},
+			Prompt:      "first \x1b[31mline\x1b[0m\nsecond\x1b]0;pwned\x07 line\x08",
+		})
+
+		out := c.String()
+		Expect(out).To(ContainSubstring("claude-sonnet -4-6"))
+		Expect(out).To(ContainSubstring("first line\n"))
+		Expect(out).To(ContainSubstring("second line"))
+		Expect(out).ToNot(ContainSubstring("[31m"))
+		Expect(out).ToNot(ContainSubstring("]0;"))
+		Expect(out).ToNot(ContainSubstring("pwned"))
+		Expect(out).ToNot(ContainSubstring("\x07"))
+		Expect(out).ToNot(ContainSubstring("\x08"))
+	})
+
+	// The status agrees with what session ls lists for the same run: a run that journaled
+	// anything after its last terminal record is open, whatever that record said.
+	Describe("the status of a run past its last ending", func() {
+		completed := runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}}
+		suspended := runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}}
+		user := runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{Message: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "again"}}}}}}
+		answer := func(text string) runstate.Record {
+			return runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: text}}}}}}
+		}
+		deferring := runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{ToolUse: &llm.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{}`)}}}}}}
+
+		fold := func(recs ...runstate.Record) *runstate.RunState {
+			GinkgoHelper()
+
+			all := []runstate.Record{{Protocol: runstate.MetaProtocol, Meta: &runstate.MetaRecord{Version: runstate.Version, RunID: "2ZqL", Prompt: "list the streams"}}}
+			all = append(all, recs...)
+			for i := range all {
+				all[i].Seq = uint64(i + 1)
+			}
+
+			rs, err := runstate.Fold(all)
+			Expect(err).ToNot(HaveOccurred())
+
+			return rs
+		}
+
+		DescribeTable("Should show it as open",
+			func(recs ...runstate.Record) {
+				c := columns.New()
+				printSessionMeta(c, fold(recs...))
+
+				out := c.String()
+				Expect(out).To(ContainSubstring("Status:"))
+				Expect(out).To(ContainSubstring("open"))
+				Expect(out).ToNot(ContainSubstring("completed"))
+				Expect(out).ToNot(ContainSubstring("suspended"))
+			},
+			Entry("a user turn after a terminal record", answer("one"), completed, user),
+			Entry("a claim after a terminal record", answer("one"), completed,
+				runstate.Record{Protocol: runstate.ClaimProtocol, Claim: &runstate.ClaimRecord{By: "worker-2"}}),
+			Entry("the memory revisions a turn writes before its terminal record", answer("one"), completed, user, answer("two"),
+				runstate.Record{Protocol: runstate.MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &runstate.MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7}}}),
+			Entry("a suspended run whose deferred call was answered", deferring,
+				runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{ToolUseID: "tu_1", ToolName: "shell"}},
+				suspended,
+				runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "tu_1", Result: llm.ToolResultBlock{ToolUseID: "tu_1", Content: "ok"}}}),
+		)
+
+		It("Should show the reason of a terminal record nothing follows", func() {
+			c := columns.New()
+			printSessionMeta(c, fold(answer("one"), completed))
+
+			Expect(c.String()).To(ContainSubstring("completed"))
+		})
+	})
 })
+
+// hostileModel carries a color sequence, an OSC title sequence and a bare BEL.
+const hostileModel = "claude-\x1b[31msonnet\x1b[0m\x1b]0;pwned\x07\x07-4-6"
+
+var _ = Describe("deferralSummary", func() {
+	It("Should strip terminal control sequences from the tool name", func() {
+		out := deferralSummary(runstate.DeferredRecord{
+			ToolUseID: "tu_1",
+			ToolName:  "\x1b[31mraise\x1b[0m_\x1b]0;pwned\x07change\x08",
+			Note:      "waiting on approval",
+		})
+
+		Expect(out).To(Equal("raise_change: waiting on approval"))
+	})
+})
+
+var _ = Describe("sessionLsAction", func() {
+	var origConfig, origStateDir string
+
+	BeforeEach(func() {
+		origConfig = sessionConfigFile
+		origStateDir = stateDirFlag
+	})
+
+	AfterEach(func() {
+		sessionConfigFile = origConfig
+		stateDirFlag = origStateDir
+	})
+
+	It("Should strip terminal control sequences from the model and the prompt", func() {
+		sessionConfigFile = ""
+		stateDirFlag = GinkgoT().TempDir()
+
+		ctx := context.Background()
+		store, cleanup, err := openSessionStore(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		defer cleanup()
+
+		j, err := store.Create(ctx, "lsHostile", runstate.MetaRecord{
+			RunID:       "lsHostile",
+			Fingerprint: runstate.Fingerprint{Model: hostileModel},
+			Prompt:      "list \x1b[31mthe\x1b[0m\nstreams\x1b]0;pwned\x07 now\x08",
+		})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(j.Close()).To(Succeed())
+
+		out := captureStdout(func() {
+			Expect(sessionLsAction(nil)).To(Succeed())
+		})
+
+		Expect(out).To(ContainSubstring("claude-sonnet -4-6"))
+		Expect(out).To(ContainSubstring("list the streams now"))
+		Expect(out).ToNot(ContainSubstring("\x1b"))
+		Expect(out).ToNot(ContainSubstring("pwned"))
+		Expect(out).ToNot(ContainSubstring("\x07"))
+		Expect(out).ToNot(ContainSubstring("\x08"))
+	})
+})
+
+// captureStdout runs f with os.Stdout redirected to a pipe and returns what it wrote.
+func captureStdout(f func()) string {
+	GinkgoHelper()
+
+	r, w, err := os.Pipe()
+	Expect(err).ToNot(HaveOccurred())
+
+	stdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = stdout }()
+
+	captured := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		captured <- data
+	}()
+
+	f()
+	Expect(w.Close()).To(Succeed())
+
+	return string(<-captured)
+}
 
 var _ = Describe("openSessionStore", func() {
 	// The session flags are package globals; snapshot and restore the ones these cases

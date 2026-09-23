@@ -915,6 +915,121 @@ var _ = Describe("runstate", func() {
 				Expect(rs.Ended).To(BeZero())
 			})
 		})
+
+		Describe("the ending a run stands at", func() {
+			summary := &ConversationSummary{Turns: 1, Counters: Counters{LlmCalls: 1}}
+
+			// completed is a conversation whose one turn answered. suspended is one whose
+			// turn deferred tu_1 and suspended to wait for the answer, with tu_2 still to be
+			// deferred.
+			prefix := func(kind string) []Record {
+				switch kind {
+				case "completed":
+					return []Record{
+						stamp(meta(), 1),
+						stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantText(0, "end_turn", "answer")}, 2),
+						stamp(Record{Seq: 3, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonCompleted, Summary: summary}}, 3),
+					}
+				default:
+					return []Record{
+						stamp(meta(), 1),
+						stamp(Record{Seq: 2, Protocol: AssistantProtocol, Assistant: assistantWithTools(0, "tu_1", "tu_2")}, 2),
+						stamp(Record{Seq: 3, Protocol: DeferredProtocol, Deferred: &DeferredRecord{ToolUseID: "tu_1", ToolName: "shell"}}, 3),
+						stamp(Record{Seq: 4, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonSuspended, Summary: summary}}, 4),
+					}
+				}
+			}
+
+			It("ends at the terminal record when nothing follows it", func() {
+				for _, kind := range []string{"completed", "suspended"} {
+					recs := prefix(kind)
+					rs, err := Fold(recs)
+					Expect(err).NotTo(HaveOccurred(), kind)
+					Expect(rs.Reopened).To(BeFalse(), kind)
+					Expect(rs.Ending()).To(BeIdenticalTo(rs.Terminal), kind)
+					Expect(rs.Ending()).To(BeIdenticalTo(recs[len(recs)-1].Terminal), kind)
+					Expect(rs.Ended).To(BeTemporally("==", recs[len(recs)-1].Time), kind)
+				}
+			})
+
+			// Every record after the terminal record reopens the run, whatever it is, and
+			// the run keeps the earlier Terminal and Completed answer a resume reads.
+			DescribeTable("reopens the run on a record that follows the terminal record",
+				func(kind string, after Record) {
+					recs := prefix(kind)
+					before, err := Fold(recs)
+					Expect(err).NotTo(HaveOccurred())
+
+					after.Seq = recs[len(recs)-1].Seq + 1
+					rs, err := Fold(append(recs, stamp(after, int(after.Seq))))
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(rs.Reopened).To(BeTrue())
+					Expect(rs.Ending()).To(BeNil())
+					Expect(rs.Ended).To(BeZero())
+					Expect(rs.Terminal).To(BeIdenticalTo(before.Terminal))
+					Expect(rs.Completed()).To(Equal(before.Completed()))
+				},
+				Entry("a user turn", "completed", Record{Protocol: UserProtocol, User: userRecord("again")}),
+				Entry("a worker's claim", "completed", Record{Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-2"}}),
+				Entry("an assistant turn", "completed", Record{Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "more")}),
+				Entry("a memory revisions record", "completed", Record{Protocol: MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7}}}),
+				Entry("a decision", "completed", Record{Protocol: DecisionProtocol, Optional: true, Decision: &DecisionRecord{Tool: "stream_rm"}}),
+				Entry("an unrecognized optional record", "completed", Record{Protocol: Protocol("io.choria.fisk-ai.v1.session.from_the_future"), Optional: true}),
+				Entry("the answer to a deferred call", "suspended", Record{Protocol: ToolResultProtocol, ToolResult: toolResult("tu_1")}),
+				Entry("a call approval", "suspended", Record{Protocol: CallApprovalProtocol, Optional: true, CallApproval: &CallApprovalRecord{ToolUseID: "tu_2", ToolName: "shell"}}),
+				Entry("another deferral", "suspended", Record{Protocol: DeferredProtocol, Deferred: &DeferredRecord{ToolUseID: "tu_2", ToolName: "shell"}}),
+			)
+
+			// The memory revisions record is written just before the terminal record, so a
+			// run that stopped between the two ends on it with a turn in flight.
+			It("stays open on a turn that wrote its memory revisions and no terminal record", func() {
+				recs := append(prefix("completed"),
+					stamp(Record{Seq: 4, Protocol: UserProtocol, User: userRecord("again")}, 4),
+					stamp(Record{Seq: 5, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "more")}, 5),
+					stamp(Record{Seq: 6, Protocol: MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7}}}, 6),
+				)
+
+				rs, err := Fold(recs)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Reopened).To(BeTrue())
+				Expect(rs.Ending()).To(BeNil())
+				Expect(rs.Ended).To(BeZero())
+				Expect(rs.Completed()).To(BeTrue(), "the earlier turn still answered")
+			})
+
+			It("ends at a later terminal record that closes the reopened run", func() {
+				recs := append(prefix("completed"),
+					stamp(Record{Seq: 4, Protocol: UserProtocol, User: userRecord("again")}, 4),
+					stamp(Record{Seq: 5, Protocol: AssistantProtocol, Assistant: assistantText(1, "end_turn", "more")}, 5),
+					stamp(Record{Seq: 6, Protocol: TerminalProtocol, Terminal: &TerminalRecord{Reason: ReasonError, Message: "boom"}}, 6),
+				)
+
+				rs, err := Fold(recs)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Reopened).To(BeFalse())
+				Expect(rs.Ending()).To(BeIdenticalTo(recs[5].Terminal))
+				Expect(rs.Ended).To(BeTemporally("==", at(6)))
+			})
+
+			It("reports no ending for a run that has no terminal record", func() {
+				rs, err := Fold([]Record{
+					stamp(meta(), 1),
+					stamp(Record{Seq: 2, Protocol: ClaimProtocol, Claim: &ClaimRecord{By: "worker-1"}}, 2),
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rs.Reopened).To(BeFalse())
+				Expect(rs.Ending()).To(BeNil())
+			})
+
+			// An embedder that builds a RunState by hand leaves Reopened false, so Ending
+			// reads as Terminal did.
+			It("returns Terminal from a RunState built without Fold", func() {
+				term := &TerminalRecord{Reason: ReasonCompleted}
+				Expect((&RunState{Terminal: term}).Ending()).To(BeIdenticalTo(term))
+				Expect((&RunState{}).Ending()).To(BeNil())
+			})
+		})
 	})
 
 	// Every backend answers an agent filter through this, so the three answers are

@@ -511,6 +511,18 @@ func (s *store) Load(ctx context.Context, id string) (*runstate.RunState, error)
 	return runstate.Fold(recs)
 }
 
+// Records implements runstate.Store. It reads the run through an ordered consumer. It
+// does not apply the hold Open applies to a run with a turn in flight, and it publishes
+// nothing, so the tail a holder's next append is fenced on does not move.
+func (s *store) Records(ctx context.Context, id string) ([]runstate.Record, error) {
+	err := runstate.ValidateID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.records(ctx, id)
+}
+
 // List implements runstate.Store.
 //
 // A listing is two records per run rather than the whole journal. Everything it names
@@ -852,6 +864,7 @@ func decodeMetaRow(id string, data []byte, stored time.Time, filter runstate.Lis
 		Model:   meta.Meta.Fingerprint.Model,
 		Prompt:  meta.Meta.Prompt,
 		Agent:   meta.Meta.Agent,
+		Caller:  meta.Meta.Caller,
 	}, nil
 }
 
@@ -863,9 +876,8 @@ func decodeMetaRow(id string, data []byte, stored time.Time, filter runstate.Lis
 // time, which is what this store has always reported.
 //
 // A run with a turn in flight ends on whatever that turn last wrote, which carries no
-// terminal payload, so it is reported as open. That is the one thing a listing reads
-// differently from a fold, which keeps the previous turn's ending until a new one
-// replaces it and so calls a running conversation completed.
+// terminal payload, so it is reported as open. This is the answer RunState.Ending gives
+// for the same run, since a last record that is terminal means nothing followed it.
 func (s *store) readEnding(ctx context.Context, id string, ri *runstate.RunInfo) {
 	last, err := s.stream.GetLastMsgForSubject(ctx, s.runWildcard(id))
 	if err != nil {
@@ -885,6 +897,7 @@ func (s *store) readEnding(ctx context.Context, id string, ri *runstate.RunInfo)
 	}
 	if rec.Terminal != nil {
 		ri.Terminal = rec.Terminal.Reason
+		ri.Ended = rec.Time
 		ri.Summary = rec.Terminal.Summary
 	}
 }

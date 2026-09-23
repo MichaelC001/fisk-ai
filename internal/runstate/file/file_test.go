@@ -206,6 +206,146 @@ var _ = Describe("FileStore", func() {
 		Expect(err).To(MatchError(runstate.ErrNotFound))
 	})
 
+	Describe("reading a run's records", func() {
+		It("returns what was appended in seq order while another journal holds the run", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			defer j.Close()
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")})).To(Succeed())
+			Expect(j.Append(ctx, 3, runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")})).To(Succeed())
+
+			if LocksRuns {
+				_, err = store.Open(ctx, id)
+				Expect(err).To(MatchError(runstate.ErrLocked), "the run is held, so a reader going through Open is refused")
+			}
+
+			recs, err := store.Records(ctx, id)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(3))
+			Expect([]uint64{recs[0].Seq, recs[1].Seq, recs[2].Seq}).To(Equal([]uint64{1, 2, 3}))
+			Expect(recs[0].Meta).NotTo(BeNil())
+			Expect(recs[0].Meta.RunID).To(Equal(id))
+			Expect(recs[1].Assistant).NotTo(BeNil())
+			Expect(recs[2].ToolResult).NotTo(BeNil())
+
+			held, err := j.Records(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(Equal(held), "the same stream the holder's journal reads")
+
+			Expect(j.Append(ctx, 4, runstate.Record{Protocol: runstate.TerminalProtocol, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.CheckHeld(ctx)).To(Succeed())
+
+			recs, err = store.Records(ctx, id)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(4))
+			Expect(recs[3].Terminal).NotTo(BeNil())
+		})
+
+		It("returns ErrNotFound for an unknown run", func() {
+			_, err := store.Records(ctx, newID())
+			Expect(err).To(MatchError(runstate.ErrNotFound))
+		})
+	})
+
+	Describe("the caller and the ending on a listing row", func() {
+		It("carries the caller off the meta record and the ending time off the terminal record", func() {
+			at := time.Unix(1700000000, 0).UTC()
+
+			id := newID()
+			meta := newMeta(id)
+			meta.Caller = "peer1"
+			j, err := store.Create(ctx, id, meta)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted}})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Caller).To(Equal("peer1"))
+			Expect(infos[0].Ended).To(BeTemporally("==", at))
+
+			described, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(described).To(Equal(infos))
+		})
+
+		It("leaves both zero for a run with no caller and no terminal record", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(j.Append(ctx, 2, runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0)})).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			infos, err := store.List(ctx, runstate.ListFilter{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(infos).To(HaveLen(1))
+			Expect(infos[0].Terminal).To(BeEmpty())
+			Expect(infos[0].Caller).To(BeEmpty())
+			Expect(infos[0].Ended).To(BeZero())
+		})
+	})
+
+	// A conversation that journaled anything after its last terminal record lists as
+	// open with no summary, which is what the JetStream store reports from its last record.
+	Describe("a run past its last ending", func() {
+		at := time.Unix(1700000000, 0).UTC()
+		summary := &runstate.ConversationSummary{Turns: 1, Counters: runstate.Counters{LlmCalls: 1}}
+		completed := runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonCompleted, Summary: summary}}
+		suspended := runstate.Record{Protocol: runstate.TerminalProtocol, Time: at, Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended, Summary: summary}}
+		user := runstate.Record{Protocol: runstate.UserProtocol, User: &runstate.UserRecord{Message: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Text: &llm.TextBlock{Text: "again"}}}}}}
+
+		DescribeTable("lists it as open with no summary",
+			func(recs ...runstate.Record) {
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).NotTo(HaveOccurred())
+				for i, rec := range recs {
+					Expect(j.Append(ctx, uint64(i+2), rec)).To(Succeed())
+				}
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).NotTo(HaveOccurred())
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+				Expect(err).NotTo(HaveOccurred())
+				described, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+				Expect(err).NotTo(HaveOccurred())
+
+				for name, rows := range map[string][]runstate.RunInfo{"List": infos, "ListPage": page.Runs, "Describe": described} {
+					Expect(rows).To(HaveLen(1), name)
+					Expect(rows[0].Terminal).To(BeEmpty(), name)
+					Expect(rows[0].Summary).To(BeNil(), name)
+					Expect(rows[0].Ended).To(BeZero(), name)
+				}
+			},
+			Entry("a user turn after a terminal record",
+				runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0)},
+				completed,
+				user,
+			),
+			Entry("a claim after a terminal record",
+				runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0)},
+				completed,
+				runstate.Record{Protocol: runstate.ClaimProtocol, Claim: &runstate.ClaimRecord{By: "worker-2"}},
+			),
+			Entry("the memory revisions a turn writes before its terminal record",
+				runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0)},
+				completed,
+				user,
+				runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(1)},
+				runstate.Record{Protocol: runstate.MemoryRevisionsProtocol, Optional: true, MemoryRevisions: &runstate.MemoryRevisionsRecord{Revisions: map[string]uint64{"notes": 7}}},
+			),
+			Entry("a suspended run whose deferred call was answered",
+				runstate.Record{Protocol: runstate.AssistantProtocol, Assistant: assistantWithTools(0, "tu_1")},
+				runstate.Record{Protocol: runstate.DeferredProtocol, Deferred: &runstate.DeferredRecord{ToolUseID: "tu_1", ToolName: "shell"}},
+				suspended,
+				runstate.Record{Protocol: runstate.ToolResultProtocol, ToolResult: toolResult("tu_1")},
+			),
+		)
+	})
+
 	Describe("listing by agent", func() {
 		// One run each for two agents sharing this store, plus one written before
 		// Store.Create stamped an agent, which is what an empty agent means.

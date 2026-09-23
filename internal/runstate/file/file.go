@@ -265,6 +265,32 @@ func (s *FileStore) Load(ctx context.Context, id string) (*runstate.RunState, er
 	return runstate.Fold(recs)
 }
 
+// Records implements runstate.Store. It reads the journal file without taking the run's
+// lock, so a holder keeps appending while it runs. A read that races an append sees the
+// new record whole or not at all, since a partly written final line is dropped as a torn
+// tail.
+func (s *FileStore) Records(ctx context.Context, id string) ([]runstate.Record, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	recs, err := readRecords(s.journalPath(id))
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("%w: %q", runstate.ErrNotFound, id)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return recs, nil
+}
+
 // List implements runstate.Store. It reads and folds one journal per run, so it checks
 // the context before each of them as well as at the start. The filter is applied through
 // runstate.ListFilter: the prefix against the journal's name, before the journal is read,
@@ -593,7 +619,7 @@ func (s *FileStore) summarize(id string) (*runstate.RunInfo, error) {
 		return nil, err
 	}
 
-	info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt, Agent: rs.Agent}
+	info := runstate.RunInfo{RunID: rs.RunID, Created: recs[0].Meta.Created, Model: rs.Fingerprint.Model, Prompt: rs.Prompt, Agent: rs.Agent, Caller: rs.Caller}
 
 	// The last record says when the journal was last written, which is what the
 	// JetStream store reports too. A journal whose records predate Record.Time falls
@@ -606,9 +632,11 @@ func (s *FileStore) summarize(id string) (*runstate.RunInfo, error) {
 			info.Updated = fi.ModTime()
 		}
 	}
-	if rs.Terminal != nil {
-		info.Terminal = rs.Terminal.Reason
-		info.Summary = rs.Terminal.Summary
+	ending := rs.Ending()
+	if ending != nil {
+		info.Terminal = ending.Reason
+		info.Ended = rs.Ended
+		info.Summary = ending.Summary
 	}
 
 	return &info, nil

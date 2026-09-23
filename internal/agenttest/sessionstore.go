@@ -186,6 +186,30 @@ func (s *FakeSessionStore) Load(ctx context.Context, id string) (*runstate.RunSt
 	return runstate.Fold(j.snapshot())
 }
 
+// Records implements runstate.Store. It takes no lock on the run, so it answers for a run
+// another journal holds open and leaves that journal able to append, as both real backends
+// do.
+func (s *FakeSessionStore) Records(ctx context.Context, id string) ([]runstate.Record, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = runstate.ValidateID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	j, ok := s.runs[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", runstate.ErrNotFound, id)
+	}
+
+	return j.snapshot(), nil
+}
+
 // List implements runstate.Store. The filter is answered through
 // runstate.ListFilter.MatchesID and MatchesAgent, the calls both real backends make, so a
 // test written against this fake sees a run with no agent listed under any agent, and a
@@ -370,10 +394,13 @@ func runInfoFor(id string, rs *runstate.RunState, created, updated time.Time) ru
 		Model:   rs.Fingerprint.Model,
 		Prompt:  rs.Prompt,
 		Agent:   rs.Agent,
+		Caller:  rs.Caller,
 	}
-	if rs.Terminal != nil {
-		info.Terminal = rs.Terminal.Reason
-		info.Summary = rs.Terminal.Summary
+	ending := rs.Ending()
+	if ending != nil {
+		info.Terminal = ending.Reason
+		info.Ended = rs.Ended
+		info.Summary = ending.Summary
 	}
 
 	return info

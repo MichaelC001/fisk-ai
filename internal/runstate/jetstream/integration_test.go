@@ -372,6 +372,43 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).To(MatchError(runstate.ErrNotFound))
 			_, err = store.Load(ctx, id)
 			Expect(err).To(MatchError(runstate.ErrNotFound))
+			_, err = store.Records(ctx, id)
+			Expect(err).To(MatchError(runstate.ErrNotFound))
+		})
+
+		// The default hold is on and the holder's turn is in flight, which is the run Open
+		// refuses. Records reads it anyway and moves nothing the holder's fence is on.
+		It("Should read the records of a run with a turn in flight and leave its holder appending", func() {
+			id := newID()
+			j, err := store.Create(ctx, id, newMeta(id))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(j.Append(ctx, 2, assistantRec(0, "tu_1"))).To(Succeed())
+			Expect(j.Append(ctx, 3, toolResultRec("tu_1"))).To(Succeed())
+
+			_, err = store.Open(ctx, id)
+			Expect(err).To(MatchError(runstate.ErrLocked))
+
+			recs, err := store.Records(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recs).To(HaveLen(3))
+			Expect([]uint64{recs[0].Seq, recs[1].Seq, recs[2].Seq}).To(Equal([]uint64{1, 2, 3}))
+			Expect(recs[0].Meta).ToNot(BeNil())
+			Expect(recs[0].Meta.RunID).To(Equal(id))
+			Expect(recs[1].Assistant).ToNot(BeNil())
+			Expect(recs[2].ToolResult).ToNot(BeNil())
+
+			held, err := j.Records(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recs).To(Equal(held), "the same stream the holder's journal reads")
+
+			Expect(j.CheckHeld(ctx)).To(Succeed(), "reading did not move the tail")
+			Expect(j.Append(ctx, 4, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+			Expect(j.Close()).To(Succeed())
+
+			recs, err = store.Records(ctx, id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recs).To(HaveLen(4))
+			Expect(recs[3].Terminal).ToNot(BeNil())
 		})
 
 		// The hold is off: a meta record is not a terminal record, so under the default
@@ -722,6 +759,55 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(err).ToNot(HaveOccurred())
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(Equal(runstate.ReasonCompleted))
+		})
+
+		Describe("the caller and the ending on a listing row", func() {
+			It("Should carry the caller off the meta record and the ending time off the terminal record", func() {
+				at := time.Unix(1700000000, 0).UTC()
+
+				id := newID()
+				meta := newMeta(id)
+				meta.Caller = "peer1"
+				j, err := store.Create(ctx, id, meta)
+				Expect(err).ToNot(HaveOccurred())
+
+				ending := terminalRec(runstate.ReasonCompleted)
+				ending.Time = at
+				Expect(j.Append(ctx, 2, ending)).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Caller).To(Equal("peer1"))
+				Expect(infos[0].Ended).To(BeTemporally("==", at))
+
+				described, err := store.Describe(ctx, runstate.ListFilter{}, []string{id})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(described).To(Equal(infos))
+
+				page, err := store.ListPage(ctx, runstate.ListFilter{}, 10, "")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(page.Runs).To(Equal(infos))
+			})
+
+			// The listing reports a run whose next turn is under way as open, so the
+			// ending of the turn before it is not reported either.
+			It("Should leave both zero for a run with no caller and a turn in flight", func() {
+				id := newID()
+				j, err := store.Create(ctx, id, newMeta(id))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(j.Append(ctx, 2, terminalRec(runstate.ReasonCompleted))).To(Succeed())
+				Expect(j.Append(ctx, 3, assistantRec(0))).To(Succeed())
+				Expect(j.Close()).To(Succeed())
+
+				infos, err := store.List(ctx, runstate.ListFilter{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(infos).To(HaveLen(1))
+				Expect(infos[0].Terminal).To(BeEmpty())
+				Expect(infos[0].Caller).To(BeEmpty())
+				Expect(infos[0].Ended).To(BeZero())
+			})
 		})
 
 		Describe("listing the conversation summary", func() {
@@ -1215,10 +1301,9 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			})
 		})
 
-		// The one thing a listing reads differently from a fold. A fold keeps the last
-		// terminal record it saw until another replaces it, so a conversation whose next
-		// turn is under way still reads as completed; the last record says what is
-		// actually true of it now.
+		// A fold keeps the last terminal record it saw until another replaces it, because
+		// resume reads it. The listing reads the last record, which says the conversation
+		// has a turn under way.
 		It("Should report a conversation with a turn in flight as open", func() {
 			id := newID()
 			j, err := store.Create(ctx, id, newMeta(id))
@@ -1235,11 +1320,12 @@ var _ = Describe("Integration: jetstream session", Label("integration"), func() 
 			Expect(infos).To(HaveLen(1))
 			Expect(infos[0].Terminal).To(BeEmpty())
 
-			// The fold still carries the earlier ending, so the two differ on purpose
-			// rather than by one of them losing the record.
+			// The fold still carries the earlier terminal record for resume, and reports
+			// no ending, as the listing does.
 			rs, err := store.Load(ctx, id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(rs.Terminal.Reason).To(Equal(runstate.ReasonCompleted))
+			Expect(rs.Ending()).To(BeNil())
 		})
 
 		// The listing must not grow a dependency on the middle of a journal again: every

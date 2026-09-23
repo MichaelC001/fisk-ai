@@ -242,6 +242,22 @@ type RunState struct {
 	MemoryRevisions map[string]uint64
 	// Terminal is set when a Terminal record was journaled.
 	Terminal *TerminalRecord
+	// Reopened reports that a record was journaled after the last Terminal record: a
+	// new turn, a worker's claim, an answer to a deferred call or any other record. It
+	// is false when there is no Terminal record. Terminal keeps the earlier ending
+	// either way, since a resume reads it.
+	Reopened bool
+}
+
+// Ending returns the terminal record that ends the run as it stands, or nil when the
+// run has none or was reopened after it. A listing and a status report read this, and
+// a resume reads Terminal.
+func (s *RunState) Ending() *TerminalRecord {
+	if s.Reopened {
+		return nil
+	}
+
+	return s.Terminal
 }
 
 // Completed reports whether the last run in this journal ended by answering.
@@ -337,6 +353,12 @@ func Fold(records []Record) (*RunState, error) {
 			return nil, fmt.Errorf("%w: seq %d not increasing after %d", ErrCorrupt, r.Seq, lastSeq)
 		}
 		lastSeq = r.Seq
+
+		// Set before the switch so a record passed over below still counts. A terminal
+		// record clears it.
+		if rs.Terminal != nil {
+			rs.Reopened = true
+		}
 
 		switch r.Protocol {
 		case MetaProtocol:
@@ -463,6 +485,7 @@ func Fold(records []Record) (*RunState, error) {
 			}
 			rs.Terminal = r.Terminal
 			rs.Ended = r.Time
+			rs.Reopened = false
 			// A one-shot approval the run did not reach is spent here rather than carried
 			// into the next resume, where a later question going unanswered would leave it
 			// authorizing a dispatch nobody approved. A standing grant is not: it covers
@@ -523,6 +546,10 @@ func Fold(records []Record) (*RunState, error) {
 	if sawAssistant {
 		rs.NextIteration = lastIter + 1
 		rs.LastStopReason = lastStop
+	}
+
+	if rs.Reopened {
+		rs.Ended = time.Time{}
 	}
 
 	return rs, nil
