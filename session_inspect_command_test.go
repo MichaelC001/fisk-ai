@@ -197,29 +197,57 @@ var _ = Describe("session query", func() {
 		})
 	})
 
-	Describe("printSessionCall", func() {
+	Describe("printSessionCalls", func() {
 		render := func(c runstate.Call, callsOnly bool, resultsOnly bool) string {
 			var buf bytes.Buffer
-			printSessionCall(&buf, c, callsOnly, resultsOnly)
+			printSessionCalls(&buf, "2ZqL", []runstate.Call{c}, callsOnly, resultsOnly)
 			return buf.String()
 		}
 
-		It("Should print the tool, the id and the iteration, the input indented and the answer", func() {
+		It("Should list the tool, the id, the iteration and the status, then the input and the answer under their own headings", func() {
 			out := render(calls[1], false, false)
 
-			Expect(out).To(Equal("stream_info tu_2 (iteration 0)\nInput:\n{\n  \"stream\": \"ORDERS\"\n}\nAnswer:\n{\n  \"messages\": 10\n}\n"))
+			Expect(out).To(Equal("Session \x1b[1m2ZqL\x1b[0m:\n\n" +
+				"  Call 1:\n\n" +
+				"           Tool: stream_info\n" +
+				"        Call ID: tu_2\n" +
+				"      Iteration: 0\n" +
+				"         Status: answered\n\n" +
+				"    Input:\n\n" +
+				"      {\n" +
+				"        \"stream\": \"ORDERS\"\n" +
+				"      }\n\n" +
+				"    Answer:\n\n" +
+				"      {\n" +
+				"        \"messages\": 10\n" +
+				"      }\n"))
 		})
 
-		It("Should print an answer that is not JSON verbatim", func() {
+		It("Should number the calls in the order given", func() {
+			var buf bytes.Buffer
+			printSessionCalls(&buf, "2ZqL", calls[:2], false, false)
+
+			Expect(buf.String()).To(MatchRegexp(`(?s)  Call 1:\n\n\s+Tool: stream_ls\n.*  Call 2:\n\n\s+Tool: stream_info\n`))
+		})
+
+		It("Should print an answer that is not JSON line by line at the section indent", func() {
 			stdout := "total 8\n-rw-r--r--  1 rip  staff  12 Sep 22 10:00 a.txt\n\tindented \"quoted\" line\n"
 			c := answered(0, "tu_9", "shell", `{"cmd":"ls -l"}`, stdout, false)
 
-			Expect(render(c, false, false)).To(HaveSuffix("Answer:\n" + stdout))
+			// The document prints a tab as one space.
+			Expect(render(c, false, false)).To(HaveSuffix("    Answer:\n\n" +
+				"      total 8\n" +
+				"      -rw-r--r--  1 rip  staff  12 Sep 22 10:00 a.txt\n" +
+				"       indented \"quoted\" line\n"))
 		})
 
 		It("Should mark an error answer and say when there is no answer yet", func() {
-			Expect(render(calls[2], false, false)).To(ContainSubstring("Answer (error):\nstream not found\n"))
-			Expect(render(calls[3], false, false)).To(HaveSuffix("Answer: none yet\n"))
+			Expect(render(calls[2], false, false)).To(ContainSubstring("Status: error\n"))
+			Expect(render(calls[2], false, false)).To(HaveSuffix("    Answer:\n\n      stream not found\n"))
+
+			out := render(calls[3], false, false)
+			Expect(out).To(ContainSubstring("Status: no answer yet\n"))
+			Expect(out).ToNot(ContainSubstring("Answer:"))
 		})
 
 		It("Should show the deferral of a call waiting on its answer", func() {
@@ -230,19 +258,58 @@ var _ = Describe("session query", func() {
 		})
 
 		It("Should leave out the answer under --calls-only and the input under --results-only", func() {
-			Expect(render(calls[0], true, false)).ToNot(ContainSubstring("Answer"))
-			Expect(render(calls[0], false, true)).ToNot(ContainSubstring("Input"))
+			out := render(calls[0], true, false)
+			Expect(out).To(ContainSubstring("Input:"))
+			Expect(out).ToNot(ContainSubstring("Answer"))
+			Expect(out).ToNot(ContainSubstring("Status"))
+
+			out = render(calls[0], false, true)
+			Expect(out).To(ContainSubstring("Answer:"))
+			Expect(out).ToNot(ContainSubstring("Input"))
 		})
 
 		It("Should strip terminal control sequences and keep newlines", func() {
 			c := answered(0, "tu_\x1b[31m1", "\x1b]0;pwned\x07shell", `{"cmd":"echo \u001b[31m"}`, "line \x1b[31mone\x1b[0m\nline two\x08", false)
 
+			// The heading is bold on a terminal, so the spec checks for the journal's own
+			// sequences, since the output still holds the bold escape.
 			out := render(c, false, false)
-			Expect(out).ToNot(ContainSubstring("\x1b"))
+			Expect(out).ToNot(ContainSubstring("\x1b[31m"))
+			Expect(out).ToNot(ContainSubstring("\x1b]"))
 			Expect(out).ToNot(ContainSubstring("pwned"))
 			Expect(out).ToNot(ContainSubstring("\x07"))
 			Expect(out).ToNot(ContainSubstring("\x08"))
-			Expect(out).To(ContainSubstring("line one\nline two"))
+			Expect(out).To(ContainSubstring("Tool: shell\n"))
+			Expect(out).To(ContainSubstring("Call ID: tu_1\n"))
+			Expect(out).To(ContainSubstring("      line one\n      line two\n"))
+		})
+
+		It("Should print markup in the journal's text literally", func() {
+			c := answered(0, "tu_{bold}1{/bold}", "{red}shell{/red}", `{"cmd":"{bold}ls{/bold}"}`, "{reset}{black}hidden{/black}", false)
+
+			out := render(c, false, false)
+			Expect(out).To(ContainSubstring("Tool: {red}shell{/red}\n"))
+			Expect(out).To(ContainSubstring("Call ID: tu_{bold}1{/bold}\n"))
+			Expect(out).To(ContainSubstring(`"cmd": "{bold}ls{/bold}"`))
+			Expect(out).To(ContainSubstring("      {reset}{black}hidden{/black}\n"))
+			Expect(strings.Count(out, "\x1b[")).To(Equal(2))
+		})
+	})
+
+	Describe("sessionText", func() {
+		It("Should render as it is in text and as a fenced block in Markdown", func() {
+			t := sessionText("# not a heading\n{bold}x{/bold}")
+			Expect(t.String()).To(Equal("# not a heading\n{bold}x{/bold}"))
+
+			md, err := t.Markdown()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(md)).To(Equal("```\n# not a heading\n{bold}x{/bold}\n```\n"))
+		})
+
+		It("Should fence the Markdown with more backticks than any run the text holds", func() {
+			md, err := sessionText("a ```` b").Markdown()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(md)).To(Equal("`````\na ```` b\n`````\n"))
 		})
 	})
 
@@ -264,7 +331,18 @@ var _ = Describe("session query", func() {
 				Expect(sessionQueryAction(nil)).To(Succeed())
 			})
 
-			Expect(out).To(Equal("stream_info tu_2 (iteration 0)\nInput:\n{\n  \"stream\": \"X\"\n}\nAnswer (error):\nno such stream\n"))
+			Expect(out).To(Equal("Session \x1b[1m2ZqLquery\x1b[0m:\n\n" +
+				"  Call 1:\n\n" +
+				"           Tool: stream_info\n" +
+				"        Call ID: tu_2\n" +
+				"      Iteration: 0\n" +
+				"         Status: error\n\n" +
+				"    Input:\n\n" +
+				"      {\n" +
+				"        \"stream\": \"X\"\n" +
+				"      }\n\n" +
+				"    Answer:\n\n" +
+				"      no such stream\n"))
 		})
 
 		It("Should render the selected calls as one JSON document in the library's shape", func() {
@@ -354,27 +432,31 @@ var _ = Describe("session stats", func() {
 			}
 
 			var buf bytes.Buffer
-			printSessionStats(&buf, runstate.Stats(all))
+			printSessionStats(&buf, "2ZqL", runstate.Stats(all))
 
 			return buf.String()
 		}
 
-		It("Should frame the run, measure the tokens against the budget and say what the tool time measured", func() {
+		It("Should frame the run, measure the tokens against the budget and place the tables in sections", func() {
 			out := stats(
 				sessionAssistant(sessionTime(1), 0, sessionCall("tu_1", "stream_ls", `{}`)),
 				sessionResult(sessionTime(3), "tu_1", "X", true),
 				runstate.Record{Protocol: runstate.TerminalProtocol, Time: sessionTime(4), Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonBudget}},
 			)
 
-			// The document renders as Markdown where the environment asks for it, so the
-			// assertions stay on values that read the same both ways.
-			Expect(out).To(ContainSubstring("ops"))
-			Expect(out).To(MatchRegexp(`Status:(\*\*)? budget`))
-			Expect(out).To(ContainSubstring("1 (at most 10 per turn)"))
-			Expect(out).To(ContainSubstring("15 of 1000 budget (10 in / 5 out)"))
-			Expect(out).To(MatchRegexp(`4(\.00)?s \(creation to the last journal record\)`))
-			Expect(out).To(MatchRegexp(tableRow("stream_ls", "application", "1", "1", "0", "0", "1", `2(\.00)?s`)))
-			Expect(out).To(ContainSubstring("Tool time is the gap between the record that ended each call"))
+			Expect(out).To(HavePrefix("Session \x1b[1m2ZqL\x1b[0m:\n\n"))
+			Expect(out).To(ContainSubstring("     Agent: ops\n"))
+			Expect(out).To(ContainSubstring("    Status: budget\n"))
+			Expect(out).To(ContainSubstring("Iterations: 1 (at most 10 per turn)\n"))
+			Expect(out).To(ContainSubstring("    Tokens: 15 of 1000 budget (10 in / 5 out)\n"))
+			Expect(out).To(ContainSubstring("Wall clock: 4.00s (creation to the last journal record)\n"))
+			Expect(out).To(MatchRegexp(`\n  Model responses:\n\n    \S`))
+			Expect(out).To(MatchRegexp(`\n  Tools:\n\n    \S`))
+			Expect(out).To(MatchRegexp(tableRow("0", "10", "5", "0", "0", "0", "15")))
+			Expect(out).To(MatchRegexp(tableRow("stream_ls", "application", "1", "1", "0", "0", "1", `2\.00s`)))
+			Expect(out).ToNot(ContainSubstring("Tool time is the gap"))
+			Expect(out).ToNot(ContainSubstring("Untimed:"))
+			Expect(out).ToNot(ContainSubstring("Unanswered:"))
 		})
 
 		It("Should report an open run and say which calls the time covers", func() {
@@ -385,9 +467,9 @@ var _ = Describe("session stats", func() {
 				sessionResult(sessionTime(12), "tu_2", "b", false),
 			)
 
-			Expect(out).To(MatchRegexp(`Status:(\*\*)? open`))
+			Expect(out).To(ContainSubstring("Status: open\n"))
 			Expect(out).To(ContainSubstring("(1 of 2 calls)"))
-			Expect(out).To(ContainSubstring("1 of 2 calls ended with a record that carries no time and are not timed.\n"))
+			Expect(out).To(HaveSuffix("\n         Untimed: 1 of 2 calls ended with a record that carries no time\n"))
 			Expect(out).ToNot(ContainSubstring("no answer yet"))
 		})
 
@@ -398,8 +480,8 @@ var _ = Describe("session stats", func() {
 				runstate.Record{Protocol: runstate.TerminalProtocol, Time: sessionTime(4), Terminal: &runstate.TerminalRecord{Reason: runstate.ReasonSuspended}},
 			)
 
-			Expect(out).To(ContainSubstring("Tool time is the gap between the record that ended each call"))
-			Expect(out).To(HaveSuffix("1 of 2 calls have no answer yet, so they are not timed.\n"))
+			Expect(out).ToNot(ContainSubstring("Tool time is the gap"))
+			Expect(out).To(HaveSuffix("\n      Unanswered: 1 of 2 calls have no answer yet\n"))
 			Expect(out).ToNot(ContainSubstring("carries no time"))
 			Expect(out).ToNot(ContainSubstring("records no times"))
 		})
@@ -409,14 +491,14 @@ var _ = Describe("session stats", func() {
 				sessionAssistant(sessionTime(1), 0, sessionCall("tu_1", "shell", `{}`)),
 			)
 
-			Expect(out).To(HaveSuffix("\n1 of 1 calls have no answer yet, so they are not timed.\n"))
+			Expect(out).To(HaveSuffix("\n      Unanswered: 1 of 1 calls have no answer yet\n"))
 			Expect(out).ToNot(ContainSubstring("records no times"))
 			Expect(out).ToNot(ContainSubstring("Tool time is the gap"))
 		})
 
 		It("Should show no timing for a journal that carries no times", func() {
 			var buf bytes.Buffer
-			printSessionStats(&buf, runstate.Stats([]runstate.Record{
+			printSessionStats(&buf, "2ZqL", runstate.Stats([]runstate.Record{
 				{Seq: 1, Protocol: runstate.MetaProtocol, Meta: &runstate.MetaRecord{Version: runstate.Version, RunID: "2ZqL"}},
 				{Seq: 2, Protocol: runstate.AssistantProtocol, Assistant: &runstate.AssistantRecord{Message: llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{ToolUse: sessionCall("tu_1", "shell", `{}`)}}}}},
 				{Seq: 3, Protocol: runstate.ToolResultProtocol, ToolResult: &runstate.ToolResultRecord{ToolUseID: "tu_1", Result: llm.ToolResultBlock{ToolUseID: "tu_1", Content: "a"}}},
@@ -424,7 +506,7 @@ var _ = Describe("session stats", func() {
 
 			out := buf.String()
 			Expect(out).To(ContainSubstring("not recorded in this journal"))
-			Expect(out).To(ContainSubstring("The journal records no times for these calls"))
+			Expect(out).To(ContainSubstring("Untimed: the journal records no times for these calls\n"))
 			Expect(out).ToNot(ContainSubstring("0s"))
 		})
 
@@ -435,14 +517,14 @@ var _ = Describe("session stats", func() {
 				runstate.Record{Protocol: runstate.TerminalProtocol, Time: sessionTime(3), Terminal: &runstate.TerminalRecord{Reason: "\x1b[31mdone\x1b]0;pwned\x07"}},
 			)
 
-			// The heading is bold on a terminal, so what is asserted is that the journal's
-			// own sequences are gone rather than that no escape is printed at all.
+			// The heading is bold on a terminal, so the spec checks for the journal's own
+			// sequences, since the output still holds the bold escape.
 			Expect(out).ToNot(ContainSubstring("[31m"))
 			Expect(out).ToNot(ContainSubstring("]0;"))
 			Expect(out).ToNot(ContainSubstring("pwned"))
 			Expect(out).ToNot(ContainSubstring("\x07"))
 			Expect(out).To(MatchRegexp(tableRow("shell", "application")))
-			Expect(out).To(MatchRegexp(`Status:(\*\*)? done\n`))
+			Expect(out).To(ContainSubstring("Status: done\n"))
 		})
 	})
 
@@ -590,7 +672,7 @@ var _ = Describe("session search", func() {
 
 			out := buf.String()
 			Expect(out).To(MatchRegexp(tableRow("ID", "Agent", "Caller", "Model", "Status", "Created", "Updated", "Prompt")))
-			Expect(out).To(ContainSubstring("2 more sessions matched every other filter but carry no agent"))
+			Expect(out).To(MatchRegexp(`\S\n\n2 more sessions matched every other filter but carry no agent, so --identity left them out\. They were journaled before the agent was recorded\.\n$`))
 		})
 
 		It("Should print the session ls columns with no filter that adds one", func() {

@@ -180,12 +180,7 @@ func sessionQueryAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	for i, c := range selected {
-		if i > 0 {
-			fmt.Println()
-		}
-		printSessionCall(os.Stdout, c, queryCallsOnly, queryResultsOnly)
-	}
+	printSessionCalls(os.Stdout, sessionArgID, selected, queryCallsOnly, queryResultsOnly)
 
 	return nil
 }
@@ -206,35 +201,96 @@ func projectSessionCalls(calls []runstate.Call, callsOnly bool, resultsOnly bool
 	return calls
 }
 
-// printSessionCall renders one call for an operator: the tool, the call id and the
-// iteration, then the input, then the answer. Everything printed is read back from a
-// journal and sanitized, with newlines kept in the input and the answer.
-func printSessionCall(w io.Writer, c runstate.Call, callsOnly bool, resultsOnly bool) {
-	fmt.Fprintf(w, "%s %s (iteration %d)\n", sanitize.ForTerminal(c.Tool, 100), sanitize.ForTerminal(c.ToolUseID, 100), c.Iteration)
+// printSessionCalls renders the selected calls of a run for an operator as one
+// document, a section per call.
+func printSessionCalls(w io.Writer, runID string, calls []runstate.Call, callsOnly bool, resultsOnly bool) {
+	c := columns.New()
+	c.Headingf("Session {bold}%s{/bold}", sanitize.ForTerminal(runID, 100))
 
-	if !resultsOnly {
-		fmt.Fprintln(w, "Input:")
-		fmt.Fprintln(w, sanitize.ForDisplay(prettySessionText(c.Input)))
+	for i, call := range calls {
+		addSessionCall(c, i+1, call, callsOnly, resultsOnly)
 	}
 
-	if callsOnly {
-		return
+	c.WriteTo(w)
+}
+
+// addSessionCall adds one call as a section: the tool, the call id, the iteration and
+// the answer's status as items, then the input and the answer under their own
+// headings. Everything added is read back from a journal and sanitized, with newlines
+// kept in the input and the answer.
+//
+// The document parses markup such as {bold} in headings and free lines, and has no
+// way to escape it. Journal text therefore goes into item values and sessionText
+// blocks, which print literally, and the section heading is the call's position.
+func addSessionCall(c *columns.Document, n int, call runstate.Call, callsOnly bool, resultsOnly bool) {
+	c.Section(fmt.Sprintf("Call %d", n), func(c *columns.Document) {
+		c.Item("Tool", sanitize.ForTerminal(call.Tool, 100))
+		c.Item("Call ID", sanitize.ForTerminal(call.ToolUseID, 100))
+		c.Item("Iteration", call.Iteration)
+
+		if !callsOnly {
+			if call.Deferred != nil {
+				c.Item("Deferred", deferralSummary(*call.Deferred))
+			}
+
+			switch {
+			case call.Answer == nil:
+				c.Item("Status", "no answer yet")
+			case call.Answer.Result.IsError:
+				c.Item("Status", "error")
+			default:
+				c.Item("Status", "answered")
+			}
+		}
+
+		if !resultsOnly {
+			c.Section("Input", func(c *columns.Document) {
+				c.Embed(sessionText(sanitize.ForDisplay(prettySessionText(call.Input))))
+			})
+		}
+
+		if callsOnly || call.Answer == nil {
+			return
+		}
+
+		c.Section("Answer", func(c *columns.Document) {
+			c.Embed(sessionText(sanitize.ForDisplay(prettySessionText([]byte(call.Answer.Result.Content)))))
+		})
+	})
+}
+
+// sessionText is a block of text a document embeds as it is. Unlike a free line it is
+// not parsed for markup, and it keeps its newlines. The Markdown form is a fenced code
+// block, so the text is not read as Markdown either.
+type sessionText string
+
+func (t sessionText) String() string {
+	return string(t)
+}
+
+func (t sessionText) Markdown() ([]byte, error) {
+	longest, run := 0, 0
+	for _, r := range t {
+		if r != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
 	}
 
-	if c.Deferred != nil {
-		fmt.Fprintf(w, "Deferred: %s\n", deferralSummary(*c.Deferred))
-	}
+	fence := strings.Repeat("`", max(3, longest+1))
 
-	switch {
-	case c.Answer == nil:
-		fmt.Fprintln(w, "Answer: none yet")
-	case c.Answer.Result.IsError:
-		fmt.Fprintln(w, "Answer (error):")
-		fmt.Fprintln(w, sanitize.ForDisplay(prettySessionText([]byte(c.Answer.Result.Content))))
-	default:
-		fmt.Fprintln(w, "Answer:")
-		fmt.Fprintln(w, sanitize.ForDisplay(prettySessionText([]byte(c.Answer.Result.Content))))
-	}
+	return fmt.Appendf(nil, "%s\n%s\n%s\n", fence, t, fence), nil
+}
+
+func (t sessionText) JSON() ([]byte, error) {
+	return json.Marshal(string(t))
+}
+
+// YAML returns the JSON form, which is a valid YAML scalar.
+func (t sessionText) YAML() ([]byte, error) {
+	return t.JSON()
 }
 
 // prettySessionText indents text that parses as JSON and returns anything else as it
@@ -271,17 +327,19 @@ func sessionStatsAction(_ *fisk.ParseContext) error {
 		return writeSessionJSON(os.Stdout, stats)
 	}
 
-	printSessionStats(os.Stdout, stats)
+	printSessionStats(os.Stdout, sessionArgID, stats)
 
 	return nil
 }
 
-// printSessionStats renders a run's statistics for an operator: the frame, a table of
-// assistant turns, a table of tools and a note saying what the tool time measured.
-// Strings read back from the journal are sanitized to one line.
-func printSessionStats(w io.Writer, s runstate.Statistics) {
+// printSessionStats renders a run's statistics for an operator as one document: the
+// frame, then sections holding a table of model responses and a table of tools. The
+// heading shows runID, the id the store validated, rather than the journal's own copy,
+// since a heading is parsed for markup. Strings read back from the journal are
+// sanitized to one line.
+func printSessionStats(w io.Writer, runID string, s runstate.Statistics) {
 	c := columns.New()
-	c.Headingf("Session {bold}%s{/bold}", sanitize.ForTerminal(s.RunID, 100))
+	c.Headingf("Session {bold}%s{/bold}", sanitize.ForTerminal(runID, 100))
 
 	if s.Agent != "" {
 		c.Item("Agent", sanitize.ForTerminal(s.Agent, 100))
@@ -315,66 +373,60 @@ func printSessionStats(w io.Writer, s runstate.Statistics) {
 
 	c.Item("Tokens", statsTokens(s))
 
-	fmt.Fprintln(w, c.String())
-
 	if len(s.Responses) > 0 {
-		fmt.Fprintln(w)
-
-		responses := table.NewTableWriter("Model responses")
+		responses := table.NewTableWriter("")
 		responses.AddHeaders("Iteration", "In", "Out", "Cache read", "Cache write", "Thinking", "Total")
 		for _, r := range s.Responses {
 			responses.AddRow(r.Iteration, r.Tokens.In, r.Tokens.Out, r.Tokens.CacheRead, r.Tokens.CacheCreate, r.Tokens.Thinking, r.Tokens.Total())
 		}
-		responses.WriteTo(w)
+
+		c.Section("Model responses", func(c *columns.Document) {
+			c.Embed(responses)
+		})
 	}
 
-	if len(s.Tools) == 0 {
+	if len(s.Tools) > 0 {
+		var calls, timed, untimed int64
+		tools := table.NewTableWriter("")
+		tools.AddHeaders("Tool", "Kind", "Calls", "Dispatched", "Not run", "Unanswered", "Errors", "Time")
+		for _, t := range s.Tools {
+			calls += t.Calls
+			timed += t.Timed
+			untimed += t.Untimed
+			tools.AddRow(sanitize.ForTerminal(t.Tool, 60), strings.Join(t.Kinds, ", "), t.Calls, t.Dispatched, t.Undispatched, t.Unanswered, t.Errors, statsToolTime(t))
+		}
+
+		c.Section("Tools", func(c *columns.Document) {
+			c.Embed(tools)
+			addStatsTimingItems(c, calls, timed, untimed)
+		})
+	}
+
+	c.WriteTo(w)
+}
+
+// addStatsTimingItems says which calls the Time column leaves out. A call that ended
+// but has no time is one whose records carry none. A call that never ended, by a
+// result or a deferral, has no answer yet, and the Unanswered column counts it with
+// the deferred calls still waiting.
+func addStatsTimingItems(c *columns.Document, calls int64, timed int64, untimed int64) {
+	if timed == calls {
 		return
 	}
 
-	fmt.Fprintln(w)
-
-	var calls, timed, untimed int64
-	tools := table.NewTableWriter("Tools")
-	tools.AddHeaders("Tool", "Kind", "Calls", "Dispatched", "Not run", "Unanswered", "Errors", "Time")
-	for _, t := range s.Tools {
-		calls += t.Calls
-		timed += t.Timed
-		untimed += t.Untimed
-		tools.AddRow(sanitize.ForTerminal(t.Tool, 60), strings.Join(t.Kinds, ", "), t.Calls, t.Dispatched, t.Undispatched, t.Unanswered, t.Errors, statsToolTime(t))
-	}
-	tools.WriteTo(w)
-
-	fmt.Fprintln(w)
-	fmt.Fprint(w, statsTimingNote(calls, timed, untimed))
-}
-
-// statsTimingNote says what the tool time measured and which calls it leaves out. A
-// call that ended but has no time is one whose records carry none. A call that never
-// ended, by a result or a deferral, has no answer yet, and the Unanswered column counts
-// it with the deferred calls still waiting.
-func statsTimingNote(calls int64, timed int64, untimed int64) string {
-	var b strings.Builder
-
-	if timed > 0 {
-		b.WriteString("Tool time is the gap between the record that ended each call, its result or its deferral, and the journal\n")
-		b.WriteString("record before it. Tools run one at a time, so this is the call's own time plus any approval prompt answered\n")
-		b.WriteString("while the run waited. An approval given while the run was suspended is not counted.\n")
-	}
+	c.Blank()
 
 	switch {
 	case untimed == calls:
-		b.WriteString("The journal records no times for these calls, so no tool time is shown.\n")
+		c.Item("Untimed", "the journal records no times for these calls")
 	case untimed > 0:
-		fmt.Fprintf(&b, "%d of %d calls ended with a record that carries no time and are not timed.\n", untimed, calls)
+		c.Item("Untimed", fmt.Sprintf("%d of %d calls ended with a record that carries no time", untimed, calls))
 	}
 
 	open := calls - timed - untimed
 	if open > 0 {
-		fmt.Fprintf(&b, "%d of %d calls have no answer yet, so they are not timed.\n", open, calls)
+		c.Item("Unanswered", fmt.Sprintf("%d of %d calls have no answer yet", open, calls))
 	}
-
-	return b.String()
 }
 
 // statsTokens is the run's tokens against its budget, with the meaning sessionTokens
@@ -535,13 +587,15 @@ func sessionSearchAction(_ *fisk.ParseContext) error {
 	return nil
 }
 
-// printSessionSearch renders the matching runs as the table session ls prints, with an
-// agent, caller or created column added where a filter made it relevant, then the
-// count of runs --identity left out for carrying no agent. Values read back from a
-// journal are sanitized to one line, as session ls sanitizes them.
+// printSessionSearch renders the matching runs as one document holding the table
+// session ls prints, with an agent, caller or created column added where a filter made
+// it relevant, then the count of runs --identity left out for carrying no agent. Values
+// read back from a journal are sanitized to one line, as session ls sanitizes them.
 func printSessionSearch(w io.Writer, f runstate.SearchFilter, found []runstate.RunInfo, excluded int) {
+	c := columns.New()
+
 	if len(found) == 0 {
-		fmt.Fprintln(w, "No sessions matched")
+		c.Print("No sessions matched")
 	} else {
 		showAgent := f.Agent != ""
 		showCaller := f.Caller != ""
@@ -577,17 +631,19 @@ func printSessionSearch(w io.Writer, f runstate.SearchFilter, found []runstate.R
 			row = append(row, info.Updated, sanitize.ForTerminal(info.Prompt, 50))
 			tbl.AddRow(row...)
 		}
-		tbl.WriteTo(w)
+		c.Embed(tbl)
 	}
 
 	switch {
 	case excluded == 1:
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "1 more session matched every other filter but carries no agent, so --identity left it out. It was journaled before the agent was recorded.")
+		c.Blank()
+		c.Print("1 more session matched every other filter but carries no agent, so --identity left it out. It was journaled before the agent was recorded.")
 	case excluded > 1:
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%d more sessions matched every other filter but carry no agent, so --identity left them out. They were journaled before the agent was recorded.\n", excluded)
+		c.Blank()
+		c.Printf("%d more sessions matched every other filter but carry no agent, so --identity left them out. They were journaled before the agent was recorded.", excluded)
 	}
+
+	c.WriteTo(w)
 }
 
 // writeSessionJSON writes one indented JSON document. HTML escaping is off because the
